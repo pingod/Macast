@@ -1,7 +1,12 @@
+# macOS (darwin) runtime requirements.
+#
+# On macOS the menu-bar app uses rumps (which already depends on pyperclip),
+# so the Linux git-fork of pyperclip is unnecessary here. Keep this list
+# minimal so `pip install -r requirements/darwin.txt` works on Apple Silicon
+# without falling back to GitHub.
 appdirs
 cherrypy
 lxml
 requests
 rumps
-pyperclip
 netifaces

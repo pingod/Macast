@@ -1,0 +1,45 @@
+[build-system]
+# Build with setuptools in isolated mode (PEP 517). setup.py still owns the
+# actual metadata; this file exists so modern `pip` / `build` invocations work
+# without falling back to the deprecated `python setup.py install` path.
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macast"
+description = "A menu bar application using mpv as a DLNA Media Renderer."
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "xfangfang", email = "xfangfang@126.com" }]
+keywords = ["mpv", "dlna", "renderer"]
+classifiers = [
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/xfangfang/Macast"
+Wiki = "https://github.com/xfangfang/Macast/wiki"
+Issues = "https://github.com/xfangfang/Macast/issues"
+
+[project.scripts]
+macast-cli = "macast.macast:cli"
+macast-gui = "macast.macast:gui"
+
+# Runtime deps are platform-specific and live in setup.py / requirements/*.txt.
+# pip with PEP 517 build will fall back to setup.py for install_requires.
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = { attr = "macast._version.__version__" }
