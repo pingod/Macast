@@ -97,54 +97,13 @@ jobs:
           retention-days: 14
 
   # -----------------------------------------------------------------------
-  # macOS x86_64 — Intel Mac .app (kept for older machines)
+  # macOS x86_64 (Intel Mac) was dropped: the GitHub-hosted macos-13 Intel
+  # runner queue is consistently 30+ minutes long and Intel Macs are no
+  # longer a target for the project. Re-add the job block from git history
+  # if you ever need it back.
   # -----------------------------------------------------------------------
-  build-macos-x86_64:
-    name: macOS x86_64
-    runs-on: macos-13   # Intel runner
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
 
-      - name: Install Homebrew + mpv
-        # macos-13 runners are x86_64; Homebrew lives at /usr/local.
-        run: brew install mpv
-
-      - name: Install build deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
-                      'lxml' 'netifaces' 'appdirs' 'pyperclip' \
-                      'requests' 'pillow'
-
-      - name: Build .app
-        run: MACAST_ARCH=x86_64 python scripts/setup_py2app.py py2app
-
-      - name: Verify x86_64
-        run: |
-          file dist/Macast.app/Contents/MacOS/Macast | grep -q x86_64
-          file dist/Macast.app/Contents/Frameworks/Python.framework/Versions/3.12/Python | grep -q x86_64
-
-      - name: Package as DMG-ready .zip
-        run: |
-          VERSION=$(cat macast/.version)
-          cd dist
-          zip -r "../Macast-MacOS-x86_64-v${VERSION}.zip" Macast.app
-          cd ..
-
-      - name: Upload artefact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-x86_64
-          path: Macast-MacOS-x86_64-*.zip
-          if-no-files-found: error
-          retention-days: 14
-
-  # -----------------------------------------------------------------------
   # Linux x86_64 — headless CLI, packaged as a standalone binary
   # -----------------------------------------------------------------------
   build-linux-x86_64:
@@ -352,7 +311,6 @@ jobs:
     name: GitHub Release
     needs:
       - build-macos-arm64
-      - build-macos-x86_64
       - build-linux-x86_64
       - build-linux-arm64
       - build-windows-x86_64
@@ -391,7 +349,6 @@ jobs:
 
             Artefacts:
             - `Macast-MacOS-arm64-*.zip` — Apple Silicon (M1+)
-            - `Macast-MacOS-x86_64-*.zip` — Intel Mac
             - `Macast-Linux-x86_64-*.tar.gz` — Linux x86_64
             - `Macast-Linux-arm64-*.tar.gz` — Linux aarch64
             - `Macast-Windows-x86_64-*.zip` — Windows x86_64
