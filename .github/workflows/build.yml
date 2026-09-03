@@ -62,10 +62,10 @@ jobs:
     name: macOS arm64
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -103,7 +103,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: Macast-MacOS-arm64-*.zip
@@ -124,10 +124,10 @@ jobs:
     name: Linux x86_64
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -177,7 +177,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: Macast-Linux-x86_64-*.tar.gz
@@ -191,10 +191,10 @@ jobs:
     name: Linux arm64
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -244,7 +244,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
           path: Macast-Linux-arm64-*.tar.gz
@@ -261,10 +261,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -321,7 +321,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: Macast-Windows-x86_64-*.zip
@@ -345,7 +345,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Download all artefacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: artefacts
 
