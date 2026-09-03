@@ -95,9 +95,19 @@ jobs:
           file dist/Macast.app/Contents/Frameworks/Python.framework/Versions/3.12/Python | grep -q arm64
           file dist/Macast.app/Contents/Resources/bin/MacOS/mpv | grep -q arm64
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME#v}
+          else
+            VERSION=$(cat macast/.version)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Package as DMG-ready .zip
         run: |
-          VERSION=$(cat macast/.version)
+          VERSION=${{ steps.version.outputs.version }}
           cd dist
           zip -r "../Macast-MacOS-arm64-v${VERSION}.zip" Macast.app
           cd ..
@@ -165,9 +175,19 @@ jobs:
       - name: Verify x86_64
         run: file dist/macast | grep -q 'x86-64'
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME#v}
+          else
+            VERSION=$(cat macast/.version)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Package
         run: |
-          VERSION=$(cat macast/.version)
+          VERSION=${{ steps.version.outputs.version }}
           mkdir -p release
           cp dist/macast "release/macast-linux-x86_64-v${VERSION}"
           cp README.md "release/README.md"
@@ -232,9 +252,19 @@ jobs:
       - name: Verify aarch64
         run: file dist/macast | grep -q 'aarch64\|ARM aarch64'
 
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME#v}
+          else
+            VERSION=$(cat macast/.version)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Package
         run: |
-          VERSION=$(cat macast/.version)
+          VERSION=${{ steps.version.outputs.version }}
           mkdir -p release
           cp dist/macast "release/macast-linux-arm64-v${VERSION}"
           cp README.md "release/README.md"
@@ -308,10 +338,21 @@ jobs:
             --hidden-import=macast_renderer.mpv \
             Macast.py
 
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VERSION=${GITHUB_REF_NAME#v}
+          else
+            VERSION=$(cat macast/.version)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Package
         shell: bash
         run: |
-          VERSION=$(cat macast/.version)
+          VERSION=${{ steps.version.outputs.version }}
           mkdir -p release
           cp dist/macast.exe "release/macast-windows-x86_64-v${VERSION}.exe"
           cp README.md "release/README.md"
@@ -372,11 +413,11 @@ jobs:
             Built by GitHub Actions. See `BUILDING.md` in the repo for
             instructions on how to verify and use the artefacts.
 
-            Artefacts:
-            - `Macast-MacOS-arm64-*.zip` — Apple Silicon (M1+)
-            - `Macast-Linux-x86_64-*.tar.gz` — Linux x86_64
-            - `Macast-Linux-arm64-*.tar.gz` — Linux aarch64
-            - `Macast-Windows-x86_64-*.zip` — Windows x86_64
+            Artefacts (this release: **v${{ steps.version.outputs.version }}**):
+            - `Macast-MacOS-arm64-v${{ steps.version.outputs.version }}.zip` — Apple Silicon (M1+)
+            - `Macast-Linux-x86_64-v${{ steps.version.outputs.version }}.tar.gz` — Linux x86_64
+            - `Macast-Linux-arm64-v${{ steps.version.outputs.version }}.tar.gz` — Linux aarch64
+            - `Macast-Windows-x86_64-v${{ steps.version.outputs.version }}.zip` — Windows x86_64
           draft: false
           prerelease: false
           generate_release_notes: true
