@@ -261,6 +261,17 @@ jobs:
           pip install pyinstaller pystray 'cherrypy>=18,<19' lxml netifaces \
                               appdirs pyperclip requests pillow
 
+      - name: Install static gettext (msgfmt)
+        # Windows runners don't ship gettext; the GitHub release of the
+        # project's own gettext zip from the upstream Macast releases
+        # contains a static msgfmt.exe that runs without installation.
+        shell: bash
+        run: |
+          curl -sL -o gettext.zip \
+            "https://github.com/xfangfang/Macast/releases/download/v0.1/gettext0.21-iconv1.16-static-64.zip"
+          7z x -ogettext gettext.zip bin/msgfmt.exe
+          echo "D:/a/$(basename $GITHUB_REPOSITORY)/$(basename $GITHUB_REPOSITORY)/gettext/bin" >> $GITHUB_PATH
+
       - name: Compile .po -> .mo
         shell: bash
         run: |
