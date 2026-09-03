@@ -130,3 +130,9 @@ dmypy.json
 
 bin
 mpv-latest.tar.gz
+
+# Macast build artefacts
+.venv-build/
+
+# macOS noise
+.DS_Store
