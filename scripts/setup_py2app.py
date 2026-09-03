@@ -1,11 +1,13 @@
 """
-py2app build script for Macast on Apple Silicon (arm64) macOS.
+py2app build script for Macast on macOS.
 
 Builds:    dist/Macast.app
 Run from:  project root, with the build virtualenv activated
 
 Usage:
-    python scripts/setup_py2app.py py2app
+    python scripts/setup_py2app.py py2app          # build for the host arch
+    python scripts/setup_py2app.py py2app --arch=arm64
+    python scripts/setup_py2app.py py2app --arch=x86_64
 
 The bundle layout matches what Macast.py expects at runtime:
     Macast.app/Contents/Resources/bin/MacOS/mpv   <-- mpv binary lives here
@@ -13,11 +15,31 @@ The bundle layout matches what Macast.py expects at runtime:
     Macast.app/Contents/MacOS/Macast              <-- the py2app launcher
 """
 
+import argparse
 import os
+import platform
 import sys
 import datetime
 import subprocess
 from setuptools import setup
+
+
+def parse_arch():
+    """Decide the target arch. CLI arg wins, then env, then the host machine."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--arch', default=None,
+                        choices=('arm64', 'x86_64'))
+    args, _unknown = parser.parse_known_args()
+
+    if args.arch:
+        return args.arch
+    if os.environ.get('MACAST_ARCH') in ('arm64', 'x86_64'):
+        return os.environ['MACAST_ARCH']
+    # Host detection: Apple Silicon → arm64, everything else → x86_64.
+    machine = platform.machine().lower()
+    if machine in ('arm64', 'aarch64'):
+        return 'arm64'
+    return 'x86_64'
 
 
 # ---------------------------------------------------------------------------
@@ -65,20 +87,45 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir
 # Resolve the bundled mpv binary. We prefer the system Homebrew arm64 mpv
 # (so the app uses the same architecture as the user's machine). If not found
 # we fall back to an mpv shipped next to this script.
-MPV_BREW = '/opt/homebrew/bin/mpv'
-MPV_BREW_X86 = '/usr/local/bin/mpv'
-MPV_LOCAL = os.path.join(PROJECT_ROOT, 'bin', 'MacOS', 'mpv')
+TARGET_ARCH = parse_arch()
 
-if os.path.exists(MPV_BREW):
-    BUNDLED_MPV = MPV_BREW
-elif os.path.exists(MPV_BREW_X86):
-    BUNDLED_MPV = MPV_BREW_X86
-elif os.path.exists(MPV_LOCAL):
-    BUNDLED_MPV = MPV_LOCAL
-else:
+# mpv locations: prefer the architecture that matches TARGET_ARCH.
+MPV_CANDIDATES = {
+    'arm64': [
+        '/opt/homebrew/bin/mpv',          # Homebrew on Apple Silicon
+        '/opt/homebrew/opt/mpv/bin/mpv',  # explicit cellar
+        os.path.join(PROJECT_ROOT, 'bin', 'MacOS', 'mpv'),
+    ],
+    'x86_64': [
+        '/usr/local/bin/mpv',             # Homebrew on Intel macOS
+        '/usr/local/Cellar/mpv/' + '' + '/bin/mpv',  # placeholder, ignored
+        os.path.join(PROJECT_ROOT, 'bin', 'MacOS', 'mpv'),
+    ],
+}
+
+BUNDLED_MPV = None
+for candidate in MPV_CANDIDATES[TARGET_ARCH] + MPV_CANDIDATES[
+        'arm64' if TARGET_ARCH == 'x86_64' else 'x86_64']:
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        # Confirm the candidate actually runs (dyld sanity).
+        try:
+            rc = subprocess.run(
+                [candidate, '--version'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).returncode
+        except Exception:
+            rc = 1
+        if rc == 0:
+            BUNDLED_MPV = candidate
+            break
+
+if BUNDLED_MPV is None:
     sys.stderr.write(
-        'ERROR: cannot find mpv binary. Install via `brew install mpv` '
-        'or drop it at bin/MacOS/mpv.\n')
+        'ERROR: cannot find a runnable mpv binary for arch={}.\n'
+        'Install via `brew install mpv` on the build host, or drop the binary\n'
+        'at bin/MacOS/mpv.\n'.format(TARGET_ARCH))
     sys.exit(1)
 
 # i18n catalogues shipped with the app.
@@ -108,15 +155,13 @@ OPTIONS = {
         'CFBundleShortVersionString': str(VERSION),
         'CFBundleVersion': str(VERSION),
         'CFBundleName': 'Macast',
-        # arm64-only build; the build host must be Apple Silicon.
-        'LSArchitecturePriority': ['arm64'],
+        'LSArchitecturePriority': [TARGET_ARCH],
     },
     'excludes': ['PIL', 'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
                  'wx', 'gtk', 'gnome', 'Xlib'],
     'packages': ['rumps', 'macast', 'macast_renderer'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
-    # Force a universal-2 bundle off; we only build for arm64 in this script.
-    'arch': 'arm64',
+    'arch': TARGET_ARCH,
     'strip': True,
     'optimize': 1,
     # The DLNA server uses cherrypy; include it explicitly so py2app's

@@ -1,0 +1,415 @@
+# Copyright (c) 2021 by xfangfang. All Rights Reserved.
+# Apple Silicon (arm64) build pipeline + cross-platform CI,
+# maintained by the Macast fork.
+#
+# Builds the following artefacts, one per job:
+#   - macOS arm64      .app         (macos-14 runner, py2app)
+#   - macOS x86_64     .app         (macos-13 runner, py2app)
+#   - Linux x86_64     .tar.gz      (ubuntu-22.04 runner, pyinstaller)
+#   - Linux arm64      .tar.gz      (ubuntu-22.04-arm runner, pyinstaller)
+#   - Windows x86_64   .zip         (windows-2022 runner, pyinstaller)
+#
+# Windows arm64 is intentionally not built: GitHub does not provide an
+# arm64 Windows runner, and the project still bundles lxml + rumps which
+# only ship x86_64 wheels on PyPI. Skip on tag-only releases.
+#
+# Triggers:
+#   - push to main                     (build + upload artefacts, no release)
+#   - pull_request                     (build only, no upload)
+#   - workflow_dispatch (release=true) (build + GitHub release with all artefacts)
+#   - push of a v*.* tag               (build + GitHub release)
+#
+# Manual release:   GitHub UI -> Actions -> Build Macast -> Run workflow -> release=true
+
+name: Build Macast
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Push a GitHub release with the built artefacts'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed for the release job to create tags/releases
+
+# Cancel in-flight runs of the same workflow on the same branch.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # macOS arm64 — Apple Silicon .app (the primary artefact for M1+ users)
+  # -----------------------------------------------------------------------
+  build-macos-arm64:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Homebrew + mpv
+        # macos-14 runners are arm64 with Homebrew preinstalled at
+        # /opt/homebrew. We just need to install mpv.
+        run: brew install mpv
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
+                      'lxml' 'netifaces' 'appdirs' 'pyperclip' \
+                      'requests' 'pillow'
+
+      - name: Build .app
+        run: MACAST_ARCH=arm64 python scripts/setup_py2app.py py2app
+
+      - name: Verify arm64
+        run: |
+          file dist/Macast.app/Contents/MacOS/Macast | grep -q arm64
+          file dist/Macast.app/Contents/Frameworks/Python.framework/Versions/3.12/Python | grep -q arm64
+          file dist/Macast.app/Contents/Resources/bin/MacOS/mpv | grep -q arm64
+
+      - name: Package as DMG-ready .zip
+        run: |
+          VERSION=$(cat macast/.version)
+          cd dist
+          zip -r "../Macast-MacOS-arm64-v${VERSION}.zip" Macast.app
+          cd ..
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: Macast-MacOS-arm64-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # macOS x86_64 — Intel Mac .app (kept for older machines)
+  # -----------------------------------------------------------------------
+  build-macos-x86_64:
+    name: macOS x86_64
+    runs-on: macos-13   # Intel runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Homebrew + mpv
+        # macos-13 runners are x86_64; Homebrew lives at /usr/local.
+        run: brew install mpv
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
+                      'lxml' 'netifaces' 'appdirs' 'pyperclip' \
+                      'requests' 'pillow'
+
+      - name: Build .app
+        run: MACAST_ARCH=x86_64 python scripts/setup_py2app.py py2app
+
+      - name: Verify x86_64
+        run: |
+          file dist/Macast.app/Contents/MacOS/Macast | grep -q x86_64
+          file dist/Macast.app/Contents/Frameworks/Python.framework/Versions/3.12/Python | grep -q x86_64
+
+      - name: Package as DMG-ready .zip
+        run: |
+          VERSION=$(cat macast/.version)
+          cd dist
+          zip -r "../Macast-MacOS-x86_64-v${VERSION}.zip" Macast.app
+          cd ..
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86_64
+          path: Macast-MacOS-x86_64-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Linux x86_64 — headless CLI, packaged as a standalone binary
+  # -----------------------------------------------------------------------
+  build-linux-x86_64:
+    name: Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext binutils
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
+                              appdirs pyperclip requests pillow
+
+      - name: Compile .po -> .mo
+        run: |
+          for d in i18n/*/; do
+            msgfmt -o "${d}LC_MESSAGES/macast.mo" "${d}LC_MESSAGES/macast.po"
+          done
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --name macast \
+            --add-data "i18n:i18n" \
+            --add-data "macast/assets:macast/assets" \
+            --collect-all cherrypy \
+            --collect-all lxml \
+            --collect-submodules rumps \
+            --hidden-import=netifaces \
+            --hidden-import=appdirs \
+            --hidden-import=pyperclip \
+            --hidden-import=macast.macast \
+            --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast_renderer.iina \
+            --hidden-import=macast_renderer.web \
+            --hidden-import=macast_renderer.live \
+            Macast.py
+
+      - name: Verify x86_64
+        run: file dist/macast | grep -q 'x86-64'
+
+      - name: Package
+        run: |
+          VERSION=$(cat macast/.version)
+          mkdir -p release
+          cp dist/macast "release/macast-linux-x86_64-v${VERSION}"
+          cp README.md "release/README.md"
+          cp LICENSE "release/LICENSE"
+          cd release
+          tar czf "../Macast-Linux-x86_64-v${VERSION}.tar.gz" *
+          cd ..
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: Macast-Linux-x86_64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Linux arm64 — same as x86_64 but for aarch64 boxes
+  # -----------------------------------------------------------------------
+  build-linux-arm64:
+    name: Linux arm64
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext binutils
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
+                              appdirs pyperclip requests pillow
+
+      - name: Compile .po -> .mo
+        run: |
+          for d in i18n/*/; do
+            msgfmt -o "${d}LC_MESSAGES/macast.mo" "${d}LC_MESSAGES/macast.po"
+          done
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --noconfirm --onefile --name macast \
+            --add-data "i18n:i18n" \
+            --add-data "macast/assets:macast/assets" \
+            --collect-all cherrypy \
+            --collect-all lxml \
+            --collect-submodules rumps \
+            --hidden-import=netifaces \
+            --hidden-import=appdirs \
+            --hidden-import=pyperclip \
+            --hidden-import=macast.macast \
+            --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast_renderer.iina \
+            --hidden-import=macast_renderer.web \
+            --hidden-import=macast_renderer.live \
+            Macast.py
+
+      - name: Verify aarch64
+        run: file dist/macast | grep -q 'aarch64\|ARM aarch64'
+
+      - name: Package
+        run: |
+          VERSION=$(cat macast/.version)
+          mkdir -p release
+          cp dist/macast "release/macast-linux-arm64-v${VERSION}"
+          cp README.md "release/README.md"
+          cp LICENSE "release/LICENSE"
+          cd release
+          tar czf "../Macast-Linux-arm64-v${VERSION}.tar.gz" *
+          cd ..
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: Macast-Linux-arm64-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Windows x86_64 — standalone .exe
+  # -----------------------------------------------------------------------
+  build-windows-x86_64:
+    name: Windows x86_64
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pystray 'cherrypy>=18,<19' lxml netifaces \
+                              appdirs pyperclip requests pillow
+
+      - name: Compile .po -> .mo
+        shell: bash
+        run: |
+          for d in i18n/*/; do
+            msgfmt -o "${d}LC_MESSAGES/macast.mo" "${d}LC_MESSAGES/macast.po"
+          done
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --name macast.exe \
+            --add-data "i18n;i18n" \
+            --add-data "macast/assets;macast/assets" \
+            --collect-all cherrypy \
+            --collect-all lxml \
+            --hidden-import=netifaces \
+            --hidden-import=appdirs \
+            --hidden-import=pyperclip \
+            --hidden-import=macast.macast \
+            --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast_renderer.iina \
+            --hidden-import=macast_renderer.web \
+            --hidden-import=macast_renderer.live \
+            Macast.py
+
+      - name: Package
+        shell: bash
+        run: |
+          VERSION=$(cat macast/.version)
+          mkdir -p release
+          cp dist/macast.exe "release/macast-windows-x86_64-v${VERSION}.exe"
+          cp README.md "release/README.md"
+          cp LICENSE "release/LICENSE"
+          cd release
+          7z a "../Macast-Windows-x86_64-v${VERSION}.zip" *
+          cd ..
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: Macast-Windows-x86_64-*.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  # -----------------------------------------------------------------------
+  # Release — collect artefacts and create a GitHub release.
+  # Only runs on tag push, on release-true manual dispatch, or on tag push.
+  # -----------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    needs:
+      - build-macos-arm64
+      - build-macos-x86_64
+      - build-linux-x86_64
+      - build-linux-arm64
+      - build-windows-x86_64
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.release == true)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+
+      - name: List artefacts
+        run: ls -R artefacts/
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(cat macast/.version)
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Macast v${{ steps.version.outputs.version }}
+          body: |
+            Built by GitHub Actions. See `BUILDING.md` in the repo for
+            instructions on how to verify and use the artefacts.
+
+            Artefacts:
+            - `Macast-MacOS-arm64-*.zip` — Apple Silicon (M1+)
+            - `Macast-MacOS-x86_64-*.zip` — Intel Mac
+            - `Macast-Linux-x86_64-*.tar.gz` — Linux x86_64
+            - `Macast-Linux-arm64-*.tar.gz` — Linux aarch64
+            - `Macast-Windows-x86_64-*.zip` — Windows x86_64
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artefacts/**/*.zip
+            artefacts/**/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
