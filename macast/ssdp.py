@@ -32,14 +32,52 @@ class Sock:
         self.ip = ip
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.ssdp_addr = socket.inet_aton(SSDP_ADDR)
-        self.interface = socket.inet_aton(self.ip)
+        # On macOS / BSD, IP_MULTICAST_IF expects the interface index
+        # (a u_int32), not the IP address. Passing inet_aton(ip) gives
+        # the kernel a giant bogus if_index which causes the datagram
+        # to be silently dropped on the way out (or sent via the wrong
+        # route). Resolve the correct if_index via netifaces + ctypes.
+        # On Linux, both the IP and the if_index are accepted, so the
+        # inet_aton form is left as a fallback.
+        if sys.platform == 'darwin':
+            try:
+                import netifaces
+                import ctypes
+                libc = ctypes.CDLL(None)
+                libc.if_nametoindex.restype = ctypes.c_uint
+                libc.if_nametoindex.argtypes = [ctypes.c_char_p]
+                if_index = 0
+                for name in netifaces.interfaces():
+                    addrs = netifaces.ifaddresses(name)
+                    if netifaces.AF_INET in addrs:
+                        for j in addrs[netifaces.AF_INET]:
+                            if j.get('addr') == self.ip:
+                                if_index = int(libc.if_nametoindex(name.encode()))
+                                break
+                    if if_index:
+                        break
+                if if_index == 0:
+                    raise RuntimeError('no if_index found for %s' % self.ip)
+                import struct
+                self.interface = struct.pack('!I', if_index)
+            except Exception as e:
+                logger.error('Sock: failed to resolve if_index for %s: %s, falling back to inet_aton' % (self.ip, e))
+                self.interface = socket.inet_aton(self.ip)
+        else:
+            self.interface = socket.inet_aton(self.ip)
         try:
             self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, self.interface)
-            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, self.ssdp_addr + self.interface)
+            # Sock instances are *send-only* (NOTIFY emitter per interface);
+            # they do not need to join the multicast group. Joining on each
+            # per-interface Sock caused EADDRINUSE on macOS Tahoe because
+            # the host already joined via the main listening socket.
         except Exception as e:
             logger.error(e)
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
-        # self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 10)
+        # Default multicast TTL is 1 (link-local only). DLNA clients can sit
+        # on a different VLAN / behind an AP that decrements the TTL, so
+        # bump it to 4 to comfortably cross a few router hops.
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
 
     def send_it(self, response, destination):
         try:
@@ -121,17 +159,32 @@ class SSDPServer:
                 logger.error("SSDP cannot set SO_REUSEADDR")
                 logger.error(str(e))
 
-        # self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 10)
+        # Default multicast TTL is 1 (link-local only). Bump it so the
+        # NOTIFY / response packets can cross WiFi/VLAN boundaries to reach
+        # the casting phone or TV.
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
 
         self.ip_list = list(Setting.get_ip())
         if sys.platform == 'win32':
             self.ip_list.append(('192.168.137.1', '255.255.255.0'))
         self.sock_list = []
+        joined = False
         for ip, mask in self.ip_list:
             try:
-                logger.error('add membership {}'.format(ip))
-                mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
-                self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                logger.debug('add membership {}'.format(ip))
+                # On macOS 14+ (Tahoe), joining 239.255.255.250 with a
+                # specific interface address in ip_mreq (e.g. 192.168.1.3)
+                # silently fails to deliver incoming M-SEARCH / NOTIFY
+                # packets to the socket. Joining with INADDR_ANY (0.0.0.0)
+                # is the documented workaround and binds the membership to
+                # whichever interface the kernel ends up using.
+                # The membership is a *host*-level property: once joined
+                # on the host, repeat joins with the same address return
+                # EADDRINUSE — harmless, just log and move on.
+                if not joined:
+                    mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton('0.0.0.0')
+                    self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                    joined = True
                 self.sock_list.append(Sock(ip))
             except Exception as e:
                 logger.error(e)

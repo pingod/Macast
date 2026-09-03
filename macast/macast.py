@@ -348,11 +348,24 @@ class Macast(App):
         api_url = 'https://api.github.com/repos/xfangfang/Macast/releases/latest'
         try:
             res = json.loads(requests.get(api_url).text)
-            online_version = re.findall(r'(\d+\.*\d+)', res['tag_name'])[0]
+            # Strip leading 'v' and grab the first dot-separated version
+            # triple. e.g. 'v0.7.2' -> '0.7.2'. Using tuple comparison so
+            # that '0.7.10' correctly sorts above '0.7.2'.
+            tag = res['tag_name'].lstrip('v')
+            parts = tag.split('.')[:3]
+            while len(parts) < 3:
+                parts.append('0')
+            online_version = tuple(int(p) for p in parts)
 
             logger.info("tag_name: {}".format(res['tag_name']))
 
-            if float(Setting.get_version()) < float(online_version):
+            cur = Setting.get_version().lstrip('v')
+            cur_parts = cur.split('.')[:3]
+            while len(cur_parts) < 3:
+                cur_parts.append('0')
+            cur_tuple = tuple(int(p) for p in cur_parts)
+
+            if cur_tuple < online_version:
                 self.dialog(_("Macast New Update {}").format(res['tag_name']),
                             lambda: self.open_browser(release_url),
                             ok="Update")
