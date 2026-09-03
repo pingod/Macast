@@ -23,6 +23,15 @@
 
 name: Build Macast
 
+# Pin every job to Node 24 — GitHub announced 2025-09-19 that
+# Node 20 is deprecated on the runners. New major versions of
+# actions/checkout, actions/setup-python, actions/upload-artifact,
+# actions/download-artifact and softprops/action-gh-release all
+# default to Node 24 and this is the cleanest way to silence
+# the warning without bouncing major versions again later.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE: '24'
+
 on:
   push:
     branches: [main]
@@ -53,17 +62,22 @@ jobs:
     name: macOS arm64
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install Homebrew + mpv
         # macos-14 runners are arm64 with Homebrew preinstalled at
-        # /opt/homebrew. We just need to install mpv.
-        run: brew install mpv
+        # /opt/homebrew. We just need to install mpv. The image
+        # also pre-installs a 'aws/tap' tap that the runner does
+        # not auto-trust; mpv is in homebrew/core, so we untap
+        # aws/tap to silence the 'not trusted' notice.
+        run: |
+          brew untap aws/tap 2>/dev/null || true
+          brew install mpv
 
       - name: Install build deps
         run: |
@@ -89,7 +103,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: macos-arm64
           path: Macast-MacOS-arm64-*.zip
@@ -110,10 +124,10 @@ jobs:
     name: Linux x86_64
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -163,7 +177,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: linux-x86_64
           path: Macast-Linux-x86_64-*.tar.gz
@@ -177,10 +191,10 @@ jobs:
     name: Linux arm64
     runs-on: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -230,7 +244,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: linux-arm64
           path: Macast-Linux-arm64-*.tar.gz
@@ -247,10 +261,10 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -307,7 +321,7 @@ jobs:
           cd ..
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: windows-x86_64
           path: Macast-Windows-x86_64-*.zip
@@ -331,7 +345,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Download all artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artefacts
 
@@ -350,7 +364,7 @@ jobs:
           echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Macast v${{ steps.version.outputs.version }}
