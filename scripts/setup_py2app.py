@@ -156,6 +156,16 @@ OPTIONS = {
         'CFBundleVersion': str(VERSION),
         'CFBundleName': 'Macast',
         'LSArchitecturePriority': [TARGET_ARCH],
+        # macOS 14+ requires apps that send multicast on the local network
+        # to declare both the usage description and the Bonjour service
+        # types they browse / advertise. Without these, the OS silently
+        # filters outgoing 239.255.255.250:1900 packets and DLNA clients
+        # never see Macast.
+        'NSLocalNetworkUsageDescription': (
+            'Macast advertises itself as a DLNA media renderer on the local '
+            'network so phones, TVs, and other devices can cast to it.'
+        ),
+        'NSBonjourServices': ['_http._tcp', '_dlna._tcp', '_smb._tcp'],
     },
     'excludes': ['PIL', 'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
                  'wx', 'gtk', 'gnome', 'Xlib'],

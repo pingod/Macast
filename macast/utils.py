@@ -22,7 +22,7 @@ elif sys.platform == 'win32':
     import win32con
 
 logger = logging.getLogger("Utils")
-DEFAULT_PORT = 0
+DEFAULT_PORT = 58880
 SETTING_DIR = appdirs.user_config_dir('Macast', 'xfangfang')
 PROTOCOL_DIR = 'protocol'
 RENDERER_DIR = 'renderer'
