@@ -16,7 +16,7 @@ from queue import Queue
 from enum import Enum
 from cherrypy import _cpnative_server
 
-from .utils import load_xml, XMLPath, Setting, cherrypy_publish, SETTING_DIR
+from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR
 
 logger = logging.getLogger("Protocol")
 logger.setLevel(logging.INFO)
