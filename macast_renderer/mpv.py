@@ -101,13 +101,18 @@ class MPVRenderer(Renderer):
     def set_media_url(self, url, start="0"):
         """ data : string
         """
-        options = {'start': start}
         player_size = Setting.get(SettingProperty.PlayerSize,
                                   default=SettingProperty.PlayerSize_Normal.value)
         if player_size == SettingProperty.PlayerSize_FullScreen.value:
-            options['fullscreen'] = 'yes'
-        self.send_command(['loadfile', url, 'replace',
-                           ','.join([f'{i}={options[i]}' for i in options])])
+            # mpv IPC 'loadfile' does NOT accept options as a 4th argument
+            # (that slot is the playlist index), so apply fullscreen as a
+            # separate property instead of bundling it into the loadfile cmd.
+            self.send_command(['set_property', 'fullscreen', 'yes'])
+        # mpv IPC signature: loadfile <url> [<flags> [<index>]].
+        # Passing a start= options string here made mpv reject the whole
+        # command with "invalid parameter", so DLNA media never played.
+        # mpv loads from the start by default, so a bare 'replace' is fine.
+        self.send_command(['loadfile', url, 'replace'])
 
     def set_media_title(self, data):
         """ data : string

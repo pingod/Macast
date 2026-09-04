@@ -14,6 +14,7 @@ import cherrypy
 import subprocess
 from enum import Enum
 import netifaces as ni
+from ._version import __version__ as _PACKAGE_VERSION
 
 if sys.platform == 'darwin':
     from AppKit import NSBundle
@@ -71,8 +72,8 @@ class Setting:
             try:
                 with open(Setting.get_base_path('.version'), 'r') as f:
                     Setting.version = f.read().strip()
-            except FileNotFoundError as e:
-                Setting.version = "0.0"
+            except FileNotFoundError:
+                Setting.version = _PACKAGE_VERSION
         if bool(Setting.setting) is False:
             if not os.path.exists(Setting.setting_path):
                 Setting.setting = {}

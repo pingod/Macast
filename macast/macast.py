@@ -14,6 +14,9 @@ import gettext
 import importlib
 
 from .utils import SettingProperty, SETTING_DIR, notify_error, format_class_name
+# This fork is distributed from pingod/Macast; the "check for updates" feature
+# must query that repo, not the upstream xfangfang/Macast.
+GITHUB_REPO = 'pingod/Macast'
 from .gui import App, MenuItem, Platform
 from .protocol import DLNAProtocol
 from .server import Service
@@ -344,8 +347,8 @@ class Macast(App):
         self.service.run_async()
 
     def check_update(self, verbose=True):
-        release_url = 'https://github.com/xfangfang/Macast/releases/latest'
-        api_url = 'https://api.github.com/repos/xfangfang/Macast/releases/latest'
+        release_url = 'https://github.com/{}/releases/latest'.format(GITHUB_REPO)
+        api_url = 'https://api.github.com/repos/{}/releases/latest'.format(GITHUB_REPO)
         try:
             res = json.loads(requests.get(api_url).text)
             # Strip leading 'v' and grab the first dot-separated version
