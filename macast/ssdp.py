@@ -65,14 +65,12 @@ class Sock:
                 self.interface = socket.inet_aton(self.ip)
         else:
             self.interface = socket.inet_aton(self.ip)
-        try:
-            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, self.interface)
-            # Sock instances are *send-only* (NOTIFY emitter per interface);
-            # they do not need to join the multicast group. Joining on each
-            # per-interface Sock caused EADDRINUSE on macOS Tahoe because
-            # the host already joined via the main listening socket.
-        except Exception as e:
-            logger.error(e)
+        # Sock instances are *send-only* (NOTIFY emitter per interface); they
+        # do not need to join the multicast group. Setting IP_MULTICAST_IF on
+        # a virtual adapter (e.g. 192.168.137.1 ICS/hotspot) can fail with
+        # WSAEADDRNOTAVAIL (WinError 10049). Let that propagate so the caller
+        # can skip such interfaces instead of logging an error per adapter.
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, self.interface)
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
         # Default multicast TTL is 1 (link-local only). DLNA clients can sit
         # on a different VLAN / behind an AP that decrements the TTL, so
@@ -185,7 +183,13 @@ class SSDPServer:
                     mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton('0.0.0.0')
                     self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
                     joined = True
-                self.sock_list.append(Sock(ip))
+                try:
+                    self.sock_list.append(Sock(ip))
+                except Exception as se:
+                    # Skip virtual / unsupported adapters (e.g. 192.168.137.1
+                    # ICS/hotspot) that can't take an IP_MULTICAST_IF; a single
+                    # bad interface must not break SSDP for the good ones.
+                    logger.warning("skip SSDP interface %s: %s", ip, se)
             except Exception as e:
                 logger.error(e)
 
@@ -206,9 +210,11 @@ class SSDPServer:
                 continue
         self.shutdown()
         for ip, mask in self.ip_list:
-            logger.error("drop membership {}".format(ip))
-            mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
+            # The multicast membership is joined host-wide (0.0.0.0), so a
+            # per-interface drop is best-effort and often not-joined; avoid
+            # spamming ERROR for virtual adapters.
             try:
+                mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
                 self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
             except Exception:
                 continue
