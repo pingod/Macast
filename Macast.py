@@ -2,6 +2,7 @@
 
 import os
 import sys
+import shutil
 import gettext
 import logging
 from macast import Setting, SETTING_DIR
@@ -49,7 +50,21 @@ def set_mpv_default_path():
                     "Found mpv at %s but it failed to launch "
                     "(missing dylibs?), trying next candidate", candidate)
     elif sys.platform == 'win32':
-        mpv_path = get_base_path('bin/mpv.exe')
+        # Bundled mpv first, then a copy next to the exe, then $PATH.
+        exe_dir = os.path.dirname(sys.executable)
+        candidates = [
+            get_base_path('bin/mpv.exe'),
+            os.path.join(exe_dir, 'bin', 'mpv.exe'),
+            os.path.join(exe_dir, 'mpv.exe'),
+        ]
+        found = None
+        for cand in candidates:
+            if os.path.isfile(cand):
+                found = cand
+                break
+        if not found:
+            found = shutil.which('mpv')
+        mpv_path = found if found else 'mpv'
     Setting.mpv_default_path = mpv_path
     logger.info("Using mpv at: %s", mpv_path)
     return mpv_path

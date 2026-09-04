@@ -325,6 +325,20 @@ jobs:
             msgfmt -o "${d}LC_MESSAGES/macast.mo" "${d}LC_MESSAGES/macast.po"
           done
 
+      - name: Fetch portable mpv playback engine
+        # Macast plays DLNA media via mpv; Windows has no mpv by default so we
+        # bundle a static x86_64 build next to the exe (-> bin/mpv.exe).
+        shell: bash
+        run: |
+          mkdir -p bin mpvsrc
+          curl -sL -o mpv.7z \
+            "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-x86_64-20260903-git-69e63f425a.7z"
+          7z x -y -ompvsrc mpv.7z
+          cp -f mpvsrc/mpv.exe mpvsrc/d3dcompiler_43.dll bin/
+          cp -rf mpvsrc/mpv bin/
+          rm -rf mpvsrc mpv.7z
+          ls -la bin/
+
       - name: Build with PyInstaller
         shell: bash
         run: |
@@ -332,6 +346,7 @@ jobs:
             --add-data "i18n;i18n" \
             --add-data "macast/assets;macast/assets" \
             --add-data "macast/xml;macast/xml" \
+            --add-binary "bin;bin" \
             --collect-all cherrypy \
             --collect-all lxml \
             --hidden-import=netifaces \
