@@ -17,9 +17,11 @@ import netifaces as ni
 
 if sys.platform == 'darwin':
     from AppKit import NSBundle
-elif sys.platform == 'win32':
-    import win32api
-    import win32con
+# Note: Windows registry access is handled via the stdlib `winreg` module
+# inside `Setting.set_start_at_login`. We deliberately avoid `pywin32`
+# (`win32api` / `win32con`) because shipping it in the PyInstaller bundle
+# would add ~14 MB of binary wheels and the v0.7.2 Windows CI does not
+# install it — leading to an immediate ModuleNotFoundError on launch.
 
 logger = logging.getLogger("Utils")
 DEFAULT_PORT = 58880
@@ -256,27 +258,38 @@ class Setting:
             return res
         elif sys.platform == 'win32':
             """Find the path of Macast.exe so as to create shortcut.
+            Uses the stdlib `winreg` module instead of `pywin32` to keep
+            the Windows binary lean (pywin32 wheels are ~14 MB).
             """
             if "python" in os.path.basename(sys.executable).lower():
                 return (1, "Not support to set start at login.")
 
-            key = win32api.RegOpenKey(win32con.HKEY_CURRENT_USER,
-                                      r'Software\Microsoft\Windows\CurrentVersion\Run',
-                                      0,
-                                      win32con.KEY_SET_VALUE)
+            import winreg
+            registry_path = r'Software\Microsoft\Windows\CurrentVersion\Run'
             logger.info(sys.executable)
             if launch:
                 try:
-                    win32api.RegSetValueEx(key, 'Macast', 0, win32con.REG_SZ, sys.executable)
-                    win32api.RegCloseKey(key)
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                         registry_path,
+                                         0,
+                                         winreg.KEY_SET_VALUE)
+                    winreg.SetValueEx(key, 'Macast', 0, winreg.REG_SZ, sys.executable)
+                    winreg.CloseKey(key)
                 except Exception as e:
                     logger.error(e)
                     # cherrypy.engine.publish("app_notify", "ERROR", f"{e}")
                 return 0, 1
             else:
                 try:
-                    win32api.RegDeleteValue(key, 'Macast')
-                    win32api.RegCloseKey(key)
+                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                         registry_path,
+                                         0,
+                                         winreg.KEY_SET_VALUE)
+                    winreg.DeleteValue(key, 'Macast')
+                    winreg.CloseKey(key)
+                except FileNotFoundError:
+                    # Value didn't exist; nothing to do
+                    pass
                 except Exception as e:
                     logger.error(e)
                     # cherrypy.engine.publish("app_notify", "ERROR", f"{e}")
