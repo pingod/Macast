@@ -171,7 +171,6 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
-            --hidden-import=macast_renderer.potplayer \
             Macast.py
 
       - name: Verify x86_64
@@ -250,7 +249,6 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
-            --hidden-import=macast_renderer.potplayer \
             Macast.py
 
       - name: Verify aarch64
@@ -355,7 +353,6 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
-            --hidden-import=macast_renderer.potplayer \
             Macast.py
 
       - name: Resolve version
