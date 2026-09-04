@@ -526,7 +526,7 @@ def gui(renderer=None, protocol=None, lang=gettext.gettext):
         except Exception:
             PotPlayerRenderer, find_potplayer = None, None
         if find_potplayer and find_potplayer():
-            renderer = PotPlayerRenderer(lang, Setting.mpv_default_path)
+            renderer = PotPlayerRenderer(lang)
         else:
             renderer = MPVRenderer(lang, Setting.mpv_default_path)
     if protocol is None:

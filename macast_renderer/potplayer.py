@@ -55,7 +55,12 @@ class PotPlayerRenderer(Renderer):
 
     def __init__(self, lang=gettext.gettext, path=None):
         super(PotPlayerRenderer, self).__init__(lang)
-        self.path = path or find_potplayer()
+        # Only honour an explicitly passed path when it actually looks like
+        # PotPlayer; otherwise (e.g. mpv's path) resolve PotPlayer ourselves.
+        if path and 'potplayer' in os.path.basename(path).lower():
+            self.path = path
+        else:
+            self.path = find_potplayer()
         self.proc = None
         self.playing = False
         self.paused = False
