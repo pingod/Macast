@@ -105,6 +105,22 @@ jobs:
           fi
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
+      - name: Force version into the bundle Info.plist
+        # py2app 0.28 builds `CFBundleVersion` / `CFBundleShortVersionString`
+        # from the build-time version and then resets them to empty strings in
+        # the bundled Info.plist. We rewrite them here using `plutil` so the
+        # version is correct in Finder → Get Info and the AppleScript `version`
+        # property. We do this regardless of where the string came from, so a
+        # future py2app upgrade can move the key around without breaking us.
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          plutil -replace CFBundleShortVersionString -string "${VERSION}" \
+            dist/Macast.app/Contents/Info.plist
+          plutil -replace CFBundleVersion -string "${VERSION}" \
+            dist/Macast.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/Macast.app/Contents/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleVersion"          dist/Macast.app/Contents/Info.plist
+
       - name: Package as DMG-ready .zip
         run: |
           VERSION=${{ steps.version.outputs.version }}
