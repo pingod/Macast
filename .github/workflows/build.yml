@@ -162,7 +162,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --name macast \
             --add-data "i18n:i18n" \
-            --add-data "macast/assets:assets" \
+            --add-data "macast/assets:macast/assets" \
             --add-data "macast/xml:macast/xml" \
             --collect-all cherrypy \
             --collect-all lxml \
@@ -240,7 +240,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --name macast \
             --add-data "i18n:i18n" \
-            --add-data "macast/assets:assets" \
+            --add-data "macast/assets:macast/assets" \
             --add-data "macast/xml:macast/xml" \
             --collect-all cherrypy \
             --collect-all lxml \
@@ -330,7 +330,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --name macast.exe \
             --add-data "i18n;i18n" \
-            --add-data "macast/assets;assets" \
+            --add-data "macast/assets;macast/assets" \
             --add-data "macast/xml;macast/xml" \
             --collect-all cherrypy \
             --collect-all lxml \
