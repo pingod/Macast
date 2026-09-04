@@ -52,8 +52,23 @@ python Macast.py
 
 ```powershell
 pip install pyinstaller
-pyinstaller --noconfirm -F -w --additional-hooks-dir=. --add-data=".version;." --add-data="macast/xml/*;macast/xml"  --add-data="i18n/zh_CN/LC_MESSAGES/*.mo;i18n/zh_CN/LC_MESSAGES" --add-data="assets/*;assets" --add-binary="bin/mpv.exe;bin" --icon=assets/icon.ico Macast.py
+pyinstaller --noconfirm -F -w --additional-hooks-dir=. --add-data=".version;." --add-data="macast/xml/*;macast/xml"  --add-data="i18n/zh_CN/LC_MESSAGES/*.mo;i18n/zh_CN/LC_MESSAGES" --add-data="macast/assets/*;macast/assets" --add-binary="bin/mpv.exe;bin" --icon=macast/assets/icon.ico Macast.py
 ```
+
+> **Note (Windows builds):**
+> - In-package resources must be bundled under `macast/` and **not** at the
+>   bundle root. `macast/macast.py` and `macast/server.py` resolve assets and
+>   XML via `os.path.dirname(__file__)`, which under a frozen one-file build
+>   equals `<MEIPASS>\macast` (e.g. `_MEIxxxx\macast\assets\icon.ico`). A wrong
+>   destination (e.g. `assets/*;assets`) makes PyInstaller place files under
+>   `<MEIPASS>\assets` and the app crashes with `FileNotFoundError:
+>   <MEIPASS>\macast\assets\icon.ico` on launch.
+> - `netifaces` ships **no Windows wheels for Python ≥ 3.10**, so a *local*
+>   Windows build must compile it and therefore needs the **MSVC C++ Build
+>   Tools** (`cl.exe`). The CI workflow in `.github/workflows/build.yml` runs on
+>   `windows-2022`, which has them preinstalled — prefer that for Windows
+>   builds, or install "Desktop development with C++" via the Visual Studio
+>   Build Tools installer.
 
 
 ## Development under Linux (example: Ubuntu)
