@@ -520,15 +520,7 @@ class Macast(App):
 
 def gui(renderer=None, protocol=None, lang=gettext.gettext):
     if renderer is None:
-        # Prefer PotPlayer when installed; fall back to bundled mpv.
-        try:
-            from macast_renderer.potplayer import PotPlayerRenderer, find_potplayer
-        except Exception:
-            PotPlayerRenderer, find_potplayer = None, None
-        if find_potplayer and find_potplayer():
-            renderer = PotPlayerRenderer(lang)
-        else:
-            renderer = MPVRenderer(lang, Setting.mpv_default_path)
+        renderer = MPVRenderer(lang, Setting.mpv_default_path)
     if protocol is None:
         protocol = DLNAProtocol()
     Macast(renderer, protocol, lang).start()
