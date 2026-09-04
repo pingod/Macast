@@ -893,6 +893,47 @@ class Handler:
             Setting.restart()
             # cherrypy.engine.restart()
 
+    def get_status(self):
+        """Snapshot of the running service, the media being cast, and the
+        connected DLNA clients, for the settings page 'Status' tab."""
+        protocol = self.protocol
+        server = {
+            'running': Setting.is_service_running(),
+            'port': Setting.get_port(),
+            'version': Setting.get_version(),
+            'friendly_name': Setting.get_friendly_name(),
+            'renderer': Setting.get(SettingProperty.Macast_Renderer, ''),
+            'protocol': Setting.get(SettingProperty.Macast_Protocol, ''),
+            'platform': sys.platform,
+            'system': Setting.get_system(),
+            'system_version': Setting.get_system_version(),
+            'ip': '/'.join(str(ip) for ip, _ in Setting.get_ip()),
+        }
+        media = {}
+        for name in ('CurrentURI', 'CurrentTrackURI', 'CurrentTrackTitle',
+                     'CurrentTrackDuration', 'CurrentMediaDuration',
+                     'AbsoluteTimePosition', 'RelativeTimePosition',
+                     'TransportState', 'TransportStatus', 'TransportPlaySpeed',
+                     'CurrentPlayMode', 'Volume', 'Mute', 'NumberOfTracks'):
+            try:
+                media[name] = protocol.get_state(name)
+            except Exception:
+                media[name] = None
+        clients = []
+        try:
+            for sid, c in protocol.event_subscribes.items():
+                clients.append({
+                    'host': getattr(c, 'host', ''),
+                    'url': getattr(c, 'url', ''),
+                    'service': getattr(c, 'service', ''),
+                    'sid': getattr(c, 'sid', ''),
+                    'path': getattr(c, 'path', ''),
+                    'timeout': getattr(c, 'timeout', 0),
+                })
+        except Exception as e:
+            logger.error(e)
+        return {'server': server, 'media': media, 'clients': clients}
+
     def GET(self, param=None, *args, **kwargs):
         if not Setting.is_service_running():
             raise cherrypy.HTTPError(503, 'Server restarting')
@@ -921,6 +962,8 @@ class Handler:
                     'version': Setting.version,
                     'plugins': info
                 }
+            elif query == 'status':
+                res = self.get_status()
             return json.dumps(res, indent=4).encode()
         if param is not None:
             raise cherrypy.HTTPRedirect('/')

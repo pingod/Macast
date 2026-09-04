@@ -11,6 +11,13 @@
     <link rel="shortcut icon" type="image/x-icon" href="/assets/icon.png">
     <link href="https://fonts.font.im/css?family=Noto+Sans" rel="stylesheet">
     <link rel="stylesheet" type="text/css" href="/assets/element-ui@2.15.7.css">
+    <style>
+        .status-table{width:100%;border-collapse:collapse;margin-bottom:6px;}
+        .status-table td{border:1px solid #ebeef5;padding:5px 9px;font-size:13px;line-height:1.5;}
+        .status-table td.k{width:110px;background:#f5f7fa;color:#606266;font-weight:600;vertical-align:top;}
+        .status-table .uri{word-break:break-all;font-family:monospace;font-size:12px;}
+        h3{margin:14px 0 6px;color:#303133;font-size:15px;}
+    </style>
 </head>
 <body>
 
@@ -30,6 +37,49 @@
                     </el-button>
                 </el-tooltip>
             </a>
+        </el-tab-pane>
+        <el-tab-pane label="Status" name="10">
+            <div style="padding: 10px;">
+                <el-button size="small" icon="el-icon-refresh" @click="load_status">刷新</el-button>
+
+                <h3>服务器状态</h3>
+                <table class="status-table">
+                    <tbody>
+                    <tr><td class="k">运行状态</td><td>{{ status.server.running ? '运行中' : '已停止' }}</td></tr>
+                    <tr><td class="k">端口</td><td>{{ status.server.port }}</td></tr>
+                    <tr><td class="k">版本</td><td>{{ status.server.version }}</td></tr>
+                    <tr><td class="k">友好名称</td><td>{{ status.server.friendly_name }}</td></tr>
+                    <tr><td class="k">渲染器</td><td>{{ status.server.renderer }}</td></tr>
+                    <tr><td class="k">协议</td><td>{{ status.server.protocol }}</td></tr>
+                    <tr><td class="k">平台</td><td>{{ status.server.system }} ({{ status.server.platform }})</td></tr>
+                    <tr><td class="k">系统版本</td><td>{{ status.server.system_version }}</td></tr>
+                    <tr><td class="k">IP</td><td>{{ status.server.ip }}</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>播放状态</h3>
+                <table class="status-table">
+                    <tbody>
+                    <tr><td class="k">传输状态</td><td>{{ status.media.TransportState }}</td></tr>
+                    <tr><td class="k">标题</td><td>{{ status.media.CurrentTrackTitle || '—' }}</td></tr>
+                    <tr><td class="k">推送地址</td><td><span class="uri">{{ status.media.CurrentURI || '—' }}</span></td></tr>
+                    <tr><td class="k">当前进度</td><td>{{ status.media.AbsoluteTimePosition || '—' }} / {{ status.media.CurrentTrackDuration || '—' }}</td></tr>
+                    <tr><td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
+                    <tr><td class="k">音量</td><td>{{ status.media.Volume }}</td></tr>
+                    <tr><td class="k">静音</td><td>{{ status.media.Mute }}</td></tr>
+                    <tr><td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>客户端信息</h3>
+                <el-table :data="status.clients" size="mini" empty-text="暂无订阅客户端">
+                    <el-table-column prop="host" label="地址/主机" show-overflow-tooltip></el-table-column>
+                    <el-table-column prop="service" label="服务" show-overflow-tooltip></el-table-column>
+                    <el-table-column prop="path" label="路径" show-overflow-tooltip></el-table-column>
+                    <el-table-column prop="sid" label="SID" show-overflow-tooltip></el-table-column>
+                    <el-table-column prop="timeout" label="超时(秒)"></el-table-column>
+                </el-table>
+            </div>
         </el-tab-pane>
         <el-tab-pane label="Setting" name="2">
             <div>
@@ -308,7 +358,11 @@
             DLNA_FriendlyName: "",
 
             //log
-            macast_log: ''
+            macast_log: '',
+
+            //status
+            status: {server: {}, media: {}, clients: []},
+            status_interval: 0
 
         },
         mounted() {
@@ -325,6 +379,8 @@
             this.load_local_plugin();
             this.load_repo_plugin();
             this.get_log();
+            this.load_status();
+            this.status_interval = setInterval(() => this.load_status(), 3000);
         },
         activated() {
 
@@ -355,6 +411,17 @@
                     this.$message.error('Error connecting to Macast');
                 });
             },
+            async load_status() {
+                let url = '/api?query=status';
+                return this.$http.get(url).then(res => {
+                    this.status = res.data;
+                    return true;
+                }).catch(err => {
+                    console.log(err);
+                    this.$message.error('Error connecting to Macast');
+                    return false;
+                });
+            },
             async handleSelect(tab, event) {
                 this.switch_page(tab.name)
             },
@@ -378,6 +445,10 @@
                         break;
                     case '4':
                         this.set_history(page_name);
+                        break;
+                    case '10':
+                        this.set_history(page_name);
+                        this.load_status();
                         break;
                 }
             },
