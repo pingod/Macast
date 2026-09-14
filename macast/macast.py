@@ -55,7 +55,10 @@ class MacastPlugin:
             res['type'] = 'protocol'
         if self.path is None:
             res['default'] = True
-            res['desc'] = 'Macast default plugin'
+            if getattr(self, 'plugin_instance', None) is not None:
+                res['desc'] = '{} protocol (built-in)'.format(self.title)
+            else:
+                res['desc'] = 'Macast default plugin'
             res['version'] = Setting.version
         return res
 
@@ -111,6 +114,7 @@ class MacastPluginManager:
         self.renderer_list = [renderer_default]
         self.renderer_list += self.load_macast_plugin(RENDERER_DIR)
         self.protocol_list = [protocol_default]
+        self.protocol_list += self._load_builtin_protocols()
         self.protocol_list += self.load_macast_plugin(PROTOCOL_DIR)
 
     def get_renderer(self, name):
@@ -140,6 +144,19 @@ class MacastPluginManager:
         else:
             print("using default plugin")
             return plugin_list[0]
+
+    def _load_builtin_protocols(self):
+        """Protocols shipped with Macast, selectable from the menu.
+
+        These mirror the DLNA default: they are built-in (not loaded from the
+        user plugin directory) and advertise over mDNS instead of SSDP.
+        """
+        from .protocol_cast import ChromecastProtocol
+        from .protocol_airplay import AirPlayProtocol
+        return [
+            MacastPlugin(None, "Chromecast", ChromecastProtocol(), "darwin,win32,linux"),
+            MacastPlugin(None, "AirPlay", AirPlayProtocol(), "darwin,win32,linux"),
+        ]
 
     @staticmethod
     def load_macast_plugin(path: str):
