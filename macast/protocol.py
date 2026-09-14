@@ -85,6 +85,46 @@ def soap_fault(error_code, error_description, fault_code='s:Client'):
     return etree.tostring(root, encoding='UTF-8', xml_declaration=False)
 
 
+class PlaybackGuard:
+    """Transparent renderer wrapper that enforces one playback owner.
+
+    With several protocols live, two senders can cast at the same time. The
+    player itself resolves that by switching track, but nobody tells the
+    displaced sender — its phone keeps showing a progress bar for something
+    that stopped.
+
+    Every protocol reaches the player through ``Protocol.renderer``, so this
+    is the one place the handoff can be observed. All attribute access is
+    forwarded unchanged; only ``set_media_url`` (start of playback) triggers
+    ownership transfer.
+    """
+
+    #: owner of the current playback, or None
+    owner = None
+
+    def __init__(self, protocol, renderer):
+        self._protocol = protocol
+        self._renderer = renderer
+
+    def set_media_url(self, *args, **kwargs):
+        previous = PlaybackGuard.owner
+        if previous is not None and previous is not self._protocol:
+            logger.info("Playback taken over from %s by %s",
+                        type(previous).__name__, type(self._protocol).__name__)
+            try:
+                previous.release_playback()
+            except Exception as e:  # never block playback on a notification
+                logger.error("release_playback failed on %s: %s",
+                             type(previous).__name__, e)
+        PlaybackGuard.owner = self._protocol
+        return self._renderer.set_media_url(*args, **kwargs)
+
+    def __getattr__(self, name):
+        # Only called when normal lookup misses, so this never shadows a real
+        # renderer attribute.
+        return getattr(self._renderer, name)
+
+
 class Protocol:
     def __init__(self):
         self._handler = None
@@ -114,7 +154,22 @@ class Protocol:
         if len(renderers) == 0:
             logger.error("Unable to find an available renderer.")
             return None
-        return renderers.pop()
+        renderer = renderers.pop()
+        if renderer is None:
+            return None
+        return PlaybackGuard(self, renderer)
+
+    def release_playback(self):
+        """Another protocol took over playback; release control.
+
+        There is one player behind every protocol. When a second sender starts
+        casting, mpv just switches track and the displaced sender's app keeps
+        showing controls for a stream it no longer owns. The default does
+        nothing; protocols able to signal STOP to their client can override
+        this. The point is that the handoff is *offered* at a single choke
+        point rather than being each protocol's problem.
+        """
+        pass
 
     # The following methods are called by the renderer to set the playback status within the protocol,
     # which will be passed to the client (generally the mobile phone)
@@ -1104,7 +1159,11 @@ class Handler:
             'version': Setting.get_version(),
             'friendly_name': Setting.get_friendly_name(),
             'renderer': Setting.get(SettingProperty.Macast_Renderer, ''),
-            'protocol': Setting.get(SettingProperty.Macast_Protocol, ''),
+            # Protocols may now run concurrently; report whichever are enabled
+            # (falling back to the legacy single value for older installs).
+            'protocol': Setting.get(SettingProperty.Macast_Protocols, [])
+            or ([Setting.get(SettingProperty.Macast_Protocol, '')]
+                if Setting.get(SettingProperty.Macast_Protocol, '') else []),
             'platform': sys.platform,
             'system': Setting.get_system(),
             'system_version': Setting.get_system_version(),

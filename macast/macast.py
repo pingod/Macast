@@ -124,8 +124,69 @@ class MacastPluginManager:
 
     def get_protocol(self, name):
         plugin = self.get_plugin_from_list(self.protocol_list, name)
-        Setting.set(SettingProperty.Macast_Protocol, plugin.title)
         return plugin.get_instance()
+
+    @staticmethod
+    def canonical_title(title):
+        """Normalise a protocol title for comparison (case/space tolerant)."""
+        return " ".join(str(title).strip().lower().split()).replace(" protocol", "").strip()
+
+    def resolve_title(self, title):
+        """Map a stored protocol name onto the current plugin list.
+
+        The default DLNA plugin is titled from its class name —
+        ``format_class_name(DLNAProtocol())`` yields "DLNA Protocol" — so a
+        stored value of "DLNA" would otherwise match nothing and silently drop
+        the protocol (taking SSDP discovery down with it). Match fuzzily, but
+        always return the *real* title so what gets persisted stays canonical.
+        """
+        for plugin in self.protocol_list:
+            if plugin.title == title:
+                return plugin.title
+        canonical = self.canonical_title(title)
+        for plugin in self.protocol_list:
+            if self.canonical_title(plugin.title) == canonical:
+                return plugin.title
+        return None
+
+    def get_protocol_instance(self, title):
+        """Return a fresh instance for `title`, or None if it is not known."""
+        resolved = self.resolve_title(title)
+        if resolved is None:
+            return None
+        for plugin in self.protocol_list:
+            if plugin.title == resolved:
+                return plugin.get_instance()
+        return None
+
+    def build_protocol_group(self, titles):
+        """Instantiate `titles` into a ProtocolGroup that runs them together.
+
+        Unknown titles are skipped so a stale settings entry (a plugin that has
+        since been removed) cannot prevent Macast from starting.
+        """
+        from .protocol_group import ProtocolGroup
+        group = ProtocolGroup()
+        for title in titles:
+            # Store the *canonical* title so that membership checks elsewhere
+            # (toggling a protocol later) compare like with like.
+            resolved = self.resolve_title(title)
+            if resolved is None:
+                logger.warning("Skipping unknown protocol: {}".format(title))
+                continue
+            if resolved in group:
+                continue
+            instance = self.get_protocol_instance(resolved)
+            if instance is None:
+                logger.warning("Skipping unavailable protocol: {}".format(resolved))
+                continue
+            group.add(resolved, instance)
+        if len(group) == 0:
+            # Never leave the app with nothing listening.
+            fallback = self.resolve_title("DLNA")
+            if fallback is not None:
+                group.add(fallback, self.get_protocol_instance(fallback))
+        return group
 
     def get_info(self):
         res = []
@@ -227,9 +288,12 @@ class Macast(App):
         self.setting_protocol = ''
         self.init_setting()
 
-        # init service
-        self.service = Service(self.plugin_manager.get_renderer(self.setting_renderer),
-                               self.plugin_manager.get_protocol(self.setting_protocol))
+        # init service. Several protocols can be enabled at once; they are
+        # bundled into one ProtocolGroup that behaves like a single Protocol
+        # towards everything downstream (CherryPy tree, bus, SSDP).
+        self.service = Service(
+            self.plugin_manager.get_renderer(self.setting_renderer),
+            self.plugin_manager.build_protocol_group(self.enabled_protocols))
 
         icon_path = os.path.join(os.path.dirname(__file__), Macast.ICON_MAP[self.setting_menubar_icon])
         template = None if self.setting_menubar_icon == 0 else True
@@ -288,18 +352,19 @@ class Macast(App):
                 self.renderer_menuitem.children[0].checked = True
 
         protocol_names = [r.title for r in self.plugin_manager.protocol_list]
+        # Protocols are checkboxes, not radio buttons: multiple may run
+        # concurrently (DLNA over SSDP, Chromecast/AirPlay over mDNS). The
+        # previous single-choice menu became the degenerate case of this.
         protocol_select = []
         if len(protocol_names) > 1:
             self.protocol_menuitem = MenuItem(_("Protocols"),
-                                              children=App.build_menu_item_group(protocol_names,
-                                                                                 self.on_protocol_change_click))
+                                              children=App.build_menu_item_group(
+                                                  protocol_names,
+                                                  self.on_protocol_toggle_click))
             protocol_select = [self.protocol_menuitem]
             for i in self.protocol_menuitem.children:
-                if i.text == self.setting_protocol:
-                    i.checked = True
-                    break
-            else:
-                self.protocol_menuitem.children[0].checked = True
+                i.checked = i.text in self.enabled_protocols
+
 
         platform_options = []
         """To judge whether Macast was launched by scripts or by packaged app.
@@ -346,12 +411,51 @@ class Macast(App):
                platform_options + \
                [None, self.check_update_menuitem, self.about_menuitem]
 
+    def _load_enabled_protocols(self):
+        """Read the enabled-protocol list, migrating the old single value.
+
+        Before protocols could run concurrently the settings file held one
+        string in `Macast_Protocol`. Existing installs should keep working
+        exactly as they did, so that value is adopted as a one-element list;
+        only fresh installs default to everything switched on.
+        """
+        stored = Setting.get(SettingProperty.Macast_Protocols, None)
+        available = [p.title for p in self.plugin_manager.protocol_list]
+
+        if isinstance(stored, list) and stored:
+            titles = []
+            for name in stored:
+                resolved = self.plugin_manager.resolve_title(name)
+                if resolved and resolved not in titles:
+                    titles.append(resolved)
+            if titles:
+                return titles
+        elif isinstance(stored, str):
+            resolved = self.plugin_manager.resolve_title(stored)
+            if resolved:
+                return [resolved]
+
+        # Nothing usable yet: adopt the legacy scalar if there is one...
+        legacy = Setting.get(SettingProperty.Macast_Protocol, None)
+        if isinstance(legacy, str):
+            resolved = self.plugin_manager.resolve_title(legacy)
+            if resolved:
+                titles = [resolved]
+                Setting.set(SettingProperty.Macast_Protocols, titles)
+                return titles
+        # ...otherwise a fresh install gets every protocol at once.
+        return list(available)
+
+    def save_enabled_protocols(self):
+        Setting.set(SettingProperty.Macast_Protocols, list(self.enabled_protocols))
+
     def init_setting(self):
         self.setting_start_at_login = Setting.get(SettingProperty.StartAtLogin, 0)
         self.setting_check = Setting.get(SettingProperty.CheckUpdate, 1)
         self.setting_menubar_icon = Setting.get(SettingProperty.MenubarIcon, 1 if sys.platform == 'darwin' else 0)
         self.setting_renderer = Setting.get(SettingProperty.Macast_Renderer, 'MPV')
-        self.setting_protocol = Setting.get(SettingProperty.Macast_Protocol, 'DLNA')
+        self.enabled_protocols = self._load_enabled_protocols()
+        self.setting_protocol = self.enabled_protocols[0] if self.enabled_protocols else 'DLNA'
         if self.setting_check:
             threading.Thread(target=self.check_update,
                              kwargs={
@@ -469,18 +573,76 @@ class Macast(App):
 
     # The followings are the callback function of menu click
 
-    def on_protocol_change_click(self, item):
-        protocol_config = self.plugin_manager.protocol_list[item.data]
-        self.stop_cast()
-        # todo 生成新的 uuid
-        self.service.protocol = protocol_config.get_instance()
-        Setting.set(SettingProperty.Macast_Protocol, protocol_config.title)
-        self.setting_protocol = protocol_config.title
+    def on_protocol_toggle_click(self, item):
+        """Enable/disable one protocol while the others keep running."""
+        plugin = self.plugin_manager.protocol_list[item.data]
+        title = plugin.title
+
+        if title in self.enabled_protocols:
+            if len(self.enabled_protocols) == 1:
+                # Disabling the last one would leave nothing listening; mpv
+                # would stay up with no way to reach it.
+                cherrypy.engine.publish(
+                    'app_notify', _('Info'),
+                    _('At least one protocol must stay enabled.'))
+                item.checked = True
+                return
+            self.enabled_protocols.remove(title)
+        else:
+            self.enabled_protocols.append(title)
+        # Keep menu order stable regardless of the order things were clicked.
+        order = [p.title for p in self.plugin_manager.protocol_list]
+        self.enabled_protocols.sort(key=lambda t: order.index(t)
+                                    if t in order else len(order))
+        self.save_enabled_protocols()
+        item.checked = title in self.enabled_protocols
+
+        self._apply_enabled_protocols()
+        cherrypy.engine.publish(
+            'app_notify', _('Info'),
+            _('{}.').format('{} {}'.format(
+                _('Enabled'), title) if item.checked else '{} {}'.format(
+                _('Disabled'), title)))
+
+    def _apply_enabled_protocols(self):
+        """Start/stop protocols to match `enabled_protocols` in place.
+
+        Deliberately not a full service restart: toggling Chromecast must not
+        interrupt a DLNA stream already playing.
+        """
+        group = self.service.protocol
+        running = Setting.is_service_running()
+
+        for title in list(group.titles()):
+            if title not in self.enabled_protocols:
+                protocol = group.remove(title)
+                if protocol is not None:
+                    try:
+                        protocol.stop()
+                    except Exception as e:
+                        logger.error("Stopping protocol %s failed: %s", title, e)
+
+        for title in self.enabled_protocols:
+            if title in group:
+                continue
+            instance = self.plugin_manager.get_protocol_instance(title)
+            if instance is None:
+                continue
+            group.add(title, instance)
+            if running:
+                try:
+                    instance.start()
+                except Exception as e:
+                    logger.error("Starting protocol %s failed: %s", title, e)
+
+        # The CherryPy tree root follows the group's primary handler (DLNA's
+        # handler supersedes the base one by serving the UPnP routes too), and
+        # SSDP is only wanted while a SSDP-based protocol is enabled.
+        self.service.refresh_protocol()
+        self.setting_protocol = (self.enabled_protocols[0]
+                                 if self.enabled_protocols else 'DLNA')
         self.setting_menuitem.children = self.build_setting_menu()
-        # reload menu
         self.set_menu(self.menu)
-        self.start_cast()
-        cherrypy.engine.publish('app_notify', _('Info'), _('Change Protocol to {}.').format(protocol_config.title))
 
     def on_renderer_change_click(self, item):
         renderer_config = self.plugin_manager.renderer_list[item.data]

@@ -186,6 +186,19 @@ class Service:
         self._sync_ssdp(self._protocol)
         self._protocol.handler.reload()
 
+    def refresh_protocol(self):
+        """Re-bind discovery to the protocols currently enabled.
+
+        Called after the user toggles a protocol. Restarting the whole service
+        would do this too, but it would also cut off anything playing, so the
+        membership change is applied in place instead.
+        """
+        # The root handler depends on which protocols are enabled: DLNA's
+        # handler serves the UPnP endpoints on top of the web UI.
+        if getattr(self, "cherrypy_application", None) is not None:
+            self.cherrypy_application.root = self._protocol.handler
+        self._sync_ssdp(self._protocol)
+
     def _sync_ssdp(self, protocol):
         """Start or stop SSDP so it matches the protocol's discovery mechanism.
 

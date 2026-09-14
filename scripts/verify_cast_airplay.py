@@ -626,6 +626,241 @@ except Exception as e:
     check("plugin manager registers built-in protocols", False, str(e))
 
 # --------------------------------------------------------------------------
+# Part 6: running several protocols at once (ProtocolGroup)
+#
+# Macast historically ran ONE protocol; the group lets DLNA + Chromecast +
+# AirPlay advertise simultaneously while looking like a single Protocol to
+# everything downstream.
+# --------------------------------------------------------------------------
+print("\n=== Part 6: concurrent protocols (ProtocolGroup) ===")
+try:
+    group_mod = _load("protocol_group", "protocol_group.py")
+    ProtocolGroup = group_mod.ProtocolGroup
+
+    class _Rec(object):
+        """Minimal Protocol stand-in that records calls."""
+
+        def __init__(self, name, uses_ssdp=False):
+            self.name = name
+            self.uses_ssdp = uses_ssdp
+            self.started = False
+            self.stopped = False
+            self.state = []
+            self.handler = "handler-of-" + name
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            self.stopped = True
+
+        def reload(self):
+            self.stop()
+            self.start()
+
+        def methods(self):
+            return ['set_state_play', 'set_state_stop']
+
+        def set_state_play(self):
+            self.state.append('play')
+            return self.name
+
+        def unique(self):
+            return "unique-" + self.name
+
+    dlna = _Rec("DLNA", uses_ssdp=True)
+    cc = _Rec("Chromecast")
+    ap2 = _Rec("AirPlay")
+    g = ProtocolGroup([("AirPlay", ap2), ("Chromecast", cc), ("DLNA", dlna)])
+
+    check("group holds every child", g.titles() == ["AirPlay", "Chromecast", "DLNA"],
+          str(g.titles()))
+    check("group is a Protocol", isinstance(g, protocol.Protocol))
+
+    # start/stop must reach ALL children
+    g.start()
+    check("start() starts every child",
+          dlna.started and cc.started and ap2.started)
+    g.stop()
+    check("stop() stops every child",
+          dlna.stopped and cc.stopped and ap2.stopped)
+
+    # uses_ssdp is true if ANY child wants it
+    check("uses_ssdp true when DLNA present", g.uses_ssdp is True)
+    g.remove("DLNA")
+    check("uses_ssdp false without DLNA", g.uses_ssdp is False, str(g.uses_ssdp))
+    # Insertion order was AirPlay, Chromecast, DLNA -> AirPlay is first left.
+    check("primary falls back to the first child with no DLNA",
+          g.primary is ap2, getattr(g.primary, "name", None))
+
+    # ...and comes back when DLNA is re-added
+    g.add("DLNA", dlna)
+    check("primary prefers the SSDP protocol", g.primary is dlna)
+    check("handler comes from the primary", g.handler == "handler-of-DLNA")
+
+    # set_state_* fan-out: Renderer resolves ONE protocol via the bus, so
+    # without this only one protocol would ever learn about playback.
+    dlna.state, cc.state, ap2.state = [], [], []
+    g.set_state_play()
+    check("set_state_* reaches every child",
+          dlna.state == ['play'] and cc.state == ['play'] and ap2.state == ['play'],
+          "dlna={} cc={} ap={}".format(dlna.state, cc.state, ap2.state))
+
+    # unknown attributes delegate to the primary
+    check("unknown attributes delegate to primary", g.unique() == "unique-DLNA")
+    try:
+        g.definitely_missing
+        raised = False
+    except AttributeError:
+        raised = True
+    check("truly missing attributes raise AttributeError", raised)
+
+    # one broken child must not sink the others
+    class _Boom(_Rec):
+        def start(self):
+            raise RuntimeError("boom")
+
+    boom = _Boom("Boom")
+    g2 = ProtocolGroup([("DLNA", dlna), ("Boom", boom)])
+    try:
+        g2.start()
+        survived = True
+    except RuntimeError:
+        survived = False
+    check("a failing child does not break the group", survived)
+
+    # empty group: no children, no primary, still no crash
+    empty = ProtocolGroup()
+    check("empty group has no primary", empty.primary is None)
+    check("empty group still exposes a handler", empty.handler is not None)
+    check("empty group does not need SSDP", empty.uses_ssdp is False)
+    empty.start()
+    empty.stop()
+    check("empty group start/stop is safe", True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("ProtocolGroup behaves as a single Protocol", False, str(e))
+
+# --------------------------------------------------------------------------
+# Part 7: one player, one owner (PlaybackGuard)
+# --------------------------------------------------------------------------
+print("\n=== Part 7: playback ownership across protocols ===")
+try:
+    class _Player(object):
+        def __init__(self):
+            self.urls = []
+
+        def set_media_url(self, url, **kw):
+            self.urls.append(url)
+            return "ok"
+
+        def set_media_pause(self):
+            return "paused"
+
+    class _Owner(_Rec):
+        def __init__(self, name):
+            super(_Owner, self).__init__(name)
+            self.released = 0
+
+        def release_playback(self):
+            self.released += 1
+
+    player = _Player()
+    first, second = _Owner("First"), _Owner("Second")
+    protocol.PlaybackGuard.owner = None
+
+    guard = protocol.PlaybackGuard(first, player)
+    ret = guard.set_media_url("http://a/1.mp4")
+    check("guard forwards to the real renderer", player.urls == ["http://a/1.mp4"])
+    check("guard passes through the return value", ret == "ok")
+    check("guard forwards unrelated calls", guard.set_media_pause() == "paused")
+
+    # First takes over nothing (no previous owner) -> no release
+    check("no release on the first playback", first.released == 0)
+
+    protocol.PlaybackGuard(first, player).set_media_url("http://a/2.mp4")
+    check("same owner keeps ownership without self-release", first.released == 0)
+
+    protocol.PlaybackGuard(second, player).set_media_url("http://b/1.mp4")
+    check("previous owner is released on takeover", first.released == 1)
+    check("new owner's URL reaches the player", player.urls[-1] == "http://b/1.mp4")
+
+    # A broken release must never block playback.
+    class _BadRelease(_Owner):
+        def release_playback(self):
+            raise RuntimeError("cannot release")
+
+    bad = _BadRelease("Bad")
+    protocol.PlaybackGuard(bad, player).set_media_url("http://c/1.mp4")
+    protocol.PlaybackGuard(first, player).set_media_url("http://c/2.mp4")
+    check("a failing release does not block playback",
+          player.urls[-1] == "http://c/2.mp4", str(player.urls))
+    protocol.PlaybackGuard.owner = None
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("PlaybackGuard arbitrates concurrent senders", False, str(e))
+
+# --------------------------------------------------------------------------
+# Part 8: persisted protocol names resolve to real plugins
+#
+# Regression: the default DLNA plugin is titled from its class name
+# ("DLNA Protocol"), so a stored value of "DLNA" matched nothing and silently
+# dropped DLNA -- taking SSDP discovery down with it, with no error shown.
+# --------------------------------------------------------------------------
+print("\n=== Part 8: protocol title resolution ===")
+try:
+    mgr_t = macast_mod.MacastPluginManager(
+        macast_mod.MacastPlugin(None, "MPV", _DummyMPV(), "darwin,win32,linux"),
+        macast_mod.MacastPlugin(
+            None, utils.format_class_name(protocol.DLNAProtocol()),
+            protocol.DLNAProtocol(), "darwin,win32,linux"),
+    )
+    real_titles = [p.title for p in mgr_t.protocol_list]
+    check("default DLNA plugin keeps the class-derived title",
+          "DLNA Protocol" in real_titles, str(real_titles))
+
+    check("short 'DLNA' resolves despite the real title differing",
+          mgr_t.resolve_title("DLNA") == "DLNA Protocol",
+          str(mgr_t.resolve_title("DLNA")))
+    check("exact title still resolves",
+          mgr_t.resolve_title("DLNA Protocol") == "DLNA Protocol")
+    check("case/space variants resolve",
+          mgr_t.resolve_title("dlna  protocol") == "DLNA Protocol",
+          str(mgr_t.resolve_title("dlna  protocol")))
+    check("built-in protocols resolve",
+          mgr_t.resolve_title("Chromecast") == "Chromecast" and
+          mgr_t.resolve_title("AirPlay") == "AirPlay")
+    check("unknown names resolve to None",
+          mgr_t.resolve_title("Nonexistent") is None)
+
+    instance = mgr_t.get_protocol_instance("DLNA")
+    check("get_protocol_instance works from the short name",
+          instance is not None and isinstance(instance, protocol.DLNAProtocol),
+          type(instance).__name__)
+
+    group_all = mgr_t.build_protocol_group(["DLNA", "Chromecast", "AirPlay"])
+    check("group built from short names stores canonical titles",
+          group_all.titles() == ["DLNA Protocol", "Chromecast", "AirPlay"],
+          str(group_all.titles()))
+    check("group containing DLNA needs SSDP", group_all.uses_ssdp is True)
+
+    # Unknown entries must be skipped, not crash the app.
+    group_partial = mgr_t.build_protocol_group(["DLNA", "Bogus"])
+    check("unknown entries are skipped", group_partial.titles() == ["DLNA Protocol"],
+          str(group_partial.titles()))
+
+    # An empty/absent list must never leave nothing listening.
+    group_empty = mgr_t.build_protocol_group([])
+    check("empty selection falls back to DLNA", len(group_empty) == 1 and
+          group_empty.uses_ssdp is True, str(group_empty.titles()))
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("protocol titles resolve robustly", False, str(e))
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 passed = sum(1 for _, ok, _ in RESULTS if ok)
