@@ -147,6 +147,22 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" dist/Macast.app/Contents/Info.plist
           /usr/libexec/PlistBuddy -c "Print :CFBundleVersion"          dist/Macast.app/Contents/Info.plist
 
+      - name: Re-sign the bundle ad-hoc
+        # `codesign -v` on the packaged app fails with "a sealed resource is
+        # missing or invalid". Two reasons, both of them ours:
+        #   - py2app signs the bundle, but its own _CodeSignature/CodeResources
+        #     lists files it strips afterwards (cherrypy's test/tutorial
+        #     modules, __pycache__ entries) -- 146 of them in v0.7.9;
+        #   - the plutil step above then rewrites Info.plist.
+        # This is worse than shipping no signature: with a broken seal
+        # Gatekeeper says "Macast.app is damaged and can't be opened" instead
+        # of offering the usual "Open Anyway" escape hatch. Re-seal ad-hoc as
+        # the LAST mutation of the bundle so the signature matches what we
+        # actually ship. Verified locally: the seal goes from
+        # "a sealed resource is missing or invalid" to
+        # "valid on disk / satisfies its Designated Requirement".
+        run: codesign --force --sign - dist/Macast.app
+
       - name: Package as DMG-ready .zip
         run: |
           VERSION=${{ steps.version.outputs.version }}
