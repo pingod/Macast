@@ -69,16 +69,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Homebrew + mpv
-        # macos-14 runners are arm64 with Homebrew preinstalled at
-        # /opt/homebrew. We just need to install mpv. The image
-        # also pre-installs a 'aws/tap' tap that the runner does
-        # not auto-trust; mpv is in homebrew/core, so we untap
-        # aws/tap to silence the 'not trusted' notice.
-        run: |
-          brew untap aws/tap 2>/dev/null || true
-          brew install mpv
-
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip
@@ -86,14 +76,34 @@ jobs:
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
                       'requests' 'pillow'
 
+      # No mpv is bundled. Playback uses the mpv already on the machine
+      # (`brew install mpv`), which is what the source repo's README asks for
+      # on macOS. Homebrew's mpv *cannot* be copied into a .app anyway: it
+      # links against absolute /opt/homebrew/opt/* paths, so py2app rewrites
+      # each of its ~14 dylibs, drags them into Contents/Frameworks (≈53 MB)
+      # and the resulting binary still fails to launch.
+      #
+      # To ship a self-contained player instead, point MACAST_BUNDLE_MPV at a
+      # portable build (upstream uses laboratory.stolendata.net's mpv_osx
+      # tarball); setup_py2app.py verifies with `otool -L` that it only links
+      # system libraries before copying it to Resources/bin/MacOS/mpv.
       - name: Build .app
         run: MACAST_ARCH=arm64 python scripts/setup_py2app.py py2app
 
-      - name: Verify arm64
+      - name: Verify arm64 and i18n
+        # `setup_py2app.py` compiles i18n/*/LC_MESSAGES/*.po itself (pure
+        # Python), so no gettext install is required. Assert both the arch and
+        # that the catalogues made it into the bundle: without the .mo files
+        # gettext silently falls back to English and the release ships an
+        # untranslated app.
         run: |
           file dist/Macast.app/Contents/MacOS/Macast | grep -q arm64
           file dist/Macast.app/Contents/Frameworks/Python.framework/Versions/3.12/Python | grep -q arm64
-          file dist/Macast.app/Contents/Resources/bin/MacOS/mpv | grep -q arm64
+          ls dist/Macast.app/Contents/Resources/i18n/*/LC_MESSAGES/macast.mo
+          find dist/Macast.app/Contents/Resources/i18n -name '*.mo' | wc -l
+
+      - name: Report bundle size
+        run: du -sh dist/Macast.app
 
       - name: Resolve version
         id: version
@@ -418,6 +428,12 @@ jobs:
       (github.event_name == 'workflow_dispatch' && inputs.release == true)
     runs-on: ubuntu-22.04
     steps:
+      - name: Checkout
+        # Needed for `macast/.version`: this job only downloads build
+        # artefacts otherwise, and resolving the version without a checkout
+        # fails on a manual (workflow_dispatch) release run.
+        uses: actions/checkout@v6
+
       - name: Download all artefacts
         uses: actions/download-artifact@v8
         with:
@@ -425,6 +441,30 @@ jobs:
 
       - name: List artefacts
         run: ls -R artefacts/
+
+      - name: Verify version sources agree
+        # Three places name the release: `macast/.version` (setup.py),
+        # `macast/_version.py` (pyproject's dynamic version) and the git tag.
+        # Drift between them ships an artefact whose pip metadata disagrees
+        # with its own filename, so refuse to publish instead.
+        run: |
+          set -eu
+          DOT=$(cat macast/.version)
+          PY=$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' macast/_version.py)
+          echo "macast/.version    = ${DOT}"
+          echo "macast/_version.py = ${PY}"
+          if [ "${DOT}" != "${PY}" ]; then
+            echo "ERROR: version sources disagree (${DOT} vs ${PY})" >&2
+            exit 1
+          fi
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF#refs/tags/v}"
+            echo "release tag        = ${TAG}"
+            if [ "${TAG}" != "${DOT}" ]; then
+              echo "ERROR: tag v${TAG} does not match macast/.version ${DOT}" >&2
+              exit 1
+            fi
+          fi
 
       - name: Resolve version
         id: version
