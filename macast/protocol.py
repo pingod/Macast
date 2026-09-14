@@ -996,13 +996,21 @@ class Handler:
         return protocols.pop()
 
     def _management_allowed(self):
-        """Management endpoints (install-plugin, save-launch-param, status/log
-        queries) must only be reachable from the loopback interface or with a
-        valid API token. DLNA control/SUBSCRIBE traffic from the LAN remains
-        open, since that is the whole point of a renderer."""
+        """Management endpoints must only be reachable from an authenticated
+        channel. A channel is trusted when it is:
+          - the loopback interface (the desktop app talking to itself), or
+          - received over HTTPS (the admin explicitly opened the https
+            endpoint), or
+          - carrying a valid X-Macast-Token.
+        DLNA control/SUBSCRIBE traffic from the LAN stays open, since that is
+        the whole point of a renderer."""
         remote = getattr(cherrypy.request, 'remote', None)
         ip = getattr(remote, 'ip', '127.0.0.1')
         if ip in ('127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost'):
+            return True
+        # A request that arrived over the HTTPS admin channel is treated as
+        # authenticated: the user explicitly opened https://host:port.
+        if getattr(cherrypy.request, 'scheme', 'http') == 'https':
             return True
         token = cherrypy.request.headers.get('X-Macast-Token')
         if not token:
@@ -1038,6 +1046,8 @@ class Handler:
             'system': Setting.get_system(),
             'system_version': Setting.get_system_version(),
             'ip': '/'.join(str(ip) for ip, _ in Setting.get_ip()),
+            'https_enabled': Setting.is_https_enabled(),
+            'https_port': Setting.get_https_port() if Setting.is_https_enabled() else None,
         }
         media = {}
         for name in ('CurrentURI', 'CurrentTrackURI', 'CurrentTrackTitle',

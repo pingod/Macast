@@ -122,6 +122,11 @@ class Service:
 
         self.cherrypy_application = cherrypy.tree.mount(self.protocol.handler, '/', config=cherrypy_config)
         cherrypy.engine.signals.subscribe()
+        # HTTPS (Web/管理 API) channel — DLNA control/SSDP stays on plain
+        # HTTP because the UPnP standard requires it. The HTTPS server reuses
+        # the same WSGI app (cherrypy.tree) so the settings UI and management
+        # API are also reachable over an encrypted LAN connection (PWA).
+        self._start_https_server()
 
     @property
     def renderer(self):
@@ -143,6 +148,58 @@ class Service:
         self.protocol_plugin.set_protocol(self._protocol)
         self.cherrypy_application.root = self._protocol.handler
         self._protocol.handler.reload()
+
+    def _start_https_server(self):
+        """Start an optional HTTPS server that reuses the same WSGI app
+        (cherrypy.tree) as the DLNA HTTP server. DLNA control/SSDP stays on
+        plain HTTP (the UPnP standard requires it); this second server only
+        secures the Web settings UI and the management API for LAN clients
+        (e.g. the PWA opened on a phone)."""
+        if not Setting.is_https_enabled():
+            logger.info("HTTPS channel disabled by setting")
+            return
+        cert = Setting.get_https_cert()
+        key = Setting.get_https_key()
+        if not cert or not key or not (os.path.exists(cert) and os.path.exists(key)):
+            cert, key = self._ensure_self_signed_cert()
+        if not cert or not key:
+            logger.warning("HTTPS channel unavailable: no usable certificate")
+            return
+        try:
+            https_port = Setting.get_https_port()
+            https_server = Server()
+            https_server.bind_addr = ('0.0.0.0', https_port)
+            https_server.ssl_module = 'builtin'
+            https_server.ssl_certificate = cert
+            https_server.ssl_private_key = key
+            https_server.subscribe()
+            logger.info("HTTPS channel will run on port: {}".format(https_port))
+        except Exception as e:
+            logger.error("Failed to start HTTPS channel: {}".format(e))
+
+    @staticmethod
+    def _ensure_self_signed_cert():
+        """Generate a self-signed certificate in SETTING_DIR if none exists.
+        Reusing a stable on-disk cert keeps browsers from re-prompting on
+        every restart. Returns (cert_path, key_path) or (None, None)."""
+        cert_path = os.path.join(SETTING_DIR, 'macast.crt')
+        key_path = os.path.join(SETTING_DIR, 'macast.key')
+        if os.path.exists(cert_path) and os.path.exists(key_path):
+            return cert_path, key_path
+        try:
+            subprocess.run([
+                'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                '-keyout', key_path, '-out', cert_path,
+                '-days', '3650', '-subj', '/CN=Macast Local Service',
+                '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+            ], check=True, capture_output=True, timeout=30)
+            logger.info("Generated self-signed certificate: {}".format(cert_path))
+            Setting.set(SettingProperty.Https_Cert, cert_path)
+            Setting.set(SettingProperty.Https_Key, key_path)
+            return cert_path, key_path
+        except Exception as e:
+            logger.error("Failed to generate self-signed certificate: {}".format(e))
+            return None, None
 
     def notify(self):
         """ssdp do notify
