@@ -1,0 +1,26 @@
+{
+  "name": "Macast 投屏控制台",
+  "short_name": "Macast",
+  "description": "Macast DLNA 投屏控制台：实时状态、本地文件投屏、播放历史、字幕管理",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#1d1e1f",
+  "theme_color": "#1d1e1f",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/assets/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

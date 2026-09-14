@@ -77,7 +77,7 @@ class MenuItem:
         if self.view is None:
             return
         if self.platform == Platform.Darwin:
-            state = 1 if self._checked else 0
+            state = 1 if self._enabled else 0
             self.view.set_callback(
                 self._rumpsCallback if self._enabled else None,
                 self.key)

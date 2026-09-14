@@ -95,9 +95,9 @@ class SSDPServer:
     """A class implementing a SSDP server.  The notify_received and
     searchReceived methods are called when the appropriate type of
     datagram is received by the server."""
-    known = {}
 
     def __init__(self):
+        self.known = {}  # registered devices (per-instance, NOT shared!)
         self.ip_list = []
         self.sock_list = []
         self.sock = None
@@ -235,34 +235,42 @@ class SSDPServer:
 
         try:
             header = data.decode().split('\r\n\r\n')[0]
-        except ValueError as err:
+        except (ValueError, UnicodeDecodeError) as err:
             logger.error(err)
             return
         if len(header) == 0:
             return
 
-        lines = header.split('\r\n')
-        cmd = lines[0].split(' ')
-        lines = map(lambda x: x.replace(': ', ':', 1), lines[1:])
-        lines = filter(lambda x: len(x) > 0, lines)
+        try:
+            lines = header.split('\r\n')
+            cmd = lines[0].split(' ')
+            if len(cmd) < 2:
+                return
+            lines = map(lambda x: x.replace(': ', ':', 1), lines[1:])
+            lines = filter(lambda x: len(x) > 0, lines)
 
-        headers = [x.split(':', 1) for x in lines]
-        headers = dict(map(lambda x: (x[0].lower(), x[1]), headers))
+            headers = [x.split(':', 1) for x in lines]
+            headers = dict(map(lambda x: (x[0].lower(), x[1]), headers))
 
-        if cmd[0] != 'NOTIFY':
-            logger.info('SSDP command %s %s - from %s:%d' %
-                        (cmd[0], cmd[1], host, port))
-        if cmd[0] == 'M-SEARCH' and cmd[1] == '*':
-            # SSDP discovery
-            logger.debug('M-SEARCH *')
-            logger.debug(data)
-            self.discovery_request(headers, (host, port))
-        elif cmd[0] == 'NOTIFY' and cmd[1] == '*':
-            # SSDP presence
-            # logger.debug('NOTIFY *')
-            pass
-        else:
-            logger.warning('Unknown SSDP command %s %s' % (cmd[0], cmd[1]))
+            if cmd[0] != 'NOTIFY':
+                logger.info('SSDP command %s %s - from %s:%d' %
+                            (cmd[0], cmd[1], host, port))
+            if cmd[0] == 'M-SEARCH' and cmd[1] == '*':
+                # SSDP discovery
+                logger.debug('M-SEARCH *')
+                logger.debug(data)
+                self.discovery_request(headers, (host, port))
+            elif cmd[0] == 'NOTIFY' and cmd[1] == '*':
+                # SSDP presence
+                # logger.debug('NOTIFY *')
+                pass
+            else:
+                logger.warning('Unknown SSDP command %s %s' % (cmd[0], cmd[1]))
+        except Exception as e:
+            # A single malformed/malicious datagram must never kill the SSDP
+            # thread (which would make Macast undiscoverable until restart).
+            logger.warning('malformed SSDP datagram from %s:%d: %s' % (host, port, e))
+            return
 
     def register(self, usn, st, location, server=SERVER_ID,
                  cache_control='max-age=1800'):
@@ -301,11 +309,14 @@ class SSDPServer:
 
         (host, port) = host_port
 
-        logger.info('Discovery request from (%s,%d) for %s' % (host, port,
-                                                               headers['st']))
+        st = headers.get('st')
+        if not st:
+            logger.warning('Discovery request from (%s,%d) missing ST header' % (host, port))
+            return
+        logger.info('Discovery request from (%s,%d) for %s' % (host, port, st))
         # Do we know about this service?
         for i in self.known.values():
-            if i['ST'] == headers['st'] or headers['st'] == 'ssdp:all':
+            if i['ST'] == st or st == 'ssdp:all':
                 response = ['HTTP/1.1 200 OK']
 
                 usn = None
@@ -320,7 +331,11 @@ class SSDPServer:
                                                             usegmt=True))
 
                     response.extend(('', ''))
-                    delay = random.randint(0, int(headers['mx']))
+                    try:
+                        mx = int(headers.get('mx', 0))
+                    except (ValueError, TypeError):
+                        mx = 0
+                    delay = random.randint(0, mx)
                     destination = (host, port)
                     logger.debug('send discovery response delayed by %ds for %s to %r' % (delay, usn, destination))
                     # logger.debug(response)

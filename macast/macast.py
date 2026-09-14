@@ -70,7 +70,10 @@ class MacastPlugin:
         """
         if self.plugin_class is None:
             return False
-        if sys.platform in self.platform:
+        # self.platform is a comma-separated list like 'darwin,win32,linux'.
+        # Use an explicit split+membership test instead of `in` on the raw
+        # string, which would also match substrings incorrectly.
+        if sys.platform in [p.strip() for p in self.platform.split(',')]:
             return True
 
         logger.error("{} support platform: {}".format(self.title, self.platform))
@@ -350,7 +353,7 @@ class Macast(App):
         release_url = 'https://github.com/{}/releases/latest'.format(GITHUB_REPO)
         api_url = 'https://api.github.com/repos/{}/releases/latest'.format(GITHUB_REPO)
         try:
-            res = json.loads(requests.get(api_url).text)
+            res = json.loads(requests.get(api_url, timeout=10).text)
             # Strip leading 'v' and grab the first dot-separated version
             # triple. e.g. 'v0.7.2' -> '0.7.2'. Using tuple comparison so
             # that '0.7.10' correctly sorts above '0.7.2'.

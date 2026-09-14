@@ -9,21 +9,120 @@
     <script src="/assets/vue-resource@1.5.3.js"></script>
     <script src="/assets/element-ui@2.15.7.js"></script>
     <link rel="shortcut icon" type="image/x-icon" href="/assets/icon.png">
-    <link href="https://fonts.font.im/css?family=Noto+Sans" rel="stylesheet">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/assets/icon-192.png">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Macast 投屏">
+    <meta name="theme-color" content="#1d1e1f">
     <link rel="stylesheet" type="text/css" href="/assets/element-ui@2.15.7.css">
     <style>
-        .status-table{width:100%;border-collapse:collapse;margin-bottom:6px;}
-        .status-table td{border:1px solid #ebeef5;padding:5px 9px;font-size:13px;line-height:1.5;}
-        .status-table td.k{width:110px;background:#f5f7fa;color:#606266;font-weight:600;vertical-align:top;}
+        :root {
+            --bg: #f5f7fa;
+            --panel: #ffffff;
+            --text: #303133;
+            --text-soft: #606266;
+            --border: #ebeef5;
+            --accent: #409eff;
+            --track: #ebeef5;
+        }
+        body.theme-dark {
+            --bg: #1d1e1f;
+            --panel: #2a2b2c;
+            --text: #e8e8e8;
+            --text-soft: #b5b5b5;
+            --border: #3a3b3c;
+            --accent: #66b1ff;
+            --track: #3a3b3c;
+        }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            transition: background .25s ease, color .25s ease;
+        }
+        #app { max-width: 980px; margin: 0 auto; padding: 12px 16px 64px; }
+        .macast-topbar {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 8px;
+        }
+        .macast-topbar .title { font-weight: 700; font-size: 18px; }
+        .status-table{width:100%;border-collapse:collapse;margin-bottom:6px;background:var(--panel);}
+        .status-table td{border:1px solid var(--border);padding:5px 9px;font-size:13px;line-height:1.5;color:var(--text);}
+        .status-table td.k{width:110px;background:var(--bg);color:var(--text-soft);font-weight:600;vertical-align:top;}
         .status-table .uri{word-break:break-all;font-family:monospace;font-size:12px;}
-        h3{margin:14px 0 6px;color:#303133;font-size:15px;}
+        .status-card {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+        }
+        .status-card h3 { margin: 0 0 10px; color: var(--text); font-size: 15px; }
+        .now-playing { display: flex; align-items: center; gap: 12px; }
+        .now-playing .cover {
+            width: 56px; height: 56px; border-radius: 8px; flex: none;
+            background: linear-gradient(135deg, var(--accent), #8e44ad);
+            display: flex; align-items: center; justify-content: center;
+            color: #fff; font-size: 22px;
+        }
+        .now-playing .meta { min-width: 0; }
+        .now-playing .meta .ttl { font-weight: 600; font-size: 15px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .now-playing .meta .sub { color: var(--text-soft); font-size: 12px; }
+        .progress-row { margin: 10px 0 4px; }
+        .vol-row { display:flex; align-items:center; gap:10px; margin-top:6px; }
+        .vol-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+        .vol-bar > i { display:block; height:100%; background: var(--accent); }
+        h3.section { margin: 18px 0 8px; color: var(--text); font-size: 15px; }
+        .cast-box {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+        }
+        .cast-box .hint { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+        .history-item {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 8px 0; border-bottom: 1px solid var(--border);
+        }
+        .history-item:last-child { border-bottom: none; }
+        .history-meta { min-width: 0; flex: 1; padding-right: 12px; }
+        .history-ttl {
+            font-weight: 600; font-size: 13px; overflow: hidden;
+            text-overflow: ellipsis; white-space: nowrap;
+        }
+        .history-sub { color: var(--text-soft); font-size: 12px; }
+        .pwa-tip {
+            display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: 10px; padding: 10px 14px; margin-bottom: 12px;
+            font-size: 13px; color: var(--text-soft);
+        }
+        .pwa-tip b { color: var(--text); }
+        @media (max-width: 600px) {
+            .box-card { width: 100%; }
+            #app { padding: 8px; }
+        }
     </style>
 </head>
 <body>
 
 <div id="app">
+    <div class="macast-topbar">
+        <span class="title">Macast 投屏</span>
+        <el-button size="mini" circle :icon="themeIcon" @click="toggleTheme"
+                   :title="themeTitle"></el-button>
+    </div>
+    <div v-if="canInstall || (isIOS && !pwaDismissed)" class="pwa-tip">
+        <template v-if="canInstall">
+            <span>可安装到主屏，像原生 App 一样使用</span>
+            <el-button size="mini" type="primary" @click="installApp">安装到主屏</el-button>
+            <el-button size="mini" text @click="dismissPwa">不再提示</el-button>
+        </template>
+        <template v-else>
+            <span class="pwa-ios">在 Safari 中点击 <b>分享 ▸ 添加到主屏幕</b>，即可像 App 一样使用</span>
+        </template>
+    </div>
     <el-tabs v-model="activeIndex" @tab-click="handleSelect">
-        <el-tab-pane label="Plugin" name="1">
+        <el-tab-pane label="插件" name="1">
             <div class="macast-plugins">
                 <macast-plugin v-for="item in plugins" :key="item.renderer"
                                :item="item" v-on:refresh_plugin="refresh_plugin">
@@ -38,11 +137,67 @@
                 </el-tooltip>
             </a>
         </el-tab-pane>
-        <el-tab-pane label="Status" name="10">
+        <el-tab-pane label="状态" name="10">
             <div style="padding: 10px;">
                 <el-button size="small" icon="el-icon-refresh" @click="load_status">刷新</el-button>
 
-                <h3>服务器状态</h3>
+                <div class="cast-box">
+                    <div style="font-weight:600;margin-bottom:8px;">投屏本地文件</div>
+                    <el-upload
+                            action="/api"
+                            :show-file-list="true"
+                            :auto-upload="true"
+                            name="local-file"
+                            :before-upload="on_before_cast"
+                            :on-success="on_cast_success"
+                            :on-error="on_cast_error">
+                        <el-button size="small" type="primary" icon="el-icon-upload">选择文件并投屏</el-button>
+                    </el-upload>
+                    <div class="hint">文件仅在本机临时目录暂存并通过 127.0.0.1 推送给播放器，关闭应用后不会外传。</div>
+                </div>
+
+                <div class="status-card">
+                    <h3>正在播放</h3>
+                    <div class="now-playing">
+                        <div class="cover">♪</div>
+                        <div class="meta">
+                            <div class="ttl">{{ status.media.CurrentTrackTitle || '—' }}</div>
+                            <div class="sub">{{ status.media.TransportState || '—' }} ·
+                                {{ status.media.CurrentTrack ? status.media.CurrentTrack : 0 }}/{{ status.media.NumberOfTracks || 0 }}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="progress-row">
+                        <el-progress :percentage="progress_percent" :format="progress_format"
+                                     :stroke-width="10"></el-progress>
+                    </div>
+                    <div class="vol-row">
+                        <span style="font-size:12px;color:var(--text-soft);">音量</span>
+                        <div class="vol-bar"><i :style="{width: volume_percent + '%'}"></i></div>
+                        <span style="font-size:12px;color:var(--text-soft);">{{ status.media.Volume || 0 }}{{ status.media.Mute ? ' (静音)' : '' }}</span>
+                    </div>
+                </div>
+
+                <div class="status-card">
+                    <div style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3 style="margin:0;">播放历史</h3>
+                        <el-button size="mini" type="text" icon="el-icon-delete"
+                                   @click="clear_history" :disabled="!history.length">清空</el-button>
+                    </div>
+                    <div v-if="!history.length" class="hint" style="margin-top:8px;">暂无播放记录</div>
+                    <div v-else>
+                        <div v-for="(h, i) in history" :key="i" class="history-item">
+                            <div class="history-meta">
+                                <div class="history-ttl" :title="h.title">{{ h.title }}</div>
+                                <div class="history-sub">{{ fmt_time(h.time) }}</div>
+                            </div>
+                            <el-button size="mini" type="primary" plain
+                                       icon="el-icon-video-play" @click="cast_history(h.uri)">重投</el-button>
+                        </div>
+                    </div>
+                </div>
+
+                <h3 class="section">服务器状态</h3>
                 <table class="status-table">
                     <tbody>
                     <tr><td class="k">运行状态</td><td>{{ status.server.running ? '运行中' : '已停止' }}</td></tr>
@@ -57,7 +212,7 @@
                     </tbody>
                 </table>
 
-                <h3>播放状态</h3>
+                <h3 class="section">播放状态</h3>
                 <table class="status-table">
                     <tbody>
                     <tr><td class="k">传输状态</td><td>{{ status.media.TransportState }}</td></tr>
@@ -65,13 +220,11 @@
                     <tr><td class="k">推送地址</td><td><span class="uri">{{ status.media.CurrentURI || '—' }}</span></td></tr>
                     <tr><td class="k">当前进度</td><td>{{ status.media.AbsoluteTimePosition || '—' }} / {{ status.media.CurrentTrackDuration || '—' }}</td></tr>
                     <tr><td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
-                    <tr><td class="k">音量</td><td>{{ status.media.Volume }}</td></tr>
-                    <tr><td class="k">静音</td><td>{{ status.media.Mute }}</td></tr>
                     <tr><td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
                     </tbody>
                 </table>
 
-                <h3>客户端信息</h3>
+                <h3 class="section">客户端信息</h3>
                 <el-table :data="status.clients" size="mini" empty-text="暂无订阅客户端">
                     <el-table-column prop="host" label="地址/主机" show-overflow-tooltip></el-table-column>
                     <el-table-column prop="service" label="服务" show-overflow-tooltip></el-table-column>
@@ -81,7 +234,7 @@
                 </el-table>
             </div>
         </el-tab-pane>
-        <el-tab-pane label="Setting" name="2">
+        <el-tab-pane label="高级设置" name="2">
             <div>
                 <el-input
                         type="textarea"
@@ -98,7 +251,7 @@
                 <p v-if="!is_json">json format error</p>
             </div>
         </el-tab-pane>
-        <el-tab-pane label="Log" name="3">
+        <el-tab-pane label="日志" name="3">
             <span>This page does not display all logs. If you want to view all logs, please run from the source code or refer to </span>
             <el-link type="primary"
                      href="https://github.com/xfangfang/Macast/blob/main/.github/ISSUE_TEMPLATE/bug_report.md"
@@ -108,7 +261,32 @@
             <br/>
             <span v-html="macast_log"></span>
         </el-tab-pane>
-        <el-tab-pane label="Help" name="4">
+        <el-tab-pane label="字幕" name="11">
+            <div style="padding: 10px;">
+                <div class="status-card">
+                    <h3 style="margin:0 0 10px;">字幕显隐</h3>
+                    <el-switch v-model="sub_show" @change="toggle_sub"
+                               active-text="显示字幕" inactive-text="隐藏字幕"></el-switch>
+                    <div class="hint" style="margin-top:8px;">开关作用于当前正在播放的视频。</div>
+                </div>
+
+                <div class="cast-box">
+                    <div style="font-weight:600;margin-bottom:8px;">加载字幕文件（仅本机）</div>
+                    <el-upload
+                            action="/api"
+                            :show-file-list="true"
+                            :auto-upload="true"
+                            name="sub-file"
+                            :before-upload="on_sub_before"
+                            :on-success="on_sub_success"
+                            :on-error="on_sub_error">
+                        <el-button size="small" type="primary" icon="el-icon-upload">选择字幕并加载</el-button>
+                    </el-upload>
+                    <div class="hint">支持 .srt / .ass / .ssa / .vtt / .sub 等格式。请先开始播放视频，再加载字幕文件。</div>
+                </div>
+            </div>
+        </el-tab-pane>
+        <el-tab-pane label="帮助" name="4">
 
             <h1>FAQ</h1>
 
@@ -338,6 +516,7 @@
             currentRoute: window.location.pathname,
             backend_url: '/api',
             activeIndex: '1',
+            theme: 'light',
 
             //plugin
             loading: true,
@@ -362,10 +541,19 @@
 
             //status
             status: {server: {}, media: {}, clients: []},
-            status_interval: 0
+            status_interval: 0,
+            history: [],
+            sub_show: true,
+
+            // pwa
+            canInstall: false,
+            installPrompt: null,
+            isIOS: false,
+            pwaDismissed: false
 
         },
         mounted() {
+            this.applyTheme();
             window.addEventListener('popstate', res => {
                 if (res.state) {
                     this.activeIndex = res.state.page;
@@ -381,6 +569,7 @@
             this.get_log();
             this.load_status();
             this.status_interval = setInterval(() => this.load_status(), 3000);
+            this.registerPWA();
         },
         activated() {
 
@@ -394,8 +583,96 @@
                     return false;
                 }
             },
+            themeIcon() {
+                return this.theme === 'dark' ? 'el-icon-sunny' : 'el-icon-moon';
+            },
+            themeTitle() {
+                return this.theme === 'dark' ? '切换到浅色模式' : '切换到深色模式';
+            },
+            volume_percent() {
+                let v = parseInt(this.status.media.Volume);
+                if (isNaN(v)) return 0;
+                return Math.max(0, Math.min(100, v));
+            },
+            progress_percent() {
+                let pos = this.to_sec(this.status.media.AbsoluteTimePosition);
+                let dur = this.to_sec(this.status.media.CurrentTrackDuration);
+                if (!dur) return 0;
+                return Math.max(0, Math.min(100, Math.round(pos / dur * 100)));
+            },
         },
         methods: {
+            registerPWA() {
+                this.isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+                if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW register failed:', e));
+                }
+                window.addEventListener('beforeinstallprompt', (e) => {
+                    e.preventDefault();
+                    this.installPrompt = e;
+                    this.canInstall = !this.pwaDismissed;
+                });
+                window.addEventListener('appinstalled', () => {
+                    this.canInstall = false;
+                    this.installPrompt = null;
+                });
+            },
+            installApp() {
+                if (!this.installPrompt) return;
+                this.installPrompt.prompt();
+                this.installPrompt.userChoice.then(() => {
+                    this.canInstall = false;
+                    this.installPrompt = null;
+                });
+            },
+            dismissPwa() {
+                this.pwaDismissed = true;
+                this.canInstall = false;
+            },
+            applyTheme() {
+                let saved = null;
+                try { saved = localStorage.getItem('macast_theme'); } catch (e) {}
+                if (!saved) {
+                    saved = (window.matchMedia &&
+                        window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+                }
+                this.theme = saved;
+                document.body.classList.toggle('theme-dark', this.theme === 'dark');
+            },
+            toggleTheme() {
+                this.theme = this.theme === 'dark' ? 'light' : 'dark';
+                document.body.classList.toggle('theme-dark', this.theme === 'dark');
+                try { localStorage.setItem('macast_theme', this.theme); } catch (e) {}
+            },
+            to_sec(t) {
+                if (!t || typeof t !== 'string') return 0;
+                let p = t.split(':');
+                if (p.length !== 3) return 0;
+                return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseInt(p[2]);
+            },
+            progress_format() {
+                return (this.status.media.AbsoluteTimePosition || '0:00:00') + ' / ' +
+                    (this.status.media.CurrentTrackDuration || '0:00:00');
+            },
+            on_before_cast(file) {
+                // reject obviously huge uploads to avoid filling the temp dir
+                if (file.size > 4 * 1024 * 1024 * 1024) {
+                    this.$message.error('文件过大（上限 4GB）');
+                    return false;
+                }
+                return true;
+            },
+            on_cast_success(res) {
+                if (res && res.code === 0 && res.url) {
+                    this.$notify({title: '已投屏', message: res.url, duration: 3000});
+                } else {
+                    this.$message.error((res && res.message) || '投屏失败');
+                }
+            },
+            on_cast_error(err) {
+                console.log(err);
+                this.$message.error('上传失败，请确认 Macast 正在运行');
+            },
             getQueryString(name) {
                 let reg = `(^|&)${name}=([^&]*)(&|$)`
                 let r = window.location.search.substr(1).match(reg);
@@ -415,12 +692,80 @@
                 let url = '/api?query=status';
                 return this.$http.get(url).then(res => {
                     this.status = res.data;
+                    this.history = res.data.history || [];
+                    let raw = res.data.media && res.data.media.DisplayCurrentSubtitle;
+                    this.sub_show = !['0', 'false', '', 0, false].includes(raw);
                     return true;
                 }).catch(err => {
                     console.log(err);
                     this.$message.error('Error connecting to Macast');
                     return false;
                 });
+            },
+            cast_history(uri) {
+                let fd = new window.FormData();
+                fd.append('cast-uri', uri);
+                this.$http.post('/api', fd).then(res => {
+                    if (res.data && res.data.code !== 0) {
+                        this.$message.error(res.data.message || '重投失败');
+                    } else {
+                        this.$notify({title: '已重新投屏', message: uri, duration: 2500});
+                    }
+                }).catch(err => {
+                    console.log(err);
+                    this.$message.error('重投失败，请确认 Macast 正在运行');
+                });
+            },
+            clear_history() {
+                this.$confirm('确定清空播放历史？', '提示', {type: 'warning'})
+                    .then(() => {
+                        let fd = new window.FormData();
+                        fd.append('clear-play-history', '1');
+                        this.$http.post('/api', fd).then(() => {
+                            this.history = [];
+                            this.$message.success('已清空');
+                        }).catch(err => {
+                            console.log(err);
+                            this.$message.error('清空失败');
+                        });
+                    }).catch(() => {});
+            },
+            toggle_sub(val) {
+                let fd = new window.FormData();
+                fd.append('set-subtitle-show', val ? '1' : '0');
+                this.$http.post('/api', fd).catch(err => {
+                    console.log(err);
+                    this.$message.error('设置字幕显隐失败');
+                });
+            },
+            on_sub_before(file) {
+                let ok = /\.(srt|ass|ssa|vtt|sub|sup|idx)$/i.test(file.name);
+                if (!ok) {
+                    this.$message.error('仅支持字幕文件（.srt/.ass/.ssa/.vtt 等）');
+                }
+                return ok;
+            },
+            on_sub_success(res) {
+                if (res && res.code === 0) {
+                    this.$notify({title: '字幕已加载', message: res.url || '', duration: 3000});
+                } else {
+                    this.$message.error((res && res.message) || '字幕加载失败');
+                }
+            },
+            on_sub_error(err) {
+                console.log(err);
+                this.$message.error('字幕上传失败，请确认 Macast 正在运行');
+            },
+            fmt_time(t) {
+                if (!t) return '';
+                try {
+                    let d = new Date(t * 1000);
+                    let p = n => (n < 10 ? '0' + n : '' + n);
+                    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+                        `${p(d.getHours())}:${p(d.getMinutes())}`;
+                } catch (e) {
+                    return '';
+                }
             },
             async handleSelect(tab, event) {
                 this.switch_page(tab.name)
@@ -449,6 +794,9 @@
                     case '10':
                         this.set_history(page_name);
                         this.load_status();
+                        break;
+                    case '11':
+                        this.set_history(page_name);
                         break;
                 }
             },

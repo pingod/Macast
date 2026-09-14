@@ -445,15 +445,27 @@ class MPVRenderer(Renderer):
         # stop mpv
         self.send_command(['quit'])
         if self.proc is not None:
-            self.proc.terminate()
-        try:
-            os.waitpid(-1, 1)
-        except Exception as e:
-            logger.error(e)
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+            try:
+                self.proc.wait(timeout=5)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
         self.mpv_thread.join()
         # stop mpv ipc
         self.ipc_running = False
         self.ipc_thread.join()
+        # Clean up the leftover IPC socket so a crash/restart does not leave
+        # a stale file in /tmp (or a dangling named pipe on Windows).
+        try:
+            os.remove(self.mpv_sock)
+        except OSError:
+            pass
 
     def reload(self):
         """Reload MPV
