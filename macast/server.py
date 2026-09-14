@@ -1,5 +1,7 @@
 import os
 import random
+import shutil
+import subprocess
 import sys
 import logging
 import threading
@@ -73,6 +75,29 @@ class AutoPortServer(Server):
                 raise
 
 
+class OptionalServer(Server):
+    """An HTTP server whose failure must not take the application down.
+
+    CherryPy's bus publishes `start` to every subscriber and aborts the whole
+    engine (`ChannelFailures` -> shutdown) if one of them raises. That is the
+    right call for the DLNA HTTP server — without it there is no product — but
+    wrong for the *optional* HTTPS channel: a busy port, a certificate cheroot
+    cannot parse, or a frozen build missing `cheroot.ssl` used to kill the
+    entire app, menu-bar icon and all, instead of just disabling one listener.
+    """
+
+    def start(self):
+        try:
+            super().start()
+        except Exception as e:
+            logger.error("HTTPS channel unavailable, continuing without it: "
+                         "{}: {}".format(type(e).__name__, e))
+            # Also drop the 'stop' listener: there is no server to stop, and
+            # ServerAdapter.stop() would trip over the half-built instance.
+            self.unsubscribe()
+    start.priority = 75
+
+
 class Service:
 
     def __init__(self, renderer, protocol):
@@ -122,6 +147,13 @@ class Service:
 
         self.cherrypy_application = cherrypy.tree.mount(self.protocol.handler, '/', config=cherrypy_config)
         cherrypy.engine.signals.subscribe()
+        # A frozen bundle (.app / PyInstaller) never changes on disk: the
+        # Autoreloader has nothing useful to watch, and watching the bundle is
+        # actively harmful — moving or rebuilding the .app while it runs makes
+        # CherryPy "Re-spawn" into a process whose resource files are gone,
+        # which surfaces as 500 errors instead of a clean exit.
+        if getattr(sys, 'frozen', False):
+            cherrypy.engine.autoreload.unsubscribe()
         # HTTPS (Web/管理 API) channel — DLNA control/SSDP stays on plain
         # HTTP because the UPnP standard requires it. The HTTPS server reuses
         # the same WSGI app (cherrypy.tree) so the settings UI and management
@@ -167,7 +199,14 @@ class Service:
             return
         try:
             https_port = Setting.get_https_port()
-            https_server = Server()
+            # Pre-flight the SSL adapter: cheroot resolves it lazily, inside
+            # the engine's 'start' listener, where a failure (e.g. a frozen
+            # build that missed cheroot.ssl) is fatal to the whole app instead
+            # of just disabling this one channel. (OptionalServer above is the
+            # second line of defence for the failures we cannot pre-flight,
+            # such as the port being taken.)
+            import cheroot.ssl.builtin  # noqa: F401
+            https_server = OptionalServer()
             https_server.bind_addr = ('0.0.0.0', https_port)
             https_server.ssl_module = 'builtin'
             https_server.ssl_certificate = cert
@@ -178,6 +217,25 @@ class Service:
             logger.error("Failed to start HTTPS channel: {}".format(e))
 
     @staticmethod
+    def _find_openssl():
+        """Return a usable openssl binary, preferring a modern OpenSSL.
+
+        Inside a bundled .app the PATH is minimal, so Homebrew's OpenSSL is
+        usually *not* on it, while macOS' own /usr/bin/openssl is LibreSSL and
+        rejects `-addext` (the flag we use to embed the subjectAltName).
+        """
+        candidates = [
+            shutil.which('openssl'),
+            '/opt/homebrew/bin/openssl',
+            '/usr/local/bin/openssl',
+            '/usr/bin/openssl',
+        ]
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return None
+
+    @staticmethod
     def _ensure_self_signed_cert():
         """Generate a self-signed certificate in SETTING_DIR if none exists.
         Reusing a stable on-disk cert keeps browsers from re-prompting on
@@ -186,13 +244,27 @@ class Service:
         key_path = os.path.join(SETTING_DIR, 'macast.key')
         if os.path.exists(cert_path) and os.path.exists(key_path):
             return cert_path, key_path
+        openssl = Service._find_openssl()
+        if not openssl:
+            logger.error("Failed to generate self-signed certificate: "
+                         "no openssl binary found")
+            return None, None
+        cmd = [
+            openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+            '-keyout', key_path, '-out', cert_path,
+            '-days', '3650', '-subj', '/CN=Macast Local Service',
+            '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
+        ]
         try:
-            subprocess.run([
-                'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-                '-keyout', key_path, '-out', cert_path,
-                '-days', '3650', '-subj', '/CN=Macast Local Service',
-                '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
-            ], check=True, capture_output=True, timeout=30)
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+            except subprocess.CalledProcessError:
+                # LibreSSL / older OpenSSL cannot parse -addext: retry with a
+                # plain self-signed cert (works, but has no subjectAltName).
+                logger.warning("-addext unsupported by %s, retrying without it",
+                               openssl)
+                subprocess.run(cmd[:-2], check=True, capture_output=True,
+                               timeout=30)
             logger.info("Generated self-signed certificate: {}".format(cert_path))
             Setting.set(SettingProperty.Https_Cert, cert_path)
             Setting.set(SettingProperty.Https_Key, key_path)
