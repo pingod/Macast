@@ -134,5 +134,10 @@ mpv-latest.tar.gz
 # Macast build artefacts
 .venv-build/
 
+# Local assistant workspace (session notes / project memory). Machine-local
+# state, not project source — keeping it out of the repo also keeps
+# `git status` clean after every build-and-verify session.
+.workbuddy/
+
 # macOS noise
 .DS_Store
