@@ -43,6 +43,10 @@ class SettingProperty(Enum):
     Blocked_Interfaces = 8
     Additional_Interfaces = 9
     Play_History = 10
+    Https_Enabled = 11
+    Https_Port = 12
+    Https_Cert = 13
+    Https_Key = 14
 
 
 class Setting:
@@ -175,6 +179,28 @@ class Setting:
         """Get application port
         """
         return Setting.get(SettingProperty.ApplicationPort, DEFAULT_PORT)
+
+    @staticmethod
+    def is_https_enabled():
+        """Whether the HTTPS admin/Web channel is enabled (default: on).
+        """
+        return bool(Setting.get(SettingProperty.Https_Enabled, 1))
+
+    @staticmethod
+    def get_https_port():
+        """HTTPS listen port. Defaults to the DLNA port + 1 (not persisted,
+        so it always tracks the actual DLNA port)."""
+        if SettingProperty.Https_Port.name in Setting.setting:
+            return Setting.setting[SettingProperty.Https_Port.name]
+        return Setting.get_port() + 1
+
+    @staticmethod
+    def get_https_cert():
+        return Setting.get(SettingProperty.Https_Cert, '')
+
+    @staticmethod
+    def get_https_key():
+        return Setting.get(SettingProperty.Https_Key, '')
 
     @staticmethod
     def get_locale():

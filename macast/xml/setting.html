@@ -209,6 +209,13 @@
                     <tr><td class="k">平台</td><td>{{ status.server.system }} ({{ status.server.platform }})</td></tr>
                     <tr><td class="k">系统版本</td><td>{{ status.server.system_version }}</td></tr>
                     <tr><td class="k">IP</td><td>{{ status.server.ip }}</td></tr>
+                    <tr><td class="k">HTTPS</td><td>
+                        <span v-if="status.server.https_enabled">
+                            <span class="uri">https://{{ status.server.ip }}:{{ status.server.https_port }}</span>
+                            <span style="color:var(--text-soft);font-size:12px;">（手机扫码/浏览器打开可装 PWA）</span>
+                        </span>
+                        <span v-else>未启用</span>
+                    </td></tr>
                     </tbody>
                 </table>
 
