@@ -84,7 +84,10 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - [ ] 改进目前的播放器控制页面
 - [x] 增加插件商店
 - [x] 添加bilibili弹幕投屏
-- [ ] 支持airplay
+- [x] 增加 Chromecast 接收端协议（mDNS + Cast v2，URL 投屏，见 macast/protocol_cast.py）
+- [x] 增加 AirPlay 接收端协议（mDNS + RTSP，视频 URL 投屏，见 macast/protocol_airplay.py）
+- [ ] AirPlay 屏幕镜像 / 音频(RAOP) 支持（需实时编码 / ALAC 解码，超出当前范围）
+- [ ] 支持airplay 完整能力（当前为视频 URL 投屏子集）
 
 ## 出现问题的可能原因及解决办法（更详细内容见项目的wiki）
 

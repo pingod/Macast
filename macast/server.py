@@ -108,17 +108,21 @@ class Service:
         cherrypy.server.bind_addr = ('0.0.0.0', Setting.get_port())
         cherrypy.server.subscribe()
         # start plugins
-        self.ssdp_plugin = SSDPPlugin(cherrypy.engine)
-        self.ssdp_plugin.subscribe()
+        self.ssdp_plugin = None
+        if getattr(protocol, "uses_ssdp", True):
+            # SSDP (UPnP discovery) is only relevant for the DLNA protocol.
+            # Chromecast/AirPlay advertise over mDNS instead.
+            self.ssdp_plugin = SSDPPlugin(cherrypy.engine)
+            self.ssdp_plugin.subscribe()
+            self.ssdp_monitor_counter = 0  # restart ssdp every 30s
+            self.ssdp_monitor = Monitor(cherrypy.engine, self.notify, 3, name="SSDP_NOTIFY_THREAD")
+            self.ssdp_monitor.subscribe()
         self._renderer = renderer
         self.renderer_plugin = RendererPlugin(cherrypy.engine, renderer)
         self.renderer_plugin.subscribe()
         self._protocol = protocol
         self.protocol_plugin = ProtocolPlugin(cherrypy.engine, protocol)
         self.protocol_plugin.subscribe()
-        self.ssdp_monitor_counter = 0  # restart ssdp every 30s
-        self.ssdp_monitor = Monitor(cherrypy.engine, self.notify, 3, name="SSDP_NOTIFY_THREAD")
-        self.ssdp_monitor.subscribe()
         cherrypy.config.update({
             'log.screen': False,
             'log.access_file': os.path.join(SETTING_DIR, 'macast.log'),
@@ -278,6 +282,8 @@ class Service:
         Using cherrypy builtin plugin Monitor to trigger this method
         see also: plugin.py -> class SSDPPlugin -> notify
         """
+        if self.ssdp_plugin is None:
+            return
         self.ssdp_monitor_counter += 1
         if Setting.is_ip_changed() or self.ssdp_monitor_counter == 10:
             self.ssdp_monitor_counter = 0
