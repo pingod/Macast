@@ -1,8 +1,11 @@
 # Chromecast / AirPlay 接收端 · 真机验证指南
 
 本指南用于在**真实局域网 + 真实手机/电脑**上验证 Macast 新增的 Chromecast 与 AirPlay
-接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，37/37 通过）只覆盖协议逻辑与
+接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，48/48 通过）只覆盖协议逻辑与
 本机 socket，无法替代真机验证。
+
+> 本轮已用真实局域网跑过一遍发现验证，期间修掉 4 个只在真机/真实网络才暴露的问题，
+> 见 [第 10 节](#10-本轮已修的真机问题2026-09-15)。
 
 ---
 
@@ -43,9 +46,11 @@ python Macast.py
 
 菜单栏图标 → **Setting → Protocols** → 选 `Chromecast` 或 `AirPlay`。
 
-> **已知瑕疵 + 规避**：`Service` 只在启动时评估一次是否启用 SSDP，运行时切换协议不会
-> 重新评估——选了 Chromecast/AirPlay 后，SSDP（DLNA 广播）可能仍在发。
-> **选完请重启一次 Macast**，可确保状态干净（重启会按保存的协议重新初始化）。
+> Macast 同一时刻只跑**一个**协议（架构限制），切换即时生效，无需重启：
+> SSDP 会随协议自动挂载/卸载（`Service._sync_ssdp`）。
+> 若想直接改默认启动协议，可编辑
+> `~/Library/Application Support/Macast/macast_setting.json` 的 `Macast_Protocol`
+> （取值 `DLNA` / `Chromecast` / `AirPlay`）后重启。
 
 ## 4. 确认服务已起（日志定位点）
 
@@ -67,9 +72,13 @@ grep -E "ChromecastProtocol started|AirPlayProtocol started|mDNS advertised" "$L
 ```
 ChromecastProtocol started on port 8009      # 或回退端口
 AirPlayProtocol started on port 7001         # 7000 常被系统 AirPlay 接收器占用 → 自动回退
-mDNS advertised Macast(...)._googlecast._tcp.local. on port 8009
-mDNS advertised Macast(...)._airplay._tcp.local. on port 7001
+mDNS name 'Macast(Host.local)._...' normalised to 'Macast-Host._...' for DNS-SD
+mDNS advertised Macast-Host._googlecast._tcp.local. on port 8009
+mDNS advertised Macast-Host._airplay._tcp.local. on port 7001
 ```
+
+> 设备名里的括号/点会被规范化成 `-`（DNS-SD 标签只允许 `A-Za-z0-9-`），
+> 这是**必须的**：不规范化时 zeroconf 会“注册成功”但局域网根本搜不到。
 
 若看到 `AirPlay port 7000 already in use (macOS AirPlay Receiver?), using 7001 instead`
 ——这是**正常的自动回退**，端口会写进 mDNS，发送端会自动跟随。
@@ -83,9 +92,9 @@ mDNS advertised Macast(...)._airplay._tcp.local. on port 7001
 dns-sd -B _googlecast._tcp
 dns-sd -B _airplay._tcp
 
-# 查看 TXT 记录（确认端口）
-dns-sd -L "Macast(Pavia-MacBookPro-1754.local)" _googlecast._tcp
-dns-sd -L "Macast(Pavia-MacBookPro-1754.local)" _airplay._tcp
+# 查看 SRV + TXT 记录（确认端口与主机名；名字是规范化后的）
+dns-sd -L "Macast-Pavia-MacBookPro-1754" _googlecast._tcp local
+dns-sd -L "Macast-Pavia-MacBookPro-1754" _airplay._tcp    local
 
 # Linux
 avahi-browse -rt _googlecast._tcp
@@ -145,7 +154,37 @@ AirPlay ANNOUNCE url=http://...
 | AirPlay 只有镜像选项、投视频无反应 | 当前只支持视频 URL 投屏 |
 | 端口冲突 | 看日志里的 `already in use ... using NNNN instead`，属正常回退 |
 
-## 9. 反馈给我时请贴出
+## 9. 不开 GUI 也能验证发现（推荐先跑这个）
+
+`scripts/smoke_discovery.py` 会**脱离 Macast 主程序**，直接在真实局域网上拉起
+Chromecast(8009) 与 AirPlay(7001) 两个接收端并广播 mDNS：
+
+```shell
+cd /Users/pavia/githome/Macast
+.venv/bin/python scripts/smoke_discovery.py --seconds 60
+
+# 另开一个终端
+dns-sd -B _googlecast._tcp local
+dns-sd -B _airplay._tcp    local
+```
+
+看到 `Macast-<主机名>` 即发现正常。它会打印发送端送来的 URL，方便不拿手机也能确认链路。
+
+## 10. 本轮已修的真机问题（2026-09-15）
+
+真实网络验证比单元测试多抓到 4 个 bug，均已修复并有回归用例（48/48）：
+
+| # | 问题 | 表现 | 修复 |
+|---|---|---|---|
+| 1 | zeroconf 默认双栈 | IPv6 socket 发不出去，`sendto ... Can't assign requested address`；**广播发出但全网搜不到** | `Zeroconf(ip_version=IPVersion.V4Only)` |
+| 2 | 实例名含括号/点 | `Macast(Host.local)` 被 zeroconf 接受且“注册成功”，但 `dns-sd -B` 永远搜不到 | `sanitize_instance_name()` 规范化为 `A-Za-z0-9-` |
+| 3 | SRV 主机名重复后缀 | macOS 主机名自带 `.local`，又拼一次 → `Host.local.local.` | `_normalize_server()` |
+| 4 | 切协议不重新评估 SSDP | DLNA 切到 AirPlay 后仍在广播已失效的 DLNA 设备 | `Service._sync_ssdp()` |
+
+另外修复：**`ProtocolPlugin` 无条件订阅 `protocol.cast_uri`**，导致 AirPlay 一启动就
+`AttributeError` 崩溃（只有真跑起来才会遇到，单元测试没覆盖）。
+
+## 11. 反馈给我时请贴出
 
 ```shell
 LOG="$HOME/Library/Application Support/Macast/macast.log"
@@ -159,8 +198,15 @@ grep -E "Chromecast|AirPlay|Cast |mDNS|Discovery|ERROR|Error|Traceback" "$LOG" |
 ## 附：自动化测试（本机，无需真机）
 
 ```shell
-/Users/pavia/.workbuddy/binaries/python/envs/macast/bin/python scripts/verify_cast_airplay.py
+cd /Users/pavia/githome/Macast
+.venv/bin/python scripts/verify_cast_airplay.py
 ```
 
 覆盖：Cast 编解码与指令路由、AirPlay RTSP 路由、真实 TLS/RTSP 端到端、
-mDNS 广播参数、以及 `MacastPluginManager` 是否真的注册了三个协议。
+mDNS 广播参数与实例名规范化、SSDP 随协议切换、以及
+`MacastPluginManager` 是否真的注册了三个协议。
+
+> 源码运行依赖 `.venv`（Python 3.12 + `requirements/darwin.txt` + `pillow zeroconf pyperclip`）。
+> 若用 WorkBuddy 的 Bash 跑 pip 报 `EEXIST: file already exists, mkdir ...`，是 CLI 注入的
+> `sitecustomize` 补丁导致，加 `env -u PYTHONPATH` 即可；
+> 从源码启动也请用 `scripts/run-from-source.sh`（它同样会清掉该变量）。
