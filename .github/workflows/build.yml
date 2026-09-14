@@ -102,8 +102,24 @@ jobs:
           ls dist/Macast.app/Contents/Resources/i18n/*/LC_MESSAGES/macast.mo
           find dist/Macast.app/Contents/Resources/i18n -name '*.mo' | wc -l
 
-      - name: Report bundle size
-        run: du -sh dist/Macast.app
+      - name: Report bundle composition
+        # Bundle size is a feature here — a stray Homebrew mpv copy once made
+        # it 102 MB — so keep the composition visible in every run, not just
+        # the total. The interpreter build and the resolved dependency versions
+        # both change what py2app pulls in, so log those as well; a size jump
+        # between two runs is otherwise impossible to attribute.
+        run: |
+          python -c "import sys; print('interpreter:', sys.version)"
+          echo "--- resolved dependency versions ---"
+          python -m pip list --format=freeze \
+            | grep -iE '^(py2app|pyobjc|lxml|rumps|cherrypy|cheroot|netifaces|appdirs|pyperclip|requests|pillow)=' \
+            || true
+          echo "--- bundle composition ---"
+          du -sh dist/Macast.app
+          du -sh dist/Macast.app/Contents/Frameworks
+          du -sh dist/Macast.app/Contents/Frameworks/Python.framework
+          du -sh dist/Macast.app/Contents/Resources/lib/python312.zip
+          du -sh dist/Macast.app/Contents/Resources/lib/python3.12/lib-dynload
 
       - name: Resolve version
         id: version
