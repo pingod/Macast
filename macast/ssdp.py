@@ -119,6 +119,17 @@ class SSDPServer:
     def stop(self, byebye=True):
         """Stop ssdp background thread
         """
+        # Order matters: publish the byebye policy *before* clearing
+        # self.running. The SSDP thread only leaves its recv-loop once it
+        # observes running == False, and it then calls shutdown() -> do_byebye(),
+        # which reads this flag. If the flag were written after running = False
+        # (as it used to be), the thread could reach do_byebye() before the
+        # write landed, so a stop(byebye=False) -- i.e. the periodic
+        # ssdp_update_ip() restart -- would still broadcast ssdp:byebye for a
+        # random prefix of the registered devices. Control points then treat
+        # the renderer as offline and re-discover it, which looks like
+        # "casting drops after a while".
+        self.sending_byebye = byebye
         if self.running:
             self.running = False
             # Wake up the socket, this will speed up exiting ssdp thread.
@@ -126,9 +137,15 @@ class SSDPServer:
                 socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'', (SSDP_ADDR, SSDP_PORT))
             except Exception as e:
                 pass
-            self.sending_byebye = byebye
-            if self.ssdp_thread is not None:
-                self.ssdp_thread.join()
+        # Join whenever a thread is still alive, not only when self.running was
+        # set: otherwise a stop() that races with an already-exiting thread
+        # would return immediately and the following start() could flip
+        # sending_byebye back to True while the old thread is still inside
+        # shutdown(). Skip a self-join, which would raise RuntimeError.
+        if (self.ssdp_thread is not None
+                and self.ssdp_thread is not threading.current_thread()
+                and self.ssdp_thread.is_alive()):
+            self.ssdp_thread.join()
 
     def run(self):
         # create UDP server
