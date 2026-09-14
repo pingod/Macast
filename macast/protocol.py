@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import uuid
+import secrets
 import http.client
 import logging
 import cherrypy
@@ -361,6 +362,10 @@ class DLNAProtocol(Protocol):
         self.state_queue = Queue()  # states needed be send to subscribe devices
         self.removed_device_queue = Queue()  # devices needed be removed
         self.append_device_queue = Queue()  # devices needed be added
+        self._state_event = threading.Event()  # wakes the event thread immediately
+        self._init_sem = threading.Semaphore(20)  # bound init-event threads
+        self.playlist = []          # cast playlist (list of uris)
+        self.current_index = -1     # current playlist position
         self.init_services()  # create services handle function from xml file
         self.init_state()  # set default value
 
@@ -467,15 +472,21 @@ class DLNAProtocol(Protocol):
         logger.error("SUBSCRIBE ADD")
         client = ObserveClient(service, url, timeout)
         self.append_device_queue.put(client)
-        threading.Thread(target=self.send_init_event,
-                         kwargs={
-                             'service': service,
-                             'client': client
-                         }).start()
+        threading.Thread(target=self._send_init_event,
+                         args=(service, client),
+                         daemon=True).start()
         return {
             "SID": client.sid,
             "TIMEOUT": "Second-{}".format(client.timeout)
         }
+
+    def _send_init_event(self, service, client):
+        """When there is a client subscription,
+        the first event callback will send all the state values of the service.
+        Bounded by a semaphore so a flood of SUBSCRIBEs cannot spawn
+        unbounded threads."""
+        with self._init_sem:
+            self.send_init_event(service, client)
 
     def send_init_event(self, service, client):
         """When there is a client subscription,
@@ -549,8 +560,12 @@ class DLNAProtocol(Protocol):
         """DLNA Event thread
         If a DLNA client subscribes to the dlna event,
         it will automatically send the event to the client when the renderer state changes.
+        Uses a threading.Event instead of a 1s sleep-poll so state changes
+        (volume / position / transport) reach the client with sub-second latency.
         """
         while self.running:
+            self._state_event.wait(timeout=0.25)
+            self._state_event.clear()
             if not self.state_queue.empty():
                 state = {}
                 while not self.state_queue.empty():
@@ -558,7 +573,6 @@ class DLNAProtocol(Protocol):
                     state[k] = v
                     self.state_queue.task_done()
                 self.send_states_to_clients(state)
-            time.sleep(1)
 
     def call(self, rawbody):
         """Processing requests from DLNA clients
@@ -571,12 +585,28 @@ class DLNAProtocol(Protocol):
         :param rawbody: soap request from dlna client
         :return:
         """
-        root = etree.fromstring(rawbody)[0][0]
+        envelope = etree.fromstring(rawbody)
+        soap_ns = 'http://schemas.xmlsoap.org/soap/envelope/'
+        body = envelope.find('{{{}}}Body'.format(soap_ns))
+        if body is None or len(body) == 0:
+            raise ValueError('malformed SOAP request: missing Body/action')
+        # Skip any comment/processing-instruction nodes before the action.
+        action_el = None
+        for child in body:
+            if isinstance(child.tag, str):
+                action_el = child
+                break
+        if action_el is None:
+            raise ValueError('malformed SOAP request: no action element')
+        # Use the action element's namespace + local name instead of brittle
+        # string splitting on the tag, which breaks on comments/whitespace
+        # text nodes or non-standard SOAP namespaces.
+        qn = etree.QName(action_el.tag)
+        action = qn.localname
+        service = qn.namespace.split(':')[-2]
         param = {}
-        for node in root:
-            param[node.tag] = node.text
-        action = root.tag.split('}')[1]
-        service = root.tag.split(":")[3]
+        for node in action_el:
+            param[etree.QName(node.tag).localname] = node.text
         method = "{}_{}".format(service, action)
         if method not in [
             'AVTransport_GetPositionInfo',
@@ -636,6 +666,7 @@ class DLNAProtocol(Protocol):
             # When some states change, the DLNA client needs to be notified immediately
             # We put this kind of state into state_queue, waiting to be sent to client.
             self.state_queue.put((name, value))
+            self._state_event.set()
         # update other states
         if self.state_list[name].value != value:
             self.state_list[name].value = value
@@ -701,11 +732,89 @@ class DLNAProtocol(Protocol):
         self.renderer.set_media_resume()
         self.set_state('CurrentTrackTitle', title)
         self.set_state('CurrentTrackURI', uri)
+        # Maintain a simple cast playlist so AVTransport Next/Previous work.
+        if uri not in self.playlist:
+            self.playlist.append(uri)
+        self.current_index = self.playlist.index(uri)
+        self.set_state('NumberOfTracks', len(self.playlist))
+        self.set_state('CurrentTrack', self.current_index + 1)
         self.set_state('RelativeTimePosition', '00:00:00')
         self.set_state('AbsoluteTimePosition', '00:00:00')
         self.set_state('TransportState', 'PAUSED_PLAYBACK')
         self.set_state('TransportStatus', 'OK')
+        self._add_history(uri, title)
         return {}
+
+    def AVTransport_Next(self, data):
+        return self._playlist_step(1)
+
+    def AVTransport_Previous(self, data):
+        return self._playlist_step(-1)
+
+    def _playlist_step(self, delta):
+        if not self.playlist:
+            return {}
+        idx = self.current_index + delta
+        if idx < 0 or idx >= len(self.playlist):
+            return {}
+        self.current_index = idx
+        uri = self.playlist[idx]
+        self.set_state_url(uri)
+        self.renderer.set_media_url(uri)
+        self.set_state('CurrentTrack', idx + 1)
+        self.set_state('CurrentTrackURI', uri)
+        self.set_state('TransportState', 'PLAYING')
+        self.set_state('TransportStatus', 'OK')
+        return {}
+
+    def cast_uri(self, uri, title=''):
+        """Push a (local or remote) uri to the renderer.
+
+        Used by the local-file-casting flow: the settings page uploads a file,
+        Macast serves it from 127.0.0.1, and publishes 'cast_local_file' which
+        this method handles."""
+        if not uri:
+            return
+        self.set_state_url(uri)
+        self.renderer.set_media_url(uri)
+        if title:
+            self.renderer.set_media_title(title)
+            self.set_state('CurrentTrackTitle', title)
+        if uri not in self.playlist:
+            self.playlist.append(uri)
+        self.current_index = self.playlist.index(uri)
+        self.set_state('NumberOfTracks', len(self.playlist))
+        self.set_state('CurrentTrack', self.current_index + 1)
+        self.set_state('CurrentTrackURI', uri)
+        self.set_state('RelativeTimePosition', '00:00:00')
+        self.set_state('AbsoluteTimePosition', '00:00:00')
+        self.set_state('TransportState', 'PLAYING')
+        self.set_state('TransportStatus', 'OK')
+        self._add_history(uri, title)
+
+    def _add_history(self, uri, title=''):
+        """Persist a played item to the on-disk play history (most recent first).
+        Dedupes by uri and caps the list so the settings file stays small."""
+        try:
+            history = Setting.get(SettingProperty.Play_History, []) or []
+            history = [h for h in history
+                       if isinstance(h, dict) and h.get('uri') != uri]
+            history.insert(0, {
+                'uri': uri,
+                'title': title or uri,
+                'time': int(time.time()),
+            })
+            history = history[:50]
+            Setting.set(SettingProperty.Play_History, history)
+        except Exception as e:
+            logger.error('add play history error: %s' % e)
+
+    def clear_play_history(self):
+        """Remove all persisted play history."""
+        try:
+            Setting.set(SettingProperty.Play_History, [])
+        except Exception as e:
+            logger.error('clear play history error: %s' % e)
 
     def AVTransport_Play(self, data):
         self.renderer.set_media_resume()
@@ -870,6 +979,13 @@ class Handler:
     def __init__(self):
         self.setting_page = load_xml(XMLPath.SETTING_PAGE.value).encode()
         self.__downloading = False
+        # Random token used to protect management endpoints (install-plugin,
+        # save-launch-param, status/log/launch-param queries) when the request
+        # comes from outside the loopback interface. The local settings page is
+        # always served from 127.0.0.1, so it never needs to send the token.
+        self._api_token = secrets.token_hex(16)
+        self.local_dir = os.path.join(SETTING_DIR, 'local_files')
+        os.makedirs(self.local_dir, exist_ok=True)
 
     @property
     def protocol(self) -> Protocol:
@@ -879,13 +995,27 @@ class Handler:
             return Protocol()
         return protocols.pop()
 
+    def _management_allowed(self):
+        """Management endpoints (install-plugin, save-launch-param, status/log
+        queries) must only be reachable from the loopback interface or with a
+        valid API token. DLNA control/SUBSCRIBE traffic from the LAN remains
+        open, since that is the whole point of a renderer."""
+        remote = getattr(cherrypy.request, 'remote', None)
+        ip = getattr(remote, 'ip', '127.0.0.1')
+        if ip in ('127.0.0.1', '::1', '::ffff:127.0.0.1', 'localhost'):
+            return True
+        token = cherrypy.request.headers.get('X-Macast-Token')
+        if not token:
+            token = cherrypy.request.params.get('token')
+        return bool(token and token == self._api_token)
+
     def reload(self):
         cherrypy.server.httpserver = _cpnative_server.CPHTTPServer(cherrypy.server)
 
     def __download_plugin(self, path, url):
         try:
             with open(path, 'wb') as f:
-                f.write(requests.get(url).content)
+                f.write(requests.get(url, timeout=30).content)
         except Exception as e:
             logger.error(f"download plugin error: {e}")
         finally:
@@ -914,7 +1044,8 @@ class Handler:
                      'CurrentTrackDuration', 'CurrentMediaDuration',
                      'AbsoluteTimePosition', 'RelativeTimePosition',
                      'TransportState', 'TransportStatus', 'TransportPlaySpeed',
-                     'CurrentPlayMode', 'Volume', 'Mute', 'NumberOfTracks'):
+                     'CurrentPlayMode', 'Volume', 'Mute', 'NumberOfTracks',
+                     'CurrentTrack', 'DisplayCurrentSubtitle'):
             try:
                 media[name] = protocol.get_state(name)
             except Exception:
@@ -932,7 +1063,13 @@ class Handler:
                 })
         except Exception as e:
             logger.error(e)
-        return {'server': server, 'media': media, 'clients': clients}
+        history = []
+        try:
+            history = Setting.get(SettingProperty.Play_History, []) or []
+        except Exception:
+            pass
+        return {'server': server, 'media': media, 'clients': clients,
+                'history': history}
 
     def GET(self, param=None, *args, **kwargs):
         if not Setting.is_service_running():
@@ -940,6 +1077,11 @@ class Handler:
         if param == 'api':
             cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
             query = kwargs.get('query', '')
+            # Sensitive management queries: block unless local or token-bearing.
+            if query in ('status', 'log', 'launch-param') and not self._management_allowed():
+                return json.dumps({'code': 403,
+                                   'message': 'Forbidden: management API requires local access or token'},
+                                  indent=4).encode()
             res = {
                 'api?query=log': 'get logs of macast',
                 'api?query=settings': 'get settings of macast',
@@ -965,15 +1107,75 @@ class Handler:
             elif query == 'status':
                 res = self.get_status()
             return json.dumps(res, indent=4).encode()
+        if param == 'local':
+            # Serve a previously uploaded local file (path-traversal safe).
+            fname = kwargs.get('file', '')
+            if not fname or '/' in fname or '\\' in fname or '..' in fname:
+                raise cherrypy.HTTPError(400, 'Bad file name')
+            fpath = os.path.join(self.local_dir, os.path.basename(fname))
+            if not os.path.exists(fpath):
+                raise cherrypy.HTTPError(404, 'File not found')
+            cherrypy.response.headers['Content-Type'] = 'application/octet-stream'
+            with open(fpath, 'rb') as f:
+                return f.read()
+        if param == 'sw.js':
+            # Served from root so the service worker controls scope "/".
+            cherrypy.response.headers['Content-Type'] = 'application/javascript; charset=utf-8'
+            return load_xml(XMLPath.SW_JS.value).encode('utf-8')
+        if param == 'manifest.webmanifest':
+            cherrypy.response.headers['Content-Type'] = 'application/manifest+json; charset=utf-8'
+            return load_xml(XMLPath.MANIFEST.value).encode('utf-8')
         if param is not None:
             raise cherrypy.HTTPRedirect('/')
         cherrypy.response.headers['Content-Type'] = 'text/html'
-        # return self.setting_page
-        return load_xml(XMLPath.SETTING_PAGE.value).encode()
+        # Cached at init time; avoids re-reading the file from disk on every GET.
+        return self.setting_page
 
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
         res = {'code': 0, 'message': 'success'}
+        # Local file casting: receive an uploaded file and expose it via /?local
+        file_part = None
+        for v in kwargs.values():
+            # An uploaded file part has .file (file-like) and .filename; a
+            # plain form field is just a string, so detect by attribute.
+            if hasattr(v, 'file') and hasattr(v, 'filename'):
+                file_part = v
+                break
+        if file_part is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            upload = file_part
+            filename = os.path.basename(getattr(upload, 'filename', 'cast.bin'))
+            ext = os.path.splitext(filename)[1].lower()
+            sub_exts = ('.srt', '.ass', '.ssa', '.vtt', '.sub', '.sup', '.idx')
+            try:
+                path = os.path.join(self.local_dir, filename)
+                with open(path, 'wb') as f:
+                    f.write(upload.file.read())
+                url = 'http://127.0.0.1:{}/?local&file={}'.format(Setting.get_port(), filename)
+                if ext in sub_exts:
+                    # Subtitle file: attach to the currently playing media.
+                    res['url'] = url
+                    cherrypy.engine.publish('set_media_sub_file',
+                                            {'url': url, 'title': filename})
+                else:
+                    res['url'] = url
+                    cherrypy.engine.publish('cast_local_file', url, filename)
+            except Exception as e:
+                logger.error('local file upload error: %s' % e)
+                res['code'] = 1
+                res['message'] = 'upload failed'
+            return json.dumps(res, indent=4).encode()
+        # Management endpoints: only allow from loopback or with a valid token.
+        if kwargs.get('save-launch-param', None) is not None or \
+                kwargs.get('install-plugin', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
         if kwargs.get('save-launch-param', None) is not None:
             setting = kwargs.get('save-launch-param', None)
             try:
@@ -1000,11 +1202,45 @@ class Handler:
                     url = plugin.get('url', '')
                     plugin_name = url.split('/')[-1]
                     local_path = os.path.join(SETTING_DIR, plugin.get('type', 'renderer'), plugin_name)
-                    threading.Thread(target=self.__download_plugin(local_path, url),
+                    # NOTE: pass (target, args=...) — do NOT call it inline,
+                    # otherwise __downloading is reset synchronously and the
+                    # download never happens in the background thread.
+                    threading.Thread(target=self.__download_plugin,
+                                     args=(local_path, url),
                                      daemon=True).start()
                 except Exception as e:
+                    self.__downloading = False
                     res['code'] = 1
                     res['message'] = 'json format error'
+        elif kwargs.get('set-subtitle-show', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            show = str(kwargs.get('set-subtitle-show')).lower() in ('1', 'true', 'yes', 'on')
+            cherrypy.engine.publish('set_media_sub_show', show)
+        elif kwargs.get('cast-uri', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            try:
+                self.protocol.cast_uri(kwargs.get('cast-uri'))
+            except Exception as e:
+                logger.error('cast uri error: %s' % e)
+                res['code'] = 1
+                res['message'] = 'cast failed'
+        elif kwargs.get('clear-play-history', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            try:
+                self.protocol.clear_play_history()
+            except Exception as e:
+                logger.error('clear play history error: %s' % e)
+                res['code'] = 1
+                res['message'] = 'clear failed'
         else:
             logger.info(kwargs)
 

@@ -42,6 +42,7 @@ class SettingProperty(Enum):
     Macast_Protocol = 7
     Blocked_Interfaces = 8
     Additional_Interfaces = 9
+    Play_History = 10
 
 
 class Setting:
@@ -129,10 +130,8 @@ class Setting:
         """
         dlna_id = str(uuid.uuid4())
         if not refresh:
-            dlna_id_temp = Setting.get(SettingProperty.USN, dlna_id)
-            if dlna_id == dlna_id_temp:
-                Setting.set(SettingProperty.USN, dlna_id)
-            return dlna_id_temp
+            # Return the persisted USN, generating and storing one if absent.
+            return Setting.get(SettingProperty.USN, dlna_id)
         else:
             Setting.set(SettingProperty.USN, dlna_id)
             return dlna_id
@@ -381,6 +380,8 @@ class XMLPath(Enum):
     RENDERING_CONTROL = BASE_PATH + '/xml/RenderingControl.xml'
     SETTING_PAGE = BASE_PATH + '/xml/setting.html'
     PROTOCOL_INFO = BASE_PATH + '/xml/SinkProtocolInfo.csv'
+    MANIFEST = BASE_PATH + '/xml/manifest.webmanifest'
+    SW_JS = BASE_PATH + '/xml/sw.js'
 
 
 def load_xml(path):

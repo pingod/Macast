@@ -77,6 +77,7 @@ class ProtocolPlugin(plugins.SimplePlugin):
         self.bus.subscribe('reload_protocol', self.protocol.reload)
         self.bus.subscribe('get_protocol', self.get_protocol)
         self.bus.subscribe('set_protocol', self.set_protocol)
+        self.bus.subscribe('cast_local_file', self.protocol.cast_uri)
         for method in self.protocol.methods():
             self.bus.subscribe(method, getattr(self.protocol, method))
 
@@ -87,6 +88,7 @@ class ProtocolPlugin(plugins.SimplePlugin):
         self.bus.unsubscribe('reload_protocol', self.protocol.reload)
         self.bus.unsubscribe('get_protocol', self.get_protocol)
         self.bus.unsubscribe('set_protocol', self.set_protocol)
+        self.bus.unsubscribe('cast_local_file', self.protocol.cast_uri)
         for method in self.protocol.methods():
             self.bus.unsubscribe(method, getattr(self.protocol, method))
         self.protocol.stop()
@@ -136,8 +138,12 @@ class SSDPPlugin(plugins.SimplePlugin):
         """register device
         """
         for device in self.devices:
+            # ST is everything after the first 'uuid:<id>::' separator.
+            # Previously this used a brittle fixed slice (device[43:]) that
+            # depended on the uuid string length; split on '::' instead.
+            st = device.split('::', 1)[1] if '::' in device else device
             self.ssdp.register(device,
-                               device[43:] if device[43:] != '' else device,
+                               st,
                                'http://{{}}:{}/description.xml'.format(Setting.get_port()),
                                Setting.get_server_info(),
                                'max-age=66')
