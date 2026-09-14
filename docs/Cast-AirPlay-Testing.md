@@ -44,13 +44,17 @@ python Macast.py
 
 ## 3. 选择协议
 
-菜单栏图标 → **Setting → Protocols** → 选 `Chromecast` 或 `AirPlay`。
+Macast **同时运行多个协议**（DLNA 走 SSDP，Chromecast/AirPlay 各走 mDNS），
+菜单栏里每一项都是开关（复选框），可任意组合、默认全开。
+切换即时生效，**不会重启服务**——钩掉 Chromecast 不会中断正在播放的 DLNA。
 
-> Macast 同一时刻只跑**一个**协议（架构限制），切换即时生效，无需重启：
-> SSDP 会随协议自动挂载/卸载（`Service._sync_ssdp`）。
-> 若想直接改默认启动协议，可编辑
-> `~/Library/Application Support/Macast/macast_setting.json` 的 `Macast_Protocol`
-> （取值 `DLNA` / `Chromecast` / `AirPlay`）后重启。
+> 想在 GUI 外改配置：编辑
+> `~/Library/Application Support/Macast/macast_setting.json` 的 `Macast_Protocols`
+> （数组，如 `["DLNA Protocol","Chromecast","AirPlay"]`）后重启。
+> 旧的 `Macast_Protocol` 单值字段仍会被识别并自动迁移。
+
+> 注意 DLNA 插件的真实标题是 **`DLNA Protocol`**（由类名推导），
+> 写 `"DLNA"` 也能识别（有容错匹配），但落盘的始终是规范名。
 
 ## 4. 确认服务已起（日志定位点）
 
@@ -184,7 +188,25 @@ dns-sd -B _airplay._tcp    local
 另外修复：**`ProtocolPlugin` 无条件订阅 `protocol.cast_uri`**，导致 AirPlay 一启动就
 `AttributeError` 崩溃（只有真跑起来才会遇到，单元测试没覆盖）。
 
-## 11. 反馈给我时请贴出
+## 11. 多协议并发（2026-09-15 起支持）
+
+三个协议可以同时在线。实现要点：
+
+- `macast/protocol_group.py` 的 `ProtocolGroup`：对外伪装成单个 `Protocol`，
+  对内把 `start/stop/uses_ssdp/set_state_*` 扇出到所有子协议。
+  这样既有的 CherryPy 树根、总线订阅、SSDP 逻辑一行不动。
+- `handler` 取自 **primary**（优先 DLNA，因为 `DLNAHandler` 继承自 `Handler`，
+  既提供 UPnP 路由也提供 Web UI / PWA / 管理 API）。
+- `macast/protocol.py` 的 `PlaybackGuard`：mpv 只有一个，多发送端同时投屏时
+  记录播放归属，后来的接管并通知前一个协议释放（默认空实现，可覆盖）。
+- 菜单从单选改为多选；设置项 `Macast_Protocol`(str) → `Macast_Protocols`(list)，
+  旧值自动迁移。
+
+⚠️ **踩过的坑**：基类 `Protocol` 本身就定义了 `set_state_*` 空方法，
+导致 `group.set_state_play` 命中类属性、`__getattr__` 扇出根本不会被调用
+——播放状态会静默丢弃。必须把扇出函数装到**实例属性**上才能盖过类方法。
+
+## 12. 反馈给我时请贴出
 
 ```shell
 LOG="$HOME/Library/Application Support/Macast/macast.log"

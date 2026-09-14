@@ -47,6 +47,9 @@ class SettingProperty(Enum):
     Https_Port = 12
     Https_Cert = 13
     Https_Key = 14
+    # Protocols enabled at the same time (list of titles). Replaces the older
+    # single-value Macast_Protocol, which is still read as a migration source.
+    Macast_Protocols = 15
 
 
 class Setting:
