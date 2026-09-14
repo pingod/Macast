@@ -35,6 +35,55 @@ SERVICE_STATE_OBSERVED = {
                           'CurrentConnectionIDs']
 }
 
+SOAP_ENV_NS = 'http://schemas.xmlsoap.org/soap/envelope/'
+SOAP_ENCODING_NS = 'http://schemas.xmlsoap.org/soap/encoding/'
+UPNP_CONTROL_NS = 'urn:schemas-upnp-org:control-1-0'
+
+
+def normalize_soap_body(rawbody):
+    """Drop a leading BOM / indentation that precedes the XML declaration.
+
+    XML requires the declaration to be the very first thing in the document,
+    so expat rejects any leading whitespace with "XML declaration allowed only
+    at the start of the document". Clients do send it anyway: BiliPai
+    (Android, okhttp) pretty-prints the whole envelope and indents even the
+    declaration by 12 spaces:
+
+        b'            <?xml version="1.0" encoding="utf-8"?>\\n            <s:Envelope ...>'
+
+    which made every SetAVTransportURI fail with HTTP 500 and the cast look
+    like it silently did nothing. Leading whitespace carries no meaning here,
+    so strip it (plus a UTF-8 BOM) instead of refusing the request.
+
+    Accepts bytes (the usual path from the HTTP body) or str, and always
+    returns bytes: lxml refuses a *str* that carries an encoding declaration,
+    so a decoded body must never be handed back to it.
+    """
+    if isinstance(rawbody, str):
+        rawbody = rawbody.encode('utf-8')
+    return rawbody.lstrip(b'\xef\xbb\xbf \t\r\n')
+
+
+def soap_fault(error_code, error_description, fault_code='s:Client'):
+    """Serialise a UPnP SOAP Fault (control-1-0) as a response body.
+
+    A DLNA control point can only interpret a SOAP Fault; the HTML page
+    CherryPy renders for an unhandled exception is opaque to it, so a bad
+    request ends up looking like "casting does nothing".
+    """
+    root = etree.Element(etree.QName(SOAP_ENV_NS, 'Envelope'),
+                         nsmap={'s': SOAP_ENV_NS})
+    root.attrib['{{{}}}encodingStyle'.format(SOAP_ENV_NS)] = SOAP_ENCODING_NS
+    body = etree.SubElement(root, etree.QName(SOAP_ENV_NS, 'Body'))
+    fault = etree.SubElement(body, etree.QName(SOAP_ENV_NS, 'Fault'))
+    etree.SubElement(fault, 'faultcode').text = fault_code
+    etree.SubElement(fault, 'faultstring').text = 'UPnPError'
+    detail = etree.SubElement(fault, 'detail')
+    error = etree.SubElement(detail, etree.QName(UPNP_CONTROL_NS, 'UPnPError'))
+    etree.SubElement(error, 'errorCode').text = str(error_code)
+    etree.SubElement(error, 'errorDescription').text = error_description
+    return etree.tostring(root, encoding='UTF-8', xml_declaration=False)
+
 
 class Protocol:
     def __init__(self):
@@ -585,7 +634,17 @@ class DLNAProtocol(Protocol):
         :param rawbody: soap request from dlna client
         :return:
         """
-        envelope = etree.fromstring(rawbody)
+        try:
+            envelope = etree.fromstring(normalize_soap_body(rawbody))
+        except etree.XMLSyntaxError as e:
+            # Log the head of the offending body -- a client-side XML quirk is
+            # otherwise invisible (macast.log is wiped on every app start) --
+            # and answer with a SOAP Fault instead of an opaque CherryPy 500
+            # HTML page, which no DLNA control point can parse.
+            logger.error('SOAP parse failed: {} ({} bytes, head={!r})'.format(
+                e, len(rawbody), rawbody[:300]))
+            cherrypy.response.status = 500
+            return soap_fault(402, 'Invalid Args')
         soap_ns = 'http://schemas.xmlsoap.org/soap/envelope/'
         body = envelope.find('{{{}}}Body'.format(soap_ns))
         if body is None or len(body) == 0:
@@ -717,7 +776,11 @@ class DLNAProtocol(Protocol):
         self.renderer.set_media_url(uri)
         title = Setting.get_friendly_name()
         try:
-            meta = etree.fromstring(data['CurrentURIMetaData'].value.encode())
+            # Same tolerance as the SOAP body: a client that indents its
+            # envelope indents the embedded DIDL-Lite metadata too, and a
+            # leading newline before <?xml...?> would cost us the real title.
+            meta = etree.fromstring(
+                normalize_soap_body(data['CurrentURIMetaData'].value))
             title_xml = meta.find('.//{{{}}}title'.format(meta.nsmap['dc']))
             if title_xml is not None and title_xml.text is not None:
                 title = title_xml.text
