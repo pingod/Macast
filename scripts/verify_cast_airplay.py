@@ -454,6 +454,113 @@ check("airplay mDNS advertises the port actually bound",
       any(port == ap.rtsp_port for _, _, port in MockAdvertiser.calls),
       "bound={} advertised={}".format(ap.rtsp_port, MockAdvertiser.calls))
 
+# 4b: the advertised instance name must be a legal DNS-SD label.
+#
+# Regression: Macast's default friendly name is "Macast(Hostname.local)" —
+# parentheses and dots included. zeroconf accepts it and reports success, but
+# the record never matches a `dns-sd -B _googlecast._tcp` query, so the device
+# was advertised yet invisible. It is normalised in discovery.py now.
+from macast.discovery import sanitize_instance_name  # noqa: E402
+
+_RAW = "Macast(MyHost-1754.local)"
+print("\n=== Part 4b: mDNS instance-name normalisation ===")
+_clean = sanitize_instance_name(_RAW + "._googlecast._tcp.local.",
+                                "_googlecast._tcp.local.")
+check("illegal friendly name is normalised",
+      _clean == "Macast-MyHost-1754._googlecast._tcp.local.", _clean)
+check("normalised label has only [A-Za-z0-9-]",
+      all(c.isalnum() or c == "-" for c in _clean.split(".")[0]),
+      _clean.split(".")[0])
+check("normalised label <= 63 bytes",
+      len(_clean.split(".")[0].encode()) <= 63, str(len(_clean.split(".")[0])))
+check("normalisation is idempotent",
+      sanitize_instance_name(_clean, "_googlecast._tcp.local.") == _clean)
+check("already-legal name is left alone",
+      sanitize_instance_name("Macast._airplay._tcp.local.",
+                             "_airplay._tcp.local.")
+      == "Macast._airplay._tcp.local.")
+check("empty/garbage name falls back to Macast",
+      sanitize_instance_name("()()._airplay._tcp.local.",
+                             "_airplay._tcp.local.")
+      == "Macast._airplay._tcp.local.")
+
+# The SRV target must not end up as "My-Mac.local.local." — macOS hostnames
+# already carry the suffix, so it must not be appended twice.
+from macast.discovery import _normalize_server  # noqa: E402
+
+check("hostname already ending in .local is not doubled",
+      _normalize_server("MyHost-1754.local")
+      == "MyHost-1754.local.", _normalize_server("MyHost-1754.local"))
+check("bare hostname gets a .local suffix",
+      _normalize_server("MyHost") == "MyHost.local.",
+      _normalize_server("MyHost"))
+
+# 4c: switching protocols at runtime must re-wire SSDP.
+#
+# Regression: SSDP was only ever configured for the protocol chosen at launch.
+# Switching DLNA -> AirPlay from the menu kept announcing a DLNA renderer that
+# no longer answered, and switching back announced nothing.
+print("\n=== Part 4c: SSDP follows the active protocol ===")
+try:
+    server = _load("server", "server.py")
+
+    class _FakePlugin(object):
+        def __init__(self, *a, **k):
+            self.started = False
+            self.unsubscribed = False
+
+        def subscribe(self):
+            pass
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            pass
+
+        def unsubscribe(self):
+            self.unsubscribed = True
+
+    _real_ssdp_plugin, _real_monitor = server.SSDPPlugin, server.Monitor
+    server.SSDPPlugin, server.Monitor = _FakePlugin, _FakePlugin
+
+    class _BareService(server.Service):
+        """Service without the port-binding __init__."""
+
+        def __init__(self):
+            self.ssdp_plugin = None
+            self.ssdp_monitor = None
+            self.ssdp_monitor_counter = 0
+
+    svc = _BareService()
+
+    # AirPlay does not use SSDP -> an existing plugin must be torn down.
+    svc.ssdp_plugin = _FakePlugin()
+    svc.ssdp_monitor = _FakePlugin()
+    old_plugin = svc.ssdp_plugin
+    svc._sync_ssdp(airplay.AirPlayProtocol())
+    check("switching to AirPlay tears SSDP down",
+          svc.ssdp_plugin is None and svc.ssdp_monitor is None and
+          old_plugin.unsubscribed)
+
+    # ...and switching back to DLNA must bring it up again.
+    svc._sync_ssdp(protocol.DLNAProtocol())
+    check("switching back to DLNA brings SSDP up",
+          svc.ssdp_plugin is not None and svc.ssdp_monitor is not None)
+
+    # Idempotence: re-selecting DLNA must not stack a second plugin.
+    again = svc.ssdp_plugin
+    svc._sync_ssdp(protocol.DLNAProtocol())
+    check("_sync_ssdp is idempotent", svc.ssdp_plugin is again)
+except Exception as e:
+    check("SSDP re-wiring on protocol switch", False,
+          "{}: {}".format(type(e).__name__, e))
+finally:
+    try:
+        server.SSDPPlugin, server.Monitor = _real_ssdp_plugin, _real_monitor
+    except Exception:
+        pass
+
 # --------------------------------------------------------------------------
 # Part 5: the plugin manager must actually expose the new protocols in the menu
 # --------------------------------------------------------------------------

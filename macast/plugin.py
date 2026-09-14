@@ -77,7 +77,12 @@ class ProtocolPlugin(plugins.SimplePlugin):
         self.bus.subscribe('reload_protocol', self.protocol.reload)
         self.bus.subscribe('get_protocol', self.get_protocol)
         self.bus.subscribe('set_protocol', self.set_protocol)
-        self.bus.subscribe('cast_local_file', self.protocol.cast_uri)
+        # 'cast_local_file' is a DLNA affordance: it serves a local file over
+        # the DLNA HTTP channel. Not every protocol implements it (Chromecast /
+        # AirPlay take a URL from the sender), and reaching for it blindly here
+        # used to raise AttributeError while *starting* an AirPlay protocol.
+        if hasattr(self.protocol, 'cast_uri'):
+            self.bus.subscribe('cast_local_file', self.protocol.cast_uri)
         for method in self.protocol.methods():
             self.bus.subscribe(method, getattr(self.protocol, method))
 
@@ -88,7 +93,8 @@ class ProtocolPlugin(plugins.SimplePlugin):
         self.bus.unsubscribe('reload_protocol', self.protocol.reload)
         self.bus.unsubscribe('get_protocol', self.get_protocol)
         self.bus.unsubscribe('set_protocol', self.set_protocol)
-        self.bus.unsubscribe('cast_local_file', self.protocol.cast_uri)
+        if hasattr(self.protocol, 'cast_uri'):
+            self.bus.unsubscribe('cast_local_file', self.protocol.cast_uri)
         for method in self.protocol.methods():
             self.bus.unsubscribe(method, getattr(self.protocol, method))
         self.protocol.stop()

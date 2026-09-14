@@ -183,7 +183,48 @@ class Service:
         self._protocol = value
         self.protocol_plugin.set_protocol(self._protocol)
         self.cherrypy_application.root = self._protocol.handler
+        self._sync_ssdp(self._protocol)
         self._protocol.handler.reload()
+
+    def _sync_ssdp(self, protocol):
+        """Start or stop SSDP so it matches the protocol's discovery mechanism.
+
+        SSDP is wired up once in ``__init__`` for whichever protocol was
+        selected at launch, but the user can switch protocols from the menu at
+        any time. Without this, moving from DLNA to Chromecast/AirPlay leaves a
+        DLNA device being announced that no longer answers (and switching back
+        would announce nothing at all), because the plugin only ever followed
+        the initial choice.
+        """
+        wanted = getattr(protocol, "uses_ssdp", True)
+        if wanted and self.ssdp_plugin is None:
+            self.ssdp_plugin = SSDPPlugin(cherrypy.engine)
+            self.ssdp_plugin.subscribe()
+            self.ssdp_monitor_counter = 0
+            self.ssdp_monitor = Monitor(cherrypy.engine, self.notify, 3,
+                                        name="SSDP_NOTIFY_THREAD")
+            self.ssdp_monitor.subscribe()
+            # A plugin created after the engine is already running never gets
+            # its start() called by the bus, so do it by hand.
+            if cherrypy.engine.state != cherrypy.engine.states.STOPPED:
+                self.ssdp_plugin.start()
+                self.ssdp_monitor.start()
+        elif not wanted and self.ssdp_plugin is not None:
+            for plugin in (getattr(self, "ssdp_monitor", None), self.ssdp_plugin):
+                if plugin is None:
+                    continue
+                try:
+                    plugin.stop()
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning("Stopping %s failed: %s",
+                                   type(plugin).__name__, e)
+                try:
+                    plugin.unsubscribe()
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.warning("Unsubscribing %s failed: %s",
+                                   type(plugin).__name__, e)
+            self.ssdp_plugin = None
+            self.ssdp_monitor = None
 
     def _start_https_server(self):
         """Start an optional HTTPS server that reuses the same WSGI app
