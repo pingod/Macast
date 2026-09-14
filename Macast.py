@@ -4,6 +4,7 @@ import os
 import sys
 import shutil
 import gettext
+import locale
 import logging
 from macast import Setting, SETTING_DIR
 from macast.macast import gui
@@ -115,8 +116,61 @@ def clear_env():
         pass
 
 
+def _force_utf8_ctype():
+    """Make text I/O UTF-8 even when the app runs without a locale.
+
+    LaunchServices starts a .app with a nearly empty environment (and the
+    LSEnvironment plist key is not always honoured), so Python falls back to
+    US-ASCII as its preferred encoding — and then any non-ASCII log line
+    (a Chinese media title, for instance) raises UnicodeEncodeError inside
+    CherryPy's own log handlers. Setting only LC_CTYPE fixes the encoding
+    without touching LC_TIME / LC_NUMERIC / LC_MESSAGES.
+    """
+    if locale.getpreferredencoding(False).lower().replace('-', '') == 'utf8':
+        return
+    for name in ('UTF-8', 'en_US.UTF-8', 'C.UTF-8'):
+        try:
+            locale.setlocale(locale.LC_CTYPE, name)
+            return
+        except locale.Error:
+            continue
+
+
+def setup_logging():
+    """Mirror Python-side log records into macast.log.
+
+    In a bundle (.app / PyInstaller) the process has no console, so without a
+    handler of our own every logger.error()/warning() from macast.* is thrown
+    away. Silent failures are the hardest kind to debug: a HTTPS channel that
+    never came up looked exactly like "nothing happened at all".
+
+    Logging must never be able to prevent the app from starting, hence the
+    guarded setup (SETTING_DIR is otherwise created later by Setting.init).
+    """
+    _force_utf8_ctype()
+    try:
+        os.makedirs(SETTING_DIR, exist_ok=True)
+        handler = logging.FileHandler(os.path.join(SETTING_DIR, 'macast.log'),
+                                      encoding='utf-8')
+    except Exception:
+        return
+    handler.setFormatter(logging.Formatter(
+        '[%(asctime)s] %(name)s %(levelname)s: %(message)s'))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    # Handy when diagnosing a bundled app: tells us where the log lives and
+    # whether the process ended up in UTF-8 mode (a bundle without a locale
+    # falls back to ASCII, and then any log line containing non-ASCII — a
+    # Chinese media title, for instance — raises UnicodeEncodeError).
+    root.info("Python %s, preferred encoding %s, logging to %s",
+              sys.version.split()[0], locale.getpreferredencoding(False),
+              handler.baseFilename)
+
+
 if __name__ == '__main__':
     clear_env()
+    setup_logging()
     get_lang()
     set_mpv_default_path()
     gui(lang=_)
