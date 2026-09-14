@@ -151,7 +151,14 @@ jobs:
         run: |
           VERSION=${{ steps.version.outputs.version }}
           cd dist
-          zip -r "../Macast-MacOS-arm64-v${VERSION}.zip" Macast.app
+          # -y is required: without it `zip` FOLLOWS symlinks and stores their
+          # targets as full copies. Python.framework relies on two symlinks —
+          # Versions/Current -> 3.12 and Python.framework/Python -> the real
+          # binary — so omitting -y duplicated a 13 MB framework directory in
+          # every release, took the .app from ~41 MB to ~80 MB, and (worse)
+          # left the framework with no Versions/Current symlink, which makes
+          # `codesign -v` fail with "bundle format is ambiguous".
+          zip -r -y "../Macast-MacOS-arm64-v${VERSION}.zip" Macast.app
           cd ..
 
       - name: Upload artefact
