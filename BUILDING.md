@@ -14,9 +14,10 @@ without touching runtime code:
 | `setup.py` updated | Dropped EOL Python 3.6–3.9, raised `python_requires` to 3.10, tightened classifier list. |
 | `macast/_version.py` (new) | Single source of truth for the version (the `.version` dotfile is kept as a fallback for third-party tooling). |
 | `requirements/darwin.txt` updated | Removed the GitHub forks of `pyperclip` on macOS — the upstream wheels are fine. |
-| `scripts/setup_py2app.py` (new) | Modern py2app config: explicit `arch='arm64'`, bundles the Homebrew mpv binary into `Contents/Resources/bin/MacOS/mpv` (matches the path `Macast.py` looks up at runtime), excludes desktop GUI stacks we don't use. |
-| `Macast.set_mpv_default_path` (updated) | Probe each candidate mpv with `mpv --version` before accepting it, fall back to Homebrew's `/opt/homebrew/bin/mpv` (or `/usr/local/bin/mpv`) when the bundled copy can't load its dylibs. The bundled mpv in a stock py2app build is present-but-broken because its 14 Homebrew dylibs are not copied alongside it; the probe lets the .app still play media without dragging ~30 MB of FFmpeg/libass/libplacebo into the bundle. |
+| `scripts/setup_py2app.py` (new) | Modern py2app config: explicit `arch='arm64'`, excludes desktop GUI stacks we don't use, and trims the bundle after the build (test-suites, CPython's own test-suite, `.dSYM` debug bundles). **mpv is not bundled** — see "Player (mpv)" below. |
+| `Macast.set_mpv_default_path` (updated) | Probe each candidate mpv with `mpv --version` before accepting it, then fall back to Homebrew's `/opt/homebrew/bin/mpv` (or `/usr/local/bin/mpv`) and finally `$PATH`. The probe exists because a bundled copy can be present-and-executable yet still fail to launch with `dyld: Library not loaded` (see "Player (mpv)"). |
 | `scripts/build_macos_arm.sh` (new) | One-command end-to-end build: verifies host, creates the venv, installs deps, runs py2app, and verifies the output is arm64. All build artefacts stay in the project directory. |
+| gettext catalogues (moved into the build) | `.mo` files are build output and stay out of git, so they must be compiled at build time. `scripts/setup_py2app.py` now does it in pure Python (`compile_i18n_catalogues`, cross-checked against `msgfmt`), which removed the `msgfmt`/gettext requirement — and fixed the CI-built `.app`, which previously got no `.mo` files at all and shipped English-only. |
 | `setup_py2app.py` (root) | Now a shim that forwards to `scripts/setup_py2app.py` so old CI that runs `python setup.py py2app` still works. |
 | `Makefile` (new) | `make build-arm`, `make run`, `make clean`, `make deep-clean`. |
 
@@ -31,10 +32,12 @@ runs cleanly on Python 3.12.
 - macOS 11 (Big Sur) or newer
 - Apple Silicon (M1 / M2 / M3 / M4) for the arm64 build
 - Xcode command line tools: `xcode-select --install`
-- Homebrew with `python@3.12` and `mpv`:
+- Homebrew with `python@3.12`:
   ```bash
-  brew install python@3.12 mpv
+  brew install python@3.12
   ```
+- `mpv` is **not** needed to build, but the built app needs one to play media
+  (`brew install mpv`). See "Player (mpv)" below.
 
 ### One-command build
 
@@ -42,27 +45,61 @@ runs cleanly on Python 3.12.
 bash scripts/build_macos_arm.sh
 ```
 
-This produces `dist/Macast.app` containing:
+This produces `dist/Macast.app` (≈ 36 MB) containing:
 
 - `Contents/MacOS/Macast` — py2app launcher (arm64)
-- `Contents/Resources/bin/MacOS/mpv` — bundled mpv binary (arm64; Homebrew's mpv)
-- `Contents/Resources/i18n/` — translations
+- `Contents/Resources/i18n/` — translations (compiled from `.po` at build time)
 - `Contents/Resources/lib/python3.X/` — embedded Python stdlib + site-packages
+- `Contents/Resources/bin/MacOS/mpv` — *only if you opted into a bundled
+  player*
 
-**About the bundled mpv:** Homebrew's `mpv` depends on ~14 dylibs in
-`/opt/homebrew/opt/*` (libass, ffmpeg, libplacebo, mujs, lcms2, libarchive,
-…). Copying just the `mpv` binary is not enough — dyld will fail to load the
-shared libraries when launched from inside the bundle. To keep the build
-script simple and the bundle size down, `Macast.set_mpv_default_path` now
-*probes* each candidate mpv with `mpv --version` at startup and falls back
-to the system Homebrew copy (`/opt/homebrew/bin/mpv` or
-`/usr/local/bin/mpv`) if the bundled copy can't launch. So:
+### Player (mpv)
 
-- **Recommended:** have `mpv` installed via Homebrew before opening the app.
-  `brew install mpv` is enough; Macast picks it up automatically.
-- **Self-contained:** copy all of mpv's dylibs into
-  `Contents/Resources/bin/MacOS/` and rewrite their load paths with
-  `dylibbundler` or `macdylibbundler`. Out of scope for this build script.
+The .app does **not** ship a player by default; `Macast.set_mpv_default_path`
+finds the `mpv` already installed on the machine
+(`/opt/homebrew/bin/mpv` → `/usr/local/bin/mpv` → `$PATH`). That is the same
+contract the upstream README states for macOS: install mpv, then run Macast.
+
+Bundling Homebrew's `mpv` does not work and costs a lot:
+
+- it links against absolute `/opt/homebrew/opt/*` paths (libass, ffmpeg,
+  libplacebo, mujs, lcms2, libarchive, …), so py2app rewrites ~14 dylibs and
+  copies them into `Contents/Frameworks/` — about **53 MB**;
+- those dylibs are placed where the binary does not look for them, so the copy
+  still dies with `dyld: Library not loaded` when spawned from inside the
+  bundle;
+- net effect: a **102 MB** bundle whose embedded player never runs and which
+  silently falls back to the system mpv anyway.
+
+To ship a genuinely self-contained player, point `MACAST_BUNDLE_MPV` at a
+**portable** build — upstream's CI used
+`https://laboratory.stolendata.net/~djinn/mpv_osx/mpv-latest.tar.gz`:
+
+```bash
+curl -LO https://laboratory.stolendata.net/~djinn/mpv_osx/mpv-latest.tar.gz
+mkdir -p bin && tar --strip-components 2 -C bin -xzvf mpv-latest.tar.gz \
+    mpv.app/Contents/MacOS
+MACAST_BUNDLE_MPV="$PWD/bin/MacOS/mpv" python scripts/setup_py2app.py py2app
+```
+
+`scripts/setup_py2app.py` runs `otool -L` on the candidate and refuses anything
+that links outside `/usr/lib` + `/System/Library` + `@rpath`/`@loader_path`/
+`@executable_path`, so a Homebrew mpv cannot be bundled by accident.
+
+### Bundle size
+
+| Item | Size | Notes |
+| --- | --- | --- |
+| `Contents/Frameworks/` | 11 MB | libpython + OpenSSL (`libcrypto` 4.3 MB, `libssl` 0.8 MB) |
+| stdlib archive (`python312.zip`) | 4.65 MB | pyobjc, stdlib; test-suite and `.dSYM` are pruned |
+| `lib-dynload/` | 17 MB | 7.9 MB of that is `lxml/etree.so` |
+| `macast/` + `cherrypy/` + `rumps/` | 4 MB | app code, settings-page assets, cherrypy |
+| **total** | **≈ 36 MB** | |
+
+The largest single remaining item is `lxml` (≈ 8 MB). `macast/protocol.py` uses
+it for SOAP/`description.xml` construction; swapping those 23 call sites for
+`xml.etree.ElementTree` would remove it, at the cost of changing namespace and
+serialization behaviour in DLNA responses.
 
 ### Open the build
 
@@ -93,13 +130,13 @@ pip install -U pip
 pip install rumps 'py2app>=0.28' 'cherrypy>=18,<19' \
             lxml netifaces appdirs pyperclip requests pillow
 
-# 3. run py2app
+# 3. run py2app (this also trims the bundle)
 rm -rf dist build
 python scripts/setup_py2app.py py2app
 
 # 4. verify
 file dist/Macast.app/Contents/MacOS/Macast   # → arm64
-file dist/Macast.app/Contents/Resources/bin/MacOS/mpv   # → arm64
+du -sh dist/Macast.app                       # → ~39M
 ```
 
 ## Why py2app and not PyInstaller
@@ -132,6 +169,7 @@ The CLI (no menu bar UI) is `make cli` or `macast-cli` once installed.
 | --- | --- | --- |
 | `py2app did not produce dist/Macast.app` | Stale `build/` dir | `rm -rf dist build` and re-run |
 | `launcher is not arm64` | Running on Intel Mac | This build script targets arm64 only; the existing app on Intel macOS can be built from the legacy `setup_py2app.py` after switching `arch` to `'x86_64'` |
-| `bundled mpv is not arm64` | Old mpv in `bin/MacOS/mpv` (if you maintain a vendored copy) | `brew install mpv` — Homebrew installs the native arm64 build on Apple Silicon |
-| App launches then immediately quits with `mpv cannot start` | The bundled mpv is missing or wrong arch | Check `dist/Macast.app/Contents/Resources/bin/MacOS/mpv` and rebuild |
+| `bundled mpv is not arm64` | You vendored an mpv at `bin/MacOS/mpv` for the wrong architecture | Use a native arm64 portable build, or unset `MACAST_BUNDLE_MPV`/remove the file and rely on the system mpv |
+| App plays nothing / logs `No mpv found` | No mpv on the machine and none bundled | `brew install mpv`, or bundle a portable build via `MACAST_BUNDLE_MPV` |
+| Bundle is ~100 MB | An mpv got bundled from Homebrew (`otool -L` shows `/opt/homebrew/opt/*`) | Remove `bin/MacOS/mpv` or `MACAST_BUNDLE_MPV`; only a portable mpv is accepted |
 | `LSArchitecturePriority: arm64` rejected on launch | Trying to run the bundle on macOS older than 11 | Bump `LSMinimumSystemVersion` in `scripts/setup_py2app.py` down to your target |
