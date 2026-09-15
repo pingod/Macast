@@ -1,6 +1,6 @@
 {
     "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。仓库坐标与索引地址的唯一来源见 macast/plugin_repo.py；新增条目后请跑 scripts/verify_cast_airplay.py，Part 5c 会校验条目与 .py 清单是否一致。",
-    "_note_url": "url 走 ghproxy 代理 raw：安装是 Python 侧 requests 拉的，没有浏览器那种多地址回退；而 raw 国内经常拉不动、jsDelivr 又会缓存分支文件数小时（实测 ?v= 查询串**不能**破它的缓存，会拿到上一版）。ghproxy 按需代理 raw，拿到的永远是最新文件。ghproxy 挂了就把 raw 直链（https://raw.githubusercontent.com/pingod/Macast/main/plugins/<file>.py）粘到设置页的「从网址安装」。",
+    "_note_url": "url 走 ghproxy 代理 raw：安装是 Python 侧 requests 拉的，没有浏览器那种多地址回退。实测三种源：raw 最新但国内经常拉不动；jsDelivr 会缓存分支文件数小时，而且 ?v= 查询串**不能**破它的缓存（升到 0.2 后拿到仍是 0.1 的内容）；ghproxy 按需代理 raw，响应头是 cache-control: max-age=300，也就是最多滞后约 5 分钟 —— 比 jsDelivr 好三个数量级，所以索引里的 url 用它。ghproxy 挂了就把 raw 直链粘到设置页的「从网址安装」。",
     "repo_url": "https://github.com/pingod/Macast/tree/main/plugins",
     "plugin_v1": [
         {
