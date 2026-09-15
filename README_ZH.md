@@ -17,6 +17,26 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 
 😂 **请尽量使用英语在Github交流，如果喜欢的话可以点个star关注后续更多协议支持的更新**
 
+## 本分支（pingod/Macast）的新增内容
+
+在 DLNA 之外，本分支把 Macast 做成了一个**多协议并发**的接收端，并把设置页做成了
+可视化管理台：
+
+- **Chromecast 接收端**：mDNS 广播 + Cast v2（TLS 8009 + setup HTTP 8008）。
+  Chrome / VLC / Android 等发送端可直接投屏。未做 Google 设备认证，官方 SDK 发送端可能失败。
+- **AirPlay 接收端**：mDNS + RTSP，支持视频 URL 投屏。音频(RAOP)与屏幕镜像未实现。
+- **三协议并发**：DLNA / Chromecast / AirPlay 可同时在线、各自可被发现，互不干扰
+  （`macast/protocol_group.py`）。
+- **网卡选择**：设置页 → 状态 → 网络与广播。多网卡（虚拟机网桥 / VPN / Tailscale）时
+  可显式指定广播网卡；不选则自动用承载默认路由的网卡。避免"能搜到但投不上"。
+- **插件热插拔**：设置页 → 插件，可**启用 / 停用 / 卸载 / 安装**，全部**即时生效、无需重启**。
+  卸载是可恢复的（文件移到配置目录 `.trash/<时间戳>/`）。
+- **播放状态如实上报**：Chromecast 的 `LOAD` 不再无脑回 `PLAYING`，而是等播放器确认；
+  播放器报错则回 `LOAD_FAILED`。
+
+**接手开发 / 排查问题请先读 [`AGENTS.md`](AGENTS.md)**（代码地图、踩坑清单、发版流程），
+真机验证与历史问题复盘见 [`docs/Cast-AirPlay-Testing.md`](docs/Cast-AirPlay-Testing.md)。
+
 
 
 ## 安装
@@ -87,6 +107,9 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - [x] 增加 Chromecast 接收端协议（mDNS + Cast v2，URL 投屏，见 macast/protocol_cast.py）
 - [x] 增加 AirPlay 接收端协议（mDNS + RTSP，视频 URL 投屏，见 macast/protocol_airplay.py）
 - [x] 多协议并发：DLNA / Chromecast / AirPlay 可同时在线并各自可被发现（见 macast/protocol_group.py）
+- [x] 网卡选择界面（设置页可指定用于发现/广播的网卡）
+- [x] 插件热插拔：设置页启用 / 停用 / 卸载 / 安装，即时生效无需重启
+- [x] 播放状态如实上报（Chromecast LOAD 等播放器确认后才回 PLAYING）
 - [ ] AirPlay 屏幕镜像 / 音频(RAOP) 支持（需实时编码 / ALAC 解码，超出当前范围）
 - [ ] 支持airplay 完整能力（当前为视频 URL 投屏子集）
 

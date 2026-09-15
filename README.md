@@ -19,6 +19,15 @@
 
 A menu bar application using mpv as **DLNA Media Renderer**. You can push videos, pictures or musics from your mobile phone to your computer.
 
+This fork (`pingod/Macast`) additionally acts as a **Chromecast** and **AirPlay** receiver,
+can run all three protocols at the same time, lets you pick which network interface is
+advertised, and supports installing / enabling / disabling / uninstalling plugins from the
+settings page **without restarting**. See [README_ZH.md](README_ZH.md) for the full list.
+
+> Working on the code? Start with **[AGENTS.md](AGENTS.md)** — repo map, the list of
+> hardware-only pitfalls this project has already been bitten by, and the release process.
+> Real-device verification notes live in [docs/Cast-AirPlay-Testing.md](docs/Cast-AirPlay-Testing.md).
+
 
 ## Installation
 
