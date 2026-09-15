@@ -123,20 +123,17 @@ jsDelivr 垫底是因为它**缓存分支文件**（可能给出过期索引）�
 
 `url` 指向本目录里的文件即可，例如 `plugins/some_renderer.py`。
 
-**为什么 yt-dlp 插件的 `url` 用 jsDelivr 而不是 raw**：插件安装是在 **Python 侧**
-用 `requests` 拉的（`MacastPluginManager.install_url`），没有设置页那种浏览器多地址
-回退，而国内 raw 经常拉不动。
+**插件的 `url` 必须来自「每次都新鲜」的源**：安装走的是 **Python 侧**
+`requests`（`MacastPluginManager.install_url`），没有设置页那种浏览器多地址回退。实测结论：
 
-**必须带 `?v=<版本>` 破缓存**：jsDelivr 会缓存分支文件，不带查询串时版本号涨了也还是
-装到旧文件，设置页会一直显示「可更新」。所以改 `<macast.version>` 时**同一次提交**里
-也要改 `url` 的 `?v=`。Part 5c 会校验两者一致（顺便说明：带查询串不违反 `install_url`
-的 `.py` 校验，它本来就先 `split('?')[0]`）。
+- `raw.githubusercontent.com` 最权威但国内经常拉不动；
+- `cdn.jsdelivr.net` 能通，**但它会缓存分支文件数小时，而且 `?v=` 查询串不能破它的缓存**
+  （实测：把插件升到 0.2 后，`...macast_ytdlp.py?v=0.2` 返回的仍是 0.1 的内容）；
+- `ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，**每次都是最新文件**，
+  所以索引里的 `url` 用它。
 
-ghproxy 挂了或 jsDelivr 抽风时，把 raw 直链粘到设置页的「从网址安装」即可。
-
-> ⚠️ `info.json` 里的条目必须和 `.py` 顶部的 `<macast.*>` 清单一致
-> （title / version / platform / 类名）。不一致的后果是「显示一个版本，装上去是另一个」，
-> 而验证套件 Part 5c 会逐条比对，改完记得跑。
+ghproxy 挂了的时候，把 raw 直链粘到设置页的「从网址安装」即可。索引里的
+`url` 一律按这个规则写，Part 5c 会检查它不是缓存型 CDN。
 
 ## 改完怎么验
 
