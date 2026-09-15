@@ -1,10 +1,11 @@
-# 参考项目评估：miraclecast / mkchromecast
+# 参考项目评估：miraclecast / mkchromecast / AirConnect
 
-评估日期：2026-09
-对照 commit：miraclecast `0b7f1f1`、mkchromecast `aad239c`、Macast `8e02bb5` / v0.7.11
+评估日期：2026-09（AirConnect 一节补于 2026-09-15）
+对照 commit：miraclecast `0b7f1f1`、mkchromecast `aad239c`、AirConnect `1.11.3`（release，2026-09-06）、
+Macast `8e02bb5` / v0.7.11
 发送端基准库：**pychromecast 14.0.10**（就装在 Macast 自己的 `.venv` 里，本文件的库侧引用都取自它）
 
-**问题**：这两个项目有没有必要集成？有没有可参考的？它们有我们没有的功能吗？它们的实现方式更正确吗？
+**问题**：这几个项目有没有必要集成？有没有可参考的？它们有我们没有的功能吗？它们的实现方式更正确吗？
 
 **一句话结论**：
 
@@ -12,6 +13,10 @@
   Linux-only、需要 root。**不要集成**；它的 RTSP 报文语义和自检脚本值得抄。
 - **mkchromecast**：**方向相反**（它是发送端）。**不要集成**；真正的价值是——它走的是真实发送端栈
   （pychromecast），据此对我们做一致性核对，**已经定位到 7 处 Macast 接收端的真实缺陷**。
+- **AirConnect**：**一半同向、一半反向**（收 AirPlay 音频 → 发 UPnP/Cast）。**不要集成**；
+  但它是第一个提供了"Macast 缺的那半边"的现成实现，其中 **Cast v2 发送端**和
+  **"长度未知的实时流怎么喂给挑剔的 HTTP 客户端"**两处可直接对照。注意它**没有本地播放后端**，
+  所以那半边缺口对 Macast 而言仍然由 `plugins/raop.py` 监督 shairport-sync 覆盖。
 
 ---
 
@@ -183,30 +188,157 @@ Wi-Fi Display（Miracast）实现，**只实现了 sink 侧**（README 原文：
 
 ---
 
-## 3. 功能对照
+## 3. AirConnect（philippe44/AirConnect，4.2k★，C）
 
-| 能力 | Macast | miraclecast | mkchromecast |
-|---|---|---|---|
-| DLNA / UPnP 接收 | ✅ | ❌ | ❌ |
-| Google Cast 接收 | ✅（未认证） | ❌ | ❌（是发送端） |
-| AirPlay 视频 URL 接收 | ✅ | ❌ | ❌ |
-| AirPlay 音频 / 屏幕镜像 | ❌ | ❌（Miracast 是另一套） | ❌ |
-| **Miracast / Wi-Fi Display** | ❌ | ✅（仅 sink） | ❌ |
-| 屏幕镜像（任意协议） | ❌ | ✅（Wi-Fi Direct，Linux + root） | ✅（Wayland 截图后当流推给 CC，发送端侧） |
-| 系统音频采集并投出 | ❌（不需要） | ❌ | ✅ |
-| Sonos | ❌ | ❌ | ❌（代码自认 broken，从未实例化） |
-| 多协议同时在线 | ✅ | ❌ | ❌ |
-| macOS / Windows | ✅ | ❌（仅 Linux） | ⚠️ 仅 macOS/Linux，且是发送端 |
-| 插件热插拔 | ✅ | ❌ | ❌ |
-| 真实发送端回归测试 | ✅（VLC 发送端仿真，206 用例） | ⚠️ check(1) 单元测试 | ❌（集成测试 skip） |
-| 硬件/环境自检脚本 | ❌ | ✅ | ❌ |
-| 全量线上报文日志 | ⚠️ 部分 | ✅ | ⚠️ |
+### 3.1 它到底是什么
 
-**它们有而我们没有的功能，全部落在"发送端"或"另一种协议"上，对接收端产品没有意义。**
+**AirPlay → UPnP/Sonos/Chromecast 的桥。** 两个可执行文件，同一套内核、两个出口：
+
+- `airupnp-<os>-<cpu>`：出口是 UPnP/Sonos（用 SOAP 控制）
+- `aircast-<os>-<cpu>`：出口是 Chromecast（用 Cast v2 控制）
+
+它自己实现 RAOP/AirPlay **音频接收端**（`common/libraop`），收到的 ALAC 音频解码后
+（可选重编码成 mp3 / aac / flac / wav / pcm），通过**它自己的 HTTP 服务**以"无限流"的形式
+喂给 mDNS/SSDP 发现的**远端**播放器。所以它是「AirPlay 接收端 + UPnP/Cast 发送端」的合体，
+而 Macast 是「UPnP/Cast/AirPlay 接收端 + 本地播放」——**它有一半和我们对齐，另一半正好反向。**
+
+两条 README 原文决定了很多结论：
+
+- "*This is an **audio-only** application. Do not expect to play a video on your device and have
+  the audio from UPnP/Sonos or ChromeCast synchronized. It does not, cannot and will not work*"
+  —— 它不碰视频，也不可能做音视频同步（原因是 RTP 推流 → HTTP 拉流这一跳无法回传播放时刻）。
+- "*looking like a **wire** to iPhone and looking like a **file** to the UPnP/CC*"
+  —— 这句是它的核心：对上游装成"一根有延迟的模拟线"，对下游装成"一个可随机读的文件"。
+  Macast 的形状反过来：上游是 URL，下游交给 mpv。
+
+构件（全部是 C）：
+
+| 位置 | 职责 |
+|---|---|
+| `aircast/src/aircast.c`（32KB） | Cast 版本的 main：配置、设备生命周期、AirPlay 事件分发 |
+| `aircast/src/castcore.c`（21KB） | **Cast v2 会话**：TLS 连接、source/destination id、LAUNCH、LOAD、心跳 |
+| `aircast/src/cast_util.c`（11KB）+ `cast_parse.c`（3KB） | Cast 消息构造与解析（nanopb + `CastMessage.proto`） |
+| `aircast/src/config_cast.c`（9KB） | `config.xml` 解析 |
+| `airupnp/src/*` | UPnP/Sonos 版本，复用同一套 libraop，出口换成 SOAP |
+| `common/libraop` | **RAOP / AirPlay 音频接收**（子模块 philippe44/libraop） |
+| `common/libmdns`、`common/libpupnp`、`common/libcodecs`、`common/libopenssl`、`common/dmap-parser`、`common/crosstools`、`common/libpthreads4w`、`aircast/nanopb`、`aircast/libjansson` | 其余 9 个子模块 |
+
+自己的胶水其实很薄（`aircast/src/*.c` 合计约 76 KB），**真正的协议都在子模块里**——
+这一点决定了"集成"到底意味着什么（见下）。
+
+运行形态：需要 UDP 5353（mDNS）可达；每个设备长期占 1 个 RTSP 端口，播放时再加 1 个 HTTP + 3 个
+RTP；`-z` 才能自守护（**README 明确警告：别用 `&` 后台化而不加 `-Z`，否则吃满 CPU**）。
+
+### 3.2 为什么不能集成
+
+- **方向卡在它的出口上**：Macast 要的是"把收到的媒体在本机放出来"，AirConnect 的出口是
+  "把音频以 HTTP 流推给**别的**播放器"，它**没有任何本地播放后端**。接进 Macast 只会得到
+  一条"AirPlay → AirConnect → 远端播放器"的链路，和 Macast 自己造的接收端不搭。
+- **本地那半已经有更合适的解**：`plugins/raop.py` 监督 shairport-sync，而 shairport-sync
+  的强项恰好是 AirConnect 完全不做的部分——**本地播放**、系统音频设备与 mixer 选择、
+  自带 mDNS 广播。对"iPhone 音频在这台 Mac 上响"这个需求，shairport-sync 是严格更顺手的工具。
+- **构建**：`build.sh` 是**交叉编译**流程，`common/crosstools` 是它自己维护的工具链仓库，
+  10 个子模块要逐个 init。Macast 是 py2app/PyInstaller 打的 Python 应用，要塞一个 C 二进制
+  进去等于新开一条构建链——而 AGENTS.md §4.3/§4.4 已经证明现有打包链对依赖漂移极度敏感
+  （少一个 `zeroconf` 就让全部产物起不来）。收益是"多一个可选的 AirPlay 音频实现"，
+  代价是"多一条必须每次发版都验证的构建链"，不划算。
+- **许可证**：AirConnect 自身代码是 MIT，但它的 LICENSE 原文写明
+  "*This program uses 3rd party software that is licensed by their author under their own
+  conditions.*"；`common/libraop` 在 GitHub API 里是 **NOASSERTION**（无标准 SPDX），
+  `libcodecs` 是 MIT。**要捆二进制就必须逐个子模块审计**（openssl、nanopb、libpupnp、
+  libcodecs、libpthreads4w…），这不是一次性工作。
+  ⚠️ 顺带一个判读坑：**AirConnect 自己的 `spdx_id` 也是 `NOASSERTION`**——因为它的 LICENSE
+  不是标准 MIT 模板，而不是因为它不是 MIT。别只看 API 的 `spdx_id` 就下结论，要读正文。
+- **能力边界**：AGENTS.md §9 已经把"AirPlay 音频（RAOP）"定为"由插件监督 shairport-sync 解决"，
+  把原生 RAOP 定为不做。集成 AirConnect 等于用第三方的 C 实现去替代这个已经成立的方案，
+  却没有解决它唯一的短板（没有本地播放）。
+
+### 3.3 值得借鉴（三处，都能直接落到现有代码上）
+
+1. **Cast v2 发送端实现** —— `aircast/src/castcore.c` + `cast_util.c` + `CastMessage.proto`。
+   Macast 的 `plugins/cast_bridge.py` 也是**发送端**（把 DLNA 来的 URL 中继到 Chromecast），
+   正好同类。这是一份经过 251 个 fork、多年真机打磨的对照实现，可用来核对：投屏序列
+   （我们记录的是 deviceauth CHALLENGE → CONNECT receiver-0 → LAUNCH → CONNECT transportId
+   → LOAD）、`transportId` 是不是真的取自 LAUNCH 的回复、心跳与重连时机，以及各代
+   Chromecast 固件的差异。**建议动作：照着它把 `cast_bridge.py` 的序列读一遍**，
+   比读 pychromecast（那是接收端视角）更贴我们的用法。
+2. **"长度未知的实时源"的 HTTP 供给** —— README 的
+   *HTTP content-length and transfer modes* 一节。这与 AGENTS.md §6 的
+   "mpv 需要 Range 否则 loading failed"、以及 AGENTS.md §4.9 里"探针的测试流必须支持 Range"
+   是**同一族问题**：源是实时的、长度未知，而 HTTP 客户端还想要 content-length / Range。
+   AirConnect 给了三种模式：不发 content-length（默认，`http_length=-1`）／chunked（`-3`）／
+   **假 content-length `2^31-1`**（`0`）；并保留一份"最近发过的字节"以便客户端重开连接时重发。
+   它还记录了一个很实用的观察：*当客户端请求 Range 而服务器回 200，就意味着源不支持 Range，
+   但有些客户端不认*。这一节值得整段读，尤其如果以后要做"边下边播"类的流服务
+   （`plugins/macast_ytdlp.py` 的流模式就在这个方向）。
+3. **RAOP / AirPlay 音频协议本体** —— `common/libraop`。C 里少有的生产级 RAOP 实现：
+   RTP 帧编号与丢包重传（"收到 1,2,3,6 时要先补请求 4,5，不能直接发 6"）、AES、
+   ALAC 解码、FLUSH 语义、时钟漂移补偿（README 的 *Latency parameters explained*
+   把这个讲得比多数协议文档都清楚）。
+   **如果哪天要重新评估"原生 RAOP"，这是比读 shairport-sync 更小的起点**；
+   按 AGENTS.md §9 的现状，只作存档。
+
+### 3.4 一个不靠集成的组合：AirPlay → aircast → Macast 自己（**猜想，未实测**）
+
+`aircast` 是靠 mDNS `_googlecast._tcp` 发现 Chromecast 的，而 **Macast 自己就在广播这个服务**。
+所以理论上可以直接串起来：
+
+```
+iPhone (AirPlay) ──RAOP──▶ aircast ──HTTP 音频流 + Cast v2──▶ Macast 自己的 Cast 接收端 ──▶ mpv
+```
+
+一行 RAOP 代码都不用写，也可能让 iPhone 的音频在这台 Mac 上响。
+
+**但我不推荐把它当方案，且以下全部未经验证：**
+
+- `aircast` 是否愿意把**本机/回环**设备当作投放目标，没有验证过（这是整个链路成立的前提）。
+- 会多一跳；README 自述 AirPlay 侧本身就有 1–2 s 基础延迟，再加 HTTP 缓冲。
+- `aircast` 会把 Macast 当成**远端 Chromecast**：暂停/音量/停止的语义走 Cast 而不是 AirPlay，
+  与 3.1 描述的"对上游装成一根线"不一致的地方会在这里露出来。
+- 想试的话用 release 里那个 zip 中的 `aircast-macos-arm64` 预编译件
+  （最新 release `1.11.3` 只挂了一个资产 `AirConnect-1.11.3.zip`，各平台二进制在里面；
+  **不要**从源码构建），并且**不要**把它写进 repo 或打包配置。
+
+### 3.5 评级
+
+| 做法 | 结论 |
+|---|---|
+| 集成代码 | **不做**（C + 10 子模块 + 自带交叉编译链；出口方向与产品需求相反；**没有本地播放**；许可证要逐个审计） |
+| 集成协议 | **不做**——它做"AirPlay 收 → UPnP/Cast 发"，Macast 做"UPnP/Cast/AirPlay 收 → 本机播"，只在一半上重叠且方向错开 |
+| 借鉴具体做法 | **做**：§3.3 的三条。第 1 条对 `plugins/cast_bridge.py` 有直接对照价值，第 2 条与 AGENTS.md §6/§4.9 的 Range 经验同源 |
+| 当依赖/子模块引入 | **不做**：会同时放大 AGENTS.md §4.3/§4.4 的打包脆弱性，并引入一个 NOASSERTION 子模块 |
+| 那个串联组合 | **可选实验**，不进产品（§3.4，未实测） |
 
 ---
 
-## 4. 落地情况（本节在修复完成后更新过）
+## 4. 功能对照
+
+| 能力 | Macast | miraclecast | mkchromecast | AirConnect |
+|---|---|---|---|---|
+| DLNA / UPnP 接收 | ✅ | ❌ | ❌ | ❌ |
+| Google Cast 接收 | ✅（未认证） | ❌ | ❌（是发送端） | ❌（是发送端） |
+| AirPlay 视频 URL 接收 | ✅ | ❌ | ❌ | ❌（audio-only） |
+| AirPlay 音频（RAOP）接收 | ⚠️ 插件监督 shairport-sync | ❌ | ❌ | ✅（自带实现，是它的核心能力） |
+| **本地播放** | ✅（mpv） | ❌（把 RTP 端口交给播放器） | ❌ | ❌（**只把 HTTP 流推给远端播放器**） |
+| **Miracast / Wi-Fi Display** | ❌ | ✅（仅 sink） | ❌ | ❌ |
+| 屏幕镜像（任意协议） | ❌ | ✅（Wi-Fi Direct，Linux + root） | ✅（Wayland 截图后当流推给 CC，发送端侧） | ❌ |
+| 系统音频采集并投出 | ❌（不需要） | ❌ | ✅ | ❌（不采集，只转发收到的 AirPlay 音频） |
+| 转发到 UPnP / Chromecast 播放器 | ❌ | ❌ | ✅（进 CC） | ✅（这就是它存在的意义） |
+| Sonos | ❌ | ❌ | ❌（代码自认 broken，从未实例化） | ✅（`airupnp` 的主要目标） |
+| 多协议同时在线 | ✅ | ❌ | ❌ | ❌（一个进程一个出口） |
+| macOS / Windows | ✅ | ❌（仅 Linux） | ⚠️ 仅 macOS/Linux，且是发送端 | ✅（含 `macos-arm64` 预编译件） |
+| 插件热插拔 | ✅ | ❌ | ❌ | ❌ |
+| 真实发送端回归测试 | ✅（VLC 发送端仿真 + pychromecast 一致性探针，套件共 411 用例） | ⚠️ check(1) 单元测试 | ❌（集成测试 skip） | ❌ |
+| 硬件/环境自检脚本 | ✅（`scripts/selfcheck.py`） | ✅ | ❌ | ❌ |
+| 全量线上报文日志 | ⚠️ 部分 | ✅ | ⚠️ | ✅ |
+
+**除了 AirConnect 的「AirPlay 音频接收」这一半，它们有而我们没有的功能都落在"发送端"或"另一种协议"上，
+对接收端产品没有意义。** AirConnect 那一半虽然同向，但它没有本地播放（只有"推给远端播放器"），
+所以对 Macast 的直接价值仍然只是参考，不是集成——本地那半继续由 `plugins/raop.py` 承担。
+
+---
+
+## 5. 落地情况（本节在修复完成后更新过）
 
 | 优先级 | 事项 | 位置 | 状态 |
 |---|---|---|---|
@@ -238,21 +370,22 @@ Wi-Fi Display（Miracast）实现，**只实现了 sink 侧**（README 原文：
 打死的血泪记录（AGENTS.md §4.1）。发送端本来就会 `GET_STATUS` 轮询，所以把真相放在应答里
 既能修好问题，又不引入任何非请求消息。
 
-**明确不做**：集成任何一个代码库；实现 Miracast/WFD（macOS 无 Wi-Fi Direct API）；
+**明确不做**：集成任何一个代码库（**含 AirConnect**——C + 10 个子模块 + 自带交叉编译链，
+且它没有本地播放，见 §3）；实现 Miracast/WFD（macOS 无 Wi-Fi Direct API）；
 为独占网卡而杀网络栈；抄 mkchromecast 的子进程/暂停实现。
 
-### 4.1 修复的验证方式
+### 5.1 修复的验证方式
 
 | 证据 | 手段 |
 |---|---|
-| 405/405 | `scripts/verify_cast_airplay.py`（新增 Part 2b 的 11 条 RTSP 用例 + Part 18 的 19 条 Cast 一致性用例） |
+| 411/411 | `scripts/verify_cast_airplay.py`（Part 2b 的 11 条 RTSP 用例 + Part 18 的 19 条 Cast 一致性用例 + Part 19 的 6 条 8443 用例） |
 | 新用例**确实能抓旧代码** | 把 `protocol_cast.py` / `protocol_airplay.py` 分别 `git stash` 回旧版重跑：Part 18 当场 6 红，Part 2 当场 11 红（含"小写 `cseq: 42` 被回成伪造的 `CSeq: 1`"、"合并请求把客户端读到超时"） |
 | 真机 23/23 | `scripts/cast_conformance.py` 打在本轮改过的源码上：`set_volume` 0.00s 应答、音量回读 0.35、`displayName='Default Media Receiver'`、`ssdp_udn` 是裸 UUID、**`BUFFERING → PLAYING → IDLE` 且 `idleReason='FINISHED'`** |
 | 探针抓到过一个新 bug | 第一次真机跑就把**旧文件 end-file 追尾**的 race 暴露出来（新视频被错标 `CANCELLED`），据此加了 `_note_stopped` 的门控和对应用例——这是任何打桩测试都抓不到的 |
 
 ---
 
-## 5. 复现方式（本次评估怎么得出的）
+## 6. 复现方式（本次评估怎么得出的）
 
 ```shell
 git clone --depth 1 https://github.com/albfan/miraclecast.git /tmp/mc
@@ -269,3 +402,36 @@ sed -n 244,272p $P/controllers/receiver.py                              # set_vo
 sed -n 232,268p $P/dial.py                                              # multizone 缺省 True、UDN UUID()
 sed -n 230,250p $P/discovery.py                                         # port != 8009 -> CAST_TYPE_GROUP
 ```
+
+AirConnect 那一节的取证（**没有 clone**——它的 master 里带着一个 95 MB 的预编译 zip，
+`git clone` 不划算，全部走 GitHub API）：
+
+```shell
+# 方向、规模、许可证
+curl -s https://api.github.com/repos/philippe44/AirConnect | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["stargazers_count"], d["language"], d["license"]["spdx_id"])'
+
+# 自己写的胶水有多薄：aircast/src 下所有 .c 之和（76248 字节，约 76 KB）
+curl -s https://api.github.com/repos/philippe44/AirConnect/contents/aircast/src | \
+  python3 -c 'import json,sys; print(sum(f["size"] for f in json.load(sys.stdin) if f["name"].endswith(".c")))'
+
+# “真正的协议都在子模块里”：10 个 submodule
+# （raw.githubusercontent 从这边经常拉不动，见 AGENTS.md §4.6，所以走 API contents）
+curl -s https://api.github.com/repos/philippe44/AirConnect/contents/.gitmodules | \
+  python3 -c 'import json,sys,base64; c=base64.b64decode(json.load(sys.stdin)["content"]).decode(); print(c.count("[submodule"))'
+
+# 许可证：自身正文写 MIT（但 API 的 spdx_id 是 NOASSERTION——模板不标准，别误判）；
+# libraop 同样是 NOASSERTION，libcodecs 是 MIT
+# （LICENSE 走 raw；拉不动就换成 .../contents/LICENSE 的 API 端点）
+curl -s https://raw.githubusercontent.com/philippe44/AirConnect/master/LICENSE
+curl -s https://api.github.com/repos/philippe44/libraop   | grep -o '"spdx_id":"[^"]*"'
+curl -s https://api.github.com/repos/philippe44/libcodecs | grep -o '"spdx_id":"[^"]*"'
+
+# 预编译件：release 只挂一个 zip（AirConnect-<ver>.zip），各平台二进制在里面；
+# 不要从 master 构建
+curl -s https://api.github.com/repos/philippe44/AirConnect/releases/latest | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["tag_name"], [(a["name"], a["size"]) for a in d["assets"]])'
+```
+
+§3.4 那个串联组合（AirPlay → aircast → Macast 自己）**没有取证**，是读构件得出的结构推断，
+在文中已明确标为"未实测"。要验证它，第一步是确认 `aircast` 愿不愿意把本机地址当作投放目标。
