@@ -53,7 +53,13 @@
         .status-table{width:100%;border-collapse:collapse;margin-bottom:6px;background:var(--panel);}
         .status-table td{border:1px solid var(--border);padding:5px 9px;font-size:13px;line-height:1.5;color:var(--text);}
         .status-table td.k{width:110px;background:var(--bg);color:var(--text-soft);font-weight:600;vertical-align:top;}
+        .uri{word-break:break-all;font-family:monospace;font-size:12px;}
+        .hint{color:var(--text-soft);font-size:12px;}
         .status-table .uri{word-break:break-all;font-family:monospace;font-size:12px;}
+        .status-table .tag-inline{margin:2px 6px 2px 0;}
+        .status-table .value-hint{color:var(--text-soft);font-size:12px;margin-left:4px;}
+        .save-row{display:flex;align-items:center;gap:12px;margin-top:12px;}
+        .json-error{color:#f56c6c;font-size:13px;}
         .status-card {
             background: var(--panel); border: 1px solid var(--border);
             border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
@@ -98,8 +104,9 @@
         }
         .pwa-tip b { color: var(--text); }
         @media (max-width: 600px) {
-            .box-card { width: 100%; }
             #app { padding: 8px; }
+            .macast-plugins { grid-template-columns: 1fr; }
+            .status-table td.k { width: 84px; }
         }
     </style>
 </head>
@@ -123,15 +130,20 @@
     </div>
     <el-tabs v-model="activeIndex" @tab-click="handleSelect">
         <el-tab-pane label="插件" name="1">
-            <div class="macast-plugins">
-                <macast-plugin v-for="item in plugins" :key="item.renderer"
-                               :item="item" v-on:refresh_plugin="refresh_plugin">
-                </macast-plugin>
-                <p v-if="loading">loading</p>
+            <div class="plugin-group" v-for="group in plugin_groups" :key="group.key">
+                <h3 class="section">
+                    {{ group.title }}
+                    <span class="section-hint">{{ group.hint }}</span>
+                </h3>
+                <div class="macast-plugins">
+                    <macast-plugin v-for="item in group.items" :key="item.key"
+                                   :item="item" v-on:refresh_plugin="refresh_plugin">
+                    </macast-plugin>
+                </div>
             </div>
+            <p v-if="loading" class="plugin-loading">正在读取插件列表…</p>
             <a :href="this.repo_url" target="_blank">
-                <el-tooltip class="item" effect="dark" content="Find more information at plugins repo."
-                            placement="top-end">
+                <el-tooltip class="item" effect="dark" content="打开插件仓库" placement="left">
                     <el-button class="macast-plugin-repo" icon="el-icon-search" circle>
                     </el-button>
                 </el-tooltip>
@@ -205,13 +217,23 @@
                     <tr><td class="k">版本</td><td>{{ status.server.version }}</td></tr>
                     <tr><td class="k">友好名称</td><td>{{ status.server.friendly_name }}</td></tr>
                     <tr><td class="k">渲染器</td><td>{{ status.server.renderer }}</td></tr>
-                    <tr><td class="k">协议</td><td>{{ status.server.protocol }}</td></tr>
+                    <tr><td class="k">协议</td><td>
+                        <el-tag v-for="p in protocol_list" :key="p" size="mini"
+                                type="primary" effect="plain" class="tag-inline">{{ p }}</el-tag>
+                        <span v-if="!protocol_list.length">—</span>
+                        <span class="value-hint">同时接收，可用菜单栏勾选</span>
+                    </td></tr>
                     <tr><td class="k">平台</td><td>{{ status.server.system }} ({{ status.server.platform }})</td></tr>
                     <tr><td class="k">系统版本</td><td>{{ status.server.system_version }}</td></tr>
-                    <tr><td class="k">IP</td><td>{{ status.server.ip }}</td></tr>
+                    <tr><td class="k">投屏地址</td><td>
+                        <el-tag v-for="ip in server_ips" :key="ip" size="mini"
+                                effect="plain" class="tag-inline uri">{{ ip }}</el-tag>
+                        <span v-if="!server_ips.length">—</span>
+                        <span class="value-hint">局域网内手机可连的地址</span>
+                    </td></tr>
                     <tr><td class="k">HTTPS</td><td>
                         <span v-if="status.server.https_enabled">
-                            <span class="uri">https://{{ status.server.ip }}:{{ status.server.https_port }}</span>
+                            <span class="uri" v-for="ip in server_ips" :key="ip">https://{{ ip }}:{{ status.server.https_port }} </span>
                             <span style="color:var(--text-soft);font-size:12px;">（手机扫码/浏览器打开可装 PWA）</span>
                         </span>
                         <span v-else>未启用</span>
@@ -222,12 +244,14 @@
                 <h3 class="section">播放状态</h3>
                 <table class="status-table">
                     <tbody>
-                    <tr><td class="k">传输状态</td><td>{{ status.media.TransportState }}</td></tr>
+                    <tr><td class="k">传输状态</td><td>{{ status.media.TransportState || '空闲' }}</td></tr>
                     <tr><td class="k">标题</td><td>{{ status.media.CurrentTrackTitle || '—' }}</td></tr>
                     <tr><td class="k">推送地址</td><td><span class="uri">{{ status.media.CurrentURI || '—' }}</span></td></tr>
                     <tr><td class="k">当前进度</td><td>{{ status.media.AbsoluteTimePosition || '—' }} / {{ status.media.CurrentTrackDuration || '—' }}</td></tr>
-                    <tr><td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
-                    <tr><td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
+                    <tr v-if="has_value(status.media.TransportPlaySpeed)">
+                        <td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
+                    <tr v-if="has_value(status.media.CurrentPlayMode)">
+                        <td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
                     </tbody>
                 </table>
 
@@ -242,20 +266,27 @@
             </div>
         </el-tab-pane>
         <el-tab-pane label="高级设置" name="2">
-            <div>
+            <div class="status-card">
+                <h3>配置文件</h3>
+                <div class="hint" style="margin-bottom:10px;">
+                    这里就是 <span class="uri">macast_setting.json</span> 的全部内容，直接编辑后保存，Macast 会自动重启生效。
+                    不熟悉各字段含义时建议改用菜单栏设置。保存会重置窗口位置等未在此处显示的运行时状态。
+                </div>
                 <el-input
                         type="textarea"
-                        :autosize="{ minRows: 2, maxRows: 20}"
+                        :autosize="{ minRows: 8, maxRows: 24}"
                         placeholder="Macast launch parameters"
                         v-model="textarea">
                 </el-input>
 
-                <el-tooltip class="item" effect="dark" content="Macast will be restarted" placement="right">
-                    <el-button :loading="connecting" :disabled="!is_json" v-on:click="save" round
-                               style="margin-top: 10px">Save
-                    </el-button>
-                </el-tooltip>
-                <p v-if="!is_json">json format error</p>
+                <div class="save-row">
+                    <el-tooltip class="item" effect="dark" content="Macast will be restarted" placement="right">
+                        <el-button type="primary" :loading="connecting" :disabled="!is_json" v-on:click="save" round>
+                            保存并重启
+                        </el-button>
+                    </el-tooltip>
+                    <span v-if="!is_json" class="json-error">JSON 格式有误，无法保存</span>
+                </div>
             </div>
         </el-tab-pane>
         <el-tab-pane label="日志" name="3">
@@ -449,18 +480,21 @@
 <div class='footer'></div>
 
 <script type="text/x-template" id="plugin">
-    <el-card class="box-card" shadow="hover">
-        <div slot="header" class="clearfix">
-            <span class="macast-plugin-name">{{ item.title }} </span>
-            <br/>
-            <div class="macast-plugin-header">
-                <span>{{ item.platform }}</span>
-                <el-tag size="small" :type="item.version_tag_type" effect="plain">{{ item.version_tag }}</el-tag>
-            </div>
+    <div class="plugin-card" :class="{ 'is-unavailable': !item.available }">
+        <div class="plugin-card-head">
+            <span class="plugin-card-name">{{ item.title }}</span>
+            <el-tag size="mini" :type="item.kind_tag_type" effect="plain">
+                {{ item.kind_label }}
+            </el-tag>
+            <el-tag v-if="item.builtin" size="mini" type="info" effect="plain">内置</el-tag>
+            <el-tag v-if="item.enabled" size="mini" type="success" effect="dark">启用中</el-tag>
         </div>
-        <div class="macast-plugin-content">{{ item.desc }}</div>
-
-        <div class="macast-plugin-footer">
+        <div class="plugin-card-meta">
+            <span class="plugin-card-platform">{{ item.platform }}</span>
+            <el-tag size="mini" :type="item.version_tag_type" effect="plain">{{ item.version_tag }}</el-tag>
+        </div>
+        <div class="plugin-card-desc">{{ item.desc || '暂无说明' }}</div>
+        <div class="plugin-card-foot">
             <div class="macast-plugin-avatar">
                 <el-avatar size="small" :src="circleUrl"></el-avatar>
                 <span class="macast-plugin-author">{{ item.author ? item.author : "Macast"  }}</span>
@@ -476,9 +510,8 @@
                     {{item.button_text}}
                 </el-button>
             </el-tooltip>
-
         </div>
-    </el-card>
+    </div>
 </script>
 
 <script type="text/javascript">
@@ -530,6 +563,8 @@
             repo_plugins: [],
             local_plugins: [],
             plugins: [],
+            plugin_groups: [],
+            repo_ok: true,
             repo_url: '',
             platform: '',
             macast_version: 0,
@@ -607,8 +642,22 @@
                 if (!dur) return 0;
                 return Math.max(0, Math.min(100, Math.round(pos / dur * 100)));
             },
+            protocol_list() {
+                // 后端返回的是协议名数组；直接插值会渲染成 ["DLNA", ...] 这样的
+                // 原始 JSON，这里拆成标签。
+                let p = this.status.server.protocol;
+                if (!p) return [];
+                return Array.isArray(p) ? p : [p];
+            },
+            server_ips() {
+                let ip = this.status.server.ip || '';
+                return String(ip).split('/').filter(s => s.length);
+            },
         },
         methods: {
+            has_value(v) {
+                return v !== null && v !== undefined && v !== '';
+            },
             registerPWA() {
                 this.isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
                 if ('serviceWorker' in navigator) {
@@ -814,17 +863,21 @@
                 }
             },
             async load_repo_plugin() {
+                // 插件仓库在 GitHub 上，访问不到是常态（国内网络尤其如此）。
+                // 它只是"可安装"分组的补充，失败不该弹错、更不该让页面一直
+                // 停在 loading —— 本机插件才是这个页面要回答的问题。
                 console.log('update plugin info')
                 let url = 'https://raw.githubusercontent.com/xfangfang/Macast-plugins/main/info.json'
-                return this.$http.get(url).then(res => {
+                return this.$http.get(url, {timeout: 6000}).then(res => {
                     this.repo_url = res.data.repo_url
                     this.repo_plugins = res.data.plugin_v1
+                    this.repo_ok = true
                     this.update_plugins();
-                    this.loading = false
                     return true;
                 }).catch(err => {
-                    console.log(err);
-                    this.$message.error('Error connecting to plugin repo.');
+                    console.log('plugin repo unavailable:', err);
+                    this.repo_ok = false
+                    this.update_plugins();
                     return false;
                 })
             },
@@ -832,17 +885,20 @@
                 let url = '/api?query=plugin-info'
                 return this.$http.get(url).then(res => {
                     console.log(res.data)
-                    this.macast_version = res.data.macast_version;
+                    this.macast_version = res.data.version;
                     this.platform = res.data.platform;
                     this.local_plugins = res.data.plugins;
                     this.plugins = []
                     this.$nextTick(() => {
                         this.update_plugins();
                     })
+                    // 本机插件拿到了就可以收工，不必等插件仓库。
+                    this.loading = false
                     return true;
                 }).catch(err => {
                     console.log(err)
-                    this.$message.error('Error connecting to Macast');
+                    this.loading = false
+                    this.$message.error('无法连接 Macast 服务');
                     return false;
                 })
             },
@@ -925,10 +981,21 @@
                     loading.close();
                 })
             },
+            plugin_kind(type) {
+                return type === 'renderer' ? '渲染器' : '协议'
+            },
+            decorate(data, extra) {
+                Object.assign(data, extra)
+                data.kind_label = this.plugin_kind(data.type)
+                data.kind_tag_type = data.type === 'renderer' ? 'warning' : 'primary'
+                // 唯一 key：内置插件没有 renderer/protocol 名，用标题区分。
+                data.key = `${data.plugin_type}:${data.type}:${data.title}`
+                return data
+            },
             update_plugins() {
                 this.plugins = [];
                 for (let p of this.local_plugins) {
-                    let data = {
+                    let data = this.decorate({
                         title: p.title,
                         platform: p.platform, //插件适配的操作系统
                         available: p.platform.indexOf(this.platform) !== -1, // 是否适配当前系统
@@ -941,12 +1008,13 @@
                         type: p.type, //插件类型：protocol / renderer
                         renderer: p.renderer,
                         protocol: p.protocol,
+                        enabled: !!p.enabled, // 协议是否正在运行
                         need_update: false, // 是否需要更新
                         plugin_type: p.default ? 'default' : 'local', // 插件类型：默认插件、本地插件（有无更新）、在线插件（是否适配当前系统）
                         hint: 'Macast will be restarted',
                         button_text: 'Update',
                         url: ''
-                    }
+                    }, { builtin: !!p.default })
                     this.plugins.push(data)
                 }
                 for (let p of this.repo_plugins) {
@@ -970,7 +1038,7 @@
                     }
                     if (!have_local) {
                         // 没有对应的本地插件
-                        let data = {
+                        let data = this.decorate({
                             title: p.title,
                             platform: p.platform, //插件适配的操作系统
                             available: p.platform.indexOf(this.platform) !== -1, // 是否适配当前系统
@@ -983,15 +1051,33 @@
                             type: p.type, //插件类型：protocol / renderer
                             renderer: p.renderer,
                             protocol: p.protocol,
+                            enabled: false,
                             need_update: true,
                             plugin_type: 'repo',
                             hint: 'Macast will be restarted',
                             button_text: 'Install',
                             url: p.url
-                        }
+                        }, { builtin: false })
                         this.plugins.push(data)
                     }
                 }
+                this.plugin_groups = this.build_plugin_groups()
+            },
+            build_plugin_groups() {
+                // 分组展示：内置插件混在一堆可安装插件里时，看不出哪个是
+                // 正在生效的接收协议 —— 这正是"插件页看不到"的原因。
+                const order = [
+                    { key: 'builtin', title: '内置', hint: '随 Macast 一起发布，开箱即用',
+                      match: p => p.plugin_type === 'default' },
+                    { key: 'local', title: '已安装', hint: '手动安装在本机的插件',
+                      match: p => p.plugin_type === 'local' },
+                    { key: 'repo', title: '可安装', hint: '来自在线插件仓库',
+                      match: p => p.plugin_type === 'repo' },
+                ]
+                return order
+                    .map(g => ({ key: g.key, title: g.title, hint: g.hint,
+                                 items: this.plugins.filter(g.match) }))
+                    .filter(g => g.items.length > 0)
             }
         }
     })
@@ -1010,45 +1096,65 @@
 
     /*plugin style*/
     .macast-plugins {
-        display: flex;
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        gap: 12px;
     }
 
-    .macast-plugin-name {
-        font-weight: bolder;
-        font-size: x-large;
+    .section-hint {
+        font-weight: 400; font-size: 12px; color: var(--text-soft);
+        margin-left: 8px;
     }
 
-    .macast-plugin-content {
-        margin: 10px;
-        height: 100px;
+    .plugin-group { margin-bottom: 6px; }
+
+    .plugin-loading { color: var(--text-soft); font-size: 13px; }
+
+    .plugin-card {
+        display: flex; flex-direction: column;
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 12px 14px;
+        transition: border-color .2s ease;
+    }
+    .plugin-card:hover { border-color: var(--accent); }
+    .plugin-card.is-unavailable { opacity: .55; }
+
+    .plugin-card-head {
+        display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+    }
+    .plugin-card-name {
+        font-weight: 700; font-size: 15px; color: var(--text);
+        margin-right: 2px;
+    }
+    .plugin-card-meta {
+        display: flex; align-items: center; gap: 8px;
+        margin-top: 8px; font-size: 12px; color: var(--text-soft);
+    }
+    .plugin-card-platform {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .plugin-card-desc {
+        flex: 1; margin-top: 10px; font-size: 13px; line-height: 1.6;
+        color: var(--text-soft);
+    }
+    .plugin-card-foot {
+        display: flex; align-items: center; justify-content: space-between;
+        margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border);
     }
 
     .macast-plugin-avatar {
         display: flex;
         align-items: center;
-        margin: 10px;
-    }
-
-    .macast-plugin-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-top: 10px;
-    }
-
-    .macast-plugin-footer {
-        display: flex;
-        justify-content: space-between;
     }
 
     .macast-plugin-install {
-        margin: 10px;
-        margin-right: 16px;
+        margin: 0;
     }
 
     .macast-plugin-author {
         margin-left: 8px;
+        font-size: 12px;
+        color: var(--text-soft);
     }
 
     .macast-plugin-repo {
@@ -1062,21 +1168,6 @@
 
     .item {
         margin-bottom: 18px;
-    }
-
-    .clearfix:before,
-    .clearfix:after {
-        display: table;
-        content: "";
-    }
-
-    .clearfix:after {
-        clear: both
-    }
-
-    .box-card {
-        width: 320px;
-        margin: 10px;
     }
 
     /*plugin style end*/

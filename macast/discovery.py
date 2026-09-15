@@ -18,7 +18,7 @@ import threading
 
 from zeroconf import Zeroconf, ServiceInfo
 
-from .utils import Setting
+from .utils import Setting, SettingProperty
 
 logger = logging.getLogger("Discovery")
 
@@ -119,21 +119,109 @@ def _normalize_server(host):
     return host + "."
 
 
-def _local_addresses():
-    """Return the list of local IPv4 addresses as 4-byte packed strings."""
-    addrs = []
+def _is_advertisable(addr, netmask):
+    """Whether an IPv4 address is worth publishing on a LAN.
+
+    Rejects the addresses that are perfectly valid locally but unreachable from
+    any other device: loopback, link-local, point-to-point tunnels (netmask
+    /32) and the CGNAT range 100.64/10 that Tailscale and similar overlays use.
+    """
+    if not addr or addr.startswith("127.") or addr.startswith("169.254."):
+        return False
+    if netmask in ("255.255.255.255", "32"):
+        return False
+    parts = addr.split(".")
+    if len(parts) != 4:
+        return False
     try:
-        for ip, _netmask in Setting.get_ip():
-            try:
-                addrs.append(socket.inet_aton(ip))
-            except OSError:
-                continue
+        if parts[0] == "100" and 64 <= int(parts[1]) <= 127:
+            return False
+    except ValueError:
+        return False
+    return True
+
+
+def _advertisable_interfaces():
+    """Interfaces whose addresses other devices on the LAN can actually reach.
+
+    ``Setting.get_ip()`` is deliberately permissive: it treats every interface
+    that carries *any* gateway entry as usable, including the ``AF_LINK`` ones.
+    On a machine running VMs or Tailscale that pulls in VM bridges and the
+    Tailscale utun, so it returns five addresses where only one -- the Wi-Fi
+    one -- is reachable by a phone.
+
+    For mDNS that matters more than anywhere else: zeroconf publishes *every*
+    address as an A record for the SRV host, so a sender resolving the device
+    gets five answers, picks (roughly) at random, and usually fails to connect.
+    The device is discovered and then cannot be cast to.
+
+    We therefore advertise only the interface carrying the IPv4 default route,
+    plus anything the user explicitly asked for via ``Additional_Interfaces``.
+    """
+    try:
+        import netifaces as ni
+    except ImportError:  # pragma: no cover - netifaces is a hard dep
+        return None
+
+    blocked = set(Setting.get(SettingProperty.Blocked_Interfaces, []))
+    extra = set(Setting.get(SettingProperty.Additional_Interfaces, []))
+    ifaces = set()
+    try:
+        gateways = ni.gateways() or {}
+        for entry in gateways.get(ni.AF_INET, []):
+            # ('192.168.1.1', 'en0', True) -- last item marks the default route
+            if len(entry) > 1:
+                ifaces.add(entry[1])
     except Exception as e:  # pragma: no cover - defensive
-        logger.warning("Failed to enumerate local addresses: %s", e)
+        logger.debug("Could not read IPv4 gateways: %s", e)
+    ifaces |= extra
+    ifaces -= blocked
+    return ifaces or None
+
+
+def advertisable_addresses():
+    """IPv4 addresses on this host that other devices can actually reach.
+
+    Public counterpart of ``_local_addresses()``; also used by the status page
+    so it reports the address a phone would connect to rather than every
+    address on the machine.
+    """
+    ifaces = _advertisable_interfaces()
+    addrs = []
+    if ifaces:
+        try:
+            import netifaces as ni
+            for name in ifaces:
+                try:
+                    addrs_v4 = ni.ifaddresses(name).get(ni.AF_INET, [])
+                except ValueError:
+                    continue
+                for entry in addrs_v4:
+                    ip = entry.get("addr")
+                    if _is_advertisable(ip, entry.get("netmask", "")):
+                        addrs.append(ip)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to enumerate local addresses: %s", e)
+
+    # Fall back to the DLNA address set, minus the addresses we know are
+    # unreachable, so a host with an unusual network still advertises something.
     if not addrs:
-        # Fallback: loopback so registration at least succeeds locally.
-        addrs = [socket.inet_aton("127.0.0.1")]
+        try:
+            for ip, netmask in Setting.get_ip():
+                if _is_advertisable(ip, netmask):
+                    addrs.append(ip)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to enumerate local addresses: %s", e)
+
+    if not addrs:
+        # Last resort: loopback, so registration at least succeeds locally.
+        addrs = ["127.0.0.1"]
     return addrs
+
+
+def _local_addresses():
+    """Return the addresses to publish, as 4-byte packed strings."""
+    return [socket.inet_aton(a) for a in advertisable_addresses()]
 
 
 class MDNSAdvertiser:
@@ -174,15 +262,18 @@ class MDNSAdvertiser:
                 txt[k] = v.encode("utf-8")
             else:
                 txt[k] = v
-        if server:
-            server = _normalize_server(server)
-        else:
-            # macOS already reports a hostname ending in ".local"; appending a
-            # second one yields "My-Mac.local.local." in the SRV record.
-            server = _normalize_server(socket.gethostname())
         safe_name = sanitize_instance_name(name, service_type)
         if safe_name != name:
             logger.info("mDNS name %r normalised to %r for DNS-SD", name, safe_name)
+        if server:
+            server = _normalize_server(server)
+        else:
+            # Default the SRV target to a hostname derived from the service
+            # instance, the way a real Chromecast does, rather than the machine
+            # hostname. The machine name is already advertised by the OS with
+            # its own (possibly different) addresses; publishing ours under a
+            # name we own keeps the A records consistent with what we publish.
+            server = _normalize_server(safe_name.split(".")[0])
         info = ServiceInfo(
             service_type,
             safe_name,

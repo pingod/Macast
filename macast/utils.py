@@ -89,7 +89,7 @@ class Setting:
                 try:
                     with open(Setting.setting_path, "r") as f:
                         Setting.setting = json.load(fp=f)
-                    logger.error(Setting.setting)
+                    logger.info("Loaded settings from %s", Setting.setting_path)
                 except Exception as e:
                     logger.error(e)
         return Setting.setting
@@ -243,6 +243,32 @@ class Setting:
         """
         Setting.setting[property.name] = data
         Setting.save()
+
+    @staticmethod
+    def has(property):
+        """Whether a key is present, without get()'s insert-on-read side effect.
+
+        Setting.get() stores the default it was handed when the key is missing,
+        so asking for a key with a None default *creates* it -- as JSON `null`.
+        Use this to test for presence.
+        """
+        if not bool(Setting.setting):
+            Setting.load()
+        return property.name in Setting.setting
+
+    @staticmethod
+    def unset(property):
+        """Remove a settings key outright.
+
+        Setting.set(key, None) would persist a JSON `null`, which reads back as
+        a present-but-empty value; a migration wants the key gone. Note the
+        save happens whenever the key existed, even if its value was falsy.
+        """
+        if not bool(Setting.setting):
+            Setting.load()
+        if property.name in Setting.setting:
+            Setting.setting.pop(property.name)
+            Setting.save()
 
     @staticmethod
     def system_shell(shell):

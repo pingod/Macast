@@ -18,6 +18,7 @@ from enum import Enum
 from cherrypy import _cpnative_server
 
 from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR
+from .discovery import advertisable_addresses
 
 logger = logging.getLogger("Protocol")
 logger.setLevel(logging.INFO)
@@ -1163,11 +1164,15 @@ class Handler:
             # (falling back to the legacy single value for older installs).
             'protocol': Setting.get(SettingProperty.Macast_Protocols, [])
             or ([Setting.get(SettingProperty.Macast_Protocol, '')]
-                if Setting.get(SettingProperty.Macast_Protocol, '') else []),
+                if Setting.has(SettingProperty.Macast_Protocol) else []),
             'platform': sys.platform,
             'system': Setting.get_system(),
             'system_version': Setting.get_system_version(),
-            'ip': '/'.join(str(ip) for ip, _ in Setting.get_ip()),
+            # Only the addresses a phone can actually reach; Setting.get_ip()
+            # also lists VM bridges and Tailscale tunnels, which is noise here
+            # and actively misleading when diagnosing "I can see it but casting
+            # fails" (the sender may have picked one of the dead addresses).
+            'ip': '/'.join(advertisable_addresses()),
             'https_enabled': Setting.is_https_enabled(),
             'https_port': Setting.get_https_port() if Setting.is_https_enabled() else None,
         }
