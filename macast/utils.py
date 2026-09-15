@@ -58,6 +58,10 @@ class SettingProperty(Enum):
     # this covers renderer plugins, which are only ever instantiated on demand
     # and so need their own off-switch to be "unloaded" rather than "unused".
     Disabled_Plugins = 17
+    # Secret that authenticates management calls arriving from outside the
+    # loopback interface. Persisted (rather than generated per run) so a phone
+    # Shortcut or a script can be configured once; shown on the settings page.
+    Api_Token = 18
 
 
 def unadvertisable_reason(addr, netmask):

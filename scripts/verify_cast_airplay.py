@@ -2029,6 +2029,184 @@ finally:
     _shutil.rmtree(_tmp_root, ignore_errors=True)
 
 # --------------------------------------------------------------------------
+# Part 12: the web cast entry point (GET /api?query=cast)
+#
+# Anything that can only open a URL -- a phone Shortcut, a bookmarklet, curl --
+# can now start playback. Two properties matter and neither is visible from the
+# code alone:
+#
+#   1. the token has to survive a restart, otherwise every configured Shortcut
+#      breaks the next time Macast is opened. It used to be per-process and was
+#      never displayed anywhere, which made the whole management API
+#      unreachable from another device;
+#   2. a GET that starts playback is reachable by *any page the user visits*
+#      (an <img src="http://127.0.0.1:58880/api?query=cast&...">), so unlike the
+#      POST flavour it must demand the token even from the loopback interface.
+#
+# CherryPy hands out a dummy loopback request outside a served request, so the
+# gate can be driven for real here instead of being asserted from source.
+# --------------------------------------------------------------------------
+print("\n=== Part 12: web cast entry ===")
+try:
+    import cherrypy as _cherrypy
+
+    _saved_setting4 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir4 = utils.SETTING_DIR
+    _tmp4 = _tempfile.mkdtemp(prefix="macast-webcast-")
+    try:
+        utils.SETTING_DIR = _tmp4
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp4, "macast_setting.json")
+
+        _token = protocol.api_token()
+        check("the management token is generated once and looks like a secret",
+              _token == protocol.api_token() and len(_token) == 32, repr(_token))
+
+        utils.Setting.setting = {}      # pretend the process was restarted
+        check("the management token survives a restart",
+              protocol.api_token() == _token, repr(protocol.api_token()))
+        check("the token is persisted in the settings, not just in memory",
+              utils.Setting.get(utils.SettingProperty.Api_Token, '') == _token,
+              repr(utils.Setting.setting.get('Api_Token')))
+
+        class _Target(object):
+            """Stands in for the protocol a cast is handed to."""
+
+            def __init__(self):
+                self.calls = []
+                self.fail = False
+
+            def cast_uri(self, uri, title=''):
+                if self.fail:
+                    raise RuntimeError('renderer exploded')
+                self.calls.append((uri, title))
+
+        class _Handler(protocol.Handler):
+            # Skips the real __init__ (it reads the settings page off disk and
+            # creates the local-files directory) -- neither is needed here.
+            def __init__(self, target):
+                self._target = target
+
+            @property
+            def protocol(self):
+                return self._target
+
+        target = _Target()
+        handler = _Handler(target)
+        request = _cherrypy.serving.request
+        _saved_params = request.params
+        _saved_remote = getattr(request, 'remote', None)
+        _saved_scheme = request.scheme
+        _saved_headers = dict(request.headers)
+        # GET answers 503 when the service is not up, and this suite never
+        # starts one. Everything below is about the gate and the payload, so
+        # the "is the engine running" check is the one thing that gets stubbed.
+        _saved_running = utils.Setting.is_service_running
+        utils.Setting.is_service_running = staticmethod(lambda: True)
+        try:
+            def _reset(ip='127.0.0.1', token=None, scheme='http'):
+                request.headers.clear()
+                for _k, _v in _saved_headers.items():
+                    request.headers[_k] = _v
+                request.params = {'token': token} if token else {}
+                request.remote = types.SimpleNamespace(ip=ip)
+                request.scheme = scheme
+                return request
+
+            def _get(**kw):
+                return json.loads(handler.GET(param='api', **kw).decode())
+
+            def _post(**kw):
+                return json.loads(handler.POST(**kw).decode())
+
+            # -- the drive-by guard ----------------------------------------
+            _reset()
+            check("loopback is still trusted for the management API",
+                  handler._management_allowed() is True)
+            check("but a GET cast is refused without the token, even locally",
+                  _get(query='cast', url='http://x/y.mp4')['code'] == 403,
+                  str(_get(query='cast', url='http://x/y.mp4')))
+            check("a refused cast starts nothing", target.calls == [], str(target.calls))
+
+            _reset(token=_token)
+            res = _get(query='cast', url='http://x/y.mp4', title='movie')
+            check("the token in the query string authorises a GET cast",
+                  res.get('code') == 0 and target.calls == [('http://x/y.mp4', 'movie')],
+                  "{} / {}".format(res, target.calls))
+
+            _reset()
+            request.headers['X-Macast-Token'] = _token
+            target.calls = []
+            res = _get(query='cast', url='http://x/y2.mp4')
+            check("the token header authorises a GET cast too (what scripts use)",
+                  res.get('code') == 0 and target.calls == [('http://x/y2.mp4', '')],
+                  "{} / {}".format(res, target.calls))
+
+            _reset(ip='192.168.1.9')
+            check("a LAN caller without the token is not trusted",
+                  handler._management_allowed() is False)
+            _reset(ip='192.168.1.9', token=_token)
+            check("a LAN caller with the token is trusted",
+                  handler._management_allowed() is True)
+            _reset(ip='192.168.1.9', scheme='https')
+            check("the HTTPS admin channel is still trusted without a token",
+                  handler._management_allowed() is True)
+
+            # -- validation -------------------------------------------------
+            _reset(token=_token)
+            target.calls = []
+            check("a cast without a url is rejected",
+                  _get(query='cast')['code'] == 1, str(_get(query='cast')))
+            check("a relative url is rejected before it reaches the player",
+                  _get(query='cast', url='/tmp/movie.mp4')['code'] == 1,
+                  str(_get(query='cast', url='/tmp/movie.mp4')))
+            check("nothing was cast by the rejected requests",
+                  target.calls == [], str(target.calls))
+
+            target.fail = True
+            check("a renderer failure is reported as a failed cast, not a crash",
+                  _get(query='cast', url='http://x/y.mp4')['code'] == 1)
+            target.fail = False
+
+            # -- cast-info (the token must not leak to the LAN) --------------
+            _reset(token=_token)
+            res = _get(query='cast-info')
+            check("cast-info hands the page the token and the port",
+                  res.get('token') == _token and res.get('port') == utils.Setting.get_port(),
+                  str(res))
+            _reset(ip='192.168.1.9')
+            check("cast-info refuses to leak the token to the LAN",
+                  _get(query='cast-info').get('code') == 403,
+                  str(_get(query='cast-info')))
+
+            # -- the POST flavour keeps working for the local page ----------
+            _reset()
+            target.calls = []
+            res = _post(**{'cast-uri': 'http://x/z.mp4'})
+            check("POST cast-uri still works from the page",
+                  res.get('code') == 0 and target.calls == [('http://x/z.mp4', '')],
+                  "{} / {}".format(res, target.calls))
+            _reset(ip='192.168.1.9')
+            check("POST cast-uri still refuses an untokened LAN caller",
+                  _post(**{'cast-uri': 'http://x/z.mp4'}).get('code') == 403)
+        finally:
+            request.params = _saved_params
+            request.remote = _saved_remote
+            request.scheme = _saved_scheme
+            request.headers.clear()
+            for _k, _v in _saved_headers.items():
+                request.headers[_k] = _v
+            utils.Setting.is_service_running = staticmethod(_saved_running)
+    finally:
+        utils.SETTING_DIR = _saved_dir4
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting4
+        _shutil.rmtree(_tmp4, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("web cast entry behaves", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 passed = sum(1 for _, ok, _ in RESULTS if ok)

@@ -112,6 +112,11 @@
             border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
         }
         .cast-box .hint { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+        .cast-example {
+            margin: 10px 0 0; padding: 8px 10px; border-radius: 8px;
+            background: var(--panel-2, rgba(127,127,127,.12)); border: 1px solid var(--border);
+            font-size: 12px; font-family: monospace; white-space: pre-wrap; word-break: break-all;
+        }
         .history-item {
             display: flex; align-items: center; justify-content: space-between;
             padding: 8px 0; border-bottom: 1px solid var(--border);
@@ -226,6 +231,33 @@
                         <el-button size="small" type="primary" icon="el-icon-upload">选择文件并投屏</el-button>
                     </el-upload>
                     <div class="hint">文件仅在本机临时目录暂存并通过 127.0.0.1 推送给播放器，关闭应用后不会外传。</div>
+                </div>
+
+                <div class="cast-box">
+                    <div style="font-weight:600;margin-bottom:8px;">网页投屏入口</div>
+                    <div class="hint" style="margin-top:0;margin-bottom:8px;">
+                        让脚本、iOS 快捷指令、书签或任何能打开网址的东西直接投屏 —— 不用走 DLNA 发现。
+                        「url」填媒体的绝对地址（http / https / rtsp 均可）。
+                    </div>
+                    <div class="install-row">
+                        <el-input v-model="cast_endpoint" size="small" readonly
+                                  class="install-url"></el-input>
+                        <el-button size="small" icon="el-icon-document-copy"
+                                   @click="copy_text(cast_endpoint)">复制地址</el-button>
+                    </div>
+                    <div class="install-row" style="margin-top:6px;">
+                        <span class="hint" style="margin:0 6px 0 0;">令牌</span>
+                        <el-input v-model="cast_info.token" size="small" readonly
+                                  class="install-url"></el-input>
+                        <el-button size="small" icon="el-icon-key"
+                                   @click="copy_text(cast_info.token)">复制令牌</el-button>
+                    </div>
+                    <pre class="cast-example">{{ cast_example }}</pre>
+                    <div class="hint">
+                        令牌是必须的（即使是本机）：网页里的一个 GET 就能触发投屏，
+                        不能让随便哪个网页顺手指使你的 Mac 播东西。
+                        快捷指令用「获取 URL 内容」GET 上面这条地址即可，令牌加在 token 参数里。
+                    </div>
                 </div>
 
                 <div class="status-card">
@@ -726,6 +758,8 @@
             repo_url: '',
             platform: '',
             macast_version: 0,
+            // 网页投屏入口：token + 端口由 /api?query=cast-info 下发
+            cast_info: {token: '', port: 0},
 
 
             //setting
@@ -777,6 +811,7 @@
             this.get_log();
             this.load_status();
             this.load_interfaces();
+            this.load_cast_info();
             this.status_interval = setInterval(() => this.load_status(), 3000);
             this.registerPWA();
         },
@@ -819,6 +854,22 @@
             server_ips() {
                 let ip = this.status.server.ip || '';
                 return String(ip).split('/').filter(s => s.length);
+            },
+            cast_host() {
+                // Prefer the address other devices can actually reach; the
+                // page itself may be open over loopback.
+                return this.server_ips.length ? this.server_ips[0] : '127.0.0.1';
+            },
+            cast_endpoint() {
+                let port = this.cast_info.port || 58880;
+                return `http://${this.cast_host}:${port}/api?query=cast`;
+            },
+            cast_example() {
+                // A copy-pasteable one-liner. The sample URL is encoded so the
+                // example itself demonstrates that `url` must be percent-encoded.
+                let sample = encodeURIComponent('https://example.com/movie.mp4');
+                let token = this.cast_info.token || '<token>';
+                return `curl -s "${this.cast_endpoint}?url=${sample}&token=${token}"`;
             },
             net_options() {
                 // One row per interface: a NIC can hold several IPv4 addresses,
@@ -1017,6 +1068,45 @@
                     return false;
                 });
             },
+            async load_cast_info() {
+                // 令牌在 状态 → 网页投屏入口 里给用户看，用来配快捷指令/脚本。
+                return this.$http.get('/api?query=cast-info').then(res => {
+                    this.cast_info = res.data || this.cast_info;
+                    return true;
+                }).catch(err => {
+                    console.log('cast-info unavailable:', err);
+                    return false;
+                });
+            },
+            async copy_text(text) {
+                // navigator.clipboard 只在安全上下文可用（http://127.0.0.1 算，
+                // 局域网 IP 不算），所以要有 execCommand 兜底。
+                if (!text) return;
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        await navigator.clipboard.writeText(text);
+                        this.$message.success('已复制');
+                        return;
+                    }
+                } catch (e) {
+                    console.log('clipboard api failed:', e);
+                }
+                let ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                let ok = false;
+                try {
+                    ok = document.execCommand('copy');
+                } catch (e) {
+                    console.log('execCommand copy failed:', e);
+                }
+                document.body.removeChild(ta);
+                ok ? this.$message.success('已复制') : this.$message.warning('复制失败，请手动选中');
+            },
             cast_history(uri) {
                 let fd = new window.FormData();
                 fd.append('cast-uri', uri);
@@ -1109,6 +1199,7 @@
                         this.set_history(page_name);
                         this.load_status();
                         this.load_interfaces();
+                        this.load_cast_info();
                         break;
                     case '11':
                         this.set_history(page_name);
