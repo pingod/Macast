@@ -1134,7 +1134,18 @@
                 for (let i = 0; i < urls.length; i++) {
                     try {
                         const res = await this.$http.get(urls[i], {timeout: 6000});
-                        const data = res.data || {};
+                        // vue-resource 只在响应"看起来像 JSON"时才解析它，而 raw
+                        // 域名返回的 Content-Type 是 text/plain。正常情况下靠内容
+                        // 启发式也能解析，但代理/门户插进来的 HTML 会原样留成字符串
+                        // —— 那就该算这次拉取失败、去试下一个地址，而不是当成
+                        // "索引是空的"。
+                        let data = res.data;
+                        if (typeof data === 'string') {
+                            data = JSON.parse(data);
+                        }
+                        if (!data || typeof data !== 'object') {
+                            throw new Error('malformed plugin index');
+                        }
                         this.repo_url = data.repo_url || this.repo_url;
                         // 索引为空是本仓库的默认状态（插件都已内置），不是错误。
                         this.repo_plugins = data.plugin_v1 || [];
