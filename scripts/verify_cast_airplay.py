@@ -1134,6 +1134,15 @@ try:
     check("raw.githubusercontent is tried before the mirror",
           _repo_info["index_urls"][0].startswith("https://raw.githubusercontent.com/"),
           _repo_info["index_urls"][0])
+    # jsDelivr caches branch files for hours, so an index served from it can be
+    # stale. It is the last resort, never the first choice, and something that
+    # proxies raw on demand has to come before it.
+    check("something fresher than the caching CDN is tried before it",
+          "jsdelivr" not in str(_repo_info["index_urls"][:-1]),
+          str(_repo_info["index_urls"]))
+    check("the caching CDN is only the last resort",
+          "jsdelivr" in _repo_info["index_urls"][-1],
+          _repo_info["index_urls"][-1])
     check("the repository button has somewhere to go",
           _repo_info.get("repo_url", "").startswith("https://github.com/" + repo_mod.REPO),
           repr(_repo_info.get("repo_url")))
@@ -1170,8 +1179,12 @@ try:
     for _entry in _index["plugin_v1"]:
         check("index entry {} carries every field the page needs".format(
                   _entry.get("title")),
+              # The query string is stripped first, exactly as install_url does
+              # (`os.path.basename(url.split('?')[0])`): a cache-busting ?v= is
+              # legitimate on a .py url.
               bool(_entry.get("title") and _entry.get("version")
-                   and _entry.get("platform") and _entry.get("url", "").endswith(".py"))
+                   and _entry.get("platform")
+                   and _entry.get("url", "").split("?")[0].endswith(".py"))
               and _entry.get("type") in ("renderer", "protocol")
               and bool(_entry.get("renderer") or _entry.get("protocol")),
               str(_entry))
@@ -1197,6 +1210,16 @@ try:
               _bundled.get(_class_key) == _entry.get(_class_key),
               "manifest={!r} index={!r}".format(_bundled.get(_class_key),
                                                 _entry.get(_class_key)))
+        # Installation goes through the caching CDN, so the url has to carry a
+        # cache-busting query that moves when the version does -- otherwise a
+        # freshly bumped entry installs the previous file, and the page keeps
+        # offering the same "update" forever.
+        if "jsdelivr" in _entry.get("url", ""):
+            check("{} url is cache-busted with its own version".format(_fname),
+                  _entry["url"].split("?", 1)[-1] == "v=" + str(_entry.get("version")),
+                  _entry.get("url"))
+        else:
+            check("{} url does not need cache busting".format(_fname), True)
 
     _html_path = os.path.join(MACAST, "xml", "setting.html")
     with open(_html_path, "r", encoding="utf-8") as _f:

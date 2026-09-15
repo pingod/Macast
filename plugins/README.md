@@ -54,12 +54,14 @@
 `/api?query=plugin-info` 下发，设置页本身不写死任何 URL：
 
 ```
-https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json   # 首选
-https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/info.json         # 镜像回退
+https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json      # 首选，永远最新
+https://ghproxy.net/https://raw.githubusercontent.com/.../info.json        # 国内可达，也是最新的
+https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/info.json            # 垫底：会缓存数小时
 ```
 
-设置页按顺序试，第一个能通的即采用；两个都不通就只显示本机插件，并给一句提示。
-国内网络下 raw 域名常年不可达，jsDelivr 通常还行，所以顺序不要反过来。
+设置页按顺序试，第一个能通的即采用；三个都不通就只显示本机插件，并给一句提示。
+jsDelivr 垫底是因为它**缓存分支文件**（可能给出过期索引）；ghproxy 类镜像按需代理 raw，
+拿到的是最新内容。改这个顺序前先想清楚「新插件多久能被看到」。
 
 > 浏览器直接抓取要求对方返回 CORS 头 —— raw.githubusercontent.com 与
 > cdn.jsdelivr.net 都满足；如果将来换成别的托管，先确认这一点。
@@ -98,9 +100,15 @@ https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/info.json         # 镜�
 `url` 指向本目录里的文件即可，例如 `plugins/some_renderer.py`。
 
 **为什么 yt-dlp 插件的 `url` 用 jsDelivr 而不是 raw**：插件安装是在 **Python 侧**
-用 `requests` 拉的（`MacastPluginManager.install_url`），没有设置页那种浏览器镜像
-回退，而国内 raw 经常拉不动。代价是 jsDelivr 对分支引用有缓存，更新插件后可能延迟
-可见；要立刻拿到新版，可把 raw 直链粘到设置页的「从网址安装」里。
+用 `requests` 拉的（`MacastPluginManager.install_url`），没有设置页那种浏览器多地址
+回退，而国内 raw 经常拉不动。
+
+**必须带 `?v=<版本>` 破缓存**：jsDelivr 会缓存分支文件，不带查询串时版本号涨了也还是
+装到旧文件，设置页会一直显示「可更新」。所以改 `<macast.version>` 时**同一次提交**里
+也要改 `url` 的 `?v=`。Part 5c 会校验两者一致（顺便说明：带查询串不违反 `install_url`
+的 `.py` 校验，它本来就先 `split('?')[0]`）。
+
+ghproxy 挂了或 jsDelivr 抽风时，把 raw 直链粘到设置页的「从网址安装」即可。
 
 > ⚠️ `info.json` 里的条目必须和 `.py` 顶部的 `<macast.*>` 清单一致
 > （title / version / platform / 类名）。不一致的后果是「显示一个版本，装上去是另一个」，
