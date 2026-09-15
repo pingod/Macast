@@ -1101,6 +1101,101 @@ except Exception as e:
     check("bundled plugins behave", False, "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
+# Part 5c: the plugin index moved off the upstream collection repo
+#
+# Every plugin xfangfang/Macast-plugins publishes is bundled in-tree now, so
+# the settings page reads this fork's own `plugins/info.json` (empty on
+# purpose) instead. Three things are easy to break here and all three fail
+# silently in the browser, hence the checks:
+#
+#   1. more than one index host, and in the right order -- raw.githubusercontent
+#      is unreachable from mainland China far more often than the jsDelivr
+#      mirror that backs it up;
+#   2. setting.html must not hardcode a repository address again. That is
+#      exactly how every bundled plugin got a duplicate card plus a bogus
+#      "update available" badge pointing back upstream;
+#   3. the index file must stay loadable and must not re-list anything the app
+#      already ships.
+# --------------------------------------------------------------------------
+print("\n=== Part 5c: plugin index ===")
+try:
+    repo_mod = _load("plugin_repo", "plugin_repo.py")
+    _repo_info = repo_mod.describe()
+
+    check("plugin index describes more than one host to try",
+          isinstance(_repo_info.get("index_urls"), list)
+          and len(_repo_info["index_urls"]) >= 2, str(_repo_info))
+    check("plugin index points at this fork, not the upstream collection",
+          all("xfangfang" not in _u for _u in _repo_info["index_urls"]),
+          str(_repo_info["index_urls"]))
+    check("plugin index URLs carry both the repo and the index path",
+          all(repo_mod.REPO in _u and repo_mod.INDEX_PATH in _u
+              for _u in _repo_info["index_urls"]), str(_repo_info["index_urls"]))
+    check("raw.githubusercontent is tried before the mirror",
+          _repo_info["index_urls"][0].startswith("https://raw.githubusercontent.com/"),
+          _repo_info["index_urls"][0])
+    check("the repository button has somewhere to go",
+          _repo_info.get("repo_url", "").startswith("https://github.com/" + repo_mod.REPO),
+          repr(_repo_info.get("repo_url")))
+
+    _index_file = os.path.join(REPO, repo_mod.INDEX_PATH)
+    check("the plugin index lives in the repo", os.path.isfile(_index_file),
+          _index_file)
+    with open(_index_file, "r", encoding="utf-8") as _f:
+        _index = json.load(_f)
+    check("the plugin index has the fields the settings page reads",
+          isinstance(_index.get("plugin_v1"), list)
+          and _index.get("repo_url", "").startswith("https://github.com/"),
+          str(sorted(_index.keys())))
+
+    # Nothing offered for install may be a plugin the app already bundles --
+    # that is the duplicate-card failure mode this whole part exists for.
+    try:
+        _read_manifest = macast_mod._read_plugin_metadata
+    except NameError:
+        _read_manifest = _load("macast", "macast.py")._read_plugin_metadata
+    _bundled_titles = set()
+    for _kind in ("renderer", "protocol"):
+        _kind_dir = os.path.join(MACAST, "plugins", _kind)
+        for _fname in sorted(os.listdir(_kind_dir)):
+            if _fname.endswith(".py") and not _fname.startswith("__"):
+                _bundled_titles.add(
+                    _read_manifest(os.path.join(_kind_dir, _fname)).get("title"))
+    _offered = [e.get("title") for e in _index["plugin_v1"]]
+    check("the index never re-lists a bundled plugin",
+          not (set(_offered) & _bundled_titles),
+          "offered={} bundled={}".format(sorted(set(_offered)),
+                                         sorted(_bundled_titles)))
+    # A filled-in entry has to be installable by the page as-is.
+    for _entry in _index["plugin_v1"]:
+        check("index entry {} carries every field the page needs".format(
+                  _entry.get("title")),
+              bool(_entry.get("title") and _entry.get("version")
+                   and _entry.get("platform") and _entry.get("url", "").endswith(".py"))
+              and _entry.get("type") in ("renderer", "protocol")
+              and bool(_entry.get("renderer") or _entry.get("protocol")),
+              str(_entry))
+
+    _html_path = os.path.join(MACAST, "xml", "setting.html")
+    with open(_html_path, "r", encoding="utf-8") as _f:
+        _html = _f.read()
+    _upstream = [ln.strip() for ln in _html.splitlines() if "Macast-plugins" in ln]
+    check("the settings page no longer reads the upstream plugin repo",
+          not _upstream, str(_upstream[:2]))
+    check("the settings page takes the index URLs from the backend",
+          "index_urls" in _html and "plugin_repo" in _html)
+    check("the settings page hides the repository button without a URL",
+          'v-if="repo_url"' in _html)
+    with open(os.path.join(MACAST, "protocol.py"), "r", encoding="utf-8") as _f:
+        _proto_src = _f.read()
+    check("plugin-info hands the index coordinates to the page",
+          "plugin_repo.describe()" in _proto_src)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("plugin index behaves", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Part 6: running several protocols at once (ProtocolGroup)
 #
 # Macast historically ran ONE protocol; the group lets DLNA + Chromecast +

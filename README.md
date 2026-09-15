@@ -5,7 +5,7 @@
 [![visitor](https://visitor-badge.glitch.me/badge?page_id=xfangfang.Macast)](https://github.com/xfangfang/Macast/releases/latest)
 ![stars](https://img.shields.io/badge/dynamic/json?label=github%20stars&query=stargazers_count&url=https%3A%2F%2Fapi.github.com%2Frepos%2Fxfangfang%2FMacast)
 [![downloads](https://img.shields.io/github/downloads/xfangfang/Macast/total?color=blue)](https://github.com/xfangfang/Macast/releases/latest)
-[![plugins](https://shields-staging.herokuapp.com/github/directory-file-count/xfangfang/Macast-plugins?type=dir&label=plugins)](https://github.com/xfangfang/Macast-plugins)
+[![plugins](https://img.shields.io/badge/plugins-6%20built--in-blueviolet)](https://github.com/pingod/Macast/tree/main/macast/plugins)
 [![pypi](https://img.shields.io/pypi/v/macast)](https://pypi.org/project/macast/)
 [![aur](https://img.shields.io/aur/version/macast-git?color=yellowgreen)](https://aur.archlinux.org/packages/macast-git/)
 [![build](https://img.shields.io/github/workflow/status/xfangfang/Macast/Build%20Macast)](https://github.com/xfangfang/Macast/actions/workflows/build-macast.yaml)
@@ -63,14 +63,14 @@ settings page **without restarting**. See [README_ZH.md](README_ZH.md) for the f
 After opening this app, a small icon will appear in the **menubar** / **taskbar** / **desktop panel**, then you can push your media files from a local DLNA client to your computer.
 
 - **For advanced users**  
-  1. By loading the [Macast-plugins](https://github.com/xfangfang/Macast-plugins), Macast can support third-party players like IINA and PotPlayer.  
-  For more information, see: [#how-to-use-third-party-player-plug-in](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-use-third-party-player-plug-in)
+  1. The renderers that used to need a download — **IINA, Web, Live, PotPlayer, PIFMRDS**, plus the **NVA** protocol — now ship **inside** the app. Enable, disable or uninstall them on the settings page, no restart needed.  
+  Anything still offered as an installable plugin lives in [plugins/](plugins/) (empty for now).
   2. You can modify the shortcut keys or configuration of the default mpv player by yourself, see: [#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **For developer**  
 You can use a few lines of code to add support for other players like IINA and PotPlayer or even add additional features, like downloading media files while playing videos.  
 Tutorials and examples are shown in: [Macast/wiki/Custom-Renderer](https://github.com/xfangfang/Macast/wiki/Custom-Renderer).  
-Fell free to submit a pull request to [Macast-plugins](https://github.com/xfangfang/Macast-plugins).  
+Bundled plugins live in [macast/plugins/](macast/plugins/); for anything else, open a pull request or an issue on [pingod/Macast](https://github.com/pingod/Macast).  
 
 
 ## FAQ

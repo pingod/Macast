@@ -18,6 +18,7 @@ from cherrypy import _cpnative_server
 
 from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR
 from .discovery import advertisable_addresses
+from . import plugin_repo
 
 logger = logging.getLogger("Protocol")
 logger.setLevel(logging.INFO)
@@ -1383,7 +1384,12 @@ class Handler:
                 res = {
                     'platform': sys.platform,
                     'version': Setting.version,
-                    'plugins': info
+                    'plugins': info,
+                    # Where to look for installable plugins. The page used to
+                    # hardcode the upstream repo; handing it over here keeps
+                    # the coordinates in one Python-side place (see
+                    # macast/plugin_repo.py) and lets the suite assert on them.
+                    'plugin_repo': plugin_repo.describe(),
                 }
             elif query == 'status':
                 res = self.get_status()

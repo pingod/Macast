@@ -197,8 +197,13 @@
                 </div>
             </div>
             <p v-if="loading" class="plugin-loading">正在读取插件列表…</p>
-            <a :href="this.repo_url" target="_blank">
-                <el-tooltip class="item" effect="dark" content="打开插件仓库" placement="left">
+            <!-- 本仓库的 plugins/ 目录当前是空的（插件都内置了），"索引为空"是
+                 正常状态，不该当错误报；只有真的拉不到索引才提示。 -->
+            <p v-else-if="repo_failed" class="plugin-loading">
+                在线插件索引暂时不可达，下面只列出本机已有的插件。
+            </p>
+            <a v-if="repo_url" :href="repo_url" target="_blank">
+                <el-tooltip class="item" effect="dark" content="打开插件仓库目录" placement="left">
                     <el-button class="macast-plugin-repo" icon="el-icon-search" circle>
                     </el-button>
                 </el-tooltip>
@@ -441,15 +446,16 @@
             </p>
             <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>How to use third-party player plugin</h2>
             <ol start=''>
-                <li>Download the plugin you want from
-                    <el-link type="primary" href='https://github.com/xfangfang/Macast-plugins'>
-                        xfangfang/Macast-plugins
-                    </el-link>
+                <li>The players Macast used to ask you to download -- IINA, Web, Live,
+                    PotPlayer, PIFMRDS and the NVA protocol -- now ship
+                    <strong>inside</strong> the app. They are listed on the
+                    <strong>Plugin</strong> tab and are switched on and off there.
                 </li>
-                <li>Open the Macast, and click <code>Open Config Directory</code> in the setting menu</li>
-                <li>put <strong>[some plugin].py</strong> in renderer directory</li>
-                <li>Restart Macast and choose the plugins you want</li>
-
+                <li>To add one of your own: install a <strong>[some plugin].py</strong> on the
+                    <strong>Plugin</strong> tab, or drop the file into the renderer /
+                    protocol directory under <code>Open Config Directory</code>
+                </li>
+                <li>No restart is needed -- a plugin takes effect as soon as it is installed.</li>
             </ol>
             <p> if you can&#39;t find any plugin you want, check
                 <el-link type="primary"
@@ -712,6 +718,11 @@
             plugins: [],
             plugin_groups: [],
             repo_ok: true,
+            // 索引拉取失败（而不是"索引为空"）时给用户一句解释。
+            repo_failed: false,
+            // 由 /api?query=plugin-info 下发：{repo_url, index_urls}。
+            // 地址不再写死在这个页面里，见 macast/plugin_repo.py。
+            plugin_repo: {repo_url: '', index_urls: []},
             repo_url: '',
             platform: '',
             macast_version: 0,
@@ -763,7 +774,6 @@
             console.log(page);
             this.switch_page(page);
             this.load_local_plugin();
-            this.load_repo_plugin();
             this.get_log();
             this.load_status();
             this.load_interfaces();
@@ -1080,7 +1090,6 @@
                 switch (page_name) {
                     case '1':
                         this.load_local_plugin();
-                        this.load_repo_plugin();
                         this.set_history(page_name);
                         break;
                     case '2':
@@ -1113,23 +1122,38 @@
                 }
             },
             async load_repo_plugin() {
-                // 插件仓库在 GitHub 上，访问不到是常态（国内网络尤其如此）。
+                // 插件索引放在本仓库的 plugins/ 目录里（见 macast/plugin_repo.py）。
+                // GitHub 访问不到是常态（国内网络尤其如此），所以按后端下发的
+                // index_urls 顺序逐个试，后一个是 jsDelivr 镜像。
                 // 它只是"可安装"分组的补充，失败不该弹错、更不该让页面一直
                 // 停在 loading —— 本机插件才是这个页面要回答的问题。
-                console.log('update plugin info')
-                let url = 'https://raw.githubusercontent.com/xfangfang/Macast-plugins/main/info.json'
-                return this.$http.get(url, {timeout: 6000}).then(res => {
-                    this.repo_url = res.data.repo_url
-                    this.repo_plugins = res.data.plugin_v1
-                    this.repo_ok = true
-                    this.update_plugins();
-                    return true;
-                }).catch(err => {
-                    console.log('plugin repo unavailable:', err);
-                    this.repo_ok = false
-                    this.update_plugins();
-                    return false;
-                })
+                const repo = this.plugin_repo || {};
+                const urls = repo.index_urls || [];
+                this.repo_url = repo.repo_url || this.repo_url;
+                this.repo_plugins = [];
+                for (let i = 0; i < urls.length; i++) {
+                    try {
+                        const res = await this.$http.get(urls[i], {timeout: 6000});
+                        const data = res.data || {};
+                        this.repo_url = data.repo_url || this.repo_url;
+                        // 索引为空是本仓库的默认状态（插件都已内置），不是错误。
+                        this.repo_plugins = data.plugin_v1 || [];
+                        this.repo_ok = true;
+                        this.repo_failed = false;
+                        console.log('plugin repo loaded:', urls[i],
+                                    this.repo_plugins.length, 'installable');
+                        this.update_plugins();
+                        return true;
+                    } catch (err) {
+                        console.log('plugin repo unavailable:', urls[i], err);
+                    }
+                }
+                console.log('plugin repo unreachable, showing local plugins only');
+                this.repo_ok = false;
+                // "拉不到"才提示；"索引为空"是正常的，不该显示成故障。
+                this.repo_failed = urls.length > 0;
+                this.update_plugins();
+                return false;
             },
             async load_local_plugin() {
                 let url = '/api?query=plugin-info'
@@ -1138,12 +1162,15 @@
                     this.macast_version = res.data.version;
                     this.platform = res.data.platform;
                     this.local_plugins = res.data.plugins;
+                    // 索引地址由后端下发 —— 页面里不再写死插件仓库地址。
+                    this.plugin_repo = res.data.plugin_repo || this.plugin_repo;
                     this.plugins = []
                     this.$nextTick(() => {
                         this.update_plugins();
                     })
                     // 本机插件拿到了就可以收工，不必等插件仓库。
                     this.loading = false
+                    this.load_repo_plugin();
                     return true;
                 }).catch(err => {
                     console.log(err)
@@ -1336,7 +1363,7 @@
                       match: p => p.plugin_type === 'default' },
                     { key: 'local', title: '已安装', hint: '手动安装在本机的插件',
                       match: p => p.plugin_type === 'local' },
-                    { key: 'repo', title: '可安装', hint: '来自在线插件仓库',
+                    { key: 'repo', title: '可安装', hint: '来自仓库 plugins/ 目录',
                       match: p => p.plugin_type === 'repo' },
                 ]
                 return order

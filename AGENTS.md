@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 206/206）
+# 2) 回归验证（当前 218/218）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -47,10 +47,12 @@ macast/
   ssdp.py                  SSDP（DLNA 发现）；Sock.send_it 里的 LOCATION 走 Setting.get_ip()
   discovery.py             mDNS 广播（zeroconf），只广播可达地址
   utils.py                 Setting（含网卡枚举/选择）、环境准备、XML 路径
+  plugin_repo.py           在线插件索引的仓库坐标（唯一来源）；见 §4.6
   gui.py                   跨平台菜单抽象（darwin: rumps；其他: pystray）
   plugins/renderer/        内置渲染器插件：iina / web / live / potplayer / pi_fm
   plugins/protocol/        内置协议插件：nirvana（NVA「哔哩必连」）
   xml/setting.html         设置页（Vue2 + Element UI，**单文件内嵌模板**）
+plugins/                   在线插件索引（仓库根目录，**不是** macast/plugins/）；见 §4.6
 macast_renderer/mpv.py     MPVRenderer：启动 mpv、走 IPC 收发、把 mpv 事件转成状态
 scripts/                  见 §6
 docs/                     见 §7
@@ -202,6 +204,27 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 
 `_guess_plugin_class` 是兜底：清单写错类名时按模块体里的类反推，不再直接丢插件。
 
+### 4.6 在线插件索引：地址只有一处，页面不写死
+
+上游合集 `xfangfang/Macast-plugins` 发布的 6 个插件**全部内置**之后，设置页原来
+硬编码的那个 `info.json` 就只剩副作用了：每个内置插件都会多出一张重复卡片，还带一个
+指向上游旧文件的「可更新」角标（因为内置版本号与上游不同）。
+
+现在的做法：
+
+- 仓库坐标与索引地址只在 **`macast/plugin_repo.py`**（`pingod/Macast` →
+  `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
+  `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
+- 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
+  `plugin_v1` 目前**故意为空**。空索引 = 正常状态，页面只显示本机插件，不报错。
+- 地址是两个：`raw.githubusercontent.com` 在前，`cdn.jsdelivr.net` 镜像在后，
+  浏览器按序回退（国内 raw 常年不可达）。两者都必须返回 CORS 头，因为这是在**浏览器
+  里** fetch，不是 Python 抓。
+- 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
+  `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。
+
+索引格式、字段表与验证命令见 `plugins/README.md`。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -232,7 +255,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（206/206）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 |
+| `verify_cast_airplay.py` | **主验证套件**（218/218）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |

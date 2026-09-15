@@ -4,7 +4,7 @@
 
 [![visitor](https://visitor-badge.glitch.me/badge?page_id=xfangfang.Macast)](https://github.com/xfangfang/Macast/releases/latest)
 [![stars](https://img.shields.io/badge/dynamic/json?label=github%20stars&query=stargazers_count&url=https%3A%2F%2Fapi.github.com%2Frepos%2Fxfangfang%2FMacast)](https://github.com/xfangfang/Macast)
-[![plugins](https://shields-staging.herokuapp.com/github/directory-file-count/xfangfang/Macast-plugins?type=dir&label=plugins)](https://github.com/xfangfang/Macast-plugins)
+[![plugins](https://img.shields.io/badge/plugins-6%20built--in-blueviolet)](https://github.com/pingod/Macast/tree/main/macast/plugins)
 [![build](https://img.shields.io/github/workflow/status/xfangfang/Macast/Build%20Macast)](https://github.com/xfangfang/Macast/actions/workflows/build-macast.yaml)
 [![mac](https://img.shields.io/badge/MacOS-10.14%20and%20higher-lightgrey?logo=Apple)](https://github.com/xfangfang/Macast/releases/latest)
 [![windows](https://img.shields.io/badge/Windows-10-lightgrey?logo=Windows)](https://github.com/xfangfang/Macast/releases/latest)
@@ -31,6 +31,10 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
   可显式指定广播网卡；不选则自动用承载默认路由的网卡。避免"能搜到但投不上"。
 - **插件热插拔**：设置页 → 插件，可**启用 / 停用 / 卸载 / 安装**，全部**即时生效、无需重启**。
   卸载是可恢复的（文件移到配置目录 `.trash/<时间戳>/`）。
+- **插件索引自持**：设置页「可安装」分组的数据源是本仓库的 [`plugins/info.json`](plugins/info.json)，
+  不再读上游 `xfangfang/Macast-plugins`（它的 6 个插件现已全部内置，继续读只会产生重复卡片和
+  指回上游旧文件的「可更新」角标）。地址只写在 `macast/plugin_repo.py` 一处，由 `/api?query=plugin-info`
+  下发；浏览器按 `raw.githubusercontent.com` → `cdn.jsdelivr.net` 顺序回退，全都不通时只显示本机插件。
 - **播放状态如实上报**：Chromecast 的 `LOAD` 不再无脑回 `PLAYING`，而是等播放器确认；
   播放器报错则回 `LOAD_FAILED`。
 
@@ -80,15 +84,17 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
   1. 打开应用后，**菜单栏 \ 状态栏 \ 任务栏** 会出现一个图标，这时你的设备就可以接收来自同一局域网的DLNA投放了。
 
 - **进阶用户**  
-  1. 通过手动加载 [Macast插件](https://gitee.com/xfangfang/Macast-plugins), Macast可以支持调用其他播放器，如：IINA、PotPlayer等等，或适配国内各家私有的DLNA协议. 
-  2. 在应用内点击高级设置，可以直接在内置的插件商店中快速下载插件（使用github仓库地址，如果网络条件不好刷新不出来，那么还是通过手动加载的方式下载吧）
+  1. 以前要手动下载的插件（IINA、Web、Live、PotPlayer、PIFMRDS、NVA 协议）现在**都已内置**，
+     在设置页 → 插件里直接启用 / 停用 / 卸载即可，即时生效、不用重启。
+  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录（目前为空，因为上游合集的插件全部内置了）。
+     设置页拉不到索引时只会显示本机插件，不影响使用。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **程序员**  
   1. 可以依照教程完成自己的脚本，快速地适配到你喜欢的播放器，或者增加一些新的功能插件，比如：边下边看，自动复制视频链接等等。教程和一些示例代码在：[Macast/wiki/Custom-Renderer](https://github.com/xfangfang/Macast/wiki/Custom-Renderer)  
-  2. 也可以参考 [nirvana](https://github.com/xfangfang/Macast-plugins/tree/main/nirvana) 快速适配第三方魔改的DLNA协议。
+  2. 也可以参考内置的 [nirvana](macast/plugins/protocol/nirvana.py) 快速适配第三方魔改的DLNA协议。
 
-欢迎大家提交代码到[Macast插件](https://github.com/xfangfang/Macast-plugins)。  
+内置插件放在 [macast/plugins/](macast/plugins/)；欢迎向 [pingod/Macast](https://github.com/pingod/Macast) 提 PR 或提 issue。  
 **注意：不要轻易加载非官方仓库下载的插件，这里“插件”本身是可以运行在电脑上的任意代码，不建议加载非官方提供的插件。**
 
 
