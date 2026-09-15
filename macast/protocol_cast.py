@@ -34,11 +34,22 @@ logger = logging.getLogger("Chromecast")
 
 CAST_PORT = 8009
 SETUP_PORT = 8008
+#: The HTTPS twin of the setup API. Not our choice: it is a client-side
+#: constant. pychromecast's ``get_cast_type`` -- the function the mDNS discovery
+#: path calls -- builds ``https://host:8443`` and has no plain-HTTP fallback
+#: (dial.py:154-161, FORMAT_BASE_URL_HTTPS at dial.py:26), so a listener on any
+#: other port would simply never be asked. Real devices expose the same
+#: ``eureka_info`` JSON on 8008 (clear) and 8443 (TLS).
+HTTPS_SETUP_PORT = 8443
 CAST_SERVICE = "_googlecast._tcp.local."
 # Fall back to a nearby port if the canonical one is taken; mDNS carries the
 # port we actually bound, so senders follow automatically.
 PORT_FALLBACK_RANGE = 20
 DEFAULT_MEDIA_APP_ID = "CC1AD845"  # Google's default media receiver
+# The name a real device reports for CC1AD845. Senders compare against it --
+# mkchromecast's --hijack re-issues LOAD every 5s while it differs -- so this
+# is protocol-visible, not cosmetics.
+DEFAULT_MEDIA_APP_NAME = "Default Media Receiver"
 APP_BACKDROP_ID = "E8C28D3C"       # backdrop / ambient screen
 
 # Cast v2 namespaces (see thibauts/node-castv2 protocol reference).
@@ -211,6 +222,34 @@ def parse_cast_message(buf):
 # ---------------------------------------------------------------------------
 
 
+class _TlsHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that wraps each accepted connection in TLS.
+
+    Per *connection*, deliberately, not the listening socket: wrapping the
+    listener runs the handshake inside ``accept()``, so a client that connects
+    without TLS (a port scan, a stray HTTPS probe, a browser hitting the wrong
+    port) raises SSLError there -- and ``SSLError`` is an ``OSError``, the exact
+    mistake that once killed the Cast accept loop for good while mDNS kept
+    advertising the device (AGENTS.md section 4.1). Here a bad handshake fails
+    inside ``get_request``, which socketserver swallows, and the listener
+    survives.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+    ssl_context = None
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        return self.ssl_context.wrap_socket(sock, server_side=True), addr
+
+    def handle_error(self, request, client_address):
+        # A dropped or non-TLS client is routine on an open port; the default
+        # prints a full traceback to stderr for every one of them.
+        logger.debug("Cast HTTPS setup connection from %s failed",
+                     client_address)
+
+
 class ChromecastProtocol(Protocol):
     """Act as a Chromecast receiver. Reuses the mpv renderer for playback."""
 
@@ -229,12 +268,25 @@ class ChromecastProtocol(Protocol):
         self._media = None          # current Cast media descriptor
         self._media_session_id = 1
         self._position = 0.0
+        # Receiver-level volume, as reported back in RECEIVER_STATUS and
+        # MEDIA_STATUS. Real state, not a constant: senders compute the next
+        # volume from what we report (pychromecast does level +/- 0.1), so
+        # answering 1.0 forever freezes their volume slider.
+        self._volume = 1.0
+        self._muted = False
+        # Latest transport observation for the *current* media, filled in from
+        # the player's set_state_* fan-out. Dialect: 'PLAYING' / 'PAUSED' / None
+        # for unknown; ``_idle_reason`` is Cast's idleReason string.
+        self._observed_transport = None
+        self._idle_reason = None
         self._transport_id = "MacastTransport"
         self._lock = threading.Lock()
         # Bumped on every LOAD so a stale playback watcher stops reporting.
         self._watch_generation = 0
         self.cast_port = CAST_PORT   # actual bound port (may differ)
         self.setup_port = SETUP_PORT
+        self._https_setup_server = None
+        self.https_setup_port = None  # set only when 8443 could be bound
         self._cert_path = os.path.join(SETTING_DIR, "macast_cast.crt")
         self._key_path = os.path.join(SETTING_DIR, "macast_cast.key")
 
@@ -246,6 +298,7 @@ class ChromecastProtocol(Protocol):
         # Bind listeners first so mDNS can advertise the ports we really bound.
         self._start_tls_server()
         self._start_setup_server()
+        self._start_https_setup_server()
         self._advertise()
         logger.info("ChromecastProtocol started on port %s", self.cast_port)
 
@@ -280,6 +333,11 @@ class ChromecastProtocol(Protocol):
             self._setup_server.shutdown()
             self._setup_server.server_close()
             self._setup_server = None
+        if self._https_setup_server is not None:
+            self._https_setup_server.shutdown()
+            self._https_setup_server.server_close()
+            self._https_setup_server = None
+            self.https_setup_port = None
         logger.info("ChromecastProtocol stopped")
 
     def _advertise(self):
@@ -427,7 +485,9 @@ class ChromecastProtocol(Protocol):
 
     def _on_message(self, sock, msg):
         ns = msg["namespace"]
-        dest = msg["destination_id"]
+        # Routing is by namespace only, so destination_id is not consulted:
+        # senders CONNECT to our transportId but reply to whatever source_id we
+        # used, which is why the reply source is not echoed from the request.
         src = msg["source_id"]
         if ns == NS_DEVICEAUTH:
             # DeviceAuthMessage{challenge} -> DeviceAuthMessage{response}
@@ -452,6 +512,15 @@ class ChromecastProtocol(Protocol):
             self._on_receiver(sock, src, data, msg_type)
         elif ns == NS_MEDIA:
             self._on_media(sock, src, data, msg_type)
+        else:
+            # Not answered, and deliberately so: this receiver advertises only
+            # the namespaces it implements, so a message here belongs to a
+            # feature we never claimed, and an unexpected reply is what wedges a
+            # strict sender's state machine. Logging it is the cheap half -- it
+            # is how we would ever learn that some client really does need an
+            # INVALID_REQUEST instead of silence.
+            logger.debug("Unhandled Cast namespace %r (type %r) from %s",
+                         ns, msg_type, src)
 
     # -- Cast v2 namespaces -------------------------------------------------
 
@@ -495,23 +564,151 @@ class ChromecastProtocol(Protocol):
                 "availability": {DEFAULT_MEDIA_APP_ID: "APP_AVAILABLE"},
             }))
         elif msg_type == "SET_VOLUME":
-            vol = data.get("volume", {})
-            if "level" in vol:
-                self.renderer.set_media_volume(int(vol["level"] * 100))
-            if "muted" in vol:
-                self.renderer.set_media_mute(bool(vol["muted"]))
+            self._apply_volume(data.get("volume") or {})
+            # A real receiver answers SET_VOLUME with the updated
+            # RECEIVER_STATUS. pychromecast's set_volume()/set_volume_muted()
+            # sit in WaitResponse(REQUEST_TIMEOUT=10.0) until that reply shows
+            # up, matched by requestId -- staying silent made every volume
+            # change stall for 10 seconds and then raise RequestTimeout on the
+            # sender (mkchromecast's volume keys, Home Assistant's slider).
+            self._send_receiver_status(sock, src, data.get("requestId"))
+        else:
+            # Ditto for the receiver namespace (SET_ACTIVE_INPUT_STATE and the
+            # GET_APP_AVAILABILITY variants we do not answer): recorded rather
+            # than answered, to avoid inventing a reply.
+            logger.debug("Unhandled Cast receiver message %r from %s",
+                         msg_type, src)
+
+    def _apply_volume(self, vol):
+        """Apply a Cast ``volume`` dict to our state and to the player.
+
+        Everything here comes off the wire, so it is coerced defensively: an
+        exception raised in a handler escapes to ``_handle_client``, which
+        drops the whole sender connection.
+        """
+        if not isinstance(vol, dict):
+            return
+        if "level" in vol:
+            try:
+                level = min(max(float(vol["level"]), 0.0), 1.0)
+            except (TypeError, ValueError):
+                logger.debug("Ignoring malformed Cast volume level: %r",
+                             vol.get("level"))
+            else:
+                with self._lock:
+                    self._volume = level
+                try:
+                    self.renderer.set_media_volume(int(round(level * 100)))
+                except Exception as e:
+                    logger.debug("Cast volume apply failed: %s", e)
+        if "muted" in vol:
+            muted = bool(vol["muted"])
+            with self._lock:
+                self._muted = muted
+            try:
+                self.renderer.set_media_mute(muted)
+            except Exception as e:
+                logger.debug("Cast mute apply failed: %s", e)
+
+    def _volume_state(self):
+        """The ``status.volume`` payload, as real state."""
+        with self._lock:
+            return {"level": self._volume, "muted": self._muted}
+
+    # -- playback observations ----------------------------------------------
+    #
+    # ``ProtocolGroup`` fans every ``set_state_*`` the player reports out to all
+    # of its children, so these overrides are how a Chromecast-only setup (DLNA
+    # switched off) learns what mpv is really doing. The DLNA ledger is *not*
+    # usable for this: with no DLNA child in the group its base-class stub
+    # answers ``STOPPED`` no matter what is on screen.
+    #
+    # They deliberately never touch the network. A GET_STATUS is answered from
+    # this, but nothing is pushed unsolicited: an unexpected status message is
+    # what wedges VLC's state machine (docs/Cast-AirPlay-Testing.md), so the
+    # only safe way to tell a sender that playback ended is to answer honestly
+    # the next time it asks.
+    #
+    # ``Protocol`` declares all of these as no-ops, so overriding is additive.
+
+    def set_state_eof(self):
+        self._note_stopped("FINISHED")
+
+    def set_state_transport_error(self):
+        self._note_stopped("ERROR")
+
+    def set_state_stop(self):
+        # mpv fires ``idle`` immediately after a normal end-of-file, so this
+        # must not overwrite a more specific reason already recorded.
+        self._note_stopped("CANCELLED")
+
+    def set_state_pause(self):
+        with self._lock:
+            if self._media is not None:
+                self._observed_transport = "PAUSED"
+
+    def set_state_play(self):
+        with self._lock:
+            if self._media is not None:
+                self._observed_transport = "PLAYING"
+                self._idle_reason = None
+
+    def _note_stopped(self, reason):
+        """Record why playback stopped.
+
+        A LOAD replaces the media, and mpv reports the end-file of the file it
+        just dropped *after* the new one is in place. Accepting that as the new
+        media's outcome labelled a video that then played to completion as
+        CANCELLED -- found by driving the receiver with a real sender stack
+        (scripts/cast_conformance.py), not by any stubbed test.
+
+        So a terminal stop is only believed once the current media has reported
+        playback at least once. An ERROR is accepted unconditionally: it is the
+        signal worth surfacing, and a replaced file ends with reason=stop rather
+        than error.
+        """
+        with self._lock:
+            if self._media is None:
+                return
+            if reason != "ERROR" and self._observed_transport is None:
+                logger.debug("Ignoring %s for a media that never started "
+                             "playing (superseded LOAD)", reason)
+                return
+            if self._idle_reason is None:
+                self._idle_reason = reason
+
+    def _observed_state(self):
+        """What a GET_STATUS should answer, from real observations only.
+
+        ``None`` means "we have not observed anything since the LOAD", which
+        the caller resolves to the optimistic ``PLAYING`` -- the previous
+        behaviour, kept as the fallback rather than guessing IDLE and turning a
+        working cast into a stopped one.
+        """
+        with self._lock:
+            if self._media is None:
+                return "IDLE", self._idle_reason
+            if self._idle_reason:
+                return "IDLE", self._idle_reason
+            return (self._observed_transport or "PLAYING"), None
 
     def _send_receiver_status(self, sock, src, request_id):
         with self._lock:
             session = self._session_id
+            volume = {"level": self._volume, "muted": self._muted}
         apps = []
         if session:
             apps.append(
                 {
                     "appId": DEFAULT_MEDIA_APP_ID,
-                    "displayName": "Macast",
+                    # A real device reports "Default Media Receiver" for
+                    # CC1AD845, and senders key off it: mkchromecast's
+                    # --hijack treats any other name as "someone stole my
+                    # receiver" and re-issues LOAD every 5 seconds, which is an
+                    # endless restart loop against us. See cast.py:410-447.
+                    "displayName": DEFAULT_MEDIA_APP_NAME,
                     "sessionId": session,
-                    "statusText": "Macast",
+                    "statusText": DEFAULT_MEDIA_APP_NAME,
                     "transportId": self._transport_id,
                     # Senders establish a virtual connection to transportId
                     # and only then speak the media namespace.
@@ -524,7 +721,11 @@ class ChromecastProtocol(Protocol):
             "status": {
                 "applications": apps,
                 "isActiveInput": True,
-                "volume": {"level": 1.0, "muted": False},
+                # pychromecast's CastStatus.is_stand_by defaults to True for a
+                # non-audio cast type when the key is missing (_parse_status),
+                # which is what makes a working receiver show up as "standby".
+                "isStandBy": False,
+                "volume": volume,
             },
         }
         self._send(sock, "receiver-0", src, NS_RECEIVER, json.dumps(status))
@@ -567,6 +768,8 @@ class ChromecastProtocol(Protocol):
                 return False
             self._session_id = None
             self._media = None
+            self._observed_transport = None
+            self._idle_reason = None
             # Stop a playback watcher from reporting on the session we just
             # dropped (it re-reads the generation before every status).
             self._watch_generation += 1
@@ -608,6 +811,10 @@ class ChromecastProtocol(Protocol):
                 self._session_id = _random_session()
                 self._media = media
                 self._position = float(data.get("currentTime", 0) or 0)
+                # A new LOAD starts a new observation window: whatever the
+                # previous media ended with must not leak into this one.
+                self._observed_transport = None
+                self._idle_reason = None
             self.renderer.set_media_url(url, start=str(int(self._position)))
             self._send_media_status(sock, src, "BUFFERING", data.get("requestId"))
             # PLAYING is reported once the player confirms it, not blindly.
@@ -622,6 +829,8 @@ class ChromecastProtocol(Protocol):
             self.renderer.set_media_stop()
             # Closes the app for every connected sender, not just this one.
             self._clear_session("sender stopped playback")
+            with self._lock:
+                self._idle_reason = "CANCELLED"
             self._send_media_status(sock, src, "IDLE", data.get("requestId"))
         elif msg_type == "SEEK":
             with self._lock:
@@ -631,6 +840,12 @@ class ChromecastProtocol(Protocol):
             self._send_media_status(sock, src, "PLAYING", data.get("requestId"))
         elif msg_type == "GET_STATUS":
             self._send_media_status(sock, src, None, data.get("requestId"))
+        else:
+            # QUEUE_*, EDIT_TRACKS_INFO, SET_PLAYBACK_RATE and friends land
+            # here. We do not advertise them in supportedMediaCommands, so a
+            # compliant sender will not send them; answering anyway would be a
+            # reply to a request we never accepted. Recorded, not answered.
+            logger.debug("Unhandled Cast media message %r from %s", msg_type, src)
 
     #: How long to wait for the player to confirm playback before falling back
     #: to the optimistic "PLAYING" reply. Long enough for a network stream to
@@ -705,22 +920,38 @@ class ChromecastProtocol(Protocol):
             media = self._media
             position = self._position
             media_session_id = self._media_session_id
-            state = player_state or ("PLAYING" if media else "IDLE")
+            volume = {"level": self._volume, "muted": self._muted}
+        if player_state is None:
+            # A GET_STATUS must answer with what is really happening. It used to
+            # answer PLAYING for as long as a media descriptor existed, so a
+            # video that had already finished still looked healthy to the
+            # sender -- and a sender that never learns otherwise never offers to
+            # re-play it. See ``_observed_state``.
+            state, idle_reason = self._observed_state()
+        else:
+            state = player_state
+            idle_reason = None
+            if state == "IDLE":
+                with self._lock:
+                    idle_reason = self._idle_reason
+        entry = {
+            "mediaSessionId": media_session_id,
+            "playbackRate": 1,
+            "playerState": state,
+            "currentTime": position,
+            "supportedMediaCommands": 15,
+            "volume": volume,
+            "sessionId": session or _random_session(),
+            "media": media,
+        }
+        if idle_reason:
+            # pychromecast clears its idle_reason whenever the key is absent, so
+            # only the terminal states carry it (media.py, MediaStatus.update).
+            entry["idleReason"] = idle_reason
         status = {
             "requestId": request_id,
             "type": "MEDIA_STATUS",
-            "status": [
-                {
-                    "mediaSessionId": media_session_id,
-                    "playbackRate": 1,
-                    "playerState": state,
-                    "currentTime": position,
-                    "supportedMediaCommands": 15,
-                    "volume": {"level": 1.0, "muted": False},
-                    "sessionId": session or _random_session(),
-                    "media": media,
-                }
-            ],
+            "status": [entry],
         }
         self._send(sock, self._transport_id, src, NS_MEDIA,
                    json.dumps(status, default=str))
@@ -743,9 +974,52 @@ class ChromecastProtocol(Protocol):
                 continue
         logger.warning("Cast setup HTTP server failed: no free port in range")
 
-    def _make_setup_handler(self):
-        protocol = self
+    def _start_https_setup_server(self):
+        """Serve ``eureka_info`` over TLS on 8443, if we can get the port.
 
+        Why bother: pychromecast's ``get_cast_type`` (the mDNS discovery path)
+        asks ``https://host:8443`` and has no plain-HTTP fallback, so without
+        this listener every discovery logs `Failed to determine cast type` and
+        the ``device_info`` branch -- ``manufacturer`` in particular -- never
+        runs. The plain 8008 listener is what the host-scanning path uses and is
+        unaffected either way.
+
+        Only 8443 will do; see ``HTTPS_SETUP_PORT``. If something else holds it
+        (Docker/OrbStack, dev servers, router UIs all like this port) we log and
+        carry on: losing a cosmetic field is not worth fighting over a port, and
+        Macast must never take a listener away from another program or fail to
+        start because of it.
+        """
+        if not (self._cert_path and os.path.exists(self._cert_path)
+                and os.path.exists(self._key_path)):
+            logger.info("No TLS certificate available, skipping the Cast HTTPS "
+                        "setup server on %d", HTTPS_SETUP_PORT)
+            return
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=self._cert_path, keyfile=self._key_path)
+        except Exception as e:
+            logger.warning("Cast HTTPS setup server: unusable certificate (%s)", e)
+            return
+        try:
+            server = _TlsHTTPServer(("0.0.0.0", HTTPS_SETUP_PORT),
+                                    self._make_setup_handler())
+        except OSError as e:
+            # Expected on machines where another program owns 8443. Not a
+            # fallback case: the client hardcodes the port, so a different
+            # listener would never be contacted.
+            logger.info("Cast HTTPS setup port %d unavailable (%s); discovery "
+                        "still works over %d", HTTPS_SETUP_PORT, e, SETUP_PORT)
+            return
+        server.ssl_context = ctx
+        self._https_setup_server = server
+        self.https_setup_port = HTTPS_SETUP_PORT
+        t = threading.Thread(target=server.serve_forever,
+                             name="CAST_SETUP_TLS", daemon=True)
+        t.start()
+        logger.info("Cast HTTPS setup server on %d", HTTPS_SETUP_PORT)
+
+    def _make_setup_handler(self):
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass
@@ -763,7 +1037,13 @@ class ChromecastProtocol(Protocol):
                 """
                 from urllib.parse import parse_qs, urlparse
 
-                udn = "uuid:{}".format(Setting.get_usn())
+                # A bare UUID, not "uuid:<...>". pychromecast parses this with
+                # ``UUID(udn.replace("-", ""))`` and catches the ValueError,
+                # returning None for the whole device_info (dial.py). A prefixed
+                # value therefore made Macast invisible to the host-scanning
+                # fallback used when mDNS is unavailable, even though the mDNS
+                # TXT ``id`` -- which is already bare -- was fine.
+                udn = Setting.get_usn()
                 name = Setting.get_friendly_name()
                 device_info = {
                     "manufacturer": "Macast",
@@ -777,6 +1057,14 @@ class ChromecastProtocol(Protocol):
                         "audio_supported": True,
                         "video_out": True,
                         "audio_out": True,
+                        # Must be explicit. pychromecast reads
+                        # ``capabilities.get("multizone_supported", True)``
+                        # whenever ``device_info`` is present (dial.py), so
+                        # omitting the key claims multi-room support and makes
+                        # every discovery probe
+                        # https://host:8443/...?params=multizone, which we do
+                        # not serve -- one failed request per poll, forever.
+                        "multizone_supported": False,
                     },
                 }
                 full = {
