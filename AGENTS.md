@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 145/145）
+# 2) 回归验证（当前 206/206）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -48,6 +48,8 @@ macast/
   discovery.py             mDNS 广播（zeroconf），只广播可达地址
   utils.py                 Setting（含网卡枚举/选择）、环境准备、XML 路径
   gui.py                   跨平台菜单抽象（darwin: rumps；其他: pystray）
+  plugins/renderer/        内置渲染器插件：iina / web / live / potplayer / pi_fm
+  plugins/protocol/        内置协议插件：nirvana（NVA「哔哩必连」）
   xml/setting.html         设置页（Vue2 + Element UI，**单文件内嵌模板**）
 macast_renderer/mpv.py     MPVRenderer：启动 mpv、走 IPC 收发、把 mpv 事件转成状态
 scripts/                  见 §6
@@ -78,6 +80,33 @@ docs/                     见 §7
   否则会以为"改了没效果"。
 - **`ProtocolGroup` + 基类同名空方法**：`Protocol` 自己定义了 `set_state_*` 空方法，
   所以扇出函数必须装到**实例属性**上才能盖过类方法（否则状态静默丢弃）。
+- **同一族陷阱同样吃掉读接口**：`Protocol` 还定义了 `get_state` / `get_state_*` /
+  `set_state` 的空实现。`ProtocolGroup` 不覆盖它们，基类的桩就会赢，**永远不转发**给
+  真正持有播放状态的 `DLNAProtocol`。症状是"状态页全空"：标题、音量、进度全是空串，
+  前端显示 `—` / `0` / `0:00:00` 且永不刷新；字幕显隐开关也一直读到 `''`。
+  修法是 `ProtocolGroup._install_state_methods()` 里对 `set_state*` 装扇出、
+  对 `get_state*` 装委托（`_delegate_getter`），并且**不要**只按 `set_state_` 前缀筛
+  （裸 `set_state` 没有尾随下划线，漏掉它 mpv 的轨道/音量更新就丢了）。
+  回归用例在验证套件 Part 6 末尾（`_Rec` 那种不继承 `Protocol` 的假对象抓不到这个 bug，
+  必须用真的 `DLNAProtocol`）。
+- **`ProtocolGroup.primary` 决定 CherryPy 树根**：它按 `handler_priority` 取最大值。
+  某个协议的 handler 若**继承**了另一个协议的 handler（NVA 继承 `DLNAHandler`），
+  它必须声明更高的优先级，否则按加入顺序 DLNA 会赢，NVA 的 SETUP/RESTORE 端点
+  全部静默不可达。
+- **`event_subscribes` 用 `ProtocolGroup.event_subscribes` 聚合**（属性，跨所有子协议合并），
+  别再退回 `getattr(protocol, 'event_subscribes', {})`——那只会问到 primary 一个子协议。
+- **订阅者必须"没有状态变更也能入表"**：`add_subscribe` 只是把客户端压进
+  `append_device_queue`，真正写进 `event_subscribes` 的是**事件线程**。而排空这个队列
+  原先只在 `send_states_to_clients()` 里做，那个调用又被 `state_queue` 非空门控。
+  DLNA **故意不 observe 播放位置**（位置靠客户端轮询 `GetPositionInfo`），
+  所以"视频稳定播放中"时 `state_queue` 一直为空 ⇒ 冷启动后**第一个订阅者永远不进表**，
+  设置页「客户端信息」一直显示"暂无订阅客户端"。
+  修法：事件线程每轮无条件 `_reap_timed_out_clients()` + `_sync_subscribe_list()`。
+  排查现成工具：`curl 'http://127.0.0.1:58880/api?query=subscribers'` —— 按子协议列出
+  `subscribed` 与 `pending_append`；**非零 `pending_append` 就是队列没被排空**。
+- **`ProtocolGroup._delegate_getter` 对 `KeyError` 要静默**：状态页会问一批超集键名
+  （如 `CurrentURI` 只是 AVTransport.xml 里的 action 参数，不是 stateVariable）。
+  按 ERROR 记会变成"每次轮询 × 每个缺失键"各一条，把真问题淹掉。
 - **DLNA 默认插件的真实标题是 `DLNA Protocol`**（由类名推导），持久化/比对一律走
   `MacastPluginManager.resolve_title()`，别硬编码 `"DLNA"`。
 - **多协议并发时 `event_subscribes` 等 DLNA 专属属性要 `getattr(..., default)`**，
@@ -124,6 +153,55 @@ find /Applications/Macast.app -iname "*zeroconf*" | head
 **教训：CI 全绿 ≠ 产物能用。** 发版后一定要把下载下来的产物**真正启动一次**并确认
 它监听了 8009/58880、`/api?query=status` 能返回版本号（见 §8）。
 
+### 4.4 `macast/plugins/**` 的"动态导入"打包坑（与 §4.3 同族）
+
+内置插件（IINA / Web / Live / PotPlayer / PIFMRDS / NVA，来自
+`xfangfang/Macast-plugins`）**从来不用静态 `import` 引入**：
+`MacastPluginManager._load_bundled_plugins` 用 `os.listdir` 拼出 dotted path
+再 `importlib.import_module`。**任何依赖扫描器都看不见它们**，所以产物里静默少一个
+插件时，源码运行一切正常。
+
+必须同时改三处，少一处就漏：
+
+| 位置 | 要写什么 |
+|---|---|
+| `scripts/setup_py2app.py` | 加进 **`includes`**（见下） |
+| `.github/workflows/build.yml` | 3 个 PyInstaller job 各加 6 个 `--hidden-import=` |
+| 新增第三方依赖时 | `requirements/*.txt`（见 §4.3） |
+
+**两套打包工具的选项名不一样，混用会直接让构建失败：**
+
+- py2app 认 **`includes`**；传 `hiddenimports` 会报
+  `error: error in setup script: command 'py2app' has no such option 'hiddenimports'`。
+- PyInstaller 认 **`--hidden-import=`**（没有 `includes` 这个 CLI 选项）。
+
+我就在这上面栽过一次：源码 206/206 全绿，`bash scripts/build_macos_arm.sh` 直接失败。
+**所以改打包配置后一定要真跑一次构建**，别只看测试。
+
+`packages: ['macast']` 会把目录整份拷进去（插件源码散落在
+`Contents/Resources/lib/python3.12/macast/plugins/`），其余纯 Python 依赖被 py2app 打进
+`lib/python312.zip` —— 所以**别用 `find` 找散文件来判断依赖在不在**，会误判成"缺失"。
+正解是查 zip：
+
+```shell
+Z=dist/Macast.app/Contents/Resources/lib/python312.zip
+python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if n.startswith('requests/')])"
+```
+
+产物校验手法见 `BUILDING.md` 的 "Verify the bundled plugins actually made it into the artefact"。
+
+### 4.5 插件清单（`<macast.*>`）只在**文件顶部注释**里解析
+
+`_read_plugin_metadata` 先截出开头连续的注释块，再用
+`<macast\.([\w.]+)>([^<]*)</macast\.[\w.]+>` 解析。两条约束都是被踩出来的：
+
+- **值里不能出现 `<`。** 早先用 `(.*?)` + `re.S`，于是后面任何一处提到闭合标签的
+  注释都会成为假终止符，把中间的标签整段吞掉。给 PotPlayer 写"原作者的 platform
+  标签闭合写错了"这句注释时，就把 `renderer` 的值污染成了半句话。
+- **只读头部。** 扫码全文只会给正文/文档制造被误认成清单的机会。
+
+`_guess_plugin_class` 是兜底：清单写错类名时按模块体里的类反推，不再直接丢插件。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -154,7 +232,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（145/145）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 |
+| `verify_cast_airplay.py` | **主验证套件**（206/206）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |
