@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 345/345）
+# 2) 回归验证（当前 351/351）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -225,11 +225,13 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
   `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。整个条目
   和 `.py` 顶部清单必须逐字对齐 —— Part 5c 会比对 title / version / platform / 类名。
-- 条目的 `url` 用 `cdn.jsdelivr.net` 而不是 raw：安装走的是 Python 侧 `requests`
-  （`MacastPluginManager.install_url`），没有浏览器那种多地址回退，国内 raw 经常拉不动。
-  **但 url 必须带 `?v=<版本>`**：jsDelivr 缓存分支文件，不带的话版本号涨了、装下来的还是
-  旧文件，页面于是永远显示「可更新」。Part 5c 会校验 `?v=` 与 `version` 一致，
-  也不会因为查询串就认为它不是 `.py`（后端本来就先 `split('?')[0]`）。
+- 条目的 `url` 必须来自**每次请求都新鲜**的源，实测过一轮：raw 国内经常拉不动；
+  `cdn.jsdelivr.net` 能通但**缓存分支文件数小时，而且 `?v=` 查询串破不了它的缓存**
+  （把插件升到 0.2 后请求 `...macast_ytdlp.py?v=0.2`，拿回来仍是 0.1 的内容 —— 页面上就会
+  永远显示同一个「可更新」）；`ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，
+  每次都是最新文件。所以索引里的 `url` 一律用 ghproxy 代理形式，Part 5c 会拦住缓存型 CDN。
+  安装是 Python 侧 `requests`（`MacastPluginManager.install_url`）拉的，没有浏览器多地址回退，
+  出问题时把 raw 直链粘到设置页的「从网址安装」即可（后端本来就先 `split('?')[0]` 再判 `.py`）。
 - 在线插件与内置插件是**两回事**：`plugins/` 里的是「用户自己装、单个 .py、只能用
   Macast 自带依赖 + 标准库 + 外部命令」；需要 pip 库或要随包发布的一律走
   `macast/plugins/`（并同步 §4.4 的三处打包配置）。
@@ -317,7 +319,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（345/345）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
+| `verify_cast_airplay.py` | **主验证套件**（351/351）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |

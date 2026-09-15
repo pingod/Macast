@@ -1210,16 +1210,16 @@ try:
               _bundled.get(_class_key) == _entry.get(_class_key),
               "manifest={!r} index={!r}".format(_bundled.get(_class_key),
                                                 _entry.get(_class_key)))
-        # Installation goes through the caching CDN, so the url has to carry a
-        # cache-busting query that moves when the version does -- otherwise a
-        # freshly bumped entry installs the previous file, and the page keeps
-        # offering the same "update" forever.
-        if "jsdelivr" in _entry.get("url", ""):
-            check("{} url is cache-busted with its own version".format(_fname),
-                  _entry["url"].split("?", 1)[-1] == "v=" + str(_entry.get("version")),
-                  _entry.get("url"))
-        else:
-            check("{} url does not need cache busting".format(_fname), True)
+        # The install url must come from a source that is fresh *per request*.
+        # jsDelivr was measured doing the opposite: it serves a branch file from
+        # its cache for hours and the `?v=` query string does not bust it, so a
+        # bumped plugin installed the previous file while the page kept offering
+        # the same "update". A raw-proxy (ghproxy-style) fetches on demand.
+        _url = _entry.get("url", "")
+        check("{} install url is not the caching CDN".format(_fname),
+              "jsdelivr" not in _url, _url)
+        check("{} install url resolves to raw on demand".format(_fname),
+              "raw.githubusercontent.com" in _url, _url)
 
     _html_path = os.path.join(MACAST, "xml", "setting.html")
     with open(_html_path, "r", encoding="utf-8") as _f:
