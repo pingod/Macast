@@ -1,6 +1,6 @@
 {
     "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。仓库坐标与索引地址的唯一来源见 macast/plugin_repo.py；新增条目后请跑 scripts/verify_cast_airplay.py，Part 5c 会校验条目与 .py 清单是否一致。",
-    "_note_url": "url 走 ghproxy 代理 raw：安装是 Python 侧 requests 拉的，没有浏览器那种多地址回退。实测三种源：raw 最新但国内经常拉不动；jsDelivr 会缓存分支文件数小时，而且 ?v= 查询串**不能**破它的缓存（升到 0.2 后拿到仍是 0.1 的内容）；ghproxy 按需代理 raw，响应头是 cache-control: max-age=300，也就是最多滞后约 5 分钟 —— 比 jsDelivr 好三个数量级，所以索引里的 url 用它。ghproxy 挂了就把 raw 直链粘到设置页的「从网址安装」。",
+    "_note_url": "url 固定到具体的 commit SHA（jsDelivr 的 @<sha> 形式），而不是分支：分支引用会被 CDN 缓存数小时（实测 jsDelivr 连 ?v= 都不认，ghproxy 实测也超过它自己声明的 5 分钟），而某个 SHA 下的文件内容永远不变 —— 缓存多久都不会给错文件。代价是：改了插件要 ① 先提交插件 ② 再把条目里的 SHA/version 指到新提交，分两次提交，Part 5c 会用 git show 校验条目与所固定内容一致。安装走 Python 侧 requests，国内若 jsDelivr 抽风，把 raw 直链（https://raw.githubusercontent.com/pingod/Macast/<sha>/plugins/<file>.py）粘到设置页的「从网址安装」。",
     "repo_url": "https://github.com/pingod/Macast/tree/main/plugins",
     "plugin_v1": [
         {
@@ -11,7 +11,7 @@
             "renderer": "YTDLPRenderer",
             "title": "yt-dlp Downloader",
             "type": "renderer",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/macast_ytdlp.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/macast_ytdlp.py",
             "version": "0.2"
         },
         {
@@ -22,7 +22,7 @@
             "renderer": "ExternalPlayerRenderer",
             "title": "External Player (VLC / MPC-BE / mpv.net)",
             "type": "renderer",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/external_player.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/external_player.py",
             "version": "0.1"
         },
         {
@@ -33,7 +33,7 @@
             "renderer": "FloatingRenderer",
             "title": "Floating Player",
             "type": "renderer",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/floating.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/floating.py",
             "version": "0.1"
         },
         {
@@ -44,7 +44,7 @@
             "renderer": "HooksRenderer",
             "title": "Automation Hooks",
             "type": "renderer",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/hooks.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/hooks.py",
             "version": "0.1"
         },
         {
@@ -55,7 +55,7 @@
             "renderer": "CastBridgeRenderer",
             "title": "Chromecast Bridge",
             "type": "renderer",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/cast_bridge.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/cast_bridge.py",
             "version": "0.1"
         },
         {
@@ -66,7 +66,7 @@
             "protocol": "AirPlayAudioProtocol",
             "title": "AirPlay Audio (RAOP)",
             "type": "protocol",
-            "url": "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/raop.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@78c8f4a3f9100d41484ddbb195aabc9a044f5acd/plugins/raop.py",
             "version": "0.1"
         }
     ]
