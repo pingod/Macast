@@ -18,10 +18,12 @@
 import importlib.util
 import json
 import os
+import shutil as _shutil
 import socket
 import ssl
 import struct
 import sys
+import tempfile as _tempfile
 import threading
 import time
 import types
@@ -541,6 +543,127 @@ finally:
     except Exception:
         pass
 
+# ---- The app must close when its last sender goes away ----
+# Regression: `_session_id` was only ever cleared by an explicit STOP, so a
+# sender that disconnected -- or simply vanished, which is what really happens
+# when the phone sleeps or VLC is killed -- left the receiver answering
+# GET_STATUS with `applications: [{Macast, sessionId: <dead>}]` while mpv sat
+# idle. VLC's state machine keys on exactly that field (chromecast_ctrl.cpp,
+# processReceiverMessage: "Media receiver application was already running"),
+# skips its LAUNCH, connects to the dead transportId and adopts the stale
+# session; casting again then appeared to need "stop casting" (or a plugin
+# restart) first. A receiver reports `applications: []` once the app is gone,
+# and a restart has to be a clean slate.
+_CAST_CONN = "urn:x-cast:com.google.cast.tp.connection"
+_CAST_RECV = "urn:x-cast:com.google.cast.receiver"
+
+
+def _cast_msg(namespace, payload, src="sender-0", dst="receiver-0"):
+    return {"source_id": src, "destination_id": dst, "namespace": namespace,
+            "payload_type": 0, "payload_utf8": json.dumps(payload),
+            "payload_binary": b""}
+
+
+def _receiver_statuses(raw):
+    out, off = [], 0
+    while off + 4 <= len(raw):
+        (n,) = struct.unpack(">I", raw[off:off + 4])
+        msg = cast.parse_cast_message(raw[off + 4: off + 4 + n])
+        off += 4 + n
+        try:
+            data = json.loads(msg["payload_utf8"])
+        except Exception:
+            continue
+        if data.get("type") == "RECEIVER_STATUS":
+            out.append(data)
+    return out
+
+
+def _apps(msg):
+    return ((msg.get("status") or {}).get("applications")) or []
+
+
+def _launched_proto():
+    """A protocol with one sender that has already launched the app."""
+    _CTX.renderer = MockRenderer()
+    proto = TestProtocol()
+    sock = FakeSock()
+    proto._on_message(sock, _cast_msg(_CAST_CONN, {"type": "CONNECT"}))
+    proto._on_message(sock, _cast_msg(_CAST_RECV, {
+        "type": "LAUNCH", "requestId": 1, "appId": "CC1AD845"}))
+    return proto, sock
+
+
+proto, sock = _launched_proto()
+check("LAUNCH reports a running app",
+      _apps(_receiver_statuses(sock.sent)[-1]) != [],
+      str(_receiver_statuses(sock.sent)[-1:]))
+
+sock.sent = b""
+proto._on_message(sock, _cast_msg(_CAST_CONN, {"type": "CLOSE"}))
+check("CLOSE forgets the session", proto._session_id is None,
+      str(proto._session_id))
+# What the *next* sender is told is the part that broke casting: the last
+# sender is gone by now, so there is nobody left to notify -- the fix shows up
+# in the status a fresh sender gets.
+proto._on_message(sock, _cast_msg(_CAST_CONN, {"type": "CONNECT"}))
+proto._on_message(sock, _cast_msg(_CAST_RECV, {"type": "GET_STATUS",
+                                               "requestId": 9}))
+statuses = _receiver_statuses(sock.sent)
+check("the next sender is told no app is running",
+      bool(statuses) and _apps(statuses[-1]) == [], str(statuses[-1:]))
+
+# A STOP must close the app for every sender, not only the one that asked.
+proto, asker = _launched_proto()
+watcher = FakeSock()
+proto._on_message(watcher, _cast_msg(_CAST_CONN, {"type": "CONNECT"},
+                                    src="sender-1"))
+asker.sent = b""
+watcher.sent = b""
+proto._on_message(asker, _cast_msg("urn:x-cast:com.google.cast.media",
+                                   {"type": "STOP", "requestId": 4,
+                                    "mediaSessionId": 1}))
+seen = _receiver_statuses(watcher.sent)
+check("STOP closes the app for the other senders too",
+      bool(seen) and _apps(seen[-1]) == [], str(seen[-1:]))
+
+proto, _ = _launched_proto()
+proto.stop()
+check("stopping the service forgets the session", proto._session_id is None,
+      str(proto._session_id))
+
+# The path VLC actually takes: the socket dies with no CLOSE frame at all.
+_CTX.renderer = MockRenderer()
+p3 = TestProtocol()
+try:
+    p3.start()
+    s1 = ctx.wrap_socket(socket.create_connection(
+        ("127.0.0.1", p3.cast_port), timeout=5), server_hostname=None)
+    cast_send(s1, "sender-0", "receiver-0", _CAST_RECV,
+              json.dumps({"type": "LAUNCH", "requestId": 1,
+                          "appId": "CC1AD845"}))
+    apps_before = _apps(json.loads(cast_recv(s1)["payload_utf8"]))
+    s1.close()
+    deadline = time.time() + 5
+    while p3._senders and time.time() < deadline:
+        time.sleep(0.05)
+    s2 = ctx.wrap_socket(socket.create_connection(
+        ("127.0.0.1", p3.cast_port), timeout=5), server_hostname=None)
+    cast_send(s2, "sender-0", "receiver-0", _CAST_RECV,
+              json.dumps({"type": "GET_STATUS", "requestId": 2}))
+    apps_after = _apps(json.loads(cast_recv(s2)["payload_utf8"]))
+    s2.close()
+    check("a sender that vanishes closes the app too",
+          apps_before != [] and apps_after == [],
+          "before={} after={}".format(apps_before, apps_after))
+except Exception as e:
+    check("a sender that vanishes closes the app too", False, str(e))
+finally:
+    try:
+        p3.stop()
+    except Exception:
+        pass
+
 # ---- AirPlay real RTSP server ----
 _CTX.renderer = MockRenderer()
 ap = TestAirPlay()
@@ -621,6 +744,84 @@ check("already-legal name is left alone",
       sanitize_instance_name("Macast._airplay._tcp.local.",
                              "_airplay._tcp.local.")
       == "Macast._airplay._tcp.local.")
+
+# 4c: registered services are re-announced, because some senders only listen.
+#
+# Regression: Macast announced exactly once, at protocol start. VLC Android's
+# renderer discovery is passive -- it logs "mDNS: listening to
+# _googlecast._tcp.local renderer" and a sniffer on the LAN sees no query from
+# the phone -- so once its cache aged out the device was missing from VLC's
+# list until the user restarted the plugin (which re-announces). Our records
+# carry a 120s TTL, so re-announce well inside it.
+print("\n=== Part 4c: mDNS re-announcement ===")
+
+
+class _FakeZc:
+    def __init__(self):
+        self.registered, self.unregistered, self.updated = [], [], []
+
+    def register_service(self, info, **kwargs):
+        self.registered.append(info)
+
+    def unregister_service(self, info):
+        self.unregistered.append(info)
+
+    def update_service(self, info):
+        self.updated.append(info)
+
+
+_fake_zc = _FakeZc()
+_real_acquire, _real_release = discovery._acquire_zc, discovery._release_zc
+discovery._acquire_zc = lambda: _fake_zc
+discovery._release_zc = lambda: None
+try:
+    _adv = discovery.MDNSAdvertiser()
+    _adv.advertise("_googlecast._tcp.local.",
+                   "Macast-Test._googlecast._tcp.local.", 8009,
+                   {"md": "Macast", "fn": "Macast-Test"})
+    check("advertiser registers the service", len(_fake_zc.registered) == 1)
+    check("advertiser starts a keepalive thread",
+          _adv._thread is not None and _adv._thread.is_alive())
+    check("re-announce republishes the registered record",
+          _adv.reannounce() == 1 and len(_fake_zc.updated) == 1
+          and _fake_zc.updated[0] is _fake_zc.registered[0],
+          "updated={}".format(len(_fake_zc.updated)))
+    check("re-announce interval stays inside the record TTL",
+          discovery.MDNSAdvertiser.REANNOUNCE_SECONDS < 120,
+          str(discovery.MDNSAdvertiser.REANNOUNCE_SECONDS))
+    _adv.close()
+    check("close stops the keepalive thread and withdraws the record",
+          len(_fake_zc.unregistered) == 1
+          and (_adv._thread is None or not _adv._thread.is_alive()),
+          "unregistered={} thread={}".format(
+              len(_fake_zc.unregistered), _adv._thread))
+finally:
+    discovery._acquire_zc, discovery._release_zc = _real_acquire, _real_release
+
+# 4d: the TXT `ca` field must declare *both* video and audio.
+#
+# VLC parses `ca` as a bitmask -- 0x01 video, 0x04 audio
+# (modules/services_discovery/microdns.c) -- and a real Chromecast sends 5.
+# Macast sent 1, i.e. "can play video but not audio". Measured on VLC Android
+# 3.7.1 this alone does not decide the cast chain (see docs), but claiming the
+# wrong capability is a bug in its own right, and other senders do read it.
+_CTX.renderer = MockRenderer()
+_pca = TestProtocol()
+try:
+    _pca.start()
+    _props = {}
+    if _pca._advertiser is not None and _pca._advertiser.advertised:
+        _props = _pca._advertiser.advertised[0][3]
+    _ca = int(_props.get("ca", "0"))
+    check("chromecast TXT ca declares video and audio",
+          (_ca & 0x01) != 0 and (_ca & 0x04) != 0, "ca={}".format(_props.get("ca")))
+except Exception as e:
+    check("chromecast TXT ca declares video and audio", False, str(e))
+finally:
+    try:
+        _pca.stop()
+    except Exception:
+        pass
 check("empty/garbage name falls back to Macast",
       sanitize_instance_name("()()._airplay._tcp.local.",
                              "_airplay._tcp.local.")
@@ -768,6 +969,138 @@ except Exception as e:
     check("plugin manager registers built-in protocols", False, str(e))
 
 # --------------------------------------------------------------------------
+# Part 5b: bundled plugins (xfangfang/Macast-plugins, shipped in-tree)
+#
+# Macast now ships the upstream plugin collection inside the package. Two
+# things must hold, and both have already gone wrong once:
+#
+#   1. Every bundled plugin must declare a readable <macast.*> manifest. The
+#      loader trusts the manifest to decide *whether to import the module*, so
+#      a typo there is no longer survivable -- the upstream PotPlayer header
+#      closed its <macast.renderer> and <macast.platform> tags with
+#      "</macast.title>", and both values were silently lost.
+#   2. A plugin declaring a platform we are not on must not be imported at
+#      all. The bundled set includes `import win32api` (module level) and a
+#      `sudo pi_fm_rds` launch, so importing them off-platform raises -- and
+#      used to take the whole app down while it was just building its list.
+# --------------------------------------------------------------------------
+print("\n=== Part 5b: bundled plugins ===")
+try:
+    _renderer_dir = os.path.join(MACAST, "plugins", "renderer")
+    _protocol_dir = os.path.join(MACAST, "plugins", "protocol")
+
+    _expected = {
+        "iina.py": ("IINA Renderer", "IINARenderer", "darwin"),
+        "web.py": ("Web Renderer", "WebRenderer", "darwin,linux,win32"),
+        "live.py": ("Live Renderer", "LiveRenderer", "win32,darwin,linux"),
+        "potplayer.py": ("PotPlayer Renderer", "PotplayerRenderer", "win32"),
+        "pi_fm.py": ("PIFMRDS Renderer", "PIFMRenderer", "linux"),
+    }
+    for _fname, (_title, _cls, _plat) in sorted(_expected.items()):
+        _meta = macast_mod._read_plugin_metadata(os.path.join(_renderer_dir, _fname))
+        check("manifest of {} parses".format(_fname), bool(_meta.get("title")),
+              str(_meta))
+        check("{} declares its title".format(_fname), _meta.get("title") == _title,
+              repr(_meta.get("title")))
+        check("{} declares its class".format(_fname),
+              _meta.get("renderer") == _cls, repr(_meta.get("renderer")))
+        check("{} declares its platform".format(_fname),
+              _meta.get("platform") == _plat, repr(_meta.get("platform")))
+
+    _nva = macast_mod._read_plugin_metadata(
+        os.path.join(_protocol_dir, "nirvana.py"))
+    check("nirvana manifest declares a protocol class",
+          _nva.get("protocol") == "NVAProtocol", repr(_nva.get("protocol")))
+    check("nirvana manifest declares its platform",
+          _nva.get("platform") == "darwin,win32,linux", repr(_nva.get("platform")))
+
+    # A bundled plugin for another OS must be *registered* (so the settings
+    # page can grey it out) while its module is never imported. The fixtures
+    # are injected where the loader looks for them, so this needs no real
+    # plugin file on disk.
+    class _FixtureRenderer(object):
+        pass
+
+    _valid_module = types.ModuleType("macast.plugins.renderer._valid_fixture")
+    _valid_module.FixtureRenderer = _FixtureRenderer
+
+    _fixture_sources = {
+        "_valid_fixture.py": (
+            "# <macast.title>Fixture Renderer</macast.title>\n"
+            "# <macast.renderer>FixtureRenderer</macast.renderer>\n"
+            "# <macast.platform>darwin,win32,linux</macast.platform>\n"
+            "# <macast.version>7.7</macast.version>\n"
+            "# <macast.desc>fixture</macast.desc>\n"),
+        "_foreign_fixture.py": (
+            "# <macast.title>Foreign Renderer</macast.title>\n"
+            "# <macast.renderer>ForeignRenderer</macast.renderer>\n"
+            "# <macast.platform>plan9</macast.platform>\n"),
+    }
+    _fixture_dir = _tempfile.mkdtemp(prefix="macast-bundled-")
+    try:
+        for _name, _body in _fixture_sources.items():
+            with open(os.path.join(_fixture_dir, _name), "w", encoding="utf-8") as _f:
+                _f.write(_body)
+
+        # `_import_bundled_module` consults sys.modules first and only then
+        # importlib, so a mock here sees exactly the modules the loader really
+        # tries to execute -- and nothing else.
+        _imported = []
+        _real_import_module = macast_mod.importlib.import_module
+
+        def _spy_import(dotted, *a, **k):
+            _imported.append(dotted)
+            if dotted.endswith("_valid_fixture"):
+                return _valid_module
+            if dotted.endswith("_foreign_fixture"):
+                raise AssertionError(
+                    "the loader tried to import a foreign-platform plugin: "
+                    + dotted)
+            return _real_import_module(dotted, *a, **k)
+
+        _probe = macast_mod.MacastPluginManager.__new__(macast_mod.MacastPluginManager)
+        macast_mod.importlib.import_module = _spy_import
+        try:
+            _loaded = _probe._load_bundled_plugins("renderer", directory=_fixture_dir)
+        finally:
+            macast_mod.importlib.import_module = _real_import_module
+
+        check("foreign-platform plugin module is never imported",
+              not any("_foreign_fixture" in d for d in _imported), str(_imported))
+        check("matching-platform plugin module is imported exactly once",
+              _imported.count("macast.plugins.renderer._valid_fixture") == 1,
+              str(_imported))
+
+        _titles = sorted(p.title for p in _loaded)
+        check("bundled loader registers every fixture",
+              _titles == ["Fixture Renderer", "Foreign Renderer"], str(_titles))
+
+        _foreign = [p for p in _loaded if p.title == "Foreign Renderer"][0]
+        check("foreign-platform plugin has no class to build",
+              _foreign.plugin_factory is None, repr(_foreign.plugin_factory))
+        check("foreign-platform plugin reports available=False",
+              _foreign.get_info()["available"] is False)
+        check("foreign-platform plugin is still listed as a bundled default",
+              _foreign.kind() == "renderer" and _foreign.get_info()["default"] is True)
+
+        _valid = [p for p in _loaded if p.title == "Fixture Renderer"][0]
+        check("matching-platform plugin is instantiable",
+              _valid.get_instance() is not None)
+        check("bundled plugin is flagged default and not uninstallable",
+              _valid.get_info()["default"] is True
+              and _valid.get_info()["can_uninstall"] is False)
+        check("bundled plugin reports its own version, not the app version",
+              _valid.get_info()["version"] == "7.7",
+              repr(_valid.get_info()["version"]))
+    finally:
+        _shutil.rmtree(_fixture_dir, ignore_errors=True)
+        sys.modules.pop("macast.plugins.renderer._valid_fixture", None)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("bundled plugins behave", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Part 6: running several protocols at once (ProtocolGroup)
 #
 # Macast historically ran ONE protocol; the group lets DLNA + Chromecast +
@@ -840,6 +1173,23 @@ try:
     check("primary prefers the SSDP protocol", g.primary is dlna)
     check("handler comes from the primary", g.handler == "handler-of-DLNA")
 
+    # A protocol that extends another's handler must win the tree root even
+    # when it was added later. The NVA protocol subclasses DLNAHandler to add
+    # its own endpoints; picking by insertion order mounted DLNA's handler and
+    # made every NVA route unreachable with no error anywhere.
+    class _Extended(_Rec):
+        handler_priority = 10
+
+    nva = _Extended("NVA", uses_ssdp=True)
+    g.add("NVA", nva)
+    check("an extended handler wins over plain insertion order",
+          g.primary is nva, getattr(g.primary, "name", None))
+    check("the richest handler is the one mounted",
+          g.handler == "handler-of-NVA", str(g.handler))
+    g.remove("NVA")
+    check("primary falls back when the extended handler is removed",
+          g.primary is dlna, getattr(g.primary, "name", None))
+
     # set_state_* fan-out: Renderer resolves ONE protocol via the bus, so
     # without this only one protocol would ever learn about playback.
     dlna.state, cc.state, ap2.state = [], [], []
@@ -879,6 +1229,124 @@ try:
     empty.start()
     empty.stop()
     check("empty group start/stop is safe", True)
+
+    # ----------------------------------------------------------------------
+    # The state ledger must survive being wrapped in a group.
+    #
+    # Regression: `Protocol` declares get_state / get_state_* / set_state as
+    # no-op stubs, so `group.get_state(...)` resolved on the base class and
+    # never reached DLNAProtocol -- the only child that actually keeps a
+    # ledger. /api?query=status therefore reported an empty title, no volume
+    # and 0:00:00 forever, and the subtitle toggle was stuck reading `''`.
+    # `_Rec` above cannot catch this: it does not inherit from Protocol, so
+    # attribute lookup always falls through to __getattr__. That is precisely
+    # why the bug shipped.
+    # ----------------------------------------------------------------------
+    ledger = protocol.DLNAProtocol()
+    ledger.set_state('TransportState', 'PLAYING')
+    ledger.set_state('CurrentTrackTitle', 'a real title')
+    ledger.set_state('CurrentMediaDuration', '00:01:30')
+    ledger.set_state('Volume', 0)              # 0 is an answer, not "unknown"
+    ledger.set_state('DisplayCurrentSubtitle', False)
+
+    gl = ProtocolGroup([("DLNA Protocol", ledger)])
+    check("group forwards get_state to the protocol holding state",
+          gl.get_state('TransportState') == 'PLAYING',
+          repr(gl.get_state('TransportState')))
+    check("group forwards get_state_transport_state",
+          gl.get_state_transport_state() == 'PLAYING',
+          repr(gl.get_state_transport_state()))
+    check("group forwards get_state_title",
+          gl.get_state_title() == 'a real title', repr(gl.get_state_title()))
+    check("group forwards get_state_duration",
+          gl.get_state_duration() == '00:01:30', repr(gl.get_state_duration()))
+    check("a real 0 / False is not mistaken for 'unknown'",
+          gl.get_state_volume() == 0 and gl.get_state_display_subtitle() is False,
+          "{!r} / {!r}".format(gl.get_state_volume(),
+                               gl.get_state_display_subtitle()))
+
+    gl.set_state('CurrentTrackTitle', 'written through the group')
+    check("Renderer.set_state reaches the ledger through the group",
+          ledger.get_state('CurrentTrackTitle') == 'written through the group',
+          repr(ledger.get_state('CurrentTrackTitle')))
+
+    # With DLNA off there is no ledger at all; the group must still answer a
+    # sender-facing read instead of the base-class stub's hardcoded 'STOPPED'.
+    check("state is readable with DLNA not the primary child",
+          ProtocolGroup([("Chromecast", ledger)]).get_state_transport_state()
+          == 'PLAYING')
+
+    # A subscriber registered on the child must show up on the group: this is
+    # the settings page's "client information" table.
+    class _Sub(object):
+        host, url, service = '10.1.2.3', 'http://10.1.2.3/notify', 'AVTransport'
+        sid, path, timeout = 'uuid:deadbeef', '/event', 1800
+
+    ledger.event_subscribes['uuid:deadbeef'] = _Sub()
+    check("group exposes every child's event subscribers",
+          'uuid:deadbeef' in gl.event_subscribes, str(list(gl.event_subscribes)))
+    check("subscriber fields reach the status page intact",
+          gl.event_subscribes['uuid:deadbeef'].service == 'AVTransport')
+    check("group reports no subscribers when nothing subscribed",
+          ProtocolGroup().event_subscribes == {})
+
+    # ----------------------------------------------------------------------
+    # A subscriber must enter the client list without waiting for playback to
+    # change something.
+    #
+    # Regression: `append_device_queue` was drained *only* from inside
+    # send_states_to_clients, which the event loop reached only when
+    # `state_queue` was non-empty. Playback position is deliberately not an
+    # observed state (DLNA clients poll GetPositionInfo for it), so while a
+    # stream sat there playing nothing was ever queued and the first
+    # subscriber of every session stayed pending forever -- the settings page's
+    # "client information" table showed "no clients".
+    # ----------------------------------------------------------------------
+    def _pending_subscriber_is_registered(drain):
+        sub = protocol.DLNAProtocol()
+        sub.add_subscribe('AVTransport', 'http://127.0.0.1:9/notify', 1800)
+        if sub.append_device_queue.qsize() != 1:
+            return False, "subscribe did not queue a client"
+        # No observed state has changed: exactly what the event loop sees while
+        # a stream plays.
+        drain(sub)
+        return len(sub.event_subscribes) == 1, \
+            "event_subscribes={} pending={}".format(
+                list(sub.event_subscribes), sub.append_device_queue.qsize())
+
+    ok, detail = _pending_subscriber_is_registered(
+        lambda s: s._sync_subscribe_list())
+    check("a subscriber is registered without any state change", ok, detail)
+    ok, detail = _pending_subscriber_is_registered(
+        lambda s: s.send_states_to_clients({'TransportState': 'PLAYING'}))
+    check("a subscriber is registered when a state does change", ok, detail)
+
+    # The reverse has to hold too, or a disconnected client lingers until the
+    # next broadcast -- which may never come.
+    sub = protocol.DLNAProtocol()
+    sub.add_subscribe('AVTransport', 'http://127.0.0.1:9/notify', 1800)
+    sub._sync_subscribe_list()
+    sid = list(sub.event_subscribes)[0]
+    sub.remove_subscribe(sid)
+    sub._sync_subscribe_list()
+    check("a removed subscriber is gone after the drain",
+          sid not in sub.event_subscribes and sub.removed_device_queue.qsize() == 0,
+          "subs={} pending={}".format(list(sub.event_subscribes),
+                                      sub.removed_device_queue.qsize()))
+
+    # An expired subscriber must be reaped by the periodic pass, not only when
+    # a broadcast happens.
+    sub = protocol.DLNAProtocol()
+    sub.add_subscribe('AVTransport', 'http://127.0.0.1:9/notify', 0)
+    sub._sync_subscribe_list()
+    check("a zero-timeout subscriber registers", len(sub.event_subscribes) == 1)
+    time.sleep(1.1)
+    sub._reap_timed_out_clients()
+    sub._sync_subscribe_list()
+    check("an expired subscriber is reaped by the periodic pass",
+          sub.event_subscribes == {} and sub.removed_device_queue.qsize() == 0,
+          "subs={} pending={}".format(list(sub.event_subscribes),
+                                      sub.removed_device_queue.qsize()))
 except Exception as e:
     import traceback
     traceback.print_exc()
@@ -1257,8 +1725,6 @@ finally:
 # create, uninstall and re-install plugins without touching the real install.
 # --------------------------------------------------------------------------
 print("\n=== Part 11: plugin hot-plug ===")
-import shutil as _shutil
-import tempfile as _tempfile
 
 RENDERER_PLUGIN = """#<macast.title>Hotplug Player</macast.title>
 #<macast.renderer>HotplugRenderer</macast.renderer>
@@ -1451,7 +1917,16 @@ finally:
     macast_mod.SETTING_DIR = _saved_dir_macast
     utils.SETTING_DIR = _saved_dir_utils
     utils.Setting.setting, utils.Setting.setting_path = _saved_setting3
-    utils.Setting.set(utils.SettingProperty.Macast_Renderer, _saved_renderer_sel)
+    # Best-effort: the value was only read to be put back unchanged, so a
+    # sandbox that forbids writing the user's real config dir (EEXIST from the
+    # PYTHONPATH shim, EPERM from the DSH file sandbox) must not turn a fully
+    # passing suite into a traceback on the very last line.
+    try:
+        utils.Setting.set(utils.SettingProperty.Macast_Renderer, _saved_renderer_sel)
+    except OSError as e:
+        print("[WARN] could not restore the real renderer setting "
+              "({}); the test used its own temp config, so nothing was "
+              "changed by the run itself.".format(e))
     for _mod in ("renderer", "protocol", "renderer.hotplay", "renderer.incoming",
                  "protocol.hotproto", "protocol.incoming_proto"):
         sys.modules.pop(_mod, None)
