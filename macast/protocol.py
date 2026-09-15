@@ -619,6 +619,43 @@ class DLNAProtocol(Protocol):
             return 200
         return 412
 
+    def _sync_subscribe_list(self):
+        """Apply pending subscriber additions/removals to `event_subscribes`.
+
+        Split out of `send_states_to_clients` because it must not depend on a
+        state change having happened. It used to be reachable *only* from
+        there, and that call was gated on `state_queue` being non-empty -- so
+        with nothing observed changing (playback position is deliberately not
+        observed; DLNA clients poll GetPositionInfo for it) a new subscriber
+        sat in `append_device_queue` forever. The settings page's client table
+        reads `event_subscribes`, so it showed "no clients" for the first
+        subscriber of every session, no matter how long it stayed subscribed.
+
+        Returns True if anything changed.
+        """
+        changed = False
+        while not self.removed_device_queue.empty():
+            sid = self.removed_device_queue.get()
+            logger.info("Remove client: {}".format(sid))
+            self.event_subscribes.pop(sid, None)
+            self.removed_device_queue.task_done()
+            changed = True
+        while not self.append_device_queue.empty():
+            client = self.append_device_queue.get()
+            # `add_subscribe` runs on a CherryPy worker thread; registering
+            # here (the event thread) is what keeps the dict single-writer.
+            self.event_subscribes[client.sid] = client
+            self.append_device_queue.task_done()
+            logger.info("Add client: {} ({})".format(client.sid, client.url))
+            changed = True
+        return changed
+
+    def _reap_timed_out_clients(self):
+        """Queue every subscriber whose TIMEOUT has elapsed for removal."""
+        for sid in list(self.event_subscribes):
+            if self.event_subscribes[sid].is_timeout():
+                self.remove_subscribe(sid)
+
     def send_states_to_clients(self, state_change_list):
         """Sending the states in the stateChangeList to the clients which subscribe to them.
         :param state_change_list:
@@ -626,24 +663,14 @@ class DLNAProtocol(Protocol):
         """
         if not bool(state_change_list):
             return
-        # remove offline clients
-        while not self.removed_device_queue.empty():
-            sid = self.removed_device_queue.get()
-            logger.info("Remove client: {}".format(sid))
-            del self.event_subscribes[sid]
-            self.removed_device_queue.task_done()
-        # add clients
-        while not self.append_device_queue.empty():
-            client = self.append_device_queue.get()
-            self.event_subscribes[client.sid] = client
-            self.append_device_queue.task_done()
+        self._sync_subscribe_list()
         # send stateChangeList to client
-        for sid in self.event_subscribes:
+        for sid in list(self.event_subscribes):
             client = self.event_subscribes[sid]
-            if client.is_timeout():
-                self.remove_subscribe(client.sid)
-                continue
             try:
+                if client.is_timeout():
+                    self.remove_subscribe(client.sid)
+                    continue
                 # Only send state which within the service
                 state = {}
                 for name in state_change_list:
@@ -660,6 +687,10 @@ class DLNAProtocol(Protocol):
                     logger.debug("remove " + client.sid)
                     self.remove_subscribe(client.sid)
 
+        # A removal queued by the loop above must not wait for the next state
+        # change to take effect.
+        self._sync_subscribe_list()
+
     def event(self):
         """DLNA Event thread
         If a DLNA client subscribes to the dlna event,
@@ -670,6 +701,17 @@ class DLNAProtocol(Protocol):
         while self.running:
             self._state_event.wait(timeout=0.25)
             self._state_event.clear()
+            # Register/reap subscribers on *every* tick, not only when a state
+            # has changed. This used to happen only inside
+            # send_states_to_clients, which the loop reached only when
+            # `state_queue` was non-empty -- so a client that subscribed while
+            # nothing observed was changing (playback position is deliberately
+            # not observed; DLNA clients poll GetPositionInfo for it) stayed in
+            # `append_device_queue` indefinitely, and the settings page's
+            # client table showed "no clients" for the first subscriber of
+            # every session.
+            self._reap_timed_out_clients()
+            self._sync_subscribe_list()
             if not self.state_queue.empty():
                 state = {}
                 while not self.state_queue.empty():
@@ -1316,7 +1358,7 @@ class Handler:
             cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
             query = kwargs.get('query', '')
             # Sensitive management queries: block unless local or token-bearing.
-            if query in ('status', 'log', 'launch-param', 'interfaces') \
+            if query in ('status', 'log', 'launch-param', 'interfaces', 'subscribers') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1345,7 +1387,45 @@ class Handler:
                 }
             elif query == 'status':
                 res = self.get_status()
+            elif query == 'subscribers':
+                # Diagnostic view of DLNA event subscribers, per protocol.
+                #
+                # `status` reports the aggregated client table the settings
+                # page renders; this shows *where* each subscriber actually
+                # landed. That distinction matters because a subscriber is
+                # queued by a CherryPy worker thread and only promoted into
+                # `event_subscribes` by the owning protocol's event thread, so
+                # "connection accepted but no client listed" is a real failure
+                # mode and this is how you tell it apart from "no client
+                # subscribed at all".
+                protocol = self.protocol
+                children = []
+                for title, child in getattr(protocol, '_children', []):
+                    thread = getattr(child, 'event_thread', None)
+                    children.append({
+                        'title': title,
+                        'type': type(child).__name__,
+                        'running': getattr(child, 'running', None),
+                        'event_thread_alive': thread.is_alive()
+                        if thread is not None else None,
+                        'subscribed': sorted(
+                            (getattr(child, 'event_subscribes', {}) or {}).keys()),
+                        # Non-zero means the event thread is not draining:
+                        # either it is gone, or it never runs.
+                        'pending_append': getattr(
+                            getattr(child, 'append_device_queue', None), 'qsize',
+                            lambda: None)(),
+                        'pending_state': getattr(
+                            getattr(child, 'state_queue', None), 'qsize',
+                            lambda: None)(),
+                    })
+                res = {
+                    'aggregated': sorted(
+                        (getattr(protocol, 'event_subscribes', {}) or {}).keys()),
+                    'children': children,
+                }
             elif query == 'interfaces':
+
                 # Backs the settings page network picker. `usable`/`reason`
                 # come from the same filter discovery uses, so the page never
                 # offers an interface the advertiser would refuse to publish.
