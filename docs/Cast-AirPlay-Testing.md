@@ -1,11 +1,12 @@
 # Chromecast / AirPlay 接收端 · 真机验证指南
 
 本指南用于在**真实局域网 + 真实手机/电脑**上验证 Macast 新增的 Chromecast 与 AirPlay
-接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，48/48 通过）只覆盖协议逻辑与
+接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，138/138 通过）只覆盖协议逻辑与
 本机 socket，无法替代真机验证。
 
-> 本轮已用真实局域网跑过一遍发现验证，期间修掉 4 个只在真机/真实网络才暴露的问题，
-> 见 [第 10 节](#10-本轮已修的真机问题2026-09-15)。
+> 已用真实局域网跑过两轮验证，期间修掉若干**只在真机/真实网络才暴露**的问题，
+> 见 [第 10 节](#10-本轮已修的真机问题2026-09-15) 与
+> [第 10.5 节](#105-第二轮真机问题2026-09-15-晚)。
 
 ---
 
@@ -18,7 +19,7 @@
 | AirPlay **音频**（RAOP / ALAC） | **未实现** |
 | AirPlay **屏幕镜像** | **未实现**（需实时 H.264 解码） |
 | Google 官方发送端（Chrome / 安卓 Play 服务 / iOS SDK） | **大概率失败**：Google 用出厂密钥做设备认证，第三方接收端无法签名 |
-| 第三方发送端（VLC、Home Assistant、go-chromecast、Jellyfin 系） | 可能可用（常跳过设备认证） |
+| 第三方发送端（VLC、Home Assistant、go-chromecast、Jellyfin 系） | 可用；VLC 已实测通过（**但它会做设备认证**，回复必须严格合法，见 10.5） |
 | 受 DRM 保护内容（Netflix / Apple TV app 等） | **不可能支持**（连 UxPlay 等成熟实现也做不到） |
 
 ---
@@ -252,6 +253,91 @@ Cast SDK）会解析失败并认定"当前 app 不支持 media 命名空间"，
 
 两个问题都补了回归用例（93/93）。
 
+### 10.5 第二轮真机问题（2026-09-15 晚）
+
+手机 VLC **仍然投不上**，日志显示它连上了 8009、发了一个 device-auth challenge、
+然后就没有下文了。查 VLC 源码
+（`modules/stream_out/chromecast/chromecast_ctrl.cpp`）才看清它到底在等什么：
+
+```cpp
+void intf_sys_t::processAuthMessage( const castchannel::CastMessage& msg )
+{
+    castchannel::DeviceAuthMessage authMessage;
+    if ( authMessage.ParseFromString(msg.payload_binary()) == false ) {
+        msg_Warn( m_module, "Failed to parse the payload" );
+        return;                      // 永远停在 Authenticating
+    }
+    if (authMessage.has_error()) { ... }
+    else if (!authMessage.has_response()) { msg_Err(...); }
+    else {
+        setState( Connecting );
+        m_communication->msgConnect( DEFAULT_CHOMECAST_RECEIVER );
+        m_communication->msgReceiverGetStatus();
+    }
+}
+```
+
+**根因 3：device-auth 回复的 protobuf 少套了一层。**
+`cast_channel.proto` 里：
+
+```protobuf
+message DeviceAuthMessage {
+  optional AuthChallenge challenge = 1;
+  optional AuthResponse  response  = 2;   // ← 回复必须放这里
+  optional AuthError     error     = 3;
+}
+message AuthResponse {
+  required bytes signature                = 1;   // required！
+  required bytes client_auth_certificate  = 2;   // required！
+  repeated bytes intermediate_certificate = 3;
+}
+```
+
+我们之前直接把 `AuthResponse` 当顶层消息发（`0a001200`），发出来被解析成
+`DeviceAuthMessage{ challenge: {}, response: {} }` —— `response` 字段在、但里面
+**空**，`signature` / `client_auth_certificate` 这两个 **required** 字段缺失，
+C++ protobuf 在 `ParseFromString()` 阶段就报错。VLC 于是 `return`，状态机卡死在
+`Authenticating`，一个字节都不再发。
+
+修复后（`12040a001200`）：`encode_auth_response()` 输出
+`DeviceAuthMessage{ response: AuthResponse{ signature: "", client_auth_certificate: "" } }`，
+并支持传入真证书与 CA 链（有证书时走认证态）。
+
+**根因 4：一次失败的 TLS 握手会永久打死接收端。**
+原来的写法是把**监听 socket** 包成 TLS：
+
+```python
+raw.listen(5)
+self._tls_server = ctx.wrap_socket(raw, server_side=True)   # ← 问题在这
+```
+
+`SSLSocket.accept()` 会在**调用线程里同步跑握手**，于是任何一次握手失败都会从
+`accept()` 抛 `ssl.SSLError` —— 而 `SSLError` 是 `OSError` 的子类，正好被
+
+```python
+try:
+    conn, addr = self._tls_server.accept()
+except OSError:
+    break                    # ← 被当成"监听器没了"，整个循环退出
+```
+
+吃掉并 `break`。后果：**设备 mDNS 广播照旧，8009 也还是 LISTEN，但没人 accept**，
+端口探活成功、TLS 握手超时。手机端看到的正是"能搜到、投不上去"，而且**重启前无法恢复**。
+（我用 `lsof` 看到端口在听、`socket.connect()` 也能成功，但 `wrap_socket` 5 秒超时，
+才定位到这里。）
+
+修复：
+- 监听 socket 保持明文，**每条连接**再 `wrap_socket`，握手失败只影响那一条；
+- `_accept_loop(server)` 把 socket 作为参数传入，避免上一轮的僵死线程 accept 到新监听器；
+- 循环里区分"监听器没了"（`_stop_event` 或 `fileno() < 0`）和"单次连接出错"，后者只记日志继续。
+
+同时把 `Handler.get_status()` 里 `protocol.event_subscribes` 改成 `getattr(..., {})`：
+`ProtocolGroup` 在只启用 Chromecast 时会把 `event_subscribes` 委派给
+`ChromecastProtocol`，抛 AttributeError（虽然被 catch，但日志全是噪声）。
+
+以上都补了回归用例（138/138），包括"3 次半开连接后仍能正常建会话"和
+"stop/start 之后仍能建会话"。
+
 ## 11. 多协议并发（2026-09-15 起支持）
 
 三个协议可以同时在线。实现要点：
@@ -269,6 +355,50 @@ Cast SDK）会解析失败并认定"当前 app 不支持 media 命名空间"，
 ⚠️ **踩过的坑**：基类 `Protocol` 本身就定义了 `set_state_*` 空方法，
 导致 `group.set_state_play` 命中类属性、`__getattr__` 扇出根本不会被调用
 ——播放状态会静默丢弃。必须把扇出函数装到**实例属性**上才能盖过类方法。
+
+## 11.5 网卡选择 & 插件热插拔（2026-09-15 新增）
+
+### 网卡选择（设置页 → 状态 → 网络与广播）
+
+多网卡机器（虚拟机网桥、VPN、Tailscale）上，"能搜到但投不上"十有八九是广播用了
+错的地址。现在可以显式指定：
+
+- `GET /api?query=interfaces` 返回 `{current, advertised, interfaces[]}`，
+  每项含 `name / ip / netmask / default / usable / reason`。
+- `POST /api  set-interface=<name>`（空串=自动）落盘 `Network_Interface`，
+  然后**立即重新广播**：`ssdp_update_ip` 让 SSDP 重绑，mDNS 由协议 stop/start 重新注册。
+  不重启，mpv 正在播的内容不受影响。
+- 后端拒绝不存在的网卡名（否则会静默退化成回环，看起来"配置好了"但其实不可见）。
+
+语义统一在 `Setting.resolved_network_interface()`：显式 pin 只在**该网卡确有
+局域网可达 IPv4** 时生效，否则退回自动选择并打 warning。SSDP（`get_ip()`）和
+mDNS（`discovery._advertisable_interfaces()`）都走这一个判断，不会再出现
+"mDNS 走 Wi-Fi、SSDP 却绑在死掉的隧道上"。
+
+地址过滤规则（`utils.unadvertisable_reason()`，前端直接展示这段文案）：
+回环、链路本地、`/32` 点对点、`100.64/10`（Tailscale CGNAT）。
+
+### 插件热插拔（设置页 → 插件）
+
+内置协议过去只能在菜单栏勾选，第三方插件装上就必须重启。现在设置页就能
+**启用 / 停用 / 卸载 / 安装**，全部**即时生效、不重启**：
+
+| 动作 | 接口 | 说明 |
+|---|---|---|
+| 启用/停用 | `plugin-enable` / `plugin-disable` + `plugin-key` | 协议改 `Macast_Protocols`；渲染器改 `Disabled_Plugins` |
+| 卸载 | `plugin-uninstall` + `plugin-key` | 仅文件插件；内置插件拒绝 |
+| 安装 | `install-plugin` + `plugin-url`/`plugin-type`（或上传 `plugin-file`） | 下载/上传后热加载 |
+
+要点：
+
+- **`plugin-key` 是稳定标识**：内置插件 `protocol:<标题>` / `renderer:<标题>`；
+  文件插件 `protocol:<文件名>` / `renderer:<文件名>`（避免同名文件冲突）。
+- **卸载是可恢复的**：文件 `mv` 到 `SETTING_DIR/.trash/<时间戳>/`，不是删除。
+- **保护规则**：不能停用最后一个启用协议；不能停用正在使用的渲染器；内置插件不能卸载。
+- **安装会回滚**：加载失败或平台不匹配的插件立即删掉，不留半装状态。
+- **`_import_plugin_module()` 会 `reload`**：importlib 有模块缓存，不 reload 的话
+  重装插件仍跑旧代码 —— 那正是热插拔想避免的。
+- 菜单重建走 `App.call_on_main_thread()`：CherryPy 工作线程改 AppKit 菜单不安全。
 
 ## 12. 反馈给我时请贴出
 
@@ -289,8 +419,16 @@ cd $REPO
 ```
 
 覆盖：Cast 编解码与指令路由、AirPlay RTSP 路由、真实 TLS/RTSP 端到端、
-mDNS 广播参数与实例名规范化、SSDP 随协议切换、以及
-`MacastPluginManager` 是否真的注册了三个协议。
+mDNS 广播参数与实例名规范化、SSDP 随协议切换、`DeviceAuthMessage` 线格式
+（含"旧写法必须被拒"的反例）、网卡枚举/过滤/pin 语义、插件热插拔
+（键稳定性、停用保护、卸载进回收站、安装回滚、坏插件不残留），以及
+"半开连接 + stop/start 后接收端仍然可用"。
+
+想用一个**忠实复刻 VLC 状态机**的发送端做端到端回归：
+
+```shell
+.venv/bin/python scripts/vlc_sender_sim.py          # 默认 127.0.0.1:8009
+```
 
 > 源码运行依赖 `.venv`（Python 3.12 + `requirements/darwin.txt` + `pillow zeroconf pyperclip`）。
 > 若用 WorkBuddy 的 Bash 跑 pip 报 `EEXIST: file already exists, mkdir ...`，是 CLI 注入的

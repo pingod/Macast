@@ -11,7 +11,6 @@ import logging
 import cherrypy
 import threading
 
-import requests
 from lxml import etree
 from queue import Queue
 from enum import Enum
@@ -1097,7 +1096,6 @@ class Handler:
 
     def __init__(self):
         self.setting_page = load_xml(XMLPath.SETTING_PAGE.value).encode()
-        self.__downloading = False
         # Random token used to protect management endpoints (install-plugin,
         # save-launch-param, status/log/launch-param queries) when the request
         # comes from outside the loopback interface. The local settings page is
@@ -1139,16 +1137,109 @@ class Handler:
     def reload(self):
         cherrypy.server.httpserver = _cpnative_server.CPHTTPServer(cherrypy.server)
 
-    def __download_plugin(self, path, url):
+    # -- plugin hot-plug ---------------------------------------------------
+
+    def _plugin_manager(self):
+        """The live plugin manager, or None if the app has not published one."""
+        manager = cherrypy_publish('get_plugin_manager', None)
+        if manager is None:
+            logger.error("Plugin manager unavailable")
+            raise ValueError('插件管理不可用')
+        return manager
+
+    def _plugin_change(self, action, **kwargs):
+        """Run one hot-plug action and return a JSON-ready result dict.
+
+        All four verbs (enable / disable / uninstall / install) share this so
+        the settings file, the plugin directory and the running services are
+        updated in one place, and the app is told to re-apply afterwards. No
+        restart is involved -- that is the point of hot-plug.
+        """
+        manager = self._plugin_manager()
         try:
-            with open(path, 'wb') as f:
-                f.write(requests.get(url, timeout=30).content)
+            if action == 'enable' or action == 'disable':
+                key = kwargs.get('key') or ''
+                plugin = manager.plugin_by_key(key)
+                if plugin is None:
+                    raise ValueError('未找到该插件')
+                if plugin.kind() == 'protocol':
+                    manager.set_protocol_enabled(plugin.title, action == 'enable')
+                else:
+                    manager.set_renderer_enabled(key, action == 'enable')
+                message = '{}已{}'.format(plugin.title,
+                                          '启用' if action == 'enable' else '停用')
+            elif action == 'uninstall':
+                plugin = manager.uninstall(kwargs.get('key') or '')
+                message = '已卸载 {}'.format(plugin.title)
+            elif action == 'install':
+                if kwargs.get('path'):
+                    plugin = manager.install_file(kwargs['path'],
+                                                  kwargs.get('type', 'renderer'),
+                                                  kwargs.get('filename'))
+                else:
+                    plugin = manager.install_url(kwargs.get('url', ''),
+                                                 kwargs.get('type', 'renderer'))
+                message = '已安装 {}'.format(plugin.title)
+            else:
+                raise ValueError('未知操作：{}'.format(action))
+        except ValueError as e:
+            return {'code': 1, 'message': str(e)}
         except Exception as e:
-            logger.error(f"download plugin error: {e}")
-        finally:
-            self.__downloading = False
-            Setting.restart()
-            # cherrypy.engine.restart()
+            logger.error("Plugin %s failed: %s", action, e)
+            return {'code': 1, 'message': '{}失败：{}'.format(action, e)}
+        cherrypy.engine.publish('plugins_changed')
+        return {'code': 0, 'message': message}
+
+    def __install_uploaded_plugin(self, upload, kwargs):
+        """Install a plugin the user uploaded from their own machine.
+
+        The upload is staged in a temp path first and removed afterwards, so a
+        file that fails to load leaves nothing behind; `install_file` is the
+        one place that copies into the plugin dir and enables it.
+        """
+        filename = os.path.basename(getattr(upload, 'filename', '') or '')
+        if not filename:
+            return json.dumps({'code': 1, 'message': '未收到插件文件'},
+                              indent=4).encode()
+        plugin_type = kwargs.get('plugin-type') or 'renderer'
+        staging_dir = os.path.join(SETTING_DIR, 'local_files')
+        staged = os.path.join(staging_dir, filename)
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+            with open(staged, 'wb') as f:
+                f.write(upload.file.read())
+        except Exception as e:
+            logger.error('plugin upload staging failed: %s', e)
+            return json.dumps({'code': 1, 'message': '插件上传失败'},
+                              indent=4).encode()
+        result = self._plugin_change('install', path=staged, type=plugin_type,
+                                     filename=filename)
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        return json.dumps(result, indent=4).encode()
+
+    def _set_network_interface(self, name):
+        """Pin (or clear) the interface used for discovery and re-advertise.
+
+        An unknown interface name is refused rather than stored: a typo would
+        otherwise silently drop Macast to the loopback fallback and make it
+        invisible while looking like it was configured.
+        """
+        name = (name or '').strip()
+        if name:
+            known = {row['name'] for row in Setting.network_interfaces()}
+            if name not in known:
+                return {'code': 1,
+                        'message': '未找到网卡 {}，当前可用：{}'.format(
+                            name, '、'.join(sorted(known)) or '无')}
+        Setting.set_network_interface(name)
+        cherrypy.engine.publish('network_interface_changed')
+        return {'code': 0,
+                'message': '已切换到 {}'.format(name or '自动选择'),
+                'interface': name}
+
 
     def get_status(self):
         """Snapshot of the running service, the media being cast, and the
@@ -1176,6 +1267,12 @@ class Handler:
             'https_enabled': Setting.is_https_enabled(),
             'https_port': Setting.get_https_port() if Setting.is_https_enabled() else None,
         }
+        network = {
+            # '' means automatic (default-route interface).
+            'interface': Setting.get_network_interface(),
+            'advertised': advertisable_addresses(),
+            'interfaces': Setting.network_interfaces(),
+        }
         media = {}
         for name in ('CurrentURI', 'CurrentTrackURI', 'CurrentTrackTitle',
                      'CurrentTrackDuration', 'CurrentMediaDuration',
@@ -1189,7 +1286,11 @@ class Handler:
                 media[name] = None
         clients = []
         try:
-            for sid, c in protocol.event_subscribes.items():
+            # getattr, not direct access: with only Chromecast/AirPlay enabled
+            # the ProtocolGroup delegates this to a protocol that has no
+            # `event_subscribes` at all, and the AttributeError made the whole
+            # status endpoint noisy for no reason.
+            for sid, c in getattr(protocol, 'event_subscribes', {}).items():
                 clients.append({
                     'host': getattr(c, 'host', ''),
                     'url': getattr(c, 'url', ''),
@@ -1206,7 +1307,7 @@ class Handler:
         except Exception:
             pass
         return {'server': server, 'media': media, 'clients': clients,
-                'history': history}
+                'history': history, 'network': network}
 
     def GET(self, param=None, *args, **kwargs):
         if not Setting.is_service_running():
@@ -1215,7 +1316,8 @@ class Handler:
             cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
             query = kwargs.get('query', '')
             # Sensitive management queries: block unless local or token-bearing.
-            if query in ('status', 'log', 'launch-param') and not self._management_allowed():
+            if query in ('status', 'log', 'launch-param', 'interfaces') \
+                    and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
                                   indent=4).encode()
@@ -1243,6 +1345,15 @@ class Handler:
                 }
             elif query == 'status':
                 res = self.get_status()
+            elif query == 'interfaces':
+                # Backs the settings page network picker. `usable`/`reason`
+                # come from the same filter discovery uses, so the page never
+                # offers an interface the advertiser would refuse to publish.
+                res = {
+                    'current': Setting.get_network_interface(),
+                    'advertised': advertisable_addresses(),
+                    'interfaces': Setting.network_interfaces(),
+                }
             return json.dumps(res, indent=4).encode()
         if param == 'local':
             # Serve a previously uploaded local file (path-traversal safe).
@@ -1268,22 +1379,31 @@ class Handler:
         # Cached at init time; avoids re-reading the file from disk on every GET.
         return self.setting_page
 
+    #: Parameters that mutate state. They are only honoured from a trusted
+    #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
+    _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
+                          'plugin-disable', 'plugin-uninstall', 'set-interface')
+
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
         res = {'code': 0, 'message': 'success'}
-        # Local file casting: receive an uploaded file and expose it via /?local
+        # Uploads are dispatched by *field name*: the cast flow, the subtitle
+        # flow and plugin installation all post a file to the same endpoint.
         file_part = None
-        for v in kwargs.values():
+        file_field = ''
+        for key, v in kwargs.items():
             # An uploaded file part has .file (file-like) and .filename; a
             # plain form field is just a string, so detect by attribute.
             if hasattr(v, 'file') and hasattr(v, 'filename'):
-                file_part = v
+                file_part, file_field = v, key
                 break
         if file_part is not None:
             if not self._management_allowed():
                 res['code'] = 403
                 res['message'] = 'Forbidden: management API requires local access or token'
                 return json.dumps(res, indent=4).encode()
+            if file_field == 'plugin-file':
+                return self.__install_uploaded_plugin(file_part, kwargs)
             upload = file_part
             filename = os.path.basename(getattr(upload, 'filename', 'cast.bin'))
             ext = os.path.splitext(filename)[1].lower()
@@ -1307,13 +1427,20 @@ class Handler:
                 res['message'] = 'upload failed'
             return json.dumps(res, indent=4).encode()
         # Management endpoints: only allow from loopback or with a valid token.
-        if kwargs.get('save-launch-param', None) is not None or \
-                kwargs.get('install-plugin', None) is not None:
+        if any(kwargs.get(p, None) is not None for p in self._MANAGEMENT_PARAMS):
             if not self._management_allowed():
                 res['code'] = 403
                 res['message'] = 'Forbidden: management API requires local access or token'
                 return json.dumps(res, indent=4).encode()
-        if kwargs.get('save-launch-param', None) is not None:
+        if kwargs.get('set-interface', None) is not None:
+            res = self._set_network_interface(kwargs.get('set-interface'))
+        elif kwargs.get('plugin-enable', None) is not None:
+            res = self._plugin_change('enable', key=kwargs.get('plugin-key', ''))
+        elif kwargs.get('plugin-disable', None) is not None:
+            res = self._plugin_change('disable', key=kwargs.get('plugin-key', ''))
+        elif kwargs.get('plugin-uninstall', None) is not None:
+            res = self._plugin_change('uninstall', key=kwargs.get('plugin-key', ''))
+        elif kwargs.get('save-launch-param', None) is not None:
             setting = kwargs.get('save-launch-param', None)
             try:
                 setting = json.loads(setting)
@@ -1326,29 +1453,20 @@ class Handler:
                 Setting.restart()
                 # cherrypy.engine.restart()
         elif kwargs.get('install-plugin', None) is not None:
-            plugin = kwargs.get('install-plugin', None)
-            if self.__downloading:
-                cherrypy.engine.publish('app_notify', 'ERROR', 'Downloading other plugin now')
-                res['code'] = 1
-                res['message'] = 'Downloading other plugin now'
-            else:
-                cherrypy.engine.publish('app_notify', 'INFO', 'installing plugin...')
-                self.__downloading = True
+            # Accept both the flat form fields the settings page sends and the
+            # older JSON blob, so an already-open page keeps working.
+            raw = kwargs.get('install-plugin')
+            payload = {}
+            if isinstance(raw, str) and raw.strip().startswith('{'):
                 try:
-                    plugin = json.loads(plugin)
-                    url = plugin.get('url', '')
-                    plugin_name = url.split('/')[-1]
-                    local_path = os.path.join(SETTING_DIR, plugin.get('type', 'renderer'), plugin_name)
-                    # NOTE: pass (target, args=...) — do NOT call it inline,
-                    # otherwise __downloading is reset synchronously and the
-                    # download never happens in the background thread.
-                    threading.Thread(target=self.__download_plugin,
-                                     args=(local_path, url),
-                                     daemon=True).start()
-                except Exception as e:
-                    self.__downloading = False
-                    res['code'] = 1
-                    res['message'] = 'json format error'
+                    payload = json.loads(raw)
+                except ValueError:
+                    return json.dumps({'code': 1, 'message': 'json format error'},
+                                      indent=4).encode()
+            res = self._plugin_change(
+                'install',
+                url=kwargs.get('plugin-url') or payload.get('url', ''),
+                type=kwargs.get('plugin-type') or payload.get('type', 'renderer'))
         elif kwargs.get('set-subtitle-show', None) is not None:
             if not self._management_allowed():
                 res['code'] = 403

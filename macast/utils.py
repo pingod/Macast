@@ -50,6 +50,47 @@ class SettingProperty(Enum):
     # Protocols enabled at the same time (list of titles). Replaces the older
     # single-value Macast_Protocol, which is still read as a migration source.
     Macast_Protocols = 15
+    # Interface name (e.g. 'en0') the user pinned for discovery/advertisement.
+    # Empty string means automatic: whichever interface carries the IPv4
+    # default route.
+    Network_Interface = 16
+    # Plugin keys switched off. Protocols live in Macast_Protocols instead;
+    # this covers renderer plugins, which are only ever instantiated on demand
+    # and so need their own off-switch to be "unloaded" rather than "unused".
+    Disabled_Plugins = 17
+
+
+def unadvertisable_reason(addr, netmask):
+    """Why `addr` must not be published to other devices, or '' if it may.
+
+    Single source of truth for the address filter. The network picker shows
+    this text to the user and discovery applies the same test, so the two can
+    never disagree about which interfaces are usable -- which is exactly the
+    bug that made Macast "discoverable but not castable" (mDNS published an
+    address from a VM bridge or a Tailscale tunnel, and the sender dialled it).
+    """
+    if not addr:
+        return '没有 IPv4 地址'
+    if addr.startswith('127.'):
+        return '回环地址，其他设备不可达'
+    if addr.startswith('169.254.'):
+        return '链路本地地址，未取得 DHCP 租约'
+    if netmask in ('255.255.255.255', '32'):
+        return '点对点地址（/32），不属于局域网'
+    parts = str(addr).split('.')
+    if len(parts) != 4:
+        return '非 IPv4 地址'
+    try:
+        if parts[0] == '100' and 64 <= int(parts[1]) <= 127:
+            return '共享地址空间（Tailscale 等虚拟网卡）'
+    except ValueError:
+        return '非 IPv4 地址'
+    return ''
+
+
+def is_advertisable_address(addr, netmask):
+    """Whether an IPv4 address is worth publishing on a LAN."""
+    return not unadvertisable_reason(addr, netmask)
 
 
 class Setting:
@@ -150,19 +191,126 @@ class Setting:
         return False
 
     @staticmethod
+    def get_network_interface():
+        """Interface the user pinned for discovery, or '' for automatic."""
+        value = Setting.get(SettingProperty.Network_Interface, '')
+        return value.strip() if isinstance(value, str) else ''
+
+    @staticmethod
+    def set_network_interface(name):
+        """Pin discovery to `name`; '' restores automatic selection."""
+        Setting.set(SettingProperty.Network_Interface,
+                    str(name or '').strip())
+
+    @staticmethod
+    def resolved_network_interface():
+        """The pinned interface if it can actually carry discovery, else ''.
+
+        An explicit choice is honoured only while it has a LAN-reachable IPv4.
+        Pinning an interface that has gone away, or that only carries a
+        link-local / point-to-point / overlay address, would make Macast
+        silently invisible; falling back to automatic selection keeps it
+        reachable, and the picker shows the reason so the state is visible.
+        """
+        pinned = Setting.get_network_interface()
+        if not pinned:
+            return ''
+        try:
+            rows = [r for r in Setting.network_interfaces()
+                    if r['name'] == pinned]
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Could not verify pinned interface %r: %s", pinned, e)
+            return ''
+        if not rows:
+            logger.warning("Pinned interface %r not found; using automatic "
+                           "selection", pinned)
+            return ''
+        if not any(r['usable'] for r in rows):
+            logger.warning("Pinned interface %r has no LAN-reachable IPv4 "
+                           "(%s); using automatic selection",
+                           pinned, rows[0]['reason'])
+            return ''
+        return pinned
+
+    @staticmethod
+    def network_interfaces():
+        """Every local IPv4 interface, annotated for the network picker.
+
+        ``usable`` mirrors ``unadvertisable_reason()`` and ``reason`` explains
+        a rejection, so the page can answer "why can't I pick this one?"
+        without duplicating the rules in JavaScript.
+        """
+        pinned = Setting.get_network_interface()
+        default_ifaces = set()
+        try:
+            gateways = ni.gateways() or {}
+            for entry in gateways.get(ni.AF_INET, []):
+                # ('192.168.1.1', 'en0', True) -- flag marks the default route
+                if len(entry) > 1 and (len(entry) < 3 or entry[2]):
+                    default_ifaces.add(entry[1])
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Could not read IPv4 gateways: %s", e)
+        try:
+            names = list(ni.interfaces())
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Could not enumerate interfaces: %s", e)
+            names = []
+        rows = []
+        for name in names:
+            try:
+                addrs_v4 = ni.ifaddresses(name).get(ni.AF_INET, [])
+            except (ValueError, OSError):
+                continue
+            for entry in addrs_v4:
+                addr = entry.get('addr')
+                if not addr:
+                    continue
+                netmask = entry.get('netmask', '')
+                reason = unadvertisable_reason(addr, netmask)
+                rows.append({
+                    'name': name,
+                    'ip': addr,
+                    'netmask': netmask,
+                    'default': name in default_ifaces,
+                    'usable': not reason,
+                    'reason': reason,
+                    'selected': name == pinned,
+                })
+        # Default-route interface first, then anything else usable, so the row
+        # a user almost always wants is the one at the top.
+        rows.sort(key=lambda r: (not r['default'], not r['usable'],
+                                 r['name'], r['ip']))
+        return rows
+
+    @staticmethod
     def get_ip():
+        """(addr, netmask) pairs this host may advertise.
+
+        A pinned interface narrows this to that interface alone. That is what
+        makes the picker meaningful rather than cosmetic: SSDP only answers a
+        peer whose address falls in the same subnet as an entry here, so
+        pinning also stops Macast replying over bridges and tunnels the user
+        never wanted it on.
+        """
         last_ip = []
+        # resolved_* rather than the raw pin: an unusable pin must not take
+        # DLNA down with it any more than it takes mDNS down.
+        pinned = Setting.resolved_network_interface()
         gateways = ni.gateways()  # {type: [{ip, interface, default},{},...], type: []}
-        interfaces = set(Setting.get(SettingProperty.Additional_Interfaces, []))
-        interface_type = [ni.AF_INET, ni.AF_LINK]
-        for t in interface_type:
-            if t in gateways:
-                for i in gateways[t]:
-                    if len(i) > 1:
-                        interfaces.add(i[1])
-        for i in Setting.get(SettingProperty.Blocked_Interfaces, []):
-            if i in interfaces:
-                interfaces.remove(i)
+        if pinned:
+            # Additional_Interfaces must not widen an explicit choice.
+            interfaces = {pinned}
+        else:
+            interfaces = set(Setting.get(SettingProperty.Additional_Interfaces, []))
+            interface_type = [ni.AF_INET, ni.AF_LINK]
+            for t in interface_type:
+                if t in gateways:
+                    for i in gateways[t]:
+                        if len(i) > 1:
+                            interfaces.add(i[1])
+            for i in Setting.get(SettingProperty.Blocked_Interfaces, []):
+                if i in interfaces:
+                    interfaces.remove(i)
         logger.debug(interfaces)
         for i in interfaces:
             try:
@@ -176,6 +324,19 @@ class Setting:
         Setting.last_ip = set(last_ip)
         logger.debug(Setting.last_ip)
         return Setting.last_ip
+
+    @staticmethod
+    def get_advertisable_ip():
+        """The addresses discovery will actually publish, as a list.
+
+        Falls back to the unfiltered set so a host whose only address looks
+        unusual to us still advertises something rather than nothing.
+        """
+        addrs = [ip for ip, mask in Setting.get_ip()
+                 if is_advertisable_address(ip, mask)]
+        if addrs:
+            return addrs
+        return [ip for ip, _mask in Setting.get_ip()]
 
     @staticmethod
     def get_port():

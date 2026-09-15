@@ -188,6 +188,27 @@ class App:
         if self.platform != Platform.Darwin:
             self.app.update_menu()
 
+    def call_on_main_thread(self, fn):
+        """Run `fn` on the UI thread.
+
+        Menu mutation belongs on the main thread. Protocol and plugin changes
+        now also arrive from CherryPy worker threads -- the settings page
+        drives them through the management API -- and rebuilding the menu from
+        there makes AppKit unhappy. Falls back to an inline call wherever no
+        main-thread pump is available, so this never becomes a silent no-op.
+        """
+        if self.platform == Platform.Darwin:
+            try:
+                from PyObjCTools import AppHelper
+                AppHelper.callAfter(fn)
+                return
+            except Exception as e:  # pragma: no cover - pyobjc always present on darwin
+                logger.warning("callAfter unavailable (%s); updating menu inline", e)
+        try:
+            fn()
+        except Exception as e:
+            logger.error("Menu refresh failed: %s", e)
+
     def set_menu(self, menu):
         self.menu = menu
         if self.platform == Platform.Darwin:

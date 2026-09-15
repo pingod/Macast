@@ -18,7 +18,7 @@ import threading
 
 from zeroconf import Zeroconf, ServiceInfo
 
-from .utils import Setting, SettingProperty
+from .utils import Setting, SettingProperty, is_advertisable_address
 
 logger = logging.getLogger("Discovery")
 
@@ -119,26 +119,20 @@ def _normalize_server(host):
     return host + "."
 
 
-def _is_advertisable(addr, netmask):
-    """Whether an IPv4 address is worth publishing on a LAN.
+# `_is_advertisable` used to live here; it now lives in utils as
+# `is_advertisable_address()` so the network picker and the advertiser share
+# one definition of "reachable".
 
-    Rejects the addresses that are perfectly valid locally but unreachable from
-    any other device: loopback, link-local, point-to-point tunnels (netmask
-    /32) and the CGNAT range 100.64/10 that Tailscale and similar overlays use.
+
+def _pinned_interface():
+    """The interface the user pinned, if it can actually carry the service.
+
+    Delegates to ``Setting.resolved_network_interface()`` so the advertiser and
+    SSDP agree on which interface is in use -- they used to answer this
+    question separately and could disagree, leaving mDNS on Wi-Fi while SSDP
+    bound to a dead tunnel.
     """
-    if not addr or addr.startswith("127.") or addr.startswith("169.254."):
-        return False
-    if netmask in ("255.255.255.255", "32"):
-        return False
-    parts = addr.split(".")
-    if len(parts) != 4:
-        return False
-    try:
-        if parts[0] == "100" and 64 <= int(parts[1]) <= 127:
-            return False
-    except ValueError:
-        return False
-    return True
+    return Setting.resolved_network_interface() or None
 
 
 def _advertisable_interfaces():
@@ -155,13 +149,18 @@ def _advertisable_interfaces():
     gets five answers, picks (roughly) at random, and usually fails to connect.
     The device is discovered and then cannot be cast to.
 
-    We therefore advertise only the interface carrying the IPv4 default route,
-    plus anything the user explicitly asked for via ``Additional_Interfaces``.
+    We therefore advertise the interface the user pinned, or failing that only
+    the one carrying the IPv4 default route, plus anything explicitly asked for
+    via ``Additional_Interfaces``.
     """
     try:
         import netifaces as ni
     except ImportError:  # pragma: no cover - netifaces is a hard dep
         return None
+
+    pinned = _pinned_interface()
+    if pinned:
+        return {pinned}
 
     blocked = set(Setting.get(SettingProperty.Blocked_Interfaces, []))
     extra = set(Setting.get(SettingProperty.Additional_Interfaces, []))
@@ -198,7 +197,7 @@ def advertisable_addresses():
                     continue
                 for entry in addrs_v4:
                     ip = entry.get("addr")
-                    if _is_advertisable(ip, entry.get("netmask", "")):
+                    if is_advertisable_address(ip, entry.get("netmask", "")):
                         addrs.append(ip)
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to enumerate local addresses: %s", e)
@@ -207,9 +206,7 @@ def advertisable_addresses():
     # unreachable, so a host with an unusual network still advertises something.
     if not addrs:
         try:
-            for ip, netmask in Setting.get_ip():
-                if _is_advertisable(ip, netmask):
-                    addrs.append(ip)
+            addrs = Setting.get_advertisable_ip()
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Failed to enumerate local addresses: %s", e)
 

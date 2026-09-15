@@ -17,12 +17,12 @@
 # private key and is out of scope.
 #
 
-import base64
 import json
 import logging
 import os
 import ssl
 import socket
+import time
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -105,14 +105,42 @@ def encode_cast_message(source_id, dest_id, namespace, payload, binary=False):
     return bytes(buf)
 
 
-def encode_auth_response():
-    """Respond to a device-auth challenge with an empty signature.
+def encode_auth_challenge():
+    """DeviceAuthMessage carrying an empty AuthChallenge (field 1)."""
+    return _field_bytes(1, b"")
 
-    A certified device would embed its signed certificate here; uncertified
-    receivers return empty fields, which clients accept for media casting.
+
+def encode_auth_response(signature=b"", certificate=b"",
+                         intermediates=(), crl=b""):
+    """Answer a device-auth challenge.
+
+    The bytes on the wire must be a **DeviceAuthMessage**, not a bare
+    AuthResponse::
+
+        message DeviceAuthMessage {
+          optional AuthChallenge challenge = 1;
+          optional AuthResponse  response  = 2;
+          optional AuthError     error     = 3;
+        }
+        message AuthResponse {
+          required bytes signature               = 1;
+          required bytes client_auth_certificate = 2;
+          repeated bytes intermediate_certificate = 3;
+          ...
+        }
+
+    ``signature`` and ``client_auth_certificate`` are *required*, so they have
+    to be present -- empty is fine for an uncertified receiver. Sending a bare
+    AuthResponse (or an empty field 2) leaves those required fields unset and
+    strict parsers reject the whole message: VLC hangs up immediately after the
+    challenge and the device looks "found but not castable".
     """
-    # AuthResponse { signature = b'', client_auth_certificate = b'' }
-    return _field_bytes(1, b"") + _field_bytes(2, b"")
+    auth_response = _field_bytes(1, signature) + _field_bytes(2, certificate)
+    for ca in intermediates:
+        auth_response += _field_bytes(3, ca)
+    if crl:
+        auth_response += _field_bytes(7, crl)
+    return _field_bytes(2, auth_response)
 
 
 def _parse_fields(buf):
@@ -191,7 +219,8 @@ class ChromecastProtocol(Protocol):
     def __init__(self):
         super().__init__()
         self._advertiser = None
-        self._tls_server = None
+        self._listen_socket = None
+        self._ssl_context = None
         self._setup_server = None
         self._stop_event = threading.Event()
         self._connections = []
@@ -228,9 +257,17 @@ class ChromecastProtocol(Protocol):
                 sock.close()
             except Exception:
                 pass
-        if self._tls_server is not None:
-            self._tls_server.close()
-            self._tls_server = None
+        self._connections = []
+        self._senders = {}
+        if self._listen_socket is not None:
+            # Closing the plain listener reliably wakes the blocked accept();
+            # closing an SSL-wrapped listener did not, which left a thread
+            # spinning up on a socket nobody could reach.
+            try:
+                self._listen_socket.close()
+            except Exception:
+                pass
+            self._listen_socket = None
         if self._setup_server is not None:
             self._setup_server.shutdown()
             self._setup_server.server_close()
@@ -278,26 +315,62 @@ class ChromecastProtocol(Protocol):
                 logger.debug("Cast bind port %d failed: %s", port, e)
                 raw.close()
                 continue
-            raw.listen(5)
-            self._tls_server = ctx.wrap_socket(raw, server_side=True)
+            raw.listen(8)
+            # Listen in the clear and wrap each *connection* instead of wrapping
+            # the listener. Wrapping the listener made ``accept()`` run the TLS
+            # handshake inline, so a single client that aborted mid-handshake
+            # raised SSLError -- and SSLError is an OSError, which the accept
+            # loop treated as "listener is gone" and exited. Macast then stayed
+            # advertised on mDNS while nothing answered on 8009: still
+            # discoverable, no longer castable.
+            self._ssl_context = ctx
+            self._listen_socket = raw
             self.cast_port = port
             if port != CAST_PORT:
                 logger.warning("Cast port %d in use, using %d instead", CAST_PORT, port)
-            t = threading.Thread(target=self._accept_loop, name="CAST_TLS", daemon=True)
+            t = threading.Thread(target=self._accept_loop, args=(raw,),
+                                 name="CAST_TLS", daemon=True)
             t.start()
             return
         logger.error("Cast TLS server failed: no free port in range")
 
-    def _accept_loop(self):
+    def _accept_loop(self, server):
+        """Accept connections until the listener is closed or stop is requested.
+
+        ``server`` is passed in rather than read from ``self`` so a stale thread
+        left over from a previous start() can never end up accepting on the
+        current listener.
+        """
         while not self._stop_event.is_set():
             try:
-                conn, addr = self._tls_server.accept()
-            except OSError:
-                break
+                conn, addr = server.accept()
+            except OSError as e:
+                if self._stop_event.is_set() or server.fileno() < 0:
+                    break
+                # Transient: a full backlog, an aborted connect, EINTR. Never
+                # give up the listener for it.
+                logger.warning("Cast accept failed, still listening: %s", e)
+                time.sleep(0.05)
+                continue
+            try:
+                # Bound the handshake only; the session itself must not time
+                # out (senders only PING every ~5s and may idle for longer).
+                conn.settimeout(10)
+                tls = self._ssl_context.wrap_socket(conn, server_side=True)
+                tls.settimeout(None)
+            except Exception as e:
+                # A bad handshake is the client's problem, not ours; the next
+                # sender must still be able to connect.
+                logger.debug("Cast handshake failed from %s: %s", addr, e)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                continue
             logger.info("Cast connection from %s", addr)
-            self._connections.append(conn)
+            self._connections.append(tls)
             t = threading.Thread(
-                target=self._handle_client, args=(conn,), name="CAST_CLIENT", daemon=True
+                target=self._handle_client, args=(tls,), name="CAST_CLIENT", daemon=True
             )
             t.start()
 
@@ -340,10 +413,12 @@ class ChromecastProtocol(Protocol):
         dest = msg["destination_id"]
         src = msg["source_id"]
         if ns == NS_DEVICEAUTH:
-            # auth challenge -> empty signature response (uncertified receiver)
-            logger.info("Cast device-auth challenge from %s "
-                        "(uncertified: empty signature)", src)
-            self._send(sock, "receiver-0", src, ns, encode_auth_response(), binary=True)
+            # DeviceAuthMessage{challenge} -> DeviceAuthMessage{response}
+            # (uncertified receiver: empty signature / certificate).
+            logger.info("Cast device-auth challenge from %s -> "
+                        "uncertified AuthResponse", src)
+            self._send(sock, "receiver-0", src, ns,
+                       encode_auth_response(), binary=True)
             return
         if msg["payload_type"] != 0:
             return
