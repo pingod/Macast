@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 351/351）
+# 2) 回归验证（当前 369/369）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -217,21 +217,24 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
   当前 6 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
-- 地址是三个，按「新鲜度」排序：`raw.githubusercontent.com`（永远最新）→
-  `ghproxy.net/https://raw.githubusercontent.com/...`（按需代理 raw，国内可达，响应头
-  `cache-control: max-age=300`，最多滞后约 5 分钟）→ `cdn.jsdelivr.net`
-  （**分支文件缓存数小时、`?v=` 也破不了，可能给出过期索引，所以只能垫底**）。
+- **索引本身**（唯一一个没法固定 SHA 的文件）走三个地址，按「新鲜度」排序：
+  `raw.githubusercontent.com`（永远最新，国内常拉不动）→
+  `ghproxy.net/https://raw.githubusercontent.com/...`（国内可达；自称 `max-age=300`，
+  实测推送 6 分钟后仍给旧文件）→ `cdn.jsdelivr.net`（**分支文件缓存数小时、`?v=` 也破不了**）。
+  也就是说索引最多可能滞后几小时，**但它只影响「新插件多久能被看到」**，装到手的文件永远是对的
+  （安装 URL 固定了 SHA，见下）。
   浏览器按序回退；三者都必须返回 CORS 头，因为这是在**浏览器里** fetch，不是 Python 抓。
   改顺序前先想一遍：把会缓存的放前面 = 用户看到的插件列表可能落后半天。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
   `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。整个条目
   和 `.py` 顶部清单必须逐字对齐 —— Part 5c 会比对 title / version / platform / 类名。
-- 条目的 `url` 必须来自**每次请求都新鲜**的源，实测过一轮：raw 国内经常拉不动；
-  `cdn.jsdelivr.net` 能通但**缓存分支文件数小时，而且 `?v=` 查询串破不了它的缓存**
-  （把插件升到 0.2 后请求 `...macast_ytdlp.py?v=0.2`，拿回来仍是 0.1 的内容 —— 页面上就会
-  永远显示同一个「可更新」）；`ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，
-  响应头 `cache-control: max-age=300`，最多滞后约 5 分钟。所以索引里的 `url` 一律用 ghproxy
-  代理形式，Part 5c 会拦住缓存型 CDN。
+- 条目的 `url` **固定到 commit SHA**（`https://cdn.jsdelivr.net/gh/pingod/Macast@<sha>/plugins/<file>.py`），
+  绝不指向分支。原因是一轮实测：分支引用会被中间缓存长期冻结 —— jsDelivr 缓存数小时、
+  **`?v=` 查询串破不了它**（把插件升到 0.2 后请求 `?v=0.2` 拿回来仍是 0.1 的内容），
+  ghproxy 自称 `cache-control: max-age=300`，实测推送后 6 分钟仍在给旧文件。
+  固定 SHA 之后内容不变，缓存多旧都是对的（raw 直链在国内还是经常拉不动，所以走 jsDelivr 的 CDN 入口）。
+  代价是插件更新的流程变成两步：**① 先提交插件文件；② 再把条目里的 SHA/version 指到那个提交**。
+  Part 5c 用 `git show <sha>:plugins/<file>` 校验「条目 ↔ 所固定内容」一致，忘了第 ② 步会当场变红。
   安装是 Python 侧 `requests`（`MacastPluginManager.install_url`）拉的，没有浏览器多地址回退，
   出问题时把 raw 直链粘到设置页的「从网址安装」即可（后端本来就先 `split('?')[0]` 再判 `.py`）。
 - 在线插件与内置插件是**两回事**：`plugins/` 里的是「用户自己装、单个 .py、只能用
@@ -321,7 +324,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（351/351）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
+| `verify_cast_airplay.py` | **主验证套件**（369/369）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |

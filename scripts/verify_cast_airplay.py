@@ -22,6 +22,7 @@ import shutil as _shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import tempfile as _tempfile
 import threading
@@ -1117,6 +1118,23 @@ except Exception as e:
 #   3. the index file must stay loadable and must not re-list anything the app
 #      already ships.
 # --------------------------------------------------------------------------
+_git_available = bool(_shutil.which("git")) and os.path.isdir(
+    os.path.join(REPO, ".git"))
+
+
+def _git_show(sha, path):
+    """File contents at `sha`, or None (git missing / unknown commit / no file)."""
+    if not _git_available:
+        return None
+    try:
+        result = subprocess.run(["git", "show", "{}:{}".format(sha, path)],
+                                capture_output=True, text=True, timeout=15,
+                                cwd=REPO)
+    except Exception:
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
 print("\n=== Part 5c: plugin index ===")
 try:
     repo_mod = _load("plugin_repo", "plugin_repo.py")
@@ -1210,16 +1228,35 @@ try:
               _bundled.get(_class_key) == _entry.get(_class_key),
               "manifest={!r} index={!r}".format(_bundled.get(_class_key),
                                                 _entry.get(_class_key)))
-        # The install url must not come from the hours-long cache. jsDelivr was
-        # measured doing exactly that: it serves a branch file from its cache for
-        # hours and `?v=` does not bust it, so a bumped plugin installed the
-        # previous file while the page kept offering the same "update". A
-        # raw-proxy caches for ~5 minutes instead (`cache-control: max-age=300`).
+        # The install url is pinned to a commit SHA, never a branch. Every CDN
+        # in front of this was measured caching branch files for far longer than
+        # they admit (jsDelivr hours, and `?v=` does not bust it; a raw proxy
+        # answered stale minutes after a push, past its own max-age=300). The
+        # content behind a SHA never changes, so a cache of any age is correct.
         _url = _entry.get("url", "")
-        check("{} install url is not the caching CDN".format(_fname),
-              "jsdelivr" not in _url, _url)
-        check("{} install url resolves to raw on demand".format(_fname),
-              "raw.githubusercontent.com" in _url, _url)
+        _pin = ""
+        if "@" in _url:
+            _pin = _url.split("@", 1)[1].split("/", 1)[0]
+        check("{} install url is pinned to a commit, not a branch".format(_fname),
+              len(_pin) == 40 and all(c in "0123456789abcdef" for c in _pin),
+              _url)
+        if len(_pin) == 40 and _git_available:
+            _pinned = _git_show(_pin, "plugins/" + _fname)
+            check("{} commit {} really contains that plugin".format(_fname, _pin[:8]),
+                  bool(_pinned), _url)
+            if _pinned:
+                _tmp_pin = os.path.join(_tempfile.mkdtemp(prefix="macast-pin-"), _fname)
+                try:
+                    with open(_tmp_pin, "w", encoding="utf-8") as _f:
+                        _f.write(_pinned)
+                    _pinned_meta = _read_manifest(_tmp_pin)
+                finally:
+                    _shutil.rmtree(os.path.dirname(_tmp_pin), ignore_errors=True)
+                for _key in ("title", "version", "platform"):
+                    check("{} pinned content matches the index ({})".format(_fname, _key),
+                          _pinned_meta.get(_key) == _entry.get(_key),
+                          "pinned={!r} index={!r}".format(_pinned_meta.get(_key),
+                                                          _entry.get(_key)))
 
     _html_path = os.path.join(MACAST, "xml", "setting.html")
     with open(_html_path, "r", encoding="utf-8") as _f:

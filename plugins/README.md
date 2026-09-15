@@ -85,8 +85,9 @@ https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/info.json            # �
 
 设置页按顺序试，第一个能通的即采用；三个都不通就只显示本机插件，并给一句提示。
 jsDelivr 垫底是因为它**缓存分支文件数小时**（可能给出过期索引，且 `?v=` 破不了）；
-ghproxy 类镜像按需代理 raw，实测最多滞后约 5 分钟（`cache-control: max-age=300`）。
-改这个顺序前先想清楚「新插件多久能被看到」。
+ghproxy 类镜像按需代理 raw，实测推送 6 分钟后仍在给旧文件，但通常比 jsDelivr 快。
+改这个顺序前先想清楚「新插件多久能被看到」——**索引本身**没法固定 SHA（它就是那个要变的文件），
+所以新插件的出现最多可能延迟几小时（指到 raw 的话是立刻）。
 
 > 浏览器直接抓取要求对方返回 CORS 头 —— raw.githubusercontent.com 与
 > cdn.jsdelivr.net 都满足；如果将来换成别的托管，先确认这一点。
@@ -124,18 +125,26 @@ ghproxy 类镜像按需代理 raw，实测最多滞后约 5 分钟（`cache-cont
 
 `url` 指向本目录里的文件即可，例如 `plugins/some_renderer.py`。
 
-**插件的 `url` 必须来自「每次都新鲜」的源**：安装走的是 **Python 侧**
-`requests`（`MacastPluginManager.install_url`），没有设置页那种浏览器多地址回退。实测结论：
+**插件的 `url` 固定到 commit SHA，绝不指向分支**：
+`https://cdn.jsdelivr.net/gh/pingod/Macast@<40位sha>/plugins/<file>.py`。
 
-- `raw.githubusercontent.com` 最权威但国内经常拉不动；
-- `cdn.jsdelivr.net` 能通，**但它会缓存分支文件数小时，而且 `?v=` 查询串不能破它的缓存**
-  （实测：把插件升到 0.2 后，`...macast_ytdlp.py?v=0.2` 返回的仍是 0.1 的内容）；
-- `ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，实测响应头是
-  `cache-control: max-age=300`，也就是**最多滞后约 5 分钟**，所以索引里的 `url` 用它
-  （比 jsDelivr 的「数小时且 ?v= 无效」好三个数量级）。
+安装走的是 **Python 侧** `requests`（`MacastPluginManager.install_url`），没有设置页那种浏览器
+多地址回退，而**每一种中间缓存都会长期冻结分支引用**，这是实测出来的：
 
-ghproxy 挂了的时候，把 raw 直链粘到设置页的「从网址安装」即可。索引里的
-`url` 一律按这个规则写，Part 5c 会检查它不是缓存型 CDN。
+| 源 | 实测结果 |
+|---|---|
+| `raw.githubusercontent.com` | 永远最新，但国内经常拉不动 |
+| `cdn.jsdelivr.net` 分支 | 缓存数小时；**`?v=` 查询串不能破缓存**（升到 0.2 后 `?v=0.2` 仍返回 0.1 的内容） |
+| `ghproxy.net` 代理 raw | 自称 `cache-control: max-age=300`，实测推送 6 分钟后仍在给旧文件 |
+
+固定 SHA 后内容永远不变，缓存多旧都不会给错文件。**代价是插件更新要分两次提交**：
+
+1. 改插件 → 提交（记下 commit SHA）；
+2. 更新 `info.json` 的 `version` 与 `url`（指到第 1 步的 SHA）→ 再提交。
+
+忘了第 2 步不会静默出错：Part 5c 会用 `git show <sha>:plugins/<file>` 校验条目与所固定内容一致。
+jsDelivr 抽风时，把 raw 直链（`https://raw.githubusercontent.com/pingod/Macast/<sha>/plugins/<file>.py`）
+粘到设置页的「从网址安装」即可。
 
 ## 改完怎么验
 
