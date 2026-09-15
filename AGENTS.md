@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 237/237）
+# 2) 回归验证（当前 261/261）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -52,7 +52,7 @@ macast/
   plugins/renderer/        内置渲染器插件：iina / web / live / potplayer / pi_fm
   plugins/protocol/        内置协议插件：nirvana（NVA「哔哩必连」）
   xml/setting.html         设置页（Vue2 + Element UI，**单文件内嵌模板**）
-plugins/                   在线插件索引（仓库根目录，**不是** macast/plugins/）；见 §4.6
+plugins/                   在线插件索引 + 可安装插件（仓库根目录，**不是** macast/plugins/）；见 §4.6
 macast_renderer/mpv.py     MPVRenderer：启动 mpv、走 IPC 收发、把 mpv 事件转成状态
 scripts/                  见 §6
 docs/                     见 §7
@@ -216,12 +216,20 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
-  `plugin_v1` 目前**故意为空**。空索引 = 正常状态，页面只显示本机插件，不报错。
+  当前只有一条：`macast_ytdlp.py`（把投屏链接交给 yt-dlp 下载）。空索引也是合法状态，
+  页面只显示本机插件，不报错。
 - 地址是两个：`raw.githubusercontent.com` 在前，`cdn.jsdelivr.net` 镜像在后，
   浏览器按序回退（国内 raw 常年不可达）。两者都必须返回 CORS 头，因为这是在**浏览器
   里** fetch，不是 Python 抓。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
-  `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。
+  `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。整个条目
+  和 `.py` 顶部清单必须逐字对齐 —— Part 5c 会比对 title / version / platform / 类名。
+- 条目的 `url` 用 `cdn.jsdelivr.net` 而不是 raw：安装走的是 Python 侧 `requests`
+  （`MacastPluginManager.install_url`），没有浏览器那种镜像回退，国内 raw 经常拉不动。
+  代价是分支引用有缓存，插件更新可能延迟可见。
+- 在线插件与内置插件是**两回事**：`plugins/` 里的是「用户自己装、单个 .py、只能用
+  Macast 自带依赖 + 标准库 + 外部命令」；需要 pip 库或要随包发布的一律走
+  `macast/plugins/`（并同步 §4.4 的三处打包配置）。
 
 索引格式、字段表与验证命令见 `plugins/README.md`。
 
@@ -279,7 +287,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（237/237）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引 + 网页投屏入口与令牌门控 |
+| `verify_cast_airplay.py` | **主验证套件**（261/261）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + yt-dlp 下载器插件 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |

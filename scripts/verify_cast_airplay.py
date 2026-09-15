@@ -1176,6 +1176,28 @@ try:
               and bool(_entry.get("renderer") or _entry.get("protocol")),
               str(_entry))
 
+    # An entry and the file it installs must agree, or the page shows one
+    # version and installs another -- the kind of drift that only shows up as
+    # "the update did nothing".
+    for _entry in _index["plugin_v1"]:
+        _fname = _entry.get("url", "").split("?")[0].rsplit("/", 1)[-1]
+        _fpath = os.path.join(REPO, "plugins", _fname)
+        check("index entry {} points at a file in this repo".format(_entry.get("title")),
+              os.path.isfile(_fpath), _fpath)
+        if not os.path.isfile(_fpath):
+            continue
+        _bundled = _read_manifest(_fpath)
+        for _key in ("title", "version", "platform"):
+            check("{} manifest and index agree on {}".format(_fname, _key),
+                  _bundled.get(_key) == _entry.get(_key),
+                  "manifest={!r} index={!r}".format(_bundled.get(_key),
+                                                    _entry.get(_key)))
+        _class_key = "protocol" if _entry.get("type") == "protocol" else "renderer"
+        check("{} manifest and index agree on the class name".format(_fname),
+              _bundled.get(_class_key) == _entry.get(_class_key),
+              "manifest={!r} index={!r}".format(_bundled.get(_class_key),
+                                                _entry.get(_class_key)))
+
     _html_path = os.path.join(MACAST, "xml", "setting.html")
     with open(_html_path, "r", encoding="utf-8") as _f:
         _html = _f.read()
@@ -2205,6 +2227,212 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     check("web cast entry behaves", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 13: the yt-dlp downloader shipped as an online plugin
+#
+# plugins/macast_ytdlp.py is the first entry in the (previously empty) index:
+# it turns "cast this Bilibili / YouTube / m3u8 url" into "download it", which
+# is the one thing the built-in mpv renderer cannot do with a page URL.
+#
+# It is a single file that shells out to the yt-dlp *binary*, so the things
+# worth testing are the ones a user would otherwise discover the hard way:
+#
+#   1. a fake yt-dlp on PATH is really executed, its progress lines become
+#      playback state, and its Destination line becomes the title;
+#   2. a missing binary (or a failed download) is *reported* -- a phone left
+#      staring at a spinner is the failure mode this whole part guards;
+#   3. stopping mid-download kills the child and does not then announce a
+#      completion that never happened.
+# --------------------------------------------------------------------------
+print("\n=== Part 13: yt-dlp downloader plugin ===")
+try:
+    import cherrypy
+
+    _plugin_file = os.path.join(REPO, "plugins", "macast_ytdlp.py")
+    check("the downloader plugin ships in plugins/",
+          os.path.isfile(_plugin_file), _plugin_file)
+
+    _saved_setting5 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir5 = utils.SETTING_DIR
+    _saved_path5 = os.environ.get('PATH', '')
+    _tmp5 = _tempfile.mkdtemp(prefix="macast-ytdlp-")
+    _notify_rec = lambda *a: _notifications.append(a)      # noqa: E731
+    _notifications = []
+    try:
+        utils.SETTING_DIR = _tmp5
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp5, "macast_setting.json")
+        # Never download into the user's real ~/Downloads from a test: point the
+        # plugin's own setting at the sandbox instead.
+        _downloads5 = os.path.join(_tmp5, "downloads")
+
+        # The plugin imports its names off the `macast` package, the way every
+        # real user plugin does. This suite loads macast's submodules by hand,
+        # so those few names are bound here. MenuItem and gui are only reached
+        # by the menu and the __main__ block, neither of which runs below.
+        _pkg = sys.modules["macast"]
+
+        class _MenuItem(object):
+            def __init__(self, *a, **k):
+                pass
+
+        _pkg.MenuItem = _MenuItem
+        _pkg.gui = lambda *a, **k: None
+        _pkg.Setting = utils.Setting
+
+        _spec = importlib.util.spec_from_file_location("macast_ytdlp_plugin",
+                                                       _plugin_file)
+        _plug = importlib.util.module_from_spec(_spec)
+        sys.modules["macast_ytdlp_plugin"] = _plug
+        _spec.loader.exec_module(_plug)
+
+        try:
+            _read_manifest5 = _read_manifest
+        except NameError:
+            _read_manifest5 = macast_mod._read_plugin_metadata
+        _meta5 = _read_manifest5(_plugin_file)
+        # Setting.set keys off the enum *name*, so the plugin's own enum works
+        # here and the download lands in the sandbox.
+        utils.Setting.set(_plug.SettingProperty.YTDLP_Dir, _downloads5)
+        check("the manifest names the class the module defines",
+              getattr(_plug, _meta5.get('renderer', ''), None) is _plug.YTDLPRenderer,
+              repr(_meta5.get('renderer')))
+        check("eta parsing handles mm:ss and h:mm:ss",
+              (_plug.eta_seconds('00:12'), _plug.eta_seconds('1:02:03')) == (12, 3723),
+              str((_plug.eta_seconds('00:12'), _plug.eta_seconds('1:02:03'))))
+        check("a duration is formatted the way the status page expects",
+              _plug.hms(3723) == '1:02:03', _plug.hms(3723))
+
+        # -- a fake yt-dlp on PATH --------------------------------------
+        _bin5 = os.path.join(_tmp5, "bin")
+        os.makedirs(_bin5)
+        _fake = os.path.join(_bin5, "yt-dlp")
+        with open(_fake, "w", encoding="utf-8") as f:
+            # `exec sleep` matters: replacing the shell with the sleeper means
+            # SIGTERM reaches the process that holds the pipe, so the plugin's
+            # reader loop really ends when the download is cancelled.
+            f.write("#!/bin/sh\n"
+                    "echo '[download] Destination: /tmp/video [abc].mp4'\n"
+                    "if [ -n \"$YTDLP_SLOW\" ]; then exec sleep 30; fi\n"
+                    "echo '[download]  50.0% of 10.00MiB at 1.00MiB/s ETA 00:05'\n"
+                    "sleep 1\n"
+                    "echo '[download] 100% of 10.00MiB in 00:10'\n"
+                    "exit 0\n")
+        os.chmod(_fake, 0o755)
+        os.environ['PATH'] = _bin5 + os.pathsep + _saved_path5
+        check("the binary is found on PATH",
+              _plug.find_ytdlp() == _fake, str(_plug.find_ytdlp()))
+
+        class _States(object):
+            """Stands in for the protocol the renderer reports to."""
+
+            def __init__(self):
+                self.rows = []
+
+            def set_state_url(self, v):
+                self.rows.append(('url', v))
+
+            def set_state(self, k, v):
+                self.rows.append((k, v))
+
+            def set_state_position(self, v):
+                self.rows.append(('position', v))
+
+            def set_state_duration(self, v):
+                self.rows.append(('duration', v))
+
+            def set_state_transport(self, v):
+                self.rows.append(('transport', v))
+
+            def set_state_transport_error(self):
+                self.rows.append(('error', True))
+
+        states = _States()
+
+        class _Renderer(_plug.YTDLPRenderer):
+            @property
+            def protocol(self):
+                return states
+
+        cherrypy.engine.subscribe('app_notify', _notify_rec)
+        renderer = _Renderer()
+
+        def _wait_for(row, timeout=20):
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                if row in states.rows:
+                    return True
+                time.sleep(0.2)
+            return False
+
+        renderer.set_media_url('https://example.com/watch?v=abc')
+        check("the cast is reported as playing while the download runs",
+              _wait_for(('transport', 'PLAYING'), timeout=5), str(states.rows[:3]))
+        check("the download finishes", _wait_for(('transport', 'STOPPED')),
+              str(states.rows))
+        check("progress lines become position and duration",
+              any(r[0] == 'position' for r in states.rows)
+              and any(r[0] == 'duration' for r in states.rows), str(states.rows))
+        check("the file name yt-dlp reported becomes the title",
+              ('CurrentTrackTitle', 'video [abc].mp4') in states.rows, str(states.rows))
+        check("a successful download reports no error",
+              ('error', True) not in states.rows, str(states.rows))
+        check("finishing the download notifies the user",
+              any('下载完成' in str(n) for n in _notifications), str(_notifications))
+
+        # -- cancel mid-download -----------------------------------------
+        os.environ['YTDLP_SLOW'] = '1'
+        states.rows = []
+        _before = len(_notifications)
+        renderer.set_media_url('https://example.com/slow')
+        time.sleep(1.5)
+        renderer.set_media_stop()
+        check("stopping marks the download stopped",
+              ('transport', 'STOPPED') in states.rows, str(states.rows))
+        renderer._thread.join(timeout=10)
+        check("the cancelled download's thread really ends",
+              not renderer._thread.is_alive())
+        time.sleep(0.5)
+        check("a cancelled download is not announced as completed",
+              len(_notifications) == _before, str(_notifications[_before:]))
+
+        # -- no yt-dlp installed -----------------------------------------
+        del os.environ['YTDLP_SLOW']
+        _real_find = _plug.find_ytdlp
+        _plug.find_ytdlp = lambda: None
+        states.rows = []
+        renderer.set_media_url('https://example.com/x')
+        check("a missing yt-dlp is reported, not swallowed",
+              _wait_for(('error', True), timeout=5) or ('error', True) in states.rows,
+              str(states.rows))
+        check("the report names the tool to install",
+              any(r[0] == 'CurrentTrackTitle' and 'yt-dlp' in str(r[1])
+                  for r in states.rows), str(states.rows))
+        _plug.find_ytdlp = _real_find
+
+        states.rows = []
+        renderer.set_media_url('')
+        time.sleep(0.5)
+        check("an empty url starts nothing", states.rows == [], str(states.rows))
+        check("the download directory setting is honoured",
+              os.path.isdir(_downloads5), _downloads5)
+        renderer.set_media_stop()
+    finally:
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify_rec)
+        except Exception:
+            pass
+        os.environ['PATH'] = _saved_path5
+        os.environ.pop('YTDLP_SLOW', None)
+        utils.SETTING_DIR = _saved_dir5
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting5
+        _shutil.rmtree(_tmp5, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("yt-dlp downloader plugin behaves", False,
+          "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
 # Summary

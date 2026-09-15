@@ -1,5 +1,18 @@
 {
-    "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。插件索引地址的唯一来源见 macast/plugin_repo.py；改动本文件后建议同时验证 https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json 可访问。",
+    "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。仓库坐标与索引地址的唯一来源见 macast/plugin_repo.py；新增条目后请跑 scripts/verify_cast_airplay.py，Part 5c 会校验条目与 .py 清单是否一致。",
+    "_note_url": "url 指向 cdn.jsdelivr.net 而不是 raw.githubusercontent.com：安装是在 Python 侧用 requests 拉的，没有浏览器那样的镜像回退，而国内 raw 经常拉不动。代价是 jsDelivr 对分支引用有缓存（更新插件后可能延迟可见）。要绕过就临时把 raw 地址粘到设置页的「从网址安装」。",
     "repo_url": "https://github.com/pingod/Macast/tree/main/plugins",
-    "plugin_v1": []
+    "plugin_v1": [
+        {
+            "author": "pingod",
+            "desc": "把投屏链接交给 yt-dlp 下载到本地（B站 / YouTube / m3u8 等），不播放。需要自行安装 yt-dlp 命令。",
+            "host_version": "0.7",
+            "platform": "darwin,linux,win32",
+            "renderer": "YTDLPRenderer",
+            "title": "yt-dlp Downloader",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/macast_ytdlp.py",
+            "version": "0.1"
+        }
+    ]
 }
