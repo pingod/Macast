@@ -472,7 +472,26 @@ OPTIONS = {
     # produces an .app that builds fine and then dies on launch with
     # "ModuleNotFoundError: No module named 'zeroconf'".
     'includes': ['cherrypy', 'lxml', 'netifaces', 'appdirs', 'pyperclip',
-                 'requests', 'cheroot.ssl.builtin'],
+                 'requests', 'cheroot.ssl.builtin',
+                 # Bundled plugins under macast/plugins/ are imported *by name*
+                 # at runtime (MacastPluginManager._load_bundled_plugins builds
+                 # the dotted path from an `os.listdir` result), so modulegraph
+                 # never sees a static import for them. `packages: ['macast']`
+                 # copies the directory, but anything modulegraph judges
+                 # unreachable can still be stripped, and the failure mode is
+                 # the one this project has already been bitten by: everything
+                 # builds, CI is green, and the .app silently loses a plugin.
+                 #
+                 # NOTE: this is py2app -- the key is `includes`. There is no
+                 # `hiddenimports` option here (that one belongs to
+                 # PyInstaller); passing it aborts the build with
+                 # "command 'py2app' has no such option 'hiddenimports'".
+                 'macast.plugins.renderer.iina',
+                 'macast.plugins.renderer.web',
+                 'macast.plugins.renderer.live',
+                 'macast.plugins.renderer.potplayer',
+                 'macast.plugins.renderer.pi_fm',
+                 'macast.plugins.protocol.nirvana'],
 }
 
 setup(
