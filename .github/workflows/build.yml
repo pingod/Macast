@@ -242,6 +242,12 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.iina \
+            --hidden-import=macast.plugins.renderer.web \
+            --hidden-import=macast.plugins.renderer.live \
+            --hidden-import=macast.plugins.renderer.potplayer \
+            --hidden-import=macast.plugins.renderer.pi_fm \
+            --hidden-import=macast.plugins.protocol.nirvana \
             Macast.py
 
       - name: Verify x86_64
@@ -321,6 +327,12 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.iina \
+            --hidden-import=macast.plugins.renderer.web \
+            --hidden-import=macast.plugins.renderer.live \
+            --hidden-import=macast.plugins.renderer.potplayer \
+            --hidden-import=macast.plugins.renderer.pi_fm \
+            --hidden-import=macast.plugins.protocol.nirvana \
             Macast.py
 
       - name: Verify aarch64
@@ -426,6 +438,12 @@ jobs:
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.iina \
+            --hidden-import=macast.plugins.renderer.web \
+            --hidden-import=macast.plugins.renderer.live \
+            --hidden-import=macast.plugins.renderer.potplayer \
+            --hidden-import=macast.plugins.renderer.pi_fm \
+            --hidden-import=macast.plugins.protocol.nirvana \
             Macast.py
 
       - name: Resolve version
