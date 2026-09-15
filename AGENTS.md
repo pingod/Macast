@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 264/264）
+# 2) 回归验证（当前 345/345）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -216,8 +216,7 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
-  当前只有一条：`macast_ytdlp.py`（把投屏链接交给 yt-dlp 下载）。空索引也是合法状态，
-  页面只显示本机插件，不报错。
+  当前 6 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
 - 地址是三个，按「新鲜度」排序：`raw.githubusercontent.com`（永远最新）→
   `ghproxy.net/https://raw.githubusercontent.com/...`（按需代理 raw，也是最新的，国内可达）
   → `cdn.jsdelivr.net`（**分支文件会缓存数小时，可能给出过期索引，所以只能垫底**）。
@@ -261,6 +260,33 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `scheme`），不需要真起服务；唯一被打桩的是 `Setting.is_service_running`（GET 在服务
   未启动时会回 503）。
 
+### 4.8 在线插件目录（`plugins/`）：6 个插件，各自的红线
+
+`plugins/` 现在提供 6 个插件（yt-dlp 下载 / 外部播放器 / 小窗+壁纸 / 自动化钩子 /
+Chromecast 中继 / AirPlay 音频）。它们是**单文件**插件，所以：
+
+- 只能用「Macast 已带的库 + 标准库 + 机器上已有的命令行程序」。要 pip 库就走内置插件
+  路线（§4.4 的三处打包配置）。
+- **Macast 一次只能选一种渲染器**：5 个渲染器类插件互斥（菜单栏切换），`raop.py` 是协议
+  插件，可以和任意渲染器共存。
+- 定位一律用 PATH + 常见安装目录（GUI 从 Finder 启动拿不到 shell 的 PATH；`yt-dlp`
+  / `shairport-sync` / 播放器都踩这条）。
+
+最容易踩的几处，改这些插件前先看：
+
+| 插件 | 红线 |
+|---|---|
+| yt-dlp | 下载模式**不启动 mpv**，所以它覆写了 `start/stop`，并用 `_mpv_started` 记住「mpv 到底起没起」——`MPVRenderer.stop()` 会 join 只有真起过才存在的线程。流模式把 ytdl 路径**合并进已有的 `--script-opts`**（再写一条会顶掉 OSC 的设置）。 |
+| external_player | 播放器用 **argv 列表**启动，绝不拼命令行（url 来自网络）。暂停不实现，停止只杀自己起的进程。 |
+| floating | 覆写 `build_mpv_params` 前先**删掉继承来的 `--geometry/--autofit/--fullscreen/--ontop-level`**，否则会和全局 Player Size 打架。壁纸模式要先探测 mpv 是否认识 `--ontop-level=desktop`：未知选项会让 mpv 起不来，而启动器的反应是重试 3 次后**把服务停掉**。 |
+| hooks | 命令是 shell 命令（用户自己写的），但 **url 只走环境变量**，不拼进命令串。spawn 完即返回，不阻塞 CherryPy 工作线程。 |
+| cast_bridge | 复用 `protocol_cast` 的 Cast v2 收发，不引 pychromecast。投屏序列是 deviceauth CHALLENGE → CONNECT receiver-0 → LAUNCH → CONNECT transportId → LOAD，`transportId` 来自 LAUNCH 的回复，**不要硬编码**。发现用 mDNS 且必须在后台跑（`build_menu` 在 UI 线程上）。 |
+| raop | 只监督 shairport-sync（生成最小配置 + 拉起 + 报连接/断开），**不**把 RAOP 映射成 DLNA 播放状态。`uses_ssdp = False`，否则只有它启用时也会把 SSDP 服务拉起来。 |
+
+回归用例：Part 14（外部播放器 / 小窗 / yt-dlp 两种模式）、Part 15（钩子）、
+Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP 监督）。
+测试用的是假二进制（PATH 上放个 shell 脚本），所以跑测试不需要 yt-dlp / VLC / shairport-sync。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -291,7 +317,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（264/264）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + yt-dlp 下载器插件 |
+| `verify_cast_airplay.py` | **主验证套件**（345/345）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |
@@ -373,9 +399,11 @@ CI 会用同名文件**替换** release 里的产物。用 digest 对比确认�
 | DLNA（SSDP + UPnP）接收 | 完整 |
 | Chromecast 接收（Cast v2，URL 投屏） | 可用；**未认证接收端**，Google 官方发送端可能因设备认证失败 |
 | AirPlay 视频 URL 投屏 | 可用 |
-| AirPlay 音频（RAOP）/ 屏幕镜像 | **未实现** |
+| AirPlay 音频（RAOP） | 核心未实现，但在线插件 `plugins/raop.py` 可监督 shairport-sync 接收（见 §4.8） |
+| AirPlay 屏幕镜像 | **未实现**（需要 FairPlay 解密，不打算做） |
 | DRM 内容 | **不可能支持** |
 | 插件 | 支持启用/停用/卸载/安装（**热生效，不重启**）；卸载进 `.trash/` 可恢复 |
+| 在线插件目录 | `plugins/` 下 6 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）|
 | 网页投屏入口 | `GET /api?query=cast&url=<绝对地址>&token=<令牌>`（脚本 / 快捷指令 / 书签，绕开 DLNA 发现）；令牌常驻并显示在设置页 |
 
 ## 10. 与用户协作的约定（这个仓库的历史教训）

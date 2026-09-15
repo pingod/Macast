@@ -1,33 +1,43 @@
-# yt-dlp Downloader for Macast
+# yt-dlp Downloader / Streamer for Macast
 #
 # Macast Metadata
 # <macast.title>yt-dlp Downloader</macast.title>
 # <macast.renderer>YTDLPRenderer</macast.renderer>
 # <macast.platform>darwin,linux,win32</macast.platform>
-# <macast.version>0.1</macast.version>
+# <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Download what you cast instead of playing it: the url is handed to yt-dlp (Bilibili, YouTube, m3u8 ...). Needs the yt-dlp command installed.</macast.desc>
+# <macast.desc>Download what you cast instead of playing it (Bilibili, YouTube, m3u8 ...), or stream it while it downloads. Needs the yt-dlp command installed.</macast.desc>
 #
 # Why this exists: a sender can only hand over a URL. For Bilibili / YouTube /
 # an m3u8 index page that URL is not a file, and the built-in mpv renderer has
 # nothing to play unless mpv's own yt-dlp integration happens to be set up.
-# This renderer turns the cast into a download instead: "cast it" becomes
-# "save it", which is what you want for anything you intend to watch later.
+# This renderer offers both answers:
 #
-# It shells out to the `yt-dlp` binary (brew install yt-dlp / pipx install
-# yt-dlp / a release binary) rather than importing the library, so Macast needs
-# no new Python dependency and this stays a single installable file.
+#   Download (default)  yt-dlp saves the media to disk; mpv is not started.
+#   Stream              mpv plays through its ytdl hook while yt-dlp fetches
+#                       (we tell the hook where the binary is); nothing is
+#                       written to disk.
+#
+# Pick the mode from the menu bar. It shells out to the `yt-dlp` binary
+# (brew install yt-dlp / pipx install yt-dlp / a release binary) rather than
+# importing the library, so Macast needs no new Python dependency and this stays
+# a single installable file.
 #
 # Notes for whoever touches this next:
-#   * pause/resume are deliberately NOT implemented. yt-dlp is not a player;
-#     faking a PAUSED_PLAYBACK state would lie to the phone.
-#   * position/duration are reused as a progress bar (elapsed vs elapsed+ETA).
-#     That is the only reason the phone and the settings page show a live
-#     percentage instead of a frozen 0:00:00.
-#   * the child inherits the environment on purpose: unlike mpv, yt-dlp talks
-#     to the internet, and stripping http_proxy (what Setting.get_system_env
-#     does for players) would break YouTube for anyone who relies on a proxy.
+#   * in download mode mpv is deliberately *not* started: an idle player window
+#     staring at you while a file downloads is worse than no window.
+#   * `_mpv_started` exists because the mode can change at runtime (`reload_renderer`
+#     restarts the renderer), and MPVRenderer.stop() joins threads that only
+#     exist when start() actually launched mpv.
+#   * pause/resume in download mode are deliberately NOT implemented: faking a
+#     PAUSED_PLAYBACK state for a downloader would lie to the phone.
+#   * download progress reuses position/duration as a progress bar (elapsed vs
+#     elapsed+ETA). That is the only reason the phone and the settings page show
+#     a live percentage instead of a frozen 0:00:00.
+#   * the child inherits the environment on purpose: unlike mpv, yt-dlp talks to
+#     the internet, and stripping http_proxy (what Setting.get_system_env does
+#     for players) would break YouTube for anyone who relies on a proxy.
 
 import os
 import re
@@ -42,7 +52,9 @@ from enum import Enum
 import cherrypy
 
 from macast import Setting, MenuItem, gui
-from macast.renderer import Renderer, RendererSetting
+from macast.renderer import Renderer
+from macast.gui import App
+from macast_renderer.mpv import MPVRenderer, MPVRendererSetting
 
 logger = logging.getLogger("YTDLPRenderer")
 logger.setLevel(logging.INFO)
@@ -74,8 +86,8 @@ EXTRA_BIN_DIRS = (
 def find_ytdlp():
     """Path of the yt-dlp binary, or None when nothing usable is installed.
 
-    Module-level (and looked up per download, not at import) so tests can swap
-    it, and so installing yt-dlp while Macast runs takes effect immediately.
+    Module-level (and looked up per use, not at import) so tests can swap it,
+    and so installing yt-dlp while Macast runs takes effect immediately.
     """
     found = shutil.which('yt-dlp') or shutil.which('youtube-dl')
     if found:
@@ -110,25 +122,83 @@ class SettingProperty(Enum):
     #: Where downloads land. Readable and editable from the settings page's
     #: JSON editor, which is how a user moves it off the boot volume.
     YTDLP_Dir = 1
+    #: 0 = download to disk, 1 = stream through mpv.
+    YTDLP_Mode = 2
+    YTDLP_Mode_Download = 0
+    YTDLP_Mode_Stream = 1
 
 
-class YTDLPRenderer(Renderer):
+class YTDLPRenderer(MPVRenderer):
 
-    def __init__(self):
-        super(YTDLPRenderer, self).__init__()
+    def __init__(self, path="mpv"):
+        super(YTDLPRenderer, self).__init__(path=path)
         self._lock = threading.Lock()
         self._proc = None
         self._thread = None
         #: Bumped on every cast/stop so a finishing download cannot overwrite
         #: the state of the one that replaced it.
         self._generation = 0
+        #: Whether MPVRenderer.start() actually launched mpv -- see the header.
+        self._mpv_started = False
         self.renderer_setting = YTDLPRendererSetting()
+
+    # -- mode --------------------------------------------------------------
+
+    def stream_mode(self):
+        mode = Setting.get(SettingProperty.YTDLP_Mode,
+                           SettingProperty.YTDLP_Mode_Download.value)
+        return mode == SettingProperty.YTDLP_Mode_Stream.value
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def start(self):
+        self._mpv_started = self.stream_mode()
+        if self._mpv_started:
+            super(YTDLPRenderer, self).start()
+        else:
+            Renderer.start(self)
+            logger.info('download mode: mpv stays closed until a cast arrives')
+
+    def stop(self):
+        self._cancel()
+        if self._mpv_started:
+            super(YTDLPRenderer, self).stop()
+        else:
+            Renderer.stop(self)
+        self._mpv_started = False
+
+    def build_mpv_params(self):
+        params = super(YTDLPRenderer, self).build_mpv_params()
+        if not self.stream_mode():
+            return params
+        binary = find_ytdlp()
+        if binary is None:
+            return params
+        # Merge into the --script-opts the base class already set: a second
+        # occurrence of a key/value-list option would drop the OSC options.
+        option = 'ytdl_hook-ytdl_path=' + binary
+        for index, param in enumerate(params):
+            if param.startswith('--script-opts='):
+                params[index] = param + ',' + option
+                break
+        else:
+            params.append('--script-opts=' + option)
+        return params
 
     # -- Renderer API ------------------------------------------------------
 
     def set_media_url(self, url, start="0"):
-        """Download `url`. `start` is accepted for interface compatibility and
-        ignored: yt-dlp has no "start 56 seconds in"."""
+        if self.stream_mode():
+            if find_ytdlp() is None:
+                self._fail('未找到 yt-dlp，请先安装：brew install yt-dlp / pipx install yt-dlp')
+                return
+            # mpv's own ytdl hook resolves the page url and plays it while it
+            # downloads; nothing is written to disk. The hook needs the binary
+            # path, which build_mpv_params passes in.
+            MPVRenderer.set_media_url(self, url, start)
+            self.set_state('CurrentTrackTitle',
+                           os.path.basename(url.split('?')[0]) or url)
+            return
         if not url:
             return
         self._cancel()
@@ -142,21 +212,26 @@ class YTDLPRenderer(Renderer):
         self._thread.start()
 
     def set_media_stop(self):
+        if self.stream_mode():
+            super(YTDLPRenderer, self).set_media_stop()
+            return
         self._cancel()
         self.set_state_transport('STOPPED')
         cherrypy.engine.publish('renderer_av_stop')
 
     def set_media_pause(self):
+        if self.stream_mode():
+            super(YTDLPRenderer, self).set_media_pause()
+            return
         # A download cannot be paused. Saying so is better than reporting a
         # PAUSED_PLAYBACK the phone would then wait on forever.
         logger.info('pause ignored: yt-dlp is a downloader, not a player')
 
     def set_media_resume(self):
+        if self.stream_mode():
+            super(YTDLPRenderer, self).set_media_resume()
+            return
         logger.info('resume ignored: yt-dlp is a downloader, not a player')
-
-    def stop(self):
-        self._cancel()
-        super(YTDLPRenderer, self).stop()
 
     # -- internals ---------------------------------------------------------
 
@@ -260,10 +335,37 @@ class YTDLPRenderer(Renderer):
             self._fail(last_error or 'yt-dlp 退出码 {}'.format(code))
 
 
-class YTDLPRendererSetting(RendererSetting):
+class YTDLPRendererSetting(MPVRendererSetting):
+
+    def __init__(self):
+        super(YTDLPRendererSetting, self).__init__()
+        self.mode_item = None
 
     def build_menu(self):
-        return [MenuItem("Open Download Folder", self.open_folder)]
+        stream = Setting.get(SettingProperty.YTDLP_Mode,
+                             SettingProperty.YTDLP_Mode_Download.value) \
+            == SettingProperty.YTDLP_Mode_Stream.value
+        self.mode_item = MenuItem(
+            'Stream while downloading',
+            children=App.build_menu_item_group(['Download to disk', 'Stream'],
+                                               self.on_mode_clicked))
+        self.mode_item.items()[1 if stream else 0].checked = True
+        return [
+            MenuItem('yt-dlp v0.2', enabled=False),
+            self.mode_item,
+            MenuItem('Open Download Folder', self.open_folder),
+        ]
+
+    def on_mode_clicked(self, item):
+        for child in self.mode_item.items():
+            child.checked = False
+        item.checked = True
+        Setting.set(SettingProperty.YTDLP_Mode, item.data)
+        # The mode decides whether mpv is running at all, so the renderer has to
+        # be restarted for the change to apply.
+        cherrypy.engine.publish('app_notify', 'yt-dlp',
+                                '正在重载渲染器…', sound=False)
+        cherrypy.engine.publish('reload_renderer')
 
     def open_folder(self, item):
         path = Setting.get(SettingProperty.YTDLP_Dir, DEFAULT_DIR)

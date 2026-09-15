@@ -26,17 +26,41 @@
 
 ## 当前提供的插件
 
-| 条目 | 插件 | 为什么放在线而不是内置 |
+| 文件 | 插件 | 为什么放在线而不是内置 |
 |---|---|---|
-| `macast_ytdlp.py` | **yt-dlp Downloader** — 把投屏链接交给 yt-dlp 下载到本地，不播放 | 依赖用户自己装的 `yt-dlp` 命令；不是人人需要，且与 app 版本无关，适合独立更新 |
+| `macast_ytdlp.py` | **yt-dlp Downloader** — 把投屏链接交给 yt-dlp 下载到本地，或边下边播 | 依赖用户自己装的 `yt-dlp` 命令 |
+| `external_player.py` | **External Player (VLC / MPC-BE / mpv.net)** — 用你自己的播放器放 | 只对装了那个播放器的人有用 |
+| `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
+| `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
+| `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
+| `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 
-它把「投屏」变成「存下来」：B站 / YouTube / m3u8 这类页面地址，内置的 mpv 渲染器
-没有可播的资源，而 yt-dlp 有。进度会被映射成播放位置（`elapsed` 对 `elapsed+ETA`），
-所以手机和设置页能看到百分比而不是一直 `0:00:00`。暂停/继续**故意不实现** ——
-它是下载器不是播放器，假装 `PAUSED_PLAYBACK` 只会骗发送端。
+**Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
+`hooks` / `cast_bridge` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
 
-下载目录默认 `~/Downloads/Macast`，可用设置页「高级设置」的 JSON 编辑器改
-`YTDLP_Dir`；渲染器菜单里有「Open Download Folder」。
+各插件要点：
+
+- **yt-dlp**：模式在菜单里切（下载 / 边下边播）。下载目录默认 `~/Downloads/Macast`，
+  可用设置页「高级设置」的 JSON 编辑器改 `YTDLP_Dir`。边下边播走 mpv 自带的 ytdl hook，
+  插件会把 `ytdl_hook-ytdl_path` 指给你装的那个 yt-dlp。暂停/继续在下载模式下**故意不实现**
+  （它是下载器不是播放器，假装 `PAUSED_PLAYBACK` 只会骗发送端）。
+- **External Player**：玩家列表在菜单里选；没装的会灰显。选中的播放器可以用设置里的
+  `External_Player` / `External_Player_Path` 覆盖。位置是模拟的（每秒 +1 秒），
+  停止只杀我们启动的那个进程 —— VLC 单实例模式下会由已有窗口接管播放，这时停止不生效，
+  我们不会去杀无关窗口。
+- **Floating Player**：`Floating_Size` 是 `SIZES` 的下标，`Floating_Mode=1` 打开壁纸模式。
+  壁纸模式需要 mpv 支持 `--ontop-level=desktop`（新版才有），不支持时会退回全屏置顶窗口并提示。
+  壁纸模式是**实验性**的：能不能压在桌面图标下面取决于系统版本。
+- **Automation Hooks**：四个命令写在设置里（菜单「Edit Hooks」直接打开设置文件）：
+  `Hook_On_Cast` / `Hook_On_Pause` / `Hook_On_Resume` / `Hook_On_Stop`，都是 shell 命令，
+  环境变量带 `MACAST_EVENT` / `MACAST_URL` / `MACAST_TITLE`。URL 只通过环境变量传递，
+  **不拼进命令行**（它是网络来的字符串）。命令是 spawn 出去的，不等待、不阻塞协议线程。
+- **Chromecast Bridge**：目标在菜单里选（mDNS 搜索 `_googlecast._tcp`，也可以直接在设置里写
+  `Cast_Bridge_Target` = `host:port`，测试就是靠这条路径）。它复用 `macast.protocol_cast`
+  的 Cast v2 收发实现，**不引入 pychromecast 依赖**。首次投屏前必须选好目标。
+- **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
+  它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
+  **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。
 
 ## 什么时候该往这里加东西
 

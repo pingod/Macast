@@ -91,9 +91,15 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - **进阶用户**  
   1. 以前要手动下载的插件（IINA、Web、Live、PotPlayer、PIFMRDS、NVA 协议）现在**都已内置**，
      在设置页 → 插件里直接启用 / 停用 / 卸载即可，即时生效、不用重启。
-  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录：目前可选装 **yt-dlp Downloader**
-     —— 把投屏链接交给 `yt-dlp` 下载到本地而不是播放（B站 / YouTube / m3u8），
-     需要你自己先装 `yt-dlp` 命令。设置页拉不到索引时只会显示本机插件，不影响使用。
+  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录，目前可选装 6 个插件，装完即生效：
+     **yt-dlp Downloader**（投屏 = 下载到本地，或边下边播）、**External Player**
+     （用你自己的 VLC / MPC-BE / mpv.net 播放）、**Floating Player**（角落置顶小窗，
+     含实验性壁纸模式）、**Automation Hooks**（投屏 / 暂停 / 停止时执行你的命令）、
+     **Chromecast Bridge**（把收到的投屏转投给另一台 Chromecast）、
+     **AirPlay Audio (RAOP)**（监督 shairport-sync，接收 iPhone 的 AirPlay 音频）。
+     除 RAOP 是协议插件外，其余 5 个是渲染器插件，**一次只能选一个**（菜单栏切换）。
+     yt-dlp / shairport-sync / 外部播放器都要你自己先装；设置页拉不到索引时只会显示
+     本机插件，不影响使用。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **程序员**  
