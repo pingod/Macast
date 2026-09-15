@@ -222,11 +222,26 @@ def _local_addresses():
 
 
 class MDNSAdvertiser:
-    """Thin, restart-safe wrapper around the shared Zeroconf instance."""
+    """Thin, restart-safe wrapper around the shared Zeroconf instance.
+
+    Registered services are re-announced on a timer because some senders only
+    *listen*: libvlc's renderer discovery starts microdns with
+    ``mDNS: listening to _googlecast._tcp.local renderer`` and never sends a
+    query of its own (a 5353 sniffer on the same LAN sees no packets from the
+    phone at all), so a device it did not hear announce is invisible to it. Our
+    records carry a 120s TTL, so one announcement at protocol start is not
+    enough to stay visible -- which is why "the phone only sees Macast after a
+    plugin restart / stop casting" used to be the workaround.
+    """
+
+    #: Re-announce interval, comfortably inside the 120s TTL.
+    REANNOUNCE_SECONDS = 60
 
     def __init__(self):
         self._zc = None
         self._registered = {}  # key "type::name" -> ServiceInfo
+        self._stop = threading.Event()
+        self._thread = None
 
     def _ensure_zc(self):
         if self._zc is None:
@@ -286,10 +301,44 @@ class MDNSAdvertiser:
             zc.register_service(info)
             self._registered[key] = info
             logger.info("mDNS advertised %s on port %d", safe_name, port)
+            self._ensure_keepalive()
             return True
         except Exception as e:
             logger.error("mDNS advertise failed for %s: %s", safe_name, e)
             return False
+
+    def _ensure_keepalive(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._keepalive, name="MDNS_KEEPALIVE", daemon=True)
+        self._thread.start()
+
+    def _keepalive(self):
+        while not self._stop.wait(self.REANNOUNCE_SECONDS):
+            self.reannounce()
+
+    def reannounce(self):
+        """Re-broadcast every registered service, without a goodbye in between.
+
+        ``Zeroconf.update_service`` re-publishes the records (it is the same
+        call path as registration minus the goodbye), so listeners that missed
+        the first announcement -- or whose cache has expired -- pick the device
+        up on their own.
+        """
+        if self._zc is None:
+            return 0
+        sent = 0
+        for info in list(self._registered.values()):
+            try:
+                self._zc.update_service(info)
+                sent += 1
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("mDNS re-announce failed: %s", e)
+        if sent:
+            logger.debug("mDNS re-announced %d service(s)", sent)
+        return sent
 
     def unadvertise(self, service_type, name):
         key = "{}::{}".format(service_type, name)
@@ -301,6 +350,10 @@ class MDNSAdvertiser:
                 logger.warning("mDNS unregister failed: %s", e)
 
     def close(self):
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
         if self._zc is None:
             return
         for key in list(self._registered.keys()):

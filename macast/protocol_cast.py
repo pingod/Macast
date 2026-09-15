@@ -261,6 +261,12 @@ class ChromecastProtocol(Protocol):
                 pass
         self._connections = []
         self._senders = {}
+        # A restart must be a clean slate: without this the phantom session
+        # from the previous cast survived the plugin being toggled off and on.
+        with self._lock:
+            self._session_id = None
+            self._media = None
+            self._watch_generation += 1
         if self._listen_socket is not None:
             # Closing the plain listener reliably wakes the blocked accept();
             # closing an SSL-wrapped listener did not, which left a thread
@@ -282,7 +288,12 @@ class ChromecastProtocol(Protocol):
         props = {
             "id": Setting.get_usn(),
             "fn": Setting.get_friendly_name(),
-            "ca": "1",        # cast capable
+            # VLC reads this as a bitmask: 0x01 = can play video,
+            # 0x04 = can play audio (modules/services_discovery/microdns.c).
+            # Without 0x01 VLC adds `no-video` to its cast chain and never
+            # sends a video ES at all, which looks exactly like a receiver bug.
+            # 5 = video | audio, the value a real Chromecast advertises.
+            "ca": "5",        # cast capable: video + audio
             "st": "0",        # standard
             "bs": "FA8B",
             "ic": "/setup/icon.png",
@@ -395,6 +406,10 @@ class ChromecastProtocol(Protocol):
                 sock.close()
             except Exception:
                 pass
+            # A sender that dies without a CLOSE (the phone sleeping, the app
+            # being killed, Wi-Fi dropping -- what VLC actually does) must still
+            # be forgotten, otherwise the app stays "running" for the next one.
+            self._forget_sender_socket(sock)
 
     @staticmethod
     def _recv_exact(sock, n):
@@ -451,6 +466,8 @@ class ChromecastProtocol(Protocol):
         elif msg_type == "CLOSE":
             self._senders.pop(src, None)
             logger.info("Cast sender disconnected: %s", src)
+            if not self._senders:
+                self._clear_session("last sender closed the connection")
 
     def _on_heartbeat(self, sock, src, msg_type):
         """Keep-alive (tp.heartbeat) -- senders PING every ~5s."""
@@ -512,6 +529,56 @@ class ChromecastProtocol(Protocol):
         }
         self._send(sock, "receiver-0", src, NS_RECEIVER, json.dumps(status))
 
+    # -- session teardown ---------------------------------------------------
+
+    def _forget_sender_socket(self, sock):
+        """Drop every sender that was riding on ``sock`` and close the app.
+
+        Called when a client thread ends. The Cast receiver namespace has no
+        "sender went away" event of its own, so the last connection closing is
+        what ends the app on a real Chromecast -- and senders rely on it:
+        VLC's controller only leaves its Connecting state on the *next*
+        RECEIVER_STATUS it receives (chromecast_ctrl.cpp, processReceiverMessage).
+        """
+        with self._lock:
+            gone = [src for src, s in self._senders.items() if s is sock]
+            for src in gone:
+                self._senders.pop(src, None)
+            last_one_out = not self._senders
+        if gone:
+            logger.info("Cast sender dropped: %s", ", ".join(gone))
+        if last_one_out:
+            self._clear_session("sender connection ended")
+
+    def _clear_session(self, reason):
+        """Forget the media app and tell the senders it closed.
+
+        Regression: ``_session_id`` was only cleared by an explicit STOP, so
+        after a sender disconnected the receiver kept answering GET_STATUS with
+        ``applications: [{...}]`` and a sessionId nobody owned while nothing was
+        playing. VLC reads that as "Media receiver application was already
+        running", skips its LAUNCH, connects to the dead transportId and adopts
+        the stale session; the phone then needed an explicit "stop casting" (or
+        a plugin restart) before it would cast again. A receiver must report
+        ``applications: []`` once the app is gone.
+        """
+        with self._lock:
+            if self._session_id is None and self._media is None:
+                return False
+            self._session_id = None
+            self._media = None
+            # Stop a playback watcher from reporting on the session we just
+            # dropped (it re-reads the generation before every status).
+            self._watch_generation += 1
+            senders = list(self._senders.items())
+        logger.info("Cast session cleared (%s)", reason)
+        for src, sock in senders:
+            try:
+                self._send_receiver_status(sock, src, None)
+            except Exception as e:
+                logger.debug("Cast status broadcast failed for %s: %s", src, e)
+        return True
+
     def _on_media(self, sock, src, data, msg_type):
         """Media playback control (media namespace)."""
         with self._lock:
@@ -553,9 +620,8 @@ class ChromecastProtocol(Protocol):
             self._send_media_status(sock, src, "PAUSED", data.get("requestId"))
         elif msg_type == "STOP":
             self.renderer.set_media_stop()
-            with self._lock:
-                self._session_id = None
-                self._media = None
+            # Closes the app for every connected sender, not just this one.
+            self._clear_session("sender stopped playback")
             self._send_media_status(sock, src, "IDLE", data.get("requestId"))
         elif msg_type == "SEEK":
             with self._lock:
