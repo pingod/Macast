@@ -238,8 +238,16 @@ p._on_message(sock, {"source_id": "sender-0", "destination_id": "receiver-0",
     "payload_binary": b""})
 st = json.loads(cast.parse_cast_message(sock.sent[4:])["payload_utf8"])
 apps = st["status"]["applications"]
+# Regression: `namespaces` must be a list of {"name": ...} objects, not bare
+# strings -- cast_channel.proto defines Namespace{string name = 1}. Senders
+# that parse it strictly reject the media namespace otherwise and never LOAD.
+_ns = apps[0].get("namespaces", []) if apps else []
+_ns_names = [n.get("name") for n in _ns if isinstance(n, dict)]
 check("cast LAUNCH reports media namespace",
-      bool(apps) and cast.NS_MEDIA in apps[0].get("namespaces", []), str(apps))
+      cast.NS_MEDIA in _ns_names, str(apps))
+check("namespaces are objects with a 'name' field, not bare strings",
+      bool(_ns) and all(isinstance(n, dict) and "name" in n for n in _ns),
+      str(_ns))
 
 sock = FakeSock()
 p._on_message(sock, {"source_id": "sender-0", "destination_id": "receiver-0",
@@ -859,6 +867,73 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     check("protocol titles resolve robustly", False, str(e))
+
+# --------------------------------------------------------------------------
+# Part 6: mDNS must only publish addresses other devices can actually reach
+#
+# Regression: the device was discoverable but casting always failed. Cause was
+# that every address on a "gateway-bearing" interface was published as an A
+# record -- on a machine with VMs/Tailscale that is 5 addresses of which 4 are
+# unreachable, so senders resolved the device and then connected to a dead end.
+# --------------------------------------------------------------------------
+print("\n--- Part 6: mDNS address selection ---")
+try:
+    is_ok = discovery._is_advertisable
+    check("loopback is not advertised", not is_ok("127.0.0.1", "255.0.0.0"))
+    check("link-local is not advertised", not is_ok("169.254.1.2", "255.255.0.0"))
+    check("point-to-point (/32) is not advertised",
+          not is_ok("100.85.176.107", "255.255.255.255"))
+    check("Tailscale CGNAT is not advertised",
+          not is_ok("100.64.0.1", "255.255.255.0"))
+    check("normal LAN address is advertised", is_ok("192.168.1.6", "255.255.255.0"))
+
+    # Now the real selection, against a network that mimics this host:
+    # en0 is the only interface with an IPv4 default route; the rest are VM
+    # bridges and a Tailscale utun that Setting.get_ip() would also return.
+    import netifaces as _real_ni  # the stub installed at import time
+except Exception:
+    _real_ni = None
+
+_fake_ni = types.ModuleType("netifaces")
+_fake_ni.AF_INET = 2
+_fake_ni.AF_LINK = 17
+_fake_ni.gateways = lambda: {
+    2: [("192.168.1.1", "en0", True)],
+    17: [("link#25", "utun4", False), ("link#27", "bridge100", False)],
+}
+_fake_ni.ifaddresses = lambda i: {
+    "en0": {2: [{"addr": "192.168.1.6", "netmask": "255.255.255.0",
+                 "broadcast": "192.168.1.255"}]},
+    "bridge100": {2: [{"addr": "192.168.139.3", "netmask": "255.255.254.0"}]},
+    "utun4": {2: [{"addr": "100.85.176.107", "netmask": "255.255.255.255"}]},
+}[i]
+
+_saved_ni = sys.modules.get("netifaces")
+_saved_get_ip = utils.Setting.get_ip
+try:
+    sys.modules["netifaces"] = _fake_ni
+    # Setting.get_ip() is what the old code used; make it return the noisy set
+    # so the test proves the new code does better than "just use get_ip()".
+    utils.Setting.get_ip = staticmethod(lambda: {
+        ("192.168.1.6", "255.255.255.0"),
+        ("192.168.139.3", "255.255.254.0"),
+        ("192.168.215.0", "255.255.255.0"),
+        ("100.85.176.107", "255.255.255.255"),
+    })
+    picked = sorted(socket.inet_ntoa(a) for a in discovery._local_addresses())
+    check("only the default-route address is advertised", picked == ["192.168.1.6"],
+          str(picked))
+finally:
+    utils.Setting.get_ip = _saved_get_ip
+    if _saved_ni is not None:
+        sys.modules["netifaces"] = _saved_ni
+
+# The SRV target must be a hostname we own, so its A records are ours too.
+check("SRV target derives from the service instance",
+      discovery._normalize_server("Macast-Pavia") == "Macast-Pavia.local.")
+check("SRV target is not double-suffixed",
+      discovery._normalize_server("Pavia-MacBookPro.local") ==
+      "Pavia-MacBookPro.local.")
 
 # --------------------------------------------------------------------------
 # Summary

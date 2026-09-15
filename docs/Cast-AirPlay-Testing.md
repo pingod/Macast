@@ -42,6 +42,24 @@ python Macast.py
 ⚠️ **重要**：`Macast.py` 启动时会调用 `clear_env()` **清空** `macast.log`。
 因此顺序必须是：**先启动 → 再复现问题 → 再看日志**，不要事后翻旧日志。
 
+## 2.5 这些协议是"插件"吗？在设置页哪里看？
+
+Chromecast / AirPlay **不是外部安装的插件**，而是**内置协议（built-in）**，
+随 Macast 一起发布，源码在 `macast/protocol_cast.py` 与 `macast/protocol_airplay.py`。
+两者与 DLNA 一样，都是 `Protocol` 子类，和用户插件走同一套注册机制。
+
+在哪里看：
+
+- **菜单栏 → Setting → Protocols**：勾选框，控制哪个协议在跑（多选、可同时开）。
+- **设置页 → 插件**：浏览 `http://127.0.0.1:58880/` 的「插件」标签页。
+  内置项在 **「内置」** 分组里，每张卡片标注了 `协议`/`渲染器`、`内置`，
+  正在运行的还会带一个绿色 **`启用中`** 标签 —— 这样才不会和下面
+  「可安装」的在线插件混在一起看不出区别。
+- **设置页 → 状态**：`协议` 一行列出当前所有在跑的协议。
+
+> 插件页的「可安装」分组要访问 GitHub 上的插件仓库，**取不到时该分组直接不显示**，
+> 不影响内置协议与页面其余部分（以前会一直卡在 loading）。
+
 ## 3. 选择协议
 
 Macast **同时运行多个协议**（DLNA 走 SSDP，Chromecast/AirPlay 各走 mDNS），
@@ -187,6 +205,52 @@ dns-sd -B _airplay._tcp    local
 
 另外修复：**`ProtocolPlugin` 无条件订阅 `protocol.cast_uri`**，导致 AirPlay 一启动就
 `AttributeError` 崩溃（只有真跑起来才会遇到，单元测试没覆盖）。
+
+## 10.5 「能找到但投不上去」——两个真正的投屏失败原因（2026-09-15）
+
+设备能被搜到、点投屏却一直失败。用第三方发送端 **pychromecast** 复现后定位到两个
+**只有在真实发送端 + 真实局域网下才暴露** 的问题，与 Google 设备认证无关
+（VLC 用的是自己的发送端实现，不做设备认证）：
+
+### (1) mDNS 广播了 5 个地址，只有 1 个能连
+
+`Setting.get_ip()` 会把**所有"带网关"的接口**都算进来。本机有 VM 网桥和 Tailscale，
+于是广播出去的是：
+
+| 地址 | 来源 | 手机能连 |
+|---|---|---|
+| `192.168.1.6` | Wi-Fi (en0，默认路由) | ✅ |
+| `192.168.139.3` | VM 网桥 bridge100 | ❌ |
+| `192.168.97.0` | VM 网桥 bridge102 | ❌ |
+| `192.168.215.0` | VM 网桥 bridge101 | ❌ |
+| `100.85.176.107` | Tailscale (100.64/10) | ❌ |
+
+zeroconf 把这些**全部**写成 SRV 主机的 A 记录，发送端解析后 5 选 1 —— 复现时
+pychromecast 恰好挑中 `192.168.215.0`，连接直接超时。
+
+修复：`discovery.py` 只广播**承载 IPv4 默认路由的接口**（外加用户显式配置的
+`Additional_Interfaces`，减去 `Blocked_Interfaces`），并过滤回环、链路本地、
+`/32` 点对点隧道和 CGNAT 段。SRV 主机名也改为由服务实例名推导
+（`Macast-<主机名>.local.`），不再用机器主机名 —— 后者由系统另行广播，
+容易出现两套不一致的 A 记录。
+
+### (2) RECEIVER_STATUS 的 `namespaces` 格式错了
+
+`cast_channel.proto` 里是 `message Namespace { string name = 1; }`，所以
+`applications[].namespaces` 必须是**对象数组**：
+
+```json
+"namespaces": [{"name": "urn:x-cast:com.google.cast.media"}, ...]
+```
+
+我们之前发的是**字符串数组**。宽松的发送端不报错，严格的发送端（pychromecast、
+Cast SDK）会解析失败并认定"当前 app 不支持 media 命名空间"，
+于是**永远不发 LOAD** —— 表现就是"能搜到、点投屏没反应"。
+
+修复：`_app_namespaces()` 输出对象数组；同时把 8008 的 `/setup/eureka_info`
+改成真实 Chromecast 的嵌套结构（`device_info`），并支持 `?params=` 过滤。
+
+两个问题都补了回归用例（93/93）。
 
 ## 11. 多协议并发（2026-09-15 起支持）
 

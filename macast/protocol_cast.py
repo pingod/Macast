@@ -51,6 +51,18 @@ NS_DEVICEAUTH = "urn:x-cast:com.google.cast.tp.deviceauth"
 APP_NAMESPACES = [NS_CONNECTION, NS_HEARTBEAT, NS_MEDIA,
                   "urn:x-cast:com.google.cast.player.message"]
 
+
+def _app_namespaces():
+    """`namespaces` as the wire format wants it.
+
+    cast_channel.proto declares ``message Namespace { string name = 1; }``, so
+    RECEIVER_STATUS carries a list of *objects*, not a list of strings. Sending
+    bare strings makes senders that parse it strictly (pychromecast, VLC, the
+    Cast SDK) fail with "namespace not supported by current app" and never
+    issue the LOAD -- the device is discovered but cannot be cast to.
+    """
+    return [{"name": ns} for ns in APP_NAMESPACES]
+
 # ---------------------------------------------------------------------------
 # Minimal protobuf codec (only the messages Cast v2 needs)
 # ---------------------------------------------------------------------------
@@ -279,9 +291,10 @@ class ChromecastProtocol(Protocol):
     def _accept_loop(self):
         while not self._stop_event.is_set():
             try:
-                conn, _addr = self._tls_server.accept()
+                conn, addr = self._tls_server.accept()
             except OSError:
                 break
+            logger.info("Cast connection from %s", addr)
             self._connections.append(conn)
             t = threading.Thread(
                 target=self._handle_client, args=(conn,), name="CAST_CLIENT", daemon=True
@@ -408,7 +421,7 @@ class ChromecastProtocol(Protocol):
                     "transportId": self._transport_id,
                     # Senders establish a virtual connection to transportId
                     # and only then speak the media namespace.
-                    "namespaces": APP_NAMESPACES,
+                    "namespaces": _app_namespaces(),
                 }
             )
         status = {
@@ -517,15 +530,54 @@ class ChromecastProtocol(Protocol):
             def log_message(self, *args):
                 pass
 
+            @staticmethod
+            def _eureka_info(path):
+                """Device description in the shape a real Chromecast returns.
+
+                Senders probe this (over 8008, and some over 8443) both to
+                label the device and to decide what it can play. Two details
+                matter: ``device_info`` is *nested* rather than flattened, and
+                ``?params=a,b`` filters the top-level keys -- a request for
+                ``params=device_info,name`` must not be answered with the whole
+                document or strict clients reject the shape.
+                """
+                from urllib.parse import parse_qs, urlparse
+
+                udn = "uuid:{}".format(Setting.get_usn())
+                name = Setting.get_friendly_name()
+                device_info = {
+                    "manufacturer": "Macast",
+                    "model_name": "Macast",
+                    "product_name": "macast",
+                    "friendly_name": name,
+                    "ssdp_udn": udn,
+                    "mac_address": "00:00:00:00:00:00",
+                    "capabilities": {
+                        "display_supported": True,
+                        "audio_supported": True,
+                        "video_out": True,
+                        "audio_out": True,
+                    },
+                }
+                full = {
+                    "name": name,
+                    "device_info": device_info,
+                    "ssdp_udn": udn,
+                    "version": Setting.version,
+                    "build_version": Setting.version,
+                    "connected": True,
+                    "settings": {"control_notifications": False},
+                }
+                params = parse_qs(urlparse(path).query).get("params")
+                if params:
+                    wanted = [p.strip() for p in params[0].split(",") if p.strip()]
+                    if wanted:
+                        return {k: v for k, v in full.items() if k in wanted}
+                return full
+
             def do_GET(self):
                 if self.path.startswith("/setup/eureka_info"):
-                    info = {
-                        "name": Setting.get_friendly_name(),
-                        "model_name": "Macast",
-                        "manufacturer": "Macast",
-                        "upnp_device_type": "Macast",
-                        "capabilities": ["video_out", "audio_out"],
-                    }
+                    info = self._eureka_info(self.path)
                     body = json.dumps(info).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")

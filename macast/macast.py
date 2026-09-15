@@ -30,13 +30,15 @@ _ = gettext.gettext
 
 class MacastPlugin:
 
-    def __init__(self, path, title="None", plugin_instance=None, platform='none'):
+    def __init__(self, path, title="None", plugin_instance=None, platform='none',
+                 desc=''):
         # path is allowed to be set to None only when renderer is macast default plugin
         self.path = path
         self.title = title
         self.plugin_class = None
         self.plugin_instance = plugin_instance
         self.platform = platform
+        self.desc = desc
         if path:
             try:
                 self.load_from_file(path)
@@ -55,12 +57,36 @@ class MacastPlugin:
             res['type'] = 'protocol'
         if self.path is None:
             res['default'] = True
-            if getattr(self, 'plugin_instance', None) is not None:
-                res['desc'] = '{} protocol (built-in)'.format(self.title)
-            else:
-                res['desc'] = 'Macast default plugin'
+            res['type'] = self._plugin_type()
+            res['desc'] = self._builtin_desc(res.get('type'))
             res['version'] = Setting.version
         return res
+
+    def _plugin_type(self):
+        """'protocol' or 'renderer' for a built-in plugin.
+
+        Built-ins are constructed with an instance rather than a file, and
+        nothing sets `self.protocol` / `self.renderer` on them, so the base
+        get_info() left `type` unset and the plugin page could not tell a
+        protocol from a renderer.
+        """
+        from .protocol import Protocol
+        if isinstance(self.plugin_instance, Protocol):
+            return 'protocol'
+        return 'renderer'
+
+    def _builtin_desc(self, kind):
+        """Description for a plugin that ships with Macast.
+
+        The old wording was derived from the title, which produced
+        "DLNA Protocol protocol (built-in)" and called the renderer a
+        protocol. Callers may pass their own text instead.
+        """
+        if self.desc:
+            return self.desc
+        if kind == 'renderer':
+            return 'Built-in renderer.'
+        return 'Built-in protocol.'
 
     def get_instance(self):
         if self.plugin_instance is None and self.plugin_class is not None:
@@ -188,12 +214,40 @@ class MacastPluginManager:
                 group.add(fallback, self.get_protocol_instance(fallback))
         return group
 
+    def enabled_protocol_titles(self):
+        """Canonical titles of the protocols currently switched on.
+
+        Reads the persisted selection the same way `Macast` does, so the plugin
+        page can show which protocols are live without duplicating the
+        migration rules in the frontend.
+        """
+        stored = Setting.get(SettingProperty.Macast_Protocols, [])
+        # has() rather than get(): get(Macast_Protocol, None) would *create* the
+        # key as JSON null, which is exactly what the migration removes.
+        legacy = (Setting.get(SettingProperty.Macast_Protocol, '')
+                  if Setting.has(SettingProperty.Macast_Protocol) else '')
+        if isinstance(stored, str):
+            stored = [stored]
+        elif not isinstance(stored, list):
+            stored = []
+        if isinstance(legacy, str):
+            stored = list(stored) + [legacy]
+        titles = []
+        for name in stored:
+            resolved = self.resolve_title(name)
+            if resolved and resolved not in titles:
+                titles.append(resolved)
+        return titles
+
     def get_info(self):
         res = []
         for r in self.renderer_list:
             res.append(r.get_info())
+        enabled = self.enabled_protocol_titles()
         for p in self.protocol_list:
-            res.append(p.get_info())
+            info = p.get_info()
+            info['enabled'] = info.get('title') in enabled
+            res.append(info)
         return res
 
     @staticmethod
@@ -215,8 +269,10 @@ class MacastPluginManager:
         from .protocol_cast import ChromecastProtocol
         from .protocol_airplay import AirPlayProtocol
         return [
-            MacastPlugin(None, "Chromecast", ChromecastProtocol(), "darwin,win32,linux"),
-            MacastPlugin(None, "AirPlay", AirPlayProtocol(), "darwin,win32,linux"),
+            MacastPlugin(None, "Chromecast", ChromecastProtocol(), "darwin,win32,linux",
+                         desc='接收 Google Cast v2 投屏（Chrome、VLC、Android 等）'),
+            MacastPlugin(None, "AirPlay", AirPlayProtocol(), "darwin,win32,linux",
+                         desc='接收 AirPlay 视频投屏（iPhone / iPad / macOS）'),
         ]
 
     @staticmethod
@@ -275,8 +331,10 @@ class Macast(App):
         self.advanced_menuitem = None
 
         self.plugin_manager = MacastPluginManager(
-            MacastPlugin(None, format_class_name(renderer), renderer, 'darwin,win32,linux'),
-            MacastPlugin(None, format_class_name(protocol), protocol, 'darwin,win32,linux'))
+            MacastPlugin(None, format_class_name(renderer), renderer, 'darwin,win32,linux',
+                         desc='使用 mpv 播放收到的媒体'),
+            MacastPlugin(None, format_class_name(protocol), protocol, 'darwin,win32,linux',
+                         desc='接收 DLNA / UPnP 投屏（智能电视、音乐 App 常用）'))
 
         cherrypy.engine.subscribe('get_plugin_info', self.plugin_manager.get_info)
 
@@ -419,31 +477,24 @@ class Macast(App):
         exactly as they did, so that value is adopted as a one-element list;
         only fresh installs default to everything switched on.
         """
-        stored = Setting.get(SettingProperty.Macast_Protocols, None)
-        available = [p.title for p in self.plugin_manager.protocol_list]
-
-        if isinstance(stored, list) and stored:
-            titles = []
-            for name in stored:
-                resolved = self.plugin_manager.resolve_title(name)
-                if resolved and resolved not in titles:
-                    titles.append(resolved)
-            if titles:
-                return titles
-        elif isinstance(stored, str):
-            resolved = self.plugin_manager.resolve_title(stored)
-            if resolved:
-                return [resolved]
-
-        # Nothing usable yet: adopt the legacy scalar if there is one...
-        legacy = Setting.get(SettingProperty.Macast_Protocol, None)
-        if isinstance(legacy, str):
-            resolved = self.plugin_manager.resolve_title(legacy)
-            if resolved:
-                titles = [resolved]
+        titles = self.plugin_manager.enabled_protocol_titles()
+        if titles:
+            # Rewrite in canonical form so the settings file (and the plugin
+            # page) stop showing a short name that the code no longer uses.
+            if Setting.get(SettingProperty.Macast_Protocols, None) != titles:
                 Setting.set(SettingProperty.Macast_Protocols, titles)
-                return titles
-        # ...otherwise a fresh install gets every protocol at once.
+            # The old scalar is now redundant; leaving it behind makes the
+            # Advanced Setting page show two contradictory keys ("AirPlay"
+            # next to ["DLNA","Chromecast","AirPlay"]) and invites edits to
+            # the wrong one.
+            if Setting.has(SettingProperty.Macast_Protocol):
+                Setting.unset(SettingProperty.Macast_Protocol)
+                logger.info("Migrated Macast_Protocol into Macast_Protocols")
+            return titles
+
+        # Nothing usable yet: a fresh install gets every protocol at once.
+        available = [p.title for p in self.plugin_manager.protocol_list]
+        Setting.set(SettingProperty.Macast_Protocols, list(available))
         return list(available)
 
     def save_enabled_protocols(self):
