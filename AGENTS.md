@@ -27,11 +27,13 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 369/369）
+# 2) 回归验证（当前 405/405）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
 > 加新功能/修 bug 时**同时补用例**。这个仓库的验证脚本是唯一能防回退的东西。
+> 验证套件把网络全部打桩，所以它**抓不到"真实发送端栈不认账"这类问题**——
+> 那类问题要跑 `scripts/cast_conformance.py`（见 §6）。
 
 ## 3. 代码地图
 
@@ -294,6 +296,35 @@ Chromecast 中继 / AirPlay 音频）。它们是**单文件**插件，所以：
 Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP 监督）。
 测试用的是假二进制（PATH 上放个 shell 脚本），所以跑测试不需要 yt-dlp / VLC / shairport-sync。
 
+### 4.9 Cast 接收端一致性：打桩测试永远抓不到的那一类
+
+这一族问题的共同点是**我们没有崩、日志也没有 ERROR，只是发送端不认账**。
+`verify_cast_airplay.py` 把网络全部打桩，`vlc_sender_sim.py` 只复刻 VLC 的状态机，
+所以两者都抓不到；能抓到的是 `scripts/cast_conformance.py`（跑真实 pychromecast 栈）。
+举证时的 pychromecast 版本是 **14.0.10**（就在本仓库 `.venv` 里）。
+
+| 症状 | 真因 | 修复要点 / 用例 |
+|---|---|---|
+| 发送端调音量**卡 10 秒然后抛 `RequestTimeout`**（HA 音量条、mkchromecast 音量键） | `SET_VOLUME` 只改播放器，**从不回复** `RECEIVER_STATUS`；pychromecast 的 `ReceiverController.set_volume()` 在 `WaitResponse(REQUEST_TIMEOUT=10.0)` 里等这条回复才返回 | `_on_receiver` 的 `SET_VOLUME` 改完状态后 `_send_receiver_status(sock, src, requestId)`。Part 18 前 4 条 |
+| 音量条永远 100%、静音状态读不到 | `RECEIVER_STATUS.volume` 与 `MEDIA_STATUS.volume` 都硬编码 `{"level":1.0,"muted":False}`；发送端按**我们报的值** ±0.1 算下一档 | 存 `_volume`/`_muted`，两处 status 都回真值 |
+| mkchromecast 的 `--hijack` **每 5 秒重投一次** | `applications[].displayName` 回了 `"Macast"`，而真机对 `CC1AD845` 一律回 `"Default Media Receiver"`，发送端把别的名字当成"接收端被抢了" | `DEFAULT_MEDIA_APP_NAME` |
+| 播完了手机还一直显示"正在播放" | `GET_STATUS` 只要有 media 描述就回 `PLAYING`，**永不**降级 | `set_state_*` 观测 + `_observed_state()`；结束带 `idleReason`（FINISHED / ERROR / CANCELLED） |
+| 刚 LOAD 完就把新视频判成 `CANCELLED` | LOAD 换片之后 mpv 才补发**旧文件**的 `end-file reason=stop` | `_note_stopped` 只采信"当前媒体已经报过播放"的终止事件；ERROR 例外（换片只会以 stop 结束） |
+| mDNS 不可用时发送端**认不出** Macast | `ssdp_udn` 带了 `"uuid:"` 前缀，而 pychromecast 用 `UUID(udn.replace("-",""))` 解析、**整个 `device_info` 返回 None** | `_eureka_info` 发裸 UUID |
+| 每次发现都多一次失败请求 | `capabilities` 里缺 `multizone_supported`，而 pychromecast 在 `device_info` 存在时缺省为 **True** → 去探 `https://host:8443/...?params=multizone` | 显式 `multizone_supported: false` |
+
+两个记录下来的操作细节：
+
+- **`Chromecast.set_volume` 在 pychromecast 14 里不存在**（`volume_up()` 自己调用它会
+  AttributeError，是上游的 bug）。要复现接收端音量路径，得用
+  `cast.socket_client.receiver_controller.set_volume(...)`——那才是走 `WaitResponse` 的那条。
+- **本机跑真机验证不要碰用户配置**（§10）：`SETTING_DIR` 是 import 时由 appdirs 算出来的常量，
+  所以在 `import macast` **之前**把 `appdirs.user_config_dir` 指向临时目录，日志和设置
+  就都落在临时目录里了。示例见本轮验证用的 `/tmp/macast_tempconf.py` 那种写法。
+- **探针要用的测试流必须支持 Range**：`http.server.SimpleHTTPRequestHandler` 不支持，
+  mpv 会在 seek/prefetch 时 `end-file reason=error`、`file_error='no audio or video data played'`
+  （和 §6 里 ffmpeg 那条是同一个坑）。`cast_conformance.py` 自带一个最小 Range handler。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -324,7 +355,9 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（369/369）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）|
+| `verify_cast_airplay.py` | **主验证套件**（405/405）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）+ Cast 接收端一致性（Part 18）|
+| `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
+| `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程" |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |
