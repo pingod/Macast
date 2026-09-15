@@ -30,6 +30,34 @@ from .protocol import Protocol, Handler
 
 logger = logging.getLogger("ProtocolGroup")
 
+#: Read-only state accessors declared as no-ops on ``Protocol`` and implemented
+#: for real on ``DLNAProtocol``. The group has to re-route all of them, or the
+#: base-class stubs win and every reader sees a lie (``'STOPPED'``, ``''``, 80).
+_STATE_GETTERS = (
+    "get_state",
+    "get_state_title",
+    "get_state_url",
+    "get_state_position",
+    "get_state_duration",
+    "get_state_volume",
+    "get_state_mute",
+    "get_state_transport_state",
+    "get_state_transport_status",
+    "get_state_speed",
+    "get_state_display_subtitle",
+)
+
+
+def _is_meaningful(value):
+    """Whether a state getter's answer carries information.
+
+    ``''`` and ``None`` mean "this child knows nothing", so the search carries
+    on to the next one. ``False`` and ``0`` are real answers and stop it —
+    testing truthiness instead would read a muted/zero-volume player as
+    unknown and hand back whatever a later child defaults to.
+    """
+    return value is not None and value != ""
+
 
 class ProtocolGroup(Protocol):
     """A composite Protocol that runs several protocols concurrently.
@@ -64,7 +92,7 @@ class ProtocolGroup(Protocol):
         return None
 
     def _install_state_methods(self):
-        """Shadow the base class' ``set_state_*`` no-ops with fan-out methods.
+        """Shadow the base class' state no-ops with fan-out / delegate methods.
 
         This is the subtle bit. ``Protocol`` defines ``set_state_play`` and
         friends as *no-op methods*, so ``group.set_state_play`` resolves on the
@@ -73,12 +101,26 @@ class ProtocolGroup(Protocol):
         update instead of relaying it to the children. Installing the fan-out
         functions as instance attributes puts them ahead of the class in
         attribute lookup, which fixes that.
+
+        Writes fan out to every child; reads come back from the child that
+        actually holds state. Doing this for ``set_state``/``get_state`` and
+        the ``get_state_*`` accessors too is not optional: ``DLNAProtocol`` is
+        the only child that keeps a playback ledger, and it is the ledger the
+        status page, the subtitle toggle and the Chromecast state machine all
+        read. Leaving them to the inherited base-class no-ops made
+        ``/api?query=status`` report an empty track, no volume and 0:00:00
+        forever.
         """
-        for name in [n for n in self.__dict__ if n.startswith("set_state_")]:
+        for name in [n for n in self.__dict__ if n.startswith(("set_state", "get_state"))]:
             del self.__dict__[name]
-        for name in self.methods():
-            if name.startswith("set_state_"):
-                setattr(self, name, self._fanout(name))
+        # `methods()` only enumerates `set_state_<something>`; the generic
+        # `set_state(name, value)` write is a base-class no-op of the same
+        # family (`Renderer.set_state` is how the player reports a track or
+        # volume update), so it has to be routed explicitly.
+        for name in self.methods() + ["set_state"]:
+            setattr(self, name, self._fanout(name))
+        for name in _STATE_GETTERS:
+            setattr(self, name, self._delegate_getter(name))
 
     def get(self, title):
         for existing, protocol in self._children:
@@ -103,17 +145,32 @@ class ProtocolGroup(Protocol):
 
     @property
     def primary(self):
-        """The child that answers non-broadcast questions.
+        """The child whose handler becomes the CherryPy tree root.
 
-        Preference goes to the SSDP-based protocol when one is enabled: its
-        handler subclasses the base `Handler`, so it serves the UPnP endpoints
-        *and* the web UI / PWA / management API. Choosing anything else would
-        quietly drop `/description.xml` from the CherryPy tree.
+        Two requirements pull in the same direction:
+
+        * It must be a handler that serves the UPnP endpoints *and* the web UI
+          / PWA / management API. Every SSDP-based protocol's handler
+          subclasses the base `Handler` and does exactly that, so preference
+          goes to an SSDP-based protocol.
+        * Where several qualify, the *most capable* one has to win. A protocol
+          may extend another's handler to add its own routes -- the NVA
+          protocol subclasses `DLNAHandler` and mounts SETUP/RESTORE endpoints
+          plus an extra SCPD -- and only the most-derived handler offers the
+          union. Picking by insertion order (as this did) meant that whenever
+          NVA ran alongside DLNA, DLNA's handler was mounted and every NVA
+          route became unreachable, with no error anywhere to say so.
+
+        `handler_priority` is the explicit tie-break; deriving it from class
+        depth would work too, but it would silently change which handler wins
+        as soon as someone introduces an unrelated subclass.
         """
-        for _, protocol in self._children:
-            if getattr(protocol, "uses_ssdp", True):
-                return protocol
-        return self._children[0][1] if self._children else None
+        candidates = [p for _, p in self._children
+                      if getattr(p, "uses_ssdp", True)] or [p for _, p in self._children]
+        if not candidates:
+            return None
+        return max(candidates,
+                   key=lambda p: getattr(p, "handler_priority", 0))
 
     # -- Protocol interface -------------------------------------------------
 
@@ -182,6 +239,74 @@ class ProtocolGroup(Protocol):
             return results[0] if results else None
 
         return call
+
+    def _delegate_getter(self, name):
+        """Read `name` from the children, first meaningful answer wins.
+
+        ``primary`` is the natural owner (its handler serves the UI and, with
+        DLNA enabled, it is the one holding the ledger), so it is asked first.
+        Falling back to the rest keeps the other arrangement honest: when DLNA
+        is switched off there is no ledger at all and the sender-facing
+        protocols read this value to decide what to report, so an answer of
+        ``'STOPPED'`` from a base-class stub would be worse than useless.
+        """
+
+        def call(*args, **kwargs):
+            ordered = [self.primary] + [p for _, p in self._children
+                                        if p is not self.primary]
+            for protocol in ordered:
+                if protocol is None:
+                    continue
+                method = getattr(protocol, name, None)
+                # `name` is an instance attribute on this very group; asking a
+                # child that happens to be a group again would recurse.
+                if not callable(method) or method is getattr(self, name, None):
+                    continue
+                try:
+                    value = method(*args, **kwargs)
+                except KeyError:
+                    # The child's ledger does not track this name at all. That
+                    # is normal, not an error: the settings page asks for a
+                    # superset of the state names any one protocol defines
+                    # (`CurrentURI` is an *action argument* in AVTransport.xml,
+                    # never a state variable). Logging it at ERROR produced one
+                    # line per missing name per 3-second status poll, which is
+                    # exactly the kind of noise that hides a real failure.
+                    logger.debug("%s does not track %s", type(protocol).__name__,
+                                 args[0] if args else name)
+                    continue
+                except Exception as e:
+                    logger.error("Protocol %s raised in %s: %s",
+                                 type(protocol).__name__, name, e)
+                    continue
+                if _is_meaningful(value):
+                    return value
+            return ''
+
+        return call
+
+    @property
+    def event_subscribes(self):
+        """Every DLNA event subscriber, from every child that has any.
+
+        ``DLNAProtocol`` owns this dict (it is not on the handler), so
+        ``getattr(protocol, 'event_subscribes')`` used to resolve to whatever
+        the *primary* child had — and answered ``{}`` outright whenever the
+        primary was not the DLNA protocol. The status page renders this as the
+        "client information" table, so that also came back empty.
+        """
+        merged = {}
+        for title, protocol in list(self._children):
+            subscribers = getattr(protocol, "event_subscribes", None)
+            if not isinstance(subscribers, dict):
+                continue
+            for sid, client in subscribers.items():
+                # A SID is globally unique, but a child handing out a clashing
+                # one must not silently overwrite another child's subscriber.
+                if sid in merged and merged[sid] is not client:
+                    sid = "{}::{}".format(title, sid)
+                merged[sid] = client
+        return merged
 
     def __getattr__(self, name):
         # Guard against recursion: a missing dunder/private attribute (e.g.
