@@ -79,6 +79,18 @@ class MockRenderer:
     def _rec(self, name, *args):
         self.calls.append((name, args))
 
+    # Transport state the Cast protocol polls to decide whether playback really
+    # started. Class-level defaults keep the recorder tests unchanged; the
+    # LOAD tests set them per instance.
+    transport_state = "STOPPED"
+    transport_status = "OK"
+
+    def get_state_transport_state(self):
+        return self.transport_state
+
+    def get_state_transport_status(self):
+        return self.transport_status
+
     def set_media_url(self, url, start="0"):
         self._rec("set_media_url", url, start)
 
@@ -294,6 +306,71 @@ check("cast LOAD -> set_media_url called", _CTX.renderer.called("set_media_url")
 check("cast LOAD -> correct url",
       _CTX.renderer.last_arg("set_media_url") == "http://example.com/video.mp4",
       str(_CTX.renderer.last_arg("set_media_url")))
+
+
+# 1d-bis media LOAD must not claim PLAYING before the player confirms it.
+#
+# Regression: the receiver answered LOAD with BUFFERING then PLAYING
+# immediately, before mpv had even opened the URL. A stream that never plays
+# (wrong advertised address, a proxy in the way, an unsupported codec) then
+# still looked healthy -- and the sender, told everything was fine, never
+# retried. Two of the bugs in this file were only invisible because of that.
+def _load_statuses(renderer, grace=0.5):
+    _CTX.renderer = renderer
+    proto = TestProtocol()
+    proto.LOAD_GRACE_SECONDS = grace
+    s = FakeSock()
+    proto._on_message(s, {
+        "source_id": "sender-0", "destination_id": "receiver-0",
+        "namespace": "urn:x-cast:com.google.cast.media", "payload_type": 0,
+        "payload_utf8": json.dumps({
+            "type": "LOAD", "requestId": 7, "currentTime": 0,
+            "media": {"contentId": "http://example.com/video.mp4",
+                      "contentType": "video/mp4"},
+        }), "payload_binary": b"",
+    })
+    time.sleep(grace + 0.7)
+    out, off = [], 0
+    while off + 4 <= len(s.sent):
+        (n,) = struct.unpack(">I", s.sent[off:off + 4])
+        msg = cast.parse_cast_message(s.sent[off + 4: off + 4 + n])
+        off += 4 + n
+        try:
+            out.append(json.loads(msg["payload_utf8"]))
+        except Exception:
+            pass
+    return out
+
+
+def _player_states(msgs):
+    states = []
+    for m in msgs:
+        if m.get("type") == "MEDIA_STATUS":
+            states.append((m.get("status") or [{}])[0].get("playerState"))
+    return states
+
+
+msgs = _load_statuses(MockRenderer())
+states = _player_states(msgs)
+check("LOAD answers BUFFERING first, not PLAYING",
+      states[:1] == ["BUFFERING"], str(states))
+check("unconfirmed playback only falls back to PLAYING after the grace period",
+      states[-1:] == ["PLAYING"] and "PLAYING" not in states[:-1], str(states))
+
+_playing = MockRenderer()
+_playing.transport_state = "PLAYING"
+states = _player_states(_load_statuses(_playing))
+check("confirmed playback is reported as PLAYING",
+      states == ["BUFFERING", "PLAYING"], str(states))
+
+_broken = MockRenderer()
+_broken.transport_status = "ERROR_OCCURRED"
+msgs = _load_statuses(_broken)
+check("player error is reported as LOAD_FAILED",
+      any(m.get("type") == "LOAD_FAILED" for m in msgs),
+      str([m.get("type") for m in msgs]))
+check("a failed load does not also claim PLAYING",
+      "PLAYING" not in _player_states(msgs), str(_player_states(msgs)))
 
 # 1e PLAY / PAUSE / STOP routing
 p._on_message(sock, {"source_id": "sender-0", "destination_id": "receiver-0",
@@ -1144,6 +1221,28 @@ try:
     utils.Setting.get_network_interface = staticmethod(lambda: "en0")
     check("a usable pin resolves to itself",
           utils.Setting.resolved_network_interface() == "en0")
+
+    # The player is handed an environment without proxy variables.
+    #
+    # Regression: mpv inherited http_proxy from Macast's environment and sent
+    # LAN media requests to it. A proxy with no route back to the sender
+    # answers 502, so casting connected and then played nothing --
+    # "[ffmpeg] http: HTTP error 502 Bad Gateway" for a URL curl fetched fine.
+    _saved_env = {k: os.environ.get(k) for k in utils.Setting.PROXY_ENV_VARS}
+    try:
+        for k in utils.Setting.PROXY_ENV_VARS:
+            os.environ[k] = "http://127.0.0.1:9"
+        env = utils.Setting.get_system_env()
+        check("player environment drops proxy variables",
+              not any(k in env for k in utils.Setting.PROXY_ENV_VARS),
+              str([k for k in utils.Setting.PROXY_ENV_VARS if k in env]))
+        check("player environment keeps everything else", "PATH" in env)
+    finally:
+        for k, v in _saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 finally:
     utils.Setting.get_ip = _saved_get_ip2
     utils.ni = _saved_ni_attr2

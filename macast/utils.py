@@ -534,6 +534,16 @@ class Setting:
                                                  Setting.get_system_version(),
                                                  Setting.get_version())
 
+    #: Proxy variables a child process must not inherit. Macast is a
+    #: *receiver*: the media URL is usually served by the sender on the local
+    #: network, and an HTTP proxy has no route back to it. Inheriting a proxy
+    #: makes the player ask the proxy for a LAN address, the proxy answers
+    #: 502, and casting connects and then plays nothing at all -- a failure
+    #: that looks like a Macast bug but is entirely environmental.
+    PROXY_ENV_VARS = ('http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
+                      'all_proxy', 'ALL_PROXY', 'ftp_proxy', 'FTP_PROXY',
+                      'no_proxy', 'NO_PROXY')
+
     @staticmethod
     def get_system_env():
         # Get system env(for GNU/Linux and *BSD).
@@ -546,6 +556,12 @@ class Setting:
             env[lp_key] = lp_orig
         else:
             env.pop(lp_key, None)
+        # Applied to the player only; Macast's own HTTP calls (plugin
+        # downloads, update checks) still honour the user's proxy.
+        ignored = [k for k in Setting.PROXY_ENV_VARS if env.pop(k, None) is not None]
+        if ignored:
+            logger.info("Player will ignore proxy environment: %s",
+                        ", ".join(ignored))
         return env
 
     @staticmethod

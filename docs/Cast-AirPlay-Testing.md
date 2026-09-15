@@ -1,12 +1,13 @@
 # Chromecast / AirPlay 接收端 · 真机验证指南
 
 本指南用于在**真实局域网 + 真实手机/电脑**上验证 Macast 新增的 Chromecast 与 AirPlay
-接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，138/138 通过）只覆盖协议逻辑与
+接收端能力。自动化验证（`scripts/verify_cast_airplay.py`，145/145 通过）只覆盖协议逻辑与
 本机 socket，无法替代真机验证。
 
-> 已用真实局域网跑过两轮验证，期间修掉若干**只在真机/真实网络才暴露**的问题，
-> 见 [第 10 节](#10-本轮已修的真机问题2026-09-15) 与
-> [第 10.5 节](#105-第二轮真机问题2026-09-15-晚)。
+> 已用真实局域网跑过三轮验证，期间修掉若干**只在真机/真实网络才暴露**的问题，
+> 见 [第 10 节](#10-本轮已修的真机问题2026-09-15)、
+> [第 10.5 节](#105-第二轮真机问题2026-09-15-晚) 与
+> [第 10.6 节](#106-有声音没有画面2026-09-15-第三轮)。
 
 ---
 
@@ -338,6 +339,124 @@ except OSError:
 以上都补了回归用例（138/138），包括"3 次半开连接后仍能正常建会话"和
 "stop/start 之后仍能建会话"。
 
+### 10.6 "有声音没有画面"（2026-09-15 第三轮）
+
+现象：手机 VLC 投上来**只有声音**。第一件事是分清责任 —— 是**发送端没送视频**，
+还是**我们丢了视频**。判据只有一个：mpv 配置视频轨时会发 `video-reconfig` 事件，
+而 MPVRenderer 会把所有 mpv 事件原样写进日志。
+
+```shell
+LOG="$HOME/Library/Application Support/Macast/macast.log"
+grep -aE "video-reconfig|audio-reconfig|file-loaded|Cast LOAD" "$LOG" | tail -20
+```
+
+用户那次的日志是：
+
+```
+Cast LOAD url=http://192.168.1.4:8010/chromecast/4305548671855/2011909838/stream
+{'event': 'start-file', ...}
+{'event': 'audio-reconfig'}      ← 只有 audio
+{'event': 'file-loaded'}
+{'event': 'playback-restart'}
+```
+
+**全程没有一次 `video-reconfig`** → mpv 根本没看到视频轨 → **VLC 推过来的流就是纯音频**。
+（对比：投本地 `file:///tmp/x.mp4` 时立刻出现 `video-reconfig`，轨道表里 video+audio 都
+是 `selected=True`。）
+
+#### 为什么 VLC 会只推音频
+
+VLC 的 cast 输出模块里有一个开关，关掉后**所有非音频 ES 直接被丢弃**
+（`modules/stream_out/chromecast/cast.cpp`）：
+
+```cpp
+static void *Add(sout_stream_t *p_stream, const es_format_t *p_fmt, const char *es_id)
+{
+    if (!p_sys->b_supports_video)
+        if (p_fmt->i_cat != AUDIO_ES)
+            return NULL;                       // 视频/字幕全丢
+    ...
+}
+...
+b_supports_video = var_GetBool(p_stream, SOUT_CFG_PREFIX "video");   // --sout-chromecast-video
+...
+if ( !p_original_video )
+    mime = "audio/x-matroska";                 // 于是 mime 也变成音频
+```
+
+默认是 `true`，所以正常情况下 VLC 会推视频。出现纯音频，只可能是：
+
+1. 该选项被显式关掉了（`sout-chromecast-video=0`，或在渲染器/转换设置里等效的开关）；
+2. VLC 侧拿到的输入本身没有视频轨（比如从**音频库/音乐**里投，或源文件就是纯音频）；
+3. 视频 ES 从未进入 sout（例如 VLC 侧解码链路把视频吃掉了）。
+
+> 关键点：**这三种都在发送端**，Macast 这侧能做的只有「如实上报 + 留下可诊断的日志」。
+
+#### 为此做的改动
+
+- **LOAD 现在记录发送端声明的媒体信息**：
+
+  ```
+  Cast LOAD url=... contentType=audio/x-matroska streamType=BUFFERED duration=None tracks=0
+  ```
+
+  `contentType` 是发送端告诉接收端"我准备推什么"的字段。看到 `audio/*` 就可以直接
+  判定为发送端只推了音频，不用再猜。
+
+- **不再无脑回 PLAYING**：之前收到 LOAD 立刻回 `BUFFERING` + `PLAYING`，等于骗发送端。
+  现在先回 `BUFFERING`，然后在**独立线程**里轮询播放器真实状态（不能阻塞收包线程，
+  否则会漏掉发送端每 6 秒的 PING），确认播放后才回 `PLAYING`；播放器报错则回
+  `LOAD_FAILED`。8 秒内拿不到确认才退回乐观的 `PLAYING`（因为传输状态带 DLNA 色彩，
+  纯 Chromecast 模式下可能一直是 `STOPPED`，不能据此误判失败）。
+
+- **播放器不再继承代理环境**（这一条修的是真问题，见下）。
+
+#### 顺带修掉：mpv 继承 `http_proxy` 会让局域网投屏彻底失败
+
+Macast 启动时如果环境里有代理（公司代理、Clash/系统 VPN 之类），mpv 会继承
+`http_proxy`，于是**连局域网地址也走代理**；代理没有回手机的网，直接 502：
+
+```
+[ffmpeg] http: HTTP error 502 Bad Gateway
+Failed to open http://192.168.1.6:8010/chromecast/1/2/stream.
+```
+
+同一个 URL `curl` 是 200。表现就是"连上了但什么都没播"。
+修复：`Setting.get_system_env()` 里把代理变量摘掉（**只对播放器生效**，
+Macast 自己的插件下载/更新检查仍然走用户代理），并打一行 info 说明摘了哪些。
+
+> 注意 `mpv --http-proxy=` **不能**解决这个问题，ffmpeg 的 HTTP 层仍然读环境变量；
+> 必须真的把变量从子进程环境里去掉。
+
+#### 本机复现"发送端形态的流"（不需要手机）
+
+VLC 给接收端的是「HTTP + 无扩展名路径 + 实时流」。用 ffmpeg 造一个等价样本：
+
+```shell
+FF=/opt/homebrew/opt/ffmpeg/bin/ffmpeg        # brew 装了但不在 PATH 上
+$FF -y -f lavfi -i testsrc2=size=640x360:rate=25 \
+       -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+       -t 20 -c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac \
+       -shortest /tmp/cast_test.mp4
+$FF -y -i /tmp/cast_test.mp4 -c copy -f mpegts /tmp/cast_test.ts   # 伪装成 TS 流
+```
+
+然后用一个只会返回这块 TS 的小 HTTP 服务挂在 `/chromecast/x/y/stream`
+（`Content-Type: video/mp2t`，带 Range 支持），再：
+
+```shell
+.venv/bin/python scripts/vlc_sender_sim.py 127.0.0.1 8009 \
+    "http://127.0.0.1:8010/chromecast/1/2/stream"
+```
+
+想直接问 mpv 到底拿到了什么轨，用它的 IPC（app 当前 socket 路径可从
+`pgrep -fl mpv` 的 `--input-ipc-server=` 里读）：
+
+```shell
+pgrep -fl mpv | sed 's/--script-opts.*//'
+# 然后 get_property: track-list / video-codec / width / height / current-vo
+```
+
 ## 11. 多协议并发（2026-09-15 起支持）
 
 三个协议可以同时在线。实现要点：
@@ -404,10 +523,13 @@ mDNS（`discovery._advertisable_interfaces()`）都走这一个判断，不会�
 
 ```shell
 LOG="$HOME/Library/Application Support/Macast/macast.log"
-grep -E "Chromecast|AirPlay|Cast |mDNS|Discovery|ERROR|Error|Traceback" "$LOG" | tail -100
+grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR|Error|Traceback" "$LOG" | tail -60
+# 声音/画面类问题一定附上这段：有没有 video-reconfig 是判定责任的分水岭
+grep -aE "video-reconfig|audio-reconfig|file-loaded|end-file" "$LOG" | tail -30
 ```
 
-以及：发送端（什么 App / 系统版本）、现象（搜不到 / 连不上 / 连上不播）。
+以及：发送端（什么 App / 系统版本）、现象（搜不到 / 连不上 / 连上不播 / 有声音没画面）。
+"有声音没画面"请特别说明**发送端投的是视频文件还是音频**。
 
 ---
 
@@ -420,8 +542,9 @@ cd /Users/pavia/githome/Macast
 
 覆盖：Cast 编解码与指令路由、AirPlay RTSP 路由、真实 TLS/RTSP 端到端、
 mDNS 广播参数与实例名规范化、SSDP 随协议切换、`DeviceAuthMessage` 线格式
-（含"旧写法必须被拒"的反例）、网卡枚举/过滤/pin 语义、插件热插拔
-（键稳定性、停用保护、卸载进回收站、安装回滚、坏插件不残留），以及
+（含"旧写法必须被拒"的反例）、LOAD 的如实上报（先 BUFFERING、确认后才 PLAYING、
+播放器报错给 LOAD_FAILED）、播放器环境不继承代理、网卡枚举/过滤/pin 语义、
+插件热插拔（键稳定性、停用保护、卸载进回收站、安装回滚、坏插件不残留），以及
 "半开连接 + stop/start 后接收端仍然可用"。
 
 想用一个**忠实复刻 VLC 状态机**的发送端做端到端回归：
