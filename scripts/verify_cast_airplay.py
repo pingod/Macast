@@ -23,6 +23,7 @@ import ssl
 import struct
 import sys
 import threading
+import time
 import types
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -164,6 +165,17 @@ def check(name, cond, detail=""):
     RESULTS.append((name, bool(cond), detail))
     mark = "PASS" if cond else "FAIL"
     print("[{}] {}".format(mark, name) + ("" if cond else "  -- " + detail))
+
+
+def _rejects(fn):
+    """True when `fn` raises ValueError -- used for the refusal paths."""
+    try:
+        fn()
+    except ValueError:
+        return True
+    except Exception:
+        return False
+    return False
 
 
 def _recv_exact(sock, n):
@@ -404,6 +416,51 @@ except Exception as e:
 finally:
     try:
         p.stop()
+    except Exception:
+        pass
+
+# ---- A stray/aborted connection must not take the receiver down ----
+# Regression: the receiver used to wrap the *listening* socket in TLS, which
+# made accept() run the handshake inline. A client that vanished mid-handshake
+# raised SSLError there -- and SSLError is an OSError, which the accept loop
+# treated as "the listener is gone" and exited. Macast then stayed advertised
+# over mDNS while nothing answered on 8009: discoverable, not castable.
+_CTX.renderer = MockRenderer()
+p2 = TestProtocol()
+try:
+    p2.start()
+
+    def _connect_cast(timeout=5):
+        raw = socket.create_connection(("127.0.0.1", p2.cast_port), timeout=timeout)
+        return ctx.wrap_socket(raw, server_hostname=None)
+
+    for _ in range(3):
+        socket.create_connection(("127.0.0.1", p2.cast_port), timeout=5).close()
+    time.sleep(0.5)
+
+    with _connect_cast() as s:
+        cast_send(s, "sender-0", "receiver-0",
+                  "urn:x-cast:com.google.cast.tp.deviceauth",
+                  json.dumps({"type": "CHALLENGE"}))
+        reply = cast_recv(s)
+    check("aborted handshakes do not kill the receiver", reply is not None,
+          "no reply after 3 stray connections")
+
+    # An interface change cycles the protocol; the receiver must come back.
+    p2.stop()
+    p2.start()
+    with _connect_cast() as s:
+        cast_send(s, "sender-0", "receiver-0",
+                  "urn:x-cast:com.google.cast.tp.deviceauth",
+                  json.dumps({"type": "CHALLENGE"}))
+        reply2 = cast_recv(s)
+    check("receiver serves again after a stop/start cycle", reply2 is not None,
+          "no reply after restart")
+except Exception as e:
+    check("receiver survives stray connections", False, str(e))
+finally:
+    try:
+        p2.stop()
     except Exception:
         pass
 
@@ -878,7 +935,9 @@ except Exception as e:
 # --------------------------------------------------------------------------
 print("\n--- Part 6: mDNS address selection ---")
 try:
-    is_ok = discovery._is_advertisable
+    # The filter moved to utils so the network picker and the advertiser share
+    # one definition of "reachable"; discovery re-exports it.
+    is_ok = discovery.is_advertisable_address
     check("loopback is not advertised", not is_ok("127.0.0.1", "255.0.0.0"))
     check("link-local is not advertised", not is_ok("169.254.1.2", "255.255.0.0"))
     check("point-to-point (/32) is not advertised",
@@ -901,17 +960,34 @@ _fake_ni.gateways = lambda: {
     2: [("192.168.1.1", "en0", True)],
     17: [("link#25", "utun4", False), ("link#27", "bridge100", False)],
 }
-_fake_ni.ifaddresses = lambda i: {
+_FAKE_TABLE = {
     "en0": {2: [{"addr": "192.168.1.6", "netmask": "255.255.255.0",
                  "broadcast": "192.168.1.255"}]},
     "bridge100": {2: [{"addr": "192.168.139.3", "netmask": "255.255.254.0"}]},
     "utun4": {2: [{"addr": "100.85.176.107", "netmask": "255.255.255.255"}]},
-}[i]
+}
+
+
+def _fake_ifaddresses(name):
+    # Real netifaces raises ValueError for an unknown interface; matching that
+    # keeps the caller's error handling under test.
+    if name not in _FAKE_TABLE:
+        raise ValueError("unknown interface %s" % name)
+    return _FAKE_TABLE[name]
+
+
+_fake_ni.ifaddresses = _fake_ifaddresses
+_fake_ni.interfaces = lambda: ["en0", "bridge100", "utun4"]
 
 _saved_ni = sys.modules.get("netifaces")
+# utils.py / discovery.py both do `import netifaces as ni`, so `sys.modules`
+# alone is not enough: utils binds the module at import time and needs the
+# attribute patched too.
+_saved_ni_attr = utils.ni
 _saved_get_ip = utils.Setting.get_ip
 try:
     sys.modules["netifaces"] = _fake_ni
+    utils.ni = _fake_ni
     # Setting.get_ip() is what the old code used; make it return the noisy set
     # so the test proves the new code does better than "just use get_ip()".
     utils.Setting.get_ip = staticmethod(lambda: {
@@ -923,8 +999,37 @@ try:
     picked = sorted(socket.inet_ntoa(a) for a in discovery._local_addresses())
     check("only the default-route address is advertised", picked == ["192.168.1.6"],
           str(picked))
+
+    # --- network picker (see also Part 10) ---------------------------------
+    _saved_pin = utils.Setting.get_network_interface
+    try:
+        utils.Setting.get_network_interface = staticmethod(lambda: "en0")
+        check("pinned interface restricts mDNS to that interface",
+              discovery._advertisable_interfaces() == {"en0"},
+              str(discovery._advertisable_interfaces()))
+        pinned_addrs = sorted(socket.inet_ntoa(a)
+                              for a in discovery._local_addresses())
+        check("pinned interface still yields its own address",
+              pinned_addrs == ["192.168.1.6"], str(pinned_addrs))
+
+        # A tunnel with a /32 address cannot carry discovery; pinning it must
+        # fall back to automatic rather than make Macast invisible.
+        utils.Setting.get_network_interface = staticmethod(lambda: "utun4")
+        fallback = sorted(socket.inet_ntoa(a)
+                          for a in discovery._local_addresses())
+        check("unusable pinned interface falls back to automatic",
+              fallback == ["192.168.1.6"], str(fallback))
+
+        # An interface that no longer exists must not break discovery either.
+        utils.Setting.get_network_interface = staticmethod(lambda: "en99")
+        stale = sorted(socket.inet_ntoa(a) for a in discovery._local_addresses())
+        check("stale pinned interface falls back to automatic",
+              stale == ["192.168.1.6"], str(stale))
+    finally:
+        utils.Setting.get_network_interface = _saved_pin
 finally:
     utils.Setting.get_ip = _saved_get_ip
+    utils.ni = _saved_ni_attr
     if _saved_ni is not None:
         sys.modules["netifaces"] = _saved_ni
 
@@ -934,6 +1039,325 @@ check("SRV target derives from the service instance",
 check("SRV target is not double-suffixed",
       discovery._normalize_server("Pavia-MacBookPro.local") ==
       "Pavia-MacBookPro.local.")
+
+# --------------------------------------------------------------------------
+# Part 9: device authentication must survive a *strict* protobuf parser
+#
+# Regression: VLC connected, sent its AuthChallenge, and then hung up with no
+# further message -- "found but not castable". VLC's processAuthMessage() bails
+# out of the whole handshake when ParseFromString() fails, and C++ protobuf
+# validates `required` fields while parsing. The reply used to be a bare
+# AuthResponse (0a001200): its `response` submessage existed but was empty, so
+# `signature` / `client_auth_certificate` were missing and the parse failed.
+# --------------------------------------------------------------------------
+print("\n=== Part 9: DeviceAuthMessage wire format ===")
+try:
+    sys.path.insert(0, os.path.join(REPO, "scripts"))
+    import importlib as _importlib
+    vlc_sim = _importlib.import_module("vlc_sender_sim")
+
+    ok_new, why_new = vlc_sim.parse_device_auth(cast.encode_auth_response())
+    check("AuthResponse is wrapped in DeviceAuthMessage.response", ok_new, why_new)
+
+    # A certified receiver would add a certificate and a CA chain; make sure
+    # the encoder can carry them without breaking the required fields.
+    rich = cast.encode_auth_response(signature=b"sig", certificate=b"cert",
+                                     intermediates=(b"ca1", b"ca2"))
+    ok_rich, why_rich = vlc_sim.parse_device_auth(rich)
+    check("a signed reply with a CA chain still parses", ok_rich, why_rich)
+
+    old_bytes = vlc_sim._f_bytes(1, b"") + vlc_sim._f_bytes(2, b"")
+    ok_old, why_old = vlc_sim.parse_device_auth(old_bytes)
+    check("bare AuthResponse is rejected (the original bug)", not ok_old, why_old)
+
+    # Field numbers must match cast_channel.proto exactly.
+    fields = {n for n, _w, _v in vlc_sim._fields(cast.encode_auth_response())}
+    check("DeviceAuthMessage uses field 2 for the response", fields == {2},
+          str(fields))
+    resp = dict((n, v) for n, w, v in vlc_sim._fields(cast.encode_auth_response())
+                if w == 2)
+    inner = {n for n, _w, _v in vlc_sim._fields(resp[2])}
+    check("AuthResponse sets signature(1) and certificate(2)",
+          inner == {1, 2}, str(inner))
+    check("challenge message still parses",
+          vlc_sim.parse_device_auth(cast.encode_auth_challenge())[0] is False,
+          "challenge is not a response, correctly rejected")
+finally:
+    sys.path.remove(os.path.join(REPO, "scripts"))
+
+# --------------------------------------------------------------------------
+# Part 10: network interface listing / pinning
+# --------------------------------------------------------------------------
+print("\n=== Part 10: network interface picker ===")
+_saved_get_ip2 = utils.Setting.get_ip
+_saved_ni_attr2 = utils.ni
+_saved_pin2 = utils.Setting.get_network_interface
+_saved_set_pin = utils.Setting.set_network_interface
+_saved_setting2 = (utils.Setting.setting, utils.Setting.setting_path)
+try:
+    utils.ni = _fake_ni
+    rows = utils.Setting.network_interfaces()
+    by_name = {r["name"]: r for r in rows}
+    check("every local IPv4 interface is listed",
+          set(by_name) == {"en0", "bridge100", "utun4"}, str(sorted(by_name)))
+    check("default-route interface is flagged and sorts first",
+          rows[0]["name"] == "en0" and rows[0]["default"] is True,
+          str([(r["name"], r["default"]) for r in rows]))
+    check("LAN address is marked usable",
+          by_name["en0"]["usable"] is True and by_name["en0"]["reason"] == "",
+          str(by_name["en0"]))
+    check("Tailscale /32 address is marked unusable with a reason",
+          by_name["utun4"]["usable"] is False and bool(by_name["utun4"]["reason"]),
+          str(by_name["utun4"]))
+    check("netmask is reported for the UI",
+          by_name["en0"]["netmask"] == "255.255.255.0")
+
+    # Pinning must narrow get_ip(), which is what SSDP uses to decide which
+    # subnet it answers on.
+    utils.Setting.get_network_interface = staticmethod(lambda: "bridge100")
+    pinned = utils.Setting.get_ip()
+    check("get_ip() honours the pinned interface",
+          pinned == {("192.168.139.3", "255.255.254.0")}, str(pinned))
+
+    # get_ip() at its most permissive (VM bridge + /32 tunnel present), as it
+    # is on this kind of host; the filter must drop the tunnel.
+    utils.Setting.get_ip = staticmethod(lambda: {
+        ("192.168.139.3", "255.255.254.0"),
+        ("100.85.176.107", "255.255.255.255"),
+    })
+    utils.Setting.get_network_interface = staticmethod(lambda: "")
+    check("get_advertisable_ip() filters unreachable addresses",
+          utils.Setting.get_advertisable_ip() == ["192.168.139.3"],
+          str(utils.Setting.get_advertisable_ip()))
+
+    # Back to the real get_ip() so the pin actually drives address selection.
+    utils.Setting.get_ip = _saved_get_ip2
+    utils.Setting.get_network_interface = staticmethod(lambda: "bridge100")
+    check("get_advertisable_ip() follows the pin",
+          utils.Setting.get_advertisable_ip() == ["192.168.139.3"],
+          str(utils.Setting.get_advertisable_ip()))
+    utils.Setting.get_network_interface = staticmethod(lambda: "utun4")
+    check("an unusable pin is resolved away and never advertised",
+          utils.Setting.resolved_network_interface() == "" and
+          "100.85.176.107" not in utils.Setting.get_advertisable_ip(),
+          str(utils.Setting.get_advertisable_ip()))
+    utils.Setting.get_network_interface = staticmethod(lambda: "en0")
+    check("a usable pin resolves to itself",
+          utils.Setting.resolved_network_interface() == "en0")
+finally:
+    utils.Setting.get_ip = _saved_get_ip2
+    utils.ni = _saved_ni_attr2
+    utils.Setting.get_network_interface = _saved_pin2
+    utils.Setting.set_network_interface = _saved_set_pin
+    utils.Setting.setting, utils.Setting.setting_path = _saved_setting2
+
+# --------------------------------------------------------------------------
+# Part 11: plugin hot-plug (enable / disable / uninstall / install)
+#
+# Everything here runs against a throwaway config dir so the tests can freely
+# create, uninstall and re-install plugins without touching the real install.
+# --------------------------------------------------------------------------
+print("\n=== Part 11: plugin hot-plug ===")
+import shutil as _shutil
+import tempfile as _tempfile
+
+RENDERER_PLUGIN = """#<macast.title>Hotplug Player</macast.title>
+#<macast.renderer>HotplugRenderer</macast.renderer>
+#<macast.platform>darwin,win32,linux</macast.platform>
+#<macast.version>1.0</macast.version>
+#<macast.author>tester</macast.author>
+#<macast.desc>test renderer</macast.desc>
+class HotplugRenderer(object):
+    def start(self):
+        pass
+    def stop(self):
+        pass
+"""
+
+PROTOCOL_PLUGIN = """#<macast.title>Hotplug Protocol</macast.title>
+#<macast.protocol>HotplugProtocol</macast.protocol>
+#<macast.platform>darwin,win32,linux</macast.platform>
+#<macast.version>1.0</macast.version>
+#<macast.author>tester</macast.author>
+#<macast.desc>test protocol</macast.desc>
+from macast.protocol import Protocol
+class HotplugProtocol(Protocol):
+    pass
+"""
+
+BROKEN_PLUGIN = """#<macast.title>Broken Plugin</macast.title>
+#<macast.renderer>NotDefinedAnywhere</macast.renderer>
+#<macast.platform>darwin,win32,linux</macast.platform>
+"""
+
+_tmp_root = _tempfile.mkdtemp(prefix="macast-hotplug-")
+_saved_dir_macast = macast_mod.SETTING_DIR
+_saved_dir_utils = utils.SETTING_DIR
+_saved_setting3 = (utils.Setting.setting, utils.Setting.setting_path)
+_saved_renderer_sel = utils.Setting.get(utils.SettingProperty.Macast_Renderer, '')
+_saved_syspath = list(sys.path)
+try:
+    utils.SETTING_DIR = _tmp_root
+    macast_mod.SETTING_DIR = _tmp_root
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp_root, "macast_setting.json")
+
+    # Earlier parts built managers against the real config dir, so it is on
+    # sys.path ahead of the sandbox. `renderer` / `protocol` would then resolve
+    # to the *real* packages and the sandbox plugins would never be found --
+    # which looks exactly like "hot-plug is broken". Point the lookup at the
+    # sandbox, front-most, and drop any package already bound.
+    for _mod in ("renderer", "protocol", "renderer.hotplay", "protocol.hotproto"):
+        sys.modules.pop(_mod, None)
+    sys.path[:] = [p for p in sys.path if p != _saved_dir_macast]
+    sys.path.insert(0, _tmp_root)
+
+    def _write(name, body, kind="renderer"):
+        d = os.path.join(_tmp_root, kind)
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        return p
+
+    _write("hotplay.py", RENDERER_PLUGIN)
+    _write("hotproto.py", PROTOCOL_PLUGIN, "protocol")
+
+    mgr2 = macast_mod.MacastPluginManager(
+        macast_mod.MacastPlugin(None, "MPV", _DummyMPV(), "darwin,win32,linux"),
+        macast_mod.MacastPlugin(
+            None, utils.format_class_name(protocol.DLNAProtocol()),
+            protocol.DLNAProtocol(), "darwin,win32,linux"),
+    )
+    keys = {p.key: p for p in mgr2.renderer_all + mgr2.protocol_list}
+    check("file plugins are keyed by kind:basename",
+          "renderer:hotplay" in keys and "protocol:hotproto" in keys,
+          str(sorted(keys)))
+    check("built-in plugins are keyed by kind:title",
+          "protocol:DLNA Protocol" in keys and "renderer:MPV" in keys,
+          str(sorted(keys)))
+    check("installed flag distinguishes file plugins from built-ins",
+          keys["renderer:hotplay"].installed is True and
+          keys["renderer:MPV"].installed is False)
+
+    info = {i["key"]: i for i in mgr2.get_info()}
+    check("plugin info exposes key / installed / can_uninstall",
+          info["renderer:hotplay"]["can_uninstall"] is True and
+          info["renderer:MPV"]["can_uninstall"] is False and
+          info["protocol:hotproto"]["enabled"] is False,
+          str(sorted(info)))
+
+    # --- enable / disable a protocol --------------------------------------
+    check("protocol can be enabled",
+          mgr2.set_protocol_enabled("Hotplug Protocol", True) is True and
+          "Hotplug Protocol" in mgr2.enabled_protocol_titles(),
+          str(mgr2.enabled_protocol_titles()))
+    mgr2.set_protocol_enabled("DLNA Protocol", False)
+    check("protocol can be disabled when others remain",
+          "DLNA Protocol" not in mgr2.enabled_protocol_titles(),
+          str(mgr2.enabled_protocol_titles()))
+    last_one_refused = False
+    try:
+        mgr2.set_protocol_enabled("Hotplug Protocol", False)
+    except ValueError:
+        last_one_refused = True
+    check("refuses to disable the last enabled protocol", last_one_refused,
+          str(mgr2.enabled_protocol_titles()))
+    check("no restart needed: settings already updated",
+          utils.Setting.get(utils.SettingProperty.Macast_Protocols) ==
+          ["Hotplug Protocol"],
+          str(utils.Setting.get(utils.SettingProperty.Macast_Protocols)))
+
+    # --- enable / disable a renderer --------------------------------------
+    utils.Setting.set(utils.SettingProperty.Macast_Renderer, "MPV")
+    active_refused = False
+    try:
+        mgr2.set_renderer_enabled("renderer:MPV", False)
+    except ValueError:
+        active_refused = True
+    check("refuses to unload the renderer currently in use", active_refused)
+
+    check("renderer can be unloaded",
+          mgr2.set_renderer_enabled("renderer:hotplay", False) is True)
+    check("unloaded renderer leaves renderer_list but stays listed",
+          "renderer:hotplay" not in {p.key for p in mgr2.renderer_list} and
+          "renderer:hotplay" in {p.key for p in mgr2.renderer_all},
+          str([p.key for p in mgr2.renderer_list]))
+    check("unloaded renderer can be loaded again",
+          mgr2.set_renderer_enabled("renderer:hotplay", True) is True and
+          "renderer:hotplay" in {p.key for p in mgr2.renderer_list})
+
+    # --- uninstall ---------------------------------------------------------
+    builtin_refused = False
+    try:
+        mgr2.uninstall("renderer:MPV")
+    except ValueError:
+        builtin_refused = True
+    check("built-in plugins cannot be uninstalled", builtin_refused)
+
+    hot_path = os.path.join(_tmp_root, "renderer", "hotplay.py")
+    mgr2.uninstall("renderer:hotplay")
+    check("uninstall removes the plugin file",
+          not os.path.exists(hot_path), hot_path)
+    check("uninstall keeps a recoverable copy in .trash",
+          os.path.exists(os.path.join(_tmp_root, ".trash")) and
+          any("hotplay.py" in files
+              for _r, _d, files in os.walk(os.path.join(_tmp_root, ".trash"))))
+    check("uninstall drops it from the in-memory lists",
+          "renderer:hotplay" not in {p.key for p in mgr2.renderer_all})
+
+    # Uninstalling an enabled protocol must not leave a phantom selection.
+    mgr2.set_protocol_enabled("DLNA Protocol", True)
+    mgr2.uninstall("protocol:hotproto")
+    check("uninstalling a protocol removes it from the enabled list",
+          "Hotplug Protocol" not in mgr2.enabled_protocol_titles(),
+          str(mgr2.enabled_protocol_titles()))
+
+    # --- install -----------------------------------------------------------
+    broken = _write("broken.py", BROKEN_PLUGIN)
+    rollback_ok = False
+    try:
+        mgr2.install_file(broken, "renderer")
+    except ValueError:
+        rollback_ok = True
+    check("a plugin that cannot load is rolled back",
+          rollback_ok and
+          not os.path.exists(os.path.join(_tmp_root, "renderer", "broken.py")))
+
+    src = os.path.join(_tmp_root, "incoming.py")
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(RENDERER_PLUGIN)
+    installed = mgr2.install_file(src, "renderer", "incoming.py")
+    check("install copies the plugin into place and loads it",
+          installed.title == "Hotplug Player" and
+          os.path.exists(os.path.join(_tmp_root, "renderer", "incoming.py")),
+          installed.key)
+    check("install rejects a non-.py file", _rejects(lambda: mgr2.install_file(
+        src, "renderer", "incoming.zip")))
+
+    src_p = os.path.join(_tmp_root, "incoming_proto.py")
+    with open(src_p, "w", encoding="utf-8") as f:
+        f.write(PROTOCOL_PLUGIN)
+    mgr2.install_file(src_p, "protocol", "incoming_proto.py")
+    check("a newly installed protocol is enabled automatically",
+          "Hotplug Protocol" in mgr2.enabled_protocol_titles(),
+          str(mgr2.enabled_protocol_titles()))
+
+    check("install_url refuses a non-.py url",
+          _rejects(lambda: mgr2.install_url("https://example.com/p.zip",
+                                            "renderer")))
+    check("unknown keys are reported, not silently ignored",
+          mgr2.plugin_by_key("renderer:nope") is None)
+finally:
+    macast_mod.SETTING_DIR = _saved_dir_macast
+    utils.SETTING_DIR = _saved_dir_utils
+    utils.Setting.setting, utils.Setting.setting_path = _saved_setting3
+    utils.Setting.set(utils.SettingProperty.Macast_Renderer, _saved_renderer_sel)
+    for _mod in ("renderer", "protocol", "renderer.hotplay", "renderer.incoming",
+                 "protocol.hotproto", "protocol.incoming_proto"):
+        sys.modules.pop(_mod, None)
+    sys.path[:] = _saved_syspath
+    _shutil.rmtree(_tmp_root, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 # Summary

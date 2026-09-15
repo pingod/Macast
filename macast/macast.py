@@ -5,6 +5,7 @@ import re
 import sys
 import time
 import json
+import shutil
 import cherrypy
 import logging
 import threading
@@ -18,7 +19,7 @@ from .utils import SettingProperty, SETTING_DIR, notify_error, format_class_name
 # must query that repo, not the upstream xfangfang/Macast.
 GITHUB_REPO = 'pingod/Macast'
 from .gui import App, MenuItem, Platform
-from .protocol import DLNAProtocol
+from .protocol import DLNAProtocol, Protocol
 from .server import Service
 from .utils import RENDERER_DIR, PROTOCOL_DIR, Setting
 from macast_renderer.mpv import MPVRenderer
@@ -26,6 +27,25 @@ from macast_renderer.mpv import MPVRenderer
 logger = logging.getLogger("main")
 logger.setLevel(logging.DEBUG)
 _ = gettext.gettext
+
+
+def _import_plugin_module(dotted):
+    """Import a plugin module, re-reading it if we already hold a stale copy.
+
+    Hot install/update depends on this: importlib caches modules, so without
+    the reload a re-installed plugin would keep running the old code until the
+    process restarted -- exactly what hot-plug exists to avoid.
+    """
+    module = sys.modules.get(dotted)
+    if module is None:
+        return importlib.import_module(dotted)
+    try:
+        return importlib.reload(module)
+    except Exception as e:
+        logger.warning("Reload of %s failed (%s), importing a fresh copy",
+                       dotted, e)
+        sys.modules.pop(dotted, None)
+        return importlib.import_module(dotted)
 
 
 class MacastPlugin:
@@ -39,6 +59,10 @@ class MacastPlugin:
         self.plugin_instance = plugin_instance
         self.platform = platform
         self.desc = desc
+        # 'protocol' / 'renderer'. Known immediately for built-ins (from the
+        # instance handed in); load_from_file() fills it in for file plugins.
+        self.plugin_type = '' if plugin_instance is None else (
+            'protocol' if isinstance(plugin_instance, Protocol) else 'renderer')
         if path:
             try:
                 self.load_from_file(path)
@@ -46,34 +70,51 @@ class MacastPlugin:
                 cherrypy.engine.publish('app_notify', 'ERROR', 'Custom plugin load error.')
                 logger.error(str(e))
 
+    def kind(self):
+        """'protocol' or 'renderer'.
+
+        Built-ins are constructed with an instance rather than a file, and
+        nothing sets `self.protocol` / `self.renderer` on them, so the kind
+        cannot be read off those attributes alone.
+        """
+        if self.plugin_type:
+            return self.plugin_type
+        if isinstance(self.plugin_instance, Protocol):
+            return 'protocol'
+        return 'renderer'
+
+    @property
+    def key(self):
+        """Stable identifier used by the enable/disable/uninstall API.
+
+        Built-ins are keyed by title (they have no file to remove); file
+        plugins by ``<kind>:<basename>`` so a renderer and a protocol that
+        happen to share a file name stay distinct.
+        """
+        if self.path is None:
+            return "{}:{}".format(self.kind(), self.title)
+        return "{}:{}".format(self.kind(),
+                              os.path.splitext(os.path.basename(self.path))[0])
+
+    @property
+    def installed(self):
+        """Whether this plugin came from a file the user can remove."""
+        return self.path is not None
+
     def get_info(self):
         props = ['protocol', 'title', 'renderer', 'platform', 'version', 'author', 'desc']
         res = {'default': False}
         for i in props:
             res[i] = getattr(self, i, '')
-        if getattr(self, 'renderer', None) is not None:
-            res['type'] = 'renderer'
-        if getattr(self, 'protocol', None) is not None:
-            res['type'] = 'protocol'
+        res['type'] = self.kind()
+        res['key'] = self.key
+        res['installed'] = self.installed
+        res['can_uninstall'] = self.installed
         if self.path is None:
             res['default'] = True
-            res['type'] = self._plugin_type()
-            res['desc'] = self._builtin_desc(res.get('type'))
+            res['desc'] = self._builtin_desc(res['type'])
             res['version'] = Setting.version
         return res
-
-    def _plugin_type(self):
-        """'protocol' or 'renderer' for a built-in plugin.
-
-        Built-ins are constructed with an instance rather than a file, and
-        nothing sets `self.protocol` / `self.renderer` on them, so the base
-        get_info() left `type` unset and the plugin page could not tell a
-        protocol from a renderer.
-        """
-        from .protocol import Protocol
-        if isinstance(self.plugin_instance, Protocol):
-            return 'protocol'
-        return 'renderer'
 
     def _builtin_desc(self, kind):
         """Description for a plugin that ships with Macast.
@@ -110,21 +151,27 @@ class MacastPlugin:
         return False
 
     def load_from_file(self, path):
+        self.path = path
         base_name = os.path.basename(path)[:-3]
         with open(path, 'r', encoding='utf-8') as f:
             renderer_file = f.read()
             metadata = re.findall("<macast.(.*?)>(.*?)</macast", renderer_file)
-            print("<Load Plugin from {}".format(base_name))
+            # Logged rather than printed: the manager is refreshed on every
+            # install/uninstall, and these used to spew the whole plugin
+            # manifest onto the console each time the settings page reloaded.
+            logger.debug("Loading plugin from %s", base_name)
             for key, value in metadata:
-                print('%-10s: %s' % (key, value))
+                logger.debug("  %-10s: %s", key, value)
                 setattr(self, key, str(value))
         if hasattr(self, 'renderer'):
-            module = importlib.import_module(f'{RENDERER_DIR}.{base_name}')
-            print(f'Load plugin {self.renderer} done />\n')
+            self.plugin_type = 'renderer'
+            module = _import_plugin_module(f'{RENDERER_DIR}.{base_name}')
+            logger.debug("Loaded renderer %s from %s", self.renderer, base_name)
             self.plugin_class = getattr(module, self.renderer, None)
         elif hasattr(self, 'protocol'):
-            module = importlib.import_module(f'{PROTOCOL_DIR}.{base_name}')
-            print(f'Load plugin {self.protocol} done />\n')
+            self.plugin_type = 'protocol'
+            module = _import_plugin_module(f'{PROTOCOL_DIR}.{base_name}')
+            logger.debug("Loaded protocol %s from %s", self.protocol, base_name)
             self.plugin_class = getattr(module, self.protocol, None)
         else:
             logger.error(f"Cannot find any plugin in {base_name}")
@@ -137,11 +184,195 @@ class MacastPluginManager:
         sys.path.append(SETTING_DIR)
         self.create_plugin_dir(RENDERER_DIR)
         self.create_plugin_dir(PROTOCOL_DIR)
-        self.renderer_list = [renderer_default]
-        self.renderer_list += self.load_macast_plugin(RENDERER_DIR)
-        self.protocol_list = [protocol_default]
-        self.protocol_list += self._load_builtin_protocols()
-        self.protocol_list += self.load_macast_plugin(PROTOCOL_DIR)
+        self._renderer_default = renderer_default
+        self._protocol_default = protocol_default
+        # Built-in protocols are instantiated once and reused: refresh() must
+        # not hand out new Chromecast/AirPlay objects, or the running
+        # ProtocolGroup would keep talking to the old ones.
+        self._builtin_protocols = self._load_builtin_protocols()
+        self.renderer_all = []
+        self.renderer_list = []
+        self.protocol_list = []
+        self.refresh()
+
+    def refresh(self):
+        """Rebuild the plugin lists from disk + settings.
+
+        Install, uninstall and disable all funnel through here, so the
+        in-memory lists can never drift from what is on disk and in
+        macast_setting.json -- which is what makes hot-plug reliable without a
+        restart.
+
+        ``renderer_all`` keeps every renderer we found, including the ones the
+        user switched off, so the page can still list them and switch them back
+        on; ``renderer_list`` is what the rest of the app may select from.
+        """
+        disabled = set(Setting.get(SettingProperty.Disabled_Plugins, []) or [])
+        renderers = [self._renderer_default]
+        renderers += (self.load_macast_plugin(RENDERER_DIR) or [])
+        self.renderer_all = renderers
+        self.renderer_list = [p for p in renderers if p.key not in disabled]
+        if not self.renderer_list:
+            # Never leave the app without a renderer.
+            self.renderer_list = [self._renderer_default]
+
+        protocols = [self._protocol_default] + self._builtin_protocols
+        protocols += (self.load_macast_plugin(PROTOCOL_DIR) or [])
+        self.protocol_list = protocols
+
+    def plugin_by_key(self, key):
+        """Find a plugin by its `key`, including ones that are switched off."""
+        for plugin in self.renderer_all + self.protocol_list:
+            if plugin.key == key:
+                return plugin
+        return None
+
+    def is_plugin_enabled(self, plugin):
+        if plugin.kind() == 'renderer':
+            return any(p.key == plugin.key for p in self.renderer_list)
+        return plugin.title in self.enabled_protocol_titles()
+
+    def set_protocol_enabled(self, title, enabled):
+        """Switch a protocol on or off.
+
+        Refuses to switch off the last one: with every protocol off mpv stays
+        up but nothing can reach it, which reads as "Macast is broken" rather
+        than "casting is off".
+        """
+        titles = self.enabled_protocol_titles()
+        resolved = self.resolve_title(title)
+        if resolved is None:
+            # Unknown/uninstalled plugin: just make sure it is not persisted.
+            titles = [t for t in titles if t != title]
+        elif enabled:
+            if resolved not in titles:
+                titles.append(resolved)
+        else:
+            if resolved not in titles:
+                return False
+            if len(titles) <= 1:
+                raise ValueError('至少要保留一个启用的协议')
+            titles.remove(resolved)
+        order = [p.title for p in self.protocol_list]
+        titles.sort(key=lambda t: order.index(t) if t in order else len(order))
+        Setting.set(SettingProperty.Macast_Protocols, titles)
+        return True
+
+    def set_renderer_enabled(self, key, enabled):
+        """Load/unload a renderer plugin.
+
+        A renderer is only ever instantiated on demand, so "unloaded" has no
+        visible effect unless we also stop offering it for selection. Refusing
+        to unload the renderer in use is what keeps the app with a player.
+        """
+        plugin = self.plugin_by_key(key)
+        if plugin is None:
+            raise ValueError('未找到该插件')
+        if plugin.kind() != 'renderer':
+            raise ValueError('该插件不是渲染器')
+        disabled = list(Setting.get(SettingProperty.Disabled_Plugins, []) or [])
+        if enabled:
+            if key in disabled:
+                disabled.remove(key)
+            Setting.set(SettingProperty.Disabled_Plugins, disabled)
+            self.refresh()
+            return True
+        if key in disabled:
+            return True
+        # Checked before the "last one" rule so the message the user sees is
+        # the actionable one: switch renderer first, rather than "keep one".
+        if Setting.get(SettingProperty.Macast_Renderer, '') == plugin.title:
+            raise ValueError('正在使用的渲染器不能停用，请先切换到其他渲染器')
+        if len(self.renderer_list) <= 1:
+            raise ValueError('至少要保留一个可用的渲染器')
+        disabled.append(key)
+        Setting.set(SettingProperty.Disabled_Plugins, disabled)
+        self.refresh()
+        return True
+
+    def uninstall(self, key):
+        """Remove an installed plugin from disk (recoverably) and from memory.
+
+        Built-ins are refused -- they ship with Macast and have no file to
+        remove. The file is *moved* to ``SETTING_DIR/.trash/<stamp>/`` rather
+        than deleted, so a mistaken uninstall stays recoverable.
+        """
+        plugin = self.plugin_by_key(key)
+        if plugin is None:
+            raise ValueError('未找到该插件')
+        if not plugin.installed:
+            raise ValueError('内置插件不能卸载，只能停用')
+        source = plugin.path
+        if not os.path.exists(source):
+            raise ValueError('插件文件不存在：{}'.format(source))
+        stamp = time.strftime('%Y%m%d-%H%M%S')
+        trash_dir = os.path.join(SETTING_DIR, '.trash', stamp)
+        os.makedirs(trash_dir, exist_ok=True)
+        shutil.move(source, os.path.join(trash_dir, os.path.basename(source)))
+        logger.info('Uninstalled plugin %s (moved to %s)', key, trash_dir)
+
+        # Drop the settings that referenced a plugin which no longer exists, so
+        # the plugin cannot reappear as a phantom menu entry.
+        titles = self.enabled_protocol_titles()
+        if plugin.kind() == 'protocol' and plugin.title in titles:
+            titles = [t for t in titles if t != plugin.title]
+            Setting.set(SettingProperty.Macast_Protocols, titles)
+        disabled = [k for k in (Setting.get(SettingProperty.Disabled_Plugins, []) or [])
+                    if k != key]
+        Setting.set(SettingProperty.Disabled_Plugins, disabled)
+        # Forget the module too: a reinstall must pick up the new file.
+        sys.modules.pop('{}.{}'.format(plugin.kind(),
+                                       os.path.splitext(os.path.basename(source))[0]),
+                        None)
+        self.refresh()
+        return plugin
+
+    def install_file(self, source_path, plugin_type, filename=None):
+        """Install a plugin ``.py`` into the user plugin dir and load it live.
+
+        Returns the loaded plugin. The file is rolled back if it does not load,
+        so a bad plugin cannot leave a half-installed entry behind that fails
+        on every later start.
+        """
+        plugin_type = 'protocol' if plugin_type == 'protocol' else 'renderer'
+        filename = os.path.basename(filename or source_path)
+        if not filename.endswith('.py'):
+            raise ValueError('插件文件必须是 .py')
+        target_dir = os.path.join(SETTING_DIR, plugin_type)
+        self.create_plugin_dir(plugin_type)
+        target = os.path.join(target_dir, filename)
+        if os.path.abspath(source_path) != os.path.abspath(target):
+            shutil.copyfile(source_path, target)
+        self.refresh()
+        key = "{}:{}".format(plugin_type, filename[:-3])
+        plugin = self.plugin_by_key(key)
+        if plugin is None or not plugin.check():
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            self.refresh()
+            raise ValueError('插件无法加载或不适配当前系统')
+        if plugin_type == 'protocol':
+            self.set_protocol_enabled(plugin.title, True)
+        logger.info('Installed plugin %s from %s', plugin.title, source_path)
+        return plugin
+
+    def install_url(self, url, plugin_type):
+        """Download a plugin from `url` then install it hot."""
+        plugin_type = 'protocol' if plugin_type == 'protocol' else 'renderer'
+        if not url:
+            raise ValueError('缺少插件下载地址')
+        filename = os.path.basename(url.split('?')[0])
+        if not filename.endswith('.py'):
+            raise ValueError('插件下载地址必须以 .py 结尾')
+        local_path = os.path.join(SETTING_DIR, plugin_type, filename)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        with open(local_path, 'wb') as f:
+            f.write(response.content)
+        return self.install_file(local_path, plugin_type, filename)
 
     def get_renderer(self, name):
         plugin = self.get_plugin_from_list(self.renderer_list, name)
@@ -240,13 +471,24 @@ class MacastPluginManager:
         return titles
 
     def get_info(self):
+        """Every known plugin, with the state the settings page needs.
+
+        Renderers are listed from ``renderer_all`` rather than
+        ``renderer_list`` so a renderer the user switched off is still visible
+        (and can be switched back on); ``enabled`` says which state it is in.
+        """
         res = []
-        for r in self.renderer_list:
-            res.append(r.get_info())
-        enabled = self.enabled_protocol_titles()
+        active_renderer = Setting.get(SettingProperty.Macast_Renderer, '')
+        for r in self.renderer_all:
+            info = r.get_info()
+            info['enabled'] = self.is_plugin_enabled(r)
+            info['active'] = info.get('title') == active_renderer
+            res.append(info)
+        enabled_protocols = self.enabled_protocol_titles()
         for p in self.protocol_list:
             info = p.get_info()
-            info['enabled'] = info.get('title') in enabled
+            info['enabled'] = info.get('title') in enabled_protocols
+            info['active'] = info['enabled']
             res.append(info)
         return res
 
@@ -337,6 +579,15 @@ class Macast(App):
                          desc='接收 DLNA / UPnP 投屏（智能电视、音乐 App 常用）'))
 
         cherrypy.engine.subscribe('get_plugin_info', self.plugin_manager.get_info)
+        # The settings page drives plugin hot-plug and the network picker
+        # through the management API, which lives on the protocol Handler and
+        # therefore cannot reach the app object directly. Expose the manager
+        # for reads, and listen for the change notifications to apply them
+        # live (this is what makes it hot rather than "restart to take effect").
+        cherrypy.engine.subscribe('get_plugin_manager', self.get_plugin_manager)
+        cherrypy.engine.subscribe('plugins_changed', self.on_plugins_changed)
+        cherrypy.engine.subscribe('network_interface_changed',
+                                  self.on_network_interface_changed)
 
         # setting items
         self.setting_start_at_login = None
@@ -515,6 +766,64 @@ class Macast(App):
                              daemon=True,
                              name="CHECKUPDATE_THREAD").start()
 
+    def get_plugin_manager(self):
+        """Bus accessor so the management API can read/modify plugins."""
+        return self.plugin_manager
+
+    def on_plugins_changed(self):
+        """Apply a plugin install / uninstall / enable / disable immediately.
+
+        Called after the management API has already updated settings and the
+        plugin directory. Everything else -- the live protocol group, the
+        renderer in use, the menu -- is re-derived here, which is what makes
+        the change take effect without restarting Macast.
+        """
+        logger.info("plugins changed, re-applying")
+        self.plugin_manager.refresh()
+        # Protocols are driven by the persisted list, so pick it back up.
+        self.enabled_protocols = self.plugin_manager.enabled_protocol_titles()
+        if not self.enabled_protocols:
+            available = [p.title for p in self.plugin_manager.protocol_list]
+            self.enabled_protocols = list(available)
+            Setting.set(SettingProperty.Macast_Protocols, list(available))
+        # A renderer that was just uninstalled or switched off must not stay
+        # selected, or the service would hold a player nobody can reach.
+        renderer_titles = [r.title for r in self.plugin_manager.renderer_list]
+        if self.setting_renderer not in renderer_titles:
+            fallback = renderer_titles[0] if renderer_titles else None
+            if fallback is not None:
+                logger.info("Renderer %r unavailable, switching to %r",
+                            self.setting_renderer, fallback)
+                self.setting_renderer = fallback
+                self.service.renderer = self.plugin_manager.get_renderer(fallback)
+        self._apply_enabled_protocols()
+        cherrypy.engine.publish('app_notify', _('Info'), _('Plugins updated.'))
+
+    def on_network_interface_changed(self):
+        """Re-advertise on the interface the user just picked.
+
+        SSDP rebinds through its own update channel; mDNS belongs to each
+        protocol, so the running ones are cycled once. Cycling does not touch
+        mpv, so anything playing keeps playing.
+        """
+        logger.info("network interface changed -> %r",
+                    Setting.get_network_interface() or 'auto')
+        try:
+            cherrypy.engine.publish('ssdp_update_ip')
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error("SSDP update after interface change failed: %s", e)
+        group = self.service.protocol
+        for title in list(group.titles()):
+            protocol = group.get(title)
+            if protocol is None:
+                continue
+            try:
+                protocol.stop()
+                protocol.start()
+            except Exception as e:
+                logger.error("Re-advertising %s failed: %s", title, e)
+        self.update_service_ip()
+
     def stop_cast(self):
         self.service.stop()
 
@@ -595,6 +904,9 @@ class Macast(App):
         call this function to refresh the device address on the menu
         """
         logger.info("ssdp_update_ip")
+        self.call_on_main_thread(self._refresh_ip_menu)
+
+    def _refresh_ip_menu(self):
         if self.ip_menuitem is not None:
             ip_text = "/".join([ip for ip, _ in Setting.get_ip()])
             port = Setting.get_port()
@@ -663,9 +975,13 @@ class Macast(App):
         """
         group = self.service.protocol
         running = Setting.is_service_running()
+        known = [p.title for p in self.plugin_manager.protocol_list]
 
         for title in list(group.titles()):
-            if title not in self.enabled_protocols:
+            # Drop what the user switched off *and* what is no longer
+            # installed: an uninstalled plugin must stop serving immediately,
+            # not linger in the group until the next restart.
+            if title not in self.enabled_protocols or title not in known:
                 protocol = group.remove(title)
                 if protocol is not None:
                     try:
@@ -692,6 +1008,11 @@ class Macast(App):
         self.service.refresh_protocol()
         self.setting_protocol = (self.enabled_protocols[0]
                                  if self.enabled_protocols else 'DLNA')
+        # May be reached from a CherryPy worker thread (settings page), so the
+        # menu rebuild is marshalled to the UI thread.
+        self.call_on_main_thread(self._rebuild_menu)
+
+    def _rebuild_menu(self):
         self.setting_menuitem.children = self.build_setting_menu()
         self.set_menu(self.menu)
 

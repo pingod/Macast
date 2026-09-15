@@ -80,6 +80,33 @@
         .vol-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
         .vol-bar > i { display:block; height:100%; background: var(--accent); }
         h3.section { margin: 18px 0 8px; color: var(--text); font-size: 15px; }
+        .install-row {
+            display: flex; align-items: center; gap: 10px;
+            flex-wrap: wrap; margin-bottom: 10px;
+        }
+        .install-row:last-of-type { margin-bottom: 6px; }
+        .install-url { flex: 1; min-width: 200px; }
+        .net-list { display: flex; flex-direction: column; gap: 2px; }
+        .net-list .net-item {
+            display: flex; align-items: center; margin: 0;
+            padding: 6px 2px; border-radius: 6px;
+        }
+        .net-list .net-item .el-radio__label {
+            display: inline-flex; align-items: center; gap: 8px;
+            flex-wrap: wrap; font-size: 13px;
+        }
+        .net-name { font-weight: 600; color: var(--text); min-width: 76px; }
+        .net-ip { color: var(--text-soft); }
+        .net-hint { color: var(--text-soft); font-weight: 400; }
+        .plugin-card-actions {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .plugin-card-actions .el-button + .el-button { margin-left: 0; }
+        .plugin-alert {
+            margin-top: 8px; padding: 6px 9px; border-radius: 6px;
+            background: #fdf6ec; color: #b88230; font-size: 12px; line-height: 1.5;
+        }
         .cast-box {
             background: var(--panel); border: 1px solid var(--border);
             border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
@@ -130,6 +157,34 @@
     </div>
     <el-tabs v-model="activeIndex" @tab-click="handleSelect">
         <el-tab-pane label="插件" name="1">
+            <div class="status-card">
+                <h3>安装插件</h3>
+                <div class="install-row">
+                    <el-select v-model="install_type" size="small" style="width:104px;">
+                        <el-option label="渲染器" value="renderer"></el-option>
+                        <el-option label="协议" value="protocol"></el-option>
+                    </el-select>
+                    <el-upload action="/api" :auto-upload="true" :show-file-list="false"
+                               name="plugin-file" :data="{ 'plugin-type': install_type }"
+                               :before-upload="on_plugin_before"
+                               :on-success="on_plugin_success"
+                               :on-error="on_plugin_error">
+                        <el-button size="small" type="primary" icon="el-icon-upload2">
+                            选择 .py 文件安装
+                        </el-button>
+                    </el-upload>
+                    <el-input v-model="install_url" size="small"
+                              placeholder="或填写插件下载地址（以 .py 结尾）"
+                              class="install-url"></el-input>
+                    <el-button size="small" icon="el-icon-download" :loading="installing"
+                               :disabled="!install_url" @click="install_from_url">从网址安装</el-button>
+                </div>
+                <div class="hint">
+                    安装后立即生效，无需重启；「协议」类插件安装后会自动启用。
+                    插件文件存放在配置目录的 <span class="uri">renderer/</span> 或
+                    <span class="uri">protocol/</span> 下。
+                </div>
+            </div>
             <div class="plugin-group" v-for="group in plugin_groups" :key="group.key">
                 <h3 class="section">
                     {{ group.title }}
@@ -137,7 +192,7 @@
                 </h3>
                 <div class="macast-plugins">
                     <macast-plugin v-for="item in group.items" :key="item.key"
-                                   :item="item" v-on:refresh_plugin="refresh_plugin">
+                                   :item="item">
                     </macast-plugin>
                 </div>
             </div>
@@ -209,6 +264,43 @@
                     </div>
                 </div>
 
+                <div class="status-card">
+                    <div style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3 style="margin:0;">网络与广播</h3>
+                        <el-button size="mini" type="text" icon="el-icon-refresh"
+                                   @click="load_interfaces">刷新网卡</el-button>
+                    </div>
+                    <div class="hint" style="margin:6px 0 10px;">
+                        选择用于发现/广播的网卡。多网卡（虚拟机网桥、VPN、Tailscale）时，
+                        选错网卡会让手机「搜得到但投不上」，这里显式指定即可。
+                        切换后立即重新广播，不需要重启。
+                    </div>
+                    <el-radio-group v-model="net_choice" @change="apply_interface"
+                                    class="net-list">
+                        <el-radio label="" class="net-item">
+                            <span class="net-name">自动选择</span>
+                            <span class="net-hint">默认路由所在的网卡</span>
+                        </el-radio>
+                        <el-radio v-for="i in net_options" :key="i.name"
+                                  :label="i.name" class="net-item" :disabled="!i.usable">
+                            <span class="net-name">{{ i.name }}</span>
+                            <span class="net-ip uri">{{ i.ip }}/{{ i.netmask }}</span>
+                            <el-tag v-if="i.default" size="mini" type="primary"
+                                    effect="plain" class="tag-inline">默认路由</el-tag>
+                            <el-tag v-if="i.selected" size="mini" type="success"
+                                    effect="plain" class="tag-inline">已选</el-tag>
+                            <el-tag v-if="!i.usable" size="mini" type="warning"
+                                    effect="plain" class="tag-inline">{{ i.reason }}</el-tag>
+                        </el-radio>
+                    </el-radio-group>
+                    <div class="hint" style="margin-top:10px;">
+                        当前广播地址：
+                        <el-tag v-for="ip in net_advertised" :key="ip" size="mini"
+                                effect="plain" class="tag-inline uri">{{ ip }}</el-tag>
+                        <span v-if="!net_advertised.length">—</span>
+                    </div>
+                </div>
+
                 <h3 class="section">服务器状态</h3>
                 <table class="status-table">
                     <tbody>
@@ -221,7 +313,7 @@
                         <el-tag v-for="p in protocol_list" :key="p" size="mini"
                                 type="primary" effect="plain" class="tag-inline">{{ p }}</el-tag>
                         <span v-if="!protocol_list.length">—</span>
-                        <span class="value-hint">同时接收，可用菜单栏勾选</span>
+                        <span class="value-hint">同时接收，可在插件页启用/停用</span>
                     </td></tr>
                     <tr><td class="k">平台</td><td>{{ status.server.system }} ({{ status.server.platform }})</td></tr>
                     <tr><td class="k">系统版本</td><td>{{ status.server.system_version }}</td></tr>
@@ -487,29 +579,53 @@
                 {{ item.kind_label }}
             </el-tag>
             <el-tag v-if="item.builtin" size="mini" type="info" effect="plain">内置</el-tag>
-            <el-tag v-if="item.enabled" size="mini" type="success" effect="dark">启用中</el-tag>
+            <!-- 只有本机已有的插件才有"启用/停用"状态；仓库里的还没装。 -->
+            <template v-if="item.show_state">
+                <el-tag v-if="item.active" size="mini" type="success" effect="dark">使用中</el-tag>
+                <el-tag v-else-if="item.enabled" size="mini" type="success" effect="plain">已启用</el-tag>
+                <el-tag v-else size="mini" type="info" effect="plain">已停用</el-tag>
+            </template>
         </div>
         <div class="plugin-card-meta">
             <span class="plugin-card-platform">{{ item.platform }}</span>
             <el-tag size="mini" :type="item.version_tag_type" effect="plain">{{ item.version_tag }}</el-tag>
         </div>
         <div class="plugin-card-desc">{{ item.desc || '暂无说明' }}</div>
+        <div class="plugin-alert" v-if="item.blocked_reason">
+            {{ item.blocked_reason }}
+        </div>
         <div class="plugin-card-foot">
             <div class="macast-plugin-avatar">
                 <el-avatar size="small" :src="circleUrl"></el-avatar>
                 <span class="macast-plugin-author">{{ item.author ? item.author : "Macast"  }}</span>
             </div>
-            <el-tooltip class="item" effect="dark" :content="item.hint" placement="top">
-                <el-button
-                        :disabled="!item.available"
-                        class="macast-plugin-install"
-                        v-if="item.need_update"
-                        :type="item.version_tag_type"
-                        round
-                        v-on:click="install">
-                    {{item.button_text}}
-                </el-button>
-            </el-tooltip>
+            <div class="plugin-card-actions">
+                <el-tooltip v-if="item.can_toggle" effect="dark"
+                            :content="item.toggle_hint" placement="top">
+                    <span>
+                        <el-button size="mini" round :loading="busy"
+                                   :disabled="item.toggle_disabled"
+                                   :type="item.enabled ? 'info' : 'success'"
+                                   :icon="item.enabled ? 'el-icon-video-pause' : 'el-icon-video-play'"
+                                   v-on:click="toggle">
+                            {{ item.enabled ? '停用' : '启用' }}
+                        </el-button>
+                    </span>
+                </el-tooltip>
+                <el-tooltip v-if="item.need_update" effect="dark"
+                            :content="item.hint" placement="top">
+                    <el-button size="mini" round :loading="busy"
+                               :disabled="!item.available"
+                               :type="item.version_tag_type" v-on:click="install">
+                        {{ item.button_text }}
+                    </el-button>
+                </el-tooltip>
+                <el-tooltip v-if="item.can_uninstall" effect="dark"
+                            content="从本机移除（可在配置目录 .trash 中找回）" placement="top">
+                    <el-button size="mini" round type="danger" plain :loading="busy"
+                               icon="el-icon-delete" v-on:click="uninstall">卸载</el-button>
+                </el-tooltip>
+            </div>
         </div>
     </div>
 </script>
@@ -522,7 +638,8 @@
         data() {
             return {
                 circleUrl: '/assets/avatar.png',
-                loading: false
+                loading: false,
+                busy: false
             }
         },
         async mounted() {
@@ -543,10 +660,40 @@
                 })
             },
             async install(evt) {
-                this.loading = true;
-                this.$emit('refresh_plugin',
-                    {type: this.item.type, url: this.item.url}
-                )
+                this.busy = true
+                let fd = new window.FormData()
+                fd.append('install-plugin', '1')
+                fd.append('plugin-url', this.item.url)
+                fd.append('plugin-type', this.item.type)
+                await this.$root.plugin_action(fd)
+                this.busy = false
+            },
+            // Enable/disable and uninstall are applied live by the backend --
+            // no restart, so afterwards the parent just re-reads the plugin
+            // list. The shared handler lives on the root instance because
+            // $emit has no return channel.
+            async toggle() {
+                this.busy = true
+                let fd = new window.FormData()
+                fd.append(this.item.enabled ? 'plugin-disable' : 'plugin-enable', '1')
+                fd.append('plugin-key', this.item.key)
+                await this.$root.plugin_action(fd)
+                this.busy = false
+            },
+            async uninstall() {
+                try {
+                    await this.$confirm(
+                        `确定卸载「${this.item.title}」？文件会移到配置目录的 .trash 下，可手动找回。`,
+                        '卸载插件', {type: 'warning'})
+                } catch (e) {
+                    return
+                }
+                this.busy = true
+                let fd = new window.FormData()
+                fd.append('plugin-uninstall', '1')
+                fd.append('plugin-key', this.item.key)
+                await this.$root.plugin_action(fd)
+                this.busy = false
             },
         }
     })
@@ -568,7 +715,6 @@
             repo_url: '',
             platform: '',
             macast_version: 0,
-            refresh_interval_id: 0,
 
 
             //setting
@@ -586,6 +732,16 @@
             status_interval: 0,
             history: [],
             sub_show: true,
+
+            //network
+            net_choice: '',
+            net_rows: [],
+            net_advertised: [],
+
+            //plugin install
+            install_type: 'renderer',
+            install_url: '',
+            installing: false,
 
             // pwa
             canInstall: false,
@@ -610,6 +766,7 @@
             this.load_repo_plugin();
             this.get_log();
             this.load_status();
+            this.load_interfaces();
             this.status_interval = setInterval(() => this.load_status(), 3000);
             this.registerPWA();
         },
@@ -652,6 +809,17 @@
             server_ips() {
                 let ip = this.status.server.ip || '';
                 return String(ip).split('/').filter(s => s.length);
+            },
+            net_options() {
+                // One row per interface: a NIC can hold several IPv4 addresses,
+                // but the picker selects by name. Prefer a usable address when
+                // the interface has both.
+                const by_name = new Map();
+                for (const row of (this.net_rows || [])) {
+                    const cur = by_name.get(row.name);
+                    if (!cur || (!cur.usable && row.usable)) by_name.set(row.name, row);
+                }
+                return Array.from(by_name.values());
             },
         },
         methods: {
@@ -743,6 +911,87 @@
                 }).catch(err => {
                     this.$message.error('Error connecting to Macast');
                 });
+            },
+            async load_interfaces() {
+                return this.$http.get('/api?query=interfaces').then(res => {
+                    this.net_rows = res.data.interfaces || [];
+                    this.net_advertised = res.data.advertised || [];
+                    this.net_choice = res.data.current || '';
+                    return true;
+                }).catch(err => {
+                    console.log(err);
+                    return false;
+                });
+            },
+            async apply_interface(name) {
+                let fd = new window.FormData();
+                fd.append('set-interface', name || '');
+                return this.$http.post('/api', fd).then(async res => {
+                    if (res.data && res.data.code !== 0) {
+                        this.$message.error(res.data.message || '切换失败');
+                        // Put the picker back where the backend actually is.
+                        await this.load_interfaces();
+                        return false;
+                    }
+                    this.$notify({title: '已切换网卡',
+                                  message: res.data.message || '', duration: 2500});
+                    await this.load_interfaces();
+                    this.load_status();
+                    return true;
+                }).catch(err => {
+                    console.log(err);
+                    this.$message.error('切换失败，请确认 Macast 正在运行');
+                    return false;
+                });
+            },
+            // Shared by every plugin card (enable / disable / uninstall).
+            async plugin_action(fd) {
+                return this.$http.post('/api', fd).then(async res => {
+                    if (res.data && res.data.code !== 0) {
+                        this.$message.error(res.data.message || '操作失败');
+                        return false;
+                    }
+                    this.$message.success(res.data.message || '已生效');
+                    await this.load_local_plugin();
+                    this.load_status();
+                    return true;
+                }).catch(err => {
+                    console.log(err);
+                    this.$message.error('操作失败，请确认 Macast 正在运行');
+                    return false;
+                });
+            },
+            on_plugin_before(file) {
+                if (!/\.py$/i.test(file.name)) {
+                    this.$message.error('插件必须是 .py 文件');
+                    return false;
+                }
+                return true;
+            },
+            on_plugin_success(res) {
+                this.installing = false;
+                if (res && res.code === 0) {
+                    this.$notify({title: '插件已安装',
+                                  message: res.message || '', duration: 3000});
+                    this.load_local_plugin();
+                } else {
+                    this.$message.error((res && res.message) || '安装失败');
+                }
+            },
+            on_plugin_error(err) {
+                console.log(err);
+                this.installing = false;
+                this.$message.error('安装失败，请确认 Macast 正在运行');
+            },
+            async install_from_url() {
+                this.installing = true;
+                let fd = new window.FormData();
+                fd.append('install-plugin', '1');
+                fd.append('plugin-url', this.install_url);
+                fd.append('plugin-type', this.install_type);
+                const ok = await this.plugin_action(fd);
+                this.installing = false;
+                if (ok) this.install_url = '';
             },
             async load_status() {
                 let url = '/api?query=status';
@@ -850,6 +1099,7 @@
                     case '10':
                         this.set_history(page_name);
                         this.load_status();
+                        this.load_interfaces();
                         break;
                     case '11':
                         this.set_history(page_name);
@@ -948,39 +1198,6 @@
                 let flag = navigator.userAgent.match(/(phone|pad|pod|iPhone|iPod|ios|iPad|Android|Mobile|BlackBerry|IEMobile|MQQBrowser|JUC|Fennec|wOSBrowser|BrowserNG|WebOS|Symbian|Windows Phone)/i)
                 return flag;
             },
-            async refresh_plugin(data) {
-                console.log(data)
-                let uploadData = new window.FormData()
-                uploadData.append('install-plugin', JSON.stringify(data))
-                const loading = this.$loading({
-                    lock: true,
-                    text: 'Installing',
-                    spinner: 'el-icon-loading',
-                    background: 'rgba(0, 0, 0, 0.7)'
-                });
-                await this.$http.post('/api', uploadData).then(res => {
-                    console.log(res.data)
-                    if (res.data.code !== 0) {
-                        console.log(res.data.message)
-                        this.$message.error(res.data.message);
-                        loading.close();
-                        return
-                    }
-                    this.refresh_interval_id = setInterval(
-                        async () => {
-                            let res = await this.load_local_plugin()
-                            console.log('load_local_plugin:', res)
-                            if (res) {
-                                clearInterval(this.refresh_interval_id)
-                                loading.close();
-                            }
-                        }, 1000)
-                }).catch(err => {
-                    console.log(err)
-                    this.$message.error('Error connecting to Macast');
-                    loading.close();
-                })
-            },
             plugin_kind(type) {
                 return type === 'renderer' ? '渲染器' : '协议'
             },
@@ -988,8 +1205,41 @@
                 Object.assign(data, extra)
                 data.kind_label = this.plugin_kind(data.type)
                 data.kind_tag_type = data.type === 'renderer' ? 'warning' : 'primary'
-                // 唯一 key：内置插件没有 renderer/protocol 名，用标题区分。
-                data.key = `${data.plugin_type}:${data.type}:${data.title}`
+                return data
+            },
+            // 依据插件类型与当前状态决定卡片上的操作按钮
+            decorate_actions(data) {
+                const is_renderer = data.type === 'renderer'
+                const installed = data.plugin_type !== 'repo'
+                data.can_toggle = installed
+                data.can_uninstall = installed && !!data.can_uninstall
+                // 仓库插件还没装，「已停用」会被误读成装过但关掉了。
+                data.show_state = installed
+                if (!installed) {
+                    data.toggle_hint = ''
+                    data.toggle_disabled = false
+                    data.blocked_reason = ''
+                    return data
+                }
+                if (is_renderer) {
+                    // 渲染器只有在「正在使用」时不能停用；启用只是重新载入，
+                    // 真正选哪个播放器仍在菜单栏切换。
+                    data.toggle_disabled = !!data.active
+                    data.toggle_hint = data.active
+                        ? '正在使用的渲染器不能停用，请先切换到其他渲染器'
+                        : (data.enabled ? '停用后不再出现在渲染器列表中'
+                                        : '重新载入该渲染器')
+                    data.blocked_reason = data.active ? '当前正在使用此渲染器' : ''
+                } else {
+                    data.toggle_disabled = false
+                    data.toggle_hint = data.enabled
+                        ? '停用后手机将无法通过该协议发现本机'
+                        : '启用后立即开始广播，无需重启'
+                    // 只剩一个协议时后端会拒绝停用，提前提示而不是等报错
+                    data.blocked_reason =
+                        (data.enabled && this.protocol_list.length <= 1)
+                            ? '至少要保留一个启用的协议' : ''
+                }
                 return data
             },
             update_plugins() {
@@ -1008,14 +1258,18 @@
                         type: p.type, //插件类型：protocol / renderer
                         renderer: p.renderer,
                         protocol: p.protocol,
-                        enabled: !!p.enabled, // 协议是否正在运行
+                        // 后端给出权威状态：enabled=已启用，active=当前生效
+                        enabled: !!p.enabled,
+                        active: !!p.active,
+                        can_uninstall: !!p.can_uninstall,
                         need_update: false, // 是否需要更新
                         plugin_type: p.default ? 'default' : 'local', // 插件类型：默认插件、本地插件（有无更新）、在线插件（是否适配当前系统）
-                        hint: 'Macast will be restarted',
+                        hint: '安装后立即生效，无需重启',
                         button_text: 'Update',
                         url: ''
-                    }, { builtin: !!p.default })
-                    this.plugins.push(data)
+                    }, { builtin: !!p.default, key: p.key })
+                    data.key = p.key || `${data.plugin_type}:${data.type}:${data.title}`
+                    this.plugins.push(this.decorate_actions(data))
                 }
                 for (let p of this.repo_plugins) {
                     let have_local = false
@@ -1052,13 +1306,15 @@
                             renderer: p.renderer,
                             protocol: p.protocol,
                             enabled: false,
+                            active: false,
+                            can_uninstall: false,
                             need_update: true,
                             plugin_type: 'repo',
-                            hint: 'Macast will be restarted',
+                            hint: '安装后立即生效，无需重启',
                             button_text: 'Install',
                             url: p.url
                         }, { builtin: false })
-                        this.plugins.push(data)
+                        this.plugins.push(this.decorate_actions(data))
                     }
                 }
                 this.plugin_groups = this.build_plugin_groups()
