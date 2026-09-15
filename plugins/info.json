@@ -1,6 +1,6 @@
 {
     "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。仓库坐标与索引地址的唯一来源见 macast/plugin_repo.py；新增条目后请跑 scripts/verify_cast_airplay.py，Part 5c 会校验条目与 .py 清单是否一致。",
-    "_note_url": "url 指向 cdn.jsdelivr.net 而不是 raw.githubusercontent.com：安装是在 Python 侧用 requests 拉的，没有浏览器那样的镜像回退，而国内 raw 经常拉不动。代价是 jsDelivr 对分支引用有缓存（更新插件后可能延迟可见）。要绕过就临时把 raw 地址粘到设置页的「从网址安装」。",
+    "_note_url": "url 指 cdn.jsdelivr.net（带 ?v=<版本> 破缓存），而不是 raw.githubusercontent.com：安装是在 Python 侧用 requests 拉的，没有浏览器那样的多地址回退，而国内 raw 经常拉不动。?v= 必须跟着 <macast.version> 一起改，否则 jsDelivr 的分支缓存会让你装到旧文件（Part 5c 会校验）。ghproxy 挂了或 jsDelivr 抽风时，把 raw 直链粘到设置页的「从网址安装」。",
     "repo_url": "https://github.com/pingod/Macast/tree/main/plugins",
     "plugin_v1": [
         {
@@ -11,7 +11,7 @@
             "renderer": "YTDLPRenderer",
             "title": "yt-dlp Downloader",
             "type": "renderer",
-            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/macast_ytdlp.py",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/macast_ytdlp.py?v=0.1",
             "version": "0.1"
         }
     ]

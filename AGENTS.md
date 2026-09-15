@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 261/261）
+# 2) 回归验证（当前 264/264）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -218,15 +218,19 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
   当前只有一条：`macast_ytdlp.py`（把投屏链接交给 yt-dlp 下载）。空索引也是合法状态，
   页面只显示本机插件，不报错。
-- 地址是两个：`raw.githubusercontent.com` 在前，`cdn.jsdelivr.net` 镜像在后，
-  浏览器按序回退（国内 raw 常年不可达）。两者都必须返回 CORS 头，因为这是在**浏览器
-  里** fetch，不是 Python 抓。
+- 地址是三个，按「新鲜度」排序：`raw.githubusercontent.com`（永远最新）→
+  `ghproxy.net/https://raw.githubusercontent.com/...`（按需代理 raw，也是最新的，国内可达）
+  → `cdn.jsdelivr.net`（**分支文件会缓存数小时，可能给出过期索引，所以只能垫底**）。
+  浏览器按序回退；三者都必须返回 CORS 头，因为这是在**浏览器里** fetch，不是 Python 抓。
+  改顺序前先想一遍：把会缓存的放前面 = 用户看到的插件列表可能落后半天。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
   `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。整个条目
   和 `.py` 顶部清单必须逐字对齐 —— Part 5c 会比对 title / version / platform / 类名。
 - 条目的 `url` 用 `cdn.jsdelivr.net` 而不是 raw：安装走的是 Python 侧 `requests`
-  （`MacastPluginManager.install_url`），没有浏览器那种镜像回退，国内 raw 经常拉不动。
-  代价是分支引用有缓存，插件更新可能延迟可见。
+  （`MacastPluginManager.install_url`），没有浏览器那种多地址回退，国内 raw 经常拉不动。
+  **但 url 必须带 `?v=<版本>`**：jsDelivr 缓存分支文件，不带的话版本号涨了、装下来的还是
+  旧文件，页面于是永远显示「可更新」。Part 5c 会校验 `?v=` 与 `version` 一致，
+  也不会因为查询串就认为它不是 `.py`（后端本来就先 `split('?')[0]`）。
 - 在线插件与内置插件是**两回事**：`plugins/` 里的是「用户自己装、单个 .py、只能用
   Macast 自带依赖 + 标准库 + 外部命令」；需要 pip 库或要随包发布的一律走
   `macast/plugins/`（并同步 §4.4 的三处打包配置）。
@@ -287,7 +291,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（261/261）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + yt-dlp 下载器插件 |
+| `verify_cast_airplay.py` | **主验证套件**（264/264）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + yt-dlp 下载器插件 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |
