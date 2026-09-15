@@ -2,12 +2,19 @@
 # Apple Silicon (arm64) build pipeline + cross-platform CI,
 # maintained by the Macast fork.
 #
-# Builds the following artefacts, one per job:
+# Builds the following artefacts, one per job (four platforms):
 #   - macOS arm64      .app         (macos-14 runner, py2app)
-#   - macOS x86_64     .app         (macos-13 runner, py2app)
 #   - Linux x86_64     .tar.gz      (ubuntu-22.04 runner, pyinstaller)
 #   - Linux arm64      .tar.gz      (ubuntu-22.04-arm runner, pyinstaller)
 #   - Windows x86_64   .zip         (windows-2022 runner, pyinstaller)
+#
+# macOS x86_64 is intentionally not built (commit f8b3a15). The macos-13 Intel
+# runner queue sat at 30+ minutes, and Intel Macs are no longer a target for
+# this fork. `scripts/setup_py2app.py` still honours MACAST_ARCH=x86_64, so an
+# Intel build can be produced locally; `git show f8b3a15^:.github/workflows/
+# build.yml` has the job block if it ever needs to come back. This header used
+# to keep claiming the job existed, which is worse than an omission: it reads
+# as "Intel is covered" to anyone who trusts it instead of the job list.
 #
 # Windows arm64 is intentionally not built: GitHub does not provide an
 # arm64 Windows runner, and the project still bundles lxml + rumps which
