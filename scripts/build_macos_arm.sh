@@ -99,16 +99,17 @@ source "${VENV_DIR}/bin/activate"
 
 echo "==> installing build dependencies"
 pip install --quiet --upgrade pip
-pip install --quiet \
-    'py2app>=0.28' \
-    'rumps>=0.4' \
-    'cherrypy>=18,<19' \
-    'lxml' \
-    'netifaces' \
-    'appdirs' \
-    'pyperclip' \
-    'requests' \
-    'pillow'
+
+# Runtime dependencies come from requirements/darwin.txt, NOT from a second
+# inline list. The two used to be maintained separately and they drifted:
+# `zeroconf` was added to the code and to requirements/common.txt but not to
+# the inline list here, so the app it produced built fine and then died on
+# launch with "ModuleNotFoundError: No module named 'zeroconf'".
+pip install --quiet -r "${PROJECT_ROOT}/requirements/darwin.txt"
+
+# Build-only extras (py2app itself; pillow is what the CI job installs and is
+# harmless at runtime — the macOS menu bar uses rumps, not PIL).
+pip install --quiet 'py2app>=0.28' 'pillow'
 
 # --- step 3b: gettext catalogues ------------------------------------------
 # Only .po sources are kept in git; gettext needs the compiled .mo at runtime.

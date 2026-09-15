@@ -382,6 +382,7 @@ COPYRIGHT = 'Copyright {} xfangfang and the Macast contributors.'.format(
 
 APP = [os.path.join(PROJECT_ROOT, 'Macast.py')]
 
+
 OPTIONS = {
     'argv_emulation': True,
     'plist': {
@@ -436,7 +437,21 @@ OPTIONS = {
         # cherrypy's wheel ships its own test-suite, tutorials and scaffold.
         'cherrypy.test', 'cherrypy.tutorial', 'cherrypy.scaffold',
     ],
-    'packages': ['rumps', 'macast', 'macast_renderer'],
+    # `packages` (not `includes`) matters for zeroconf: it ships Cython-compiled
+    # modules *next to* their .py sources, and `zeroconf/_services/__init__` is
+    # one of the compiled ones. modulegraph therefore resolves
+    # `zeroconf._services` to a single extension module, decides it is a leaf
+    # and never descends into it -- the bundle then contains
+    # `lib-dynload/zeroconf/_services.so` *instead of* the `_services/`
+    # directory and the app dies at launch with:
+    #
+    #   ModuleNotFoundError: No module named 'zeroconf._services.info';
+    #   'zeroconf._services' is not a package
+    #
+    # `packages` copies the whole directory verbatim, so the compiled
+    # `__init__` and the submodules all ship together. `ifaddr` is zeroconf's
+    # only runtime dependency (imported from zeroconf._utils.ipaddress).
+    'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
     'arch': TARGET_ARCH,
     'strip': True,
@@ -452,6 +467,10 @@ OPTIONS = {
     # admin channel dies with `ModuleNotFoundError: No module named
     # 'cheroot.ssl'` — and because the failure happens inside the engine's
     # start listeners it takes the whole app down with it.
+    # `zeroconf` must be listed here AND installed in the build environment.
+    # It is imported at module level by macast/discovery.py, so leaving it out
+    # produces an .app that builds fine and then dies on launch with
+    # "ModuleNotFoundError: No module named 'zeroconf'".
     'includes': ['cherrypy', 'lxml', 'netifaces', 'appdirs', 'pyperclip',
                  'requests', 'cheroot.ssl.builtin'],
 }

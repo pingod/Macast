@@ -72,9 +72,14 @@ jobs:
       - name: Install build deps
         run: |
           python -m pip install --upgrade pip
+          # `zeroconf` is not optional: macast/discovery.py imports it at module
+          # level for the Chromecast/AirPlay mDNS advertisement. Without it in
+          # the build environment py2app cannot see the import, the dependency
+          # is silently left out of the bundle, and the shipped .app dies at
+          # launch with "ModuleNotFoundError: No module named 'zeroconf'".
           pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
-                      'requests' 'pillow'
+                      'requests' 'pillow' 'zeroconf'
 
       # No mpv is bundled. Playback uses the mpv already on the machine
       # (`brew install mpv`), which is what the source repo's README asks for
@@ -215,7 +220,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Compile .po -> .mo
         run: |
@@ -231,6 +236,7 @@ jobs:
             --add-data "macast/xml:macast/xml" \
             --collect-all cherrypy \
             --collect-all lxml \
+            --collect-all zeroconf \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
@@ -293,7 +299,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Compile .po -> .mo
         run: |
@@ -309,6 +315,7 @@ jobs:
             --add-data "macast/xml:macast/xml" \
             --collect-all cherrypy \
             --collect-all lxml \
+            --collect-all zeroconf \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
@@ -370,7 +377,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller pystray 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Install static gettext (msgfmt)
         # Windows runners don't ship gettext; the GitHub release of the
@@ -413,6 +420,7 @@ jobs:
             --add-binary "bin;bin" \
             --collect-all cherrypy \
             --collect-all lxml \
+            --collect-all zeroconf \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
