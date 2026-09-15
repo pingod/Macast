@@ -1221,6 +1221,15 @@
                     data.blocked_reason = ''
                     return data
                 }
+                if (!data.available) {
+                    // 声明了不适配当前系统：不隐藏，标灰并说明原因。
+                    // 隐藏会让人以为是 bug，而"装了但用不了"才是真相。
+                    data.toggle_disabled = true
+                    data.toggle_hint = '该插件不支持当前系统'
+                    data.blocked_reason =
+                        `仅支持 ${data.platform}，当前系统是 ${this.platform}`
+                    return data
+                }
                 if (is_renderer) {
                     // 渲染器只有在「正在使用」时不能停用；启用只是重新载入，
                     // 真正选哪个播放器仍在菜单栏切换。

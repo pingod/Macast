@@ -48,27 +48,136 @@ def _import_plugin_module(dotted):
         return importlib.import_module(dotted)
 
 
+def _import_bundled_module(dotted):
+    """Import a module that ships inside the package, exactly once.
+
+    Deliberately *not* `_import_plugin_module`: that one reloads on every call
+    so a re-installed user plugin picks up new code, but reloading a bundled
+    module would re-execute its class bodies and hand out a *different* class
+    object than the one an already-registered plugin holds. A plugin in use
+    would then fail `isinstance` checks against its own class.
+    """
+    module = sys.modules.get(dotted)
+    if module is not None:
+        return module
+    return importlib.import_module(dotted)
+
+
+#: `<macast.key>value</macast.key>` pairs in a plugin's header comment. One
+#: parser serves both user-installed files and bundled modules so the two
+#: cannot drift apart.
+#:
+#: The value may not contain `<`, which is what makes this robust: a manifest
+#: is a sequence of tags on consecutive lines, and letting the value span them
+#: (as a plain `(.*?)` does, with DOTALL) means any later mention of a closing
+#: tag -- in a comment documenting the format, say -- swallows the tags in
+#: between. `[^<]*` simply cannot run past the next tag.
+_PLUGIN_META_RE = re.compile(r"<macast\.([\w.]+)>([^<]*)</macast\.[\w.]+>")
+
+
+def _plugin_header_comment(source):
+    """Return the plugin's leading comment block, and nothing else.
+
+    The manifest lives in the header, so there is no reason to scan the whole
+    file: doing so only creates chances for unrelated code or documentation to
+    be mistaken for manifest text.
+    """
+    lines = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            lines.append(stripped.lstrip('#').strip())
+        elif stripped == '':
+            continue
+        else:
+            break
+    return '\n'.join(lines)
+
+
+def _read_plugin_metadata(path):
+    """Parse the ``<macast.*>`` manifest out of a plugin's header comment."""
+    meta = {}
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            source = f.read()
+    except OSError as e:
+        logger.error("Cannot read plugin manifest from %s: %s", path, e)
+        return meta
+    for key, value in _PLUGIN_META_RE.findall(_plugin_header_comment(source)):
+        meta[key.strip()] = value.strip()
+    return meta
+
+
+def _guess_plugin_class(module, kind):
+    """Find a plugin class in `module` when its manifest names none.
+
+    A manifest typo (the bundled PotPlayer header used to close its
+    `<macast.renderer>` and `<macast.platform>` tags with `</macast.title>`)
+    should cost a class lookup, not the whole plugin.
+    """
+    from .protocol import Protocol
+    from .renderer import Renderer
+    for name, value in vars(module).items():
+        if not isinstance(value, type) or name.startswith('_'):
+            continue
+        if kind == 'protocol' and issubclass(value, Protocol):
+            return value
+        if kind == 'renderer' and issubclass(value, Renderer):
+            return value
+    return None
+
+
+
 class MacastPlugin:
 
     def __init__(self, path, title="None", plugin_instance=None, platform='none',
-                 desc=''):
+                 desc='', plugin_factory=None, module=None, version='',
+                 author=''):
         # path is allowed to be set to None only when renderer is macast default plugin
         self.path = path
         self.title = title
         self.plugin_class = None
         self.plugin_instance = plugin_instance
+        #: Zero-argument callable building the instance on first use. Built-in
+        #: renderers use this instead of an eager instance: IINA launches an
+        #: external app and PotPlayer imports win32-only modules, so
+        #: constructing one at startup is both wasteful and, off-platform,
+        #: fatal.
+        self.plugin_factory = plugin_factory
+        #: Module the plugin was loaded from, when it has one. Several plugins
+        #: are identified by the class they define, not by a file name.
+        self.module = module
         self.platform = platform
         self.desc = desc
+        self.version = version
+        self.author = author
         # 'protocol' / 'renderer'. Known immediately for built-ins (from the
         # instance handed in); load_from_file() fills it in for file plugins.
         self.plugin_type = '' if plugin_instance is None else (
             'protocol' if isinstance(plugin_instance, Protocol) else 'renderer')
+        if self.plugin_type == '' and module is not None:
+            self.plugin_type = self._infer_type(module)
         if path:
             try:
                 self.load_from_file(path)
             except Exception as e:
                 cherrypy.engine.publish('app_notify', 'ERROR', 'Custom plugin load error.')
                 logger.error(str(e))
+
+    @staticmethod
+    def _infer_type(module):
+        """Guess whether a plugin module is a renderer or a protocol.
+
+        A renderer is the common case, and `Renderer` is imported by every
+        plugin file; a protocol is recognised by an exported class that is a
+        `Protocol` subclass. Reading it off the module beats trusting a
+        hand-written manifest tag.
+        """
+        for value in vars(module).values():
+            if isinstance(value, type) and issubclass(value, Protocol) \
+                    and value is not Protocol:
+                return 'protocol'
+        return 'renderer'
 
     def kind(self):
         """'protocol' or 'renderer'.
@@ -110,10 +219,21 @@ class MacastPlugin:
         res['key'] = self.key
         res['installed'] = self.installed
         res['can_uninstall'] = self.installed
+        # Whether this plugin can run on the machine we are answering from.
+        # The settings page greys out the ones that cannot, instead of hiding
+        # them: "PotPlayer is here but Windows-only" is information worth
+        # showing, while a card that silently vanished looks like a bug.
+        # Derived from the declared platform list rather than check(), because
+        # a bundled plugin for another OS is deliberately never imported and
+        # so has no class to inspect.
+        res['available'] = self.matches_platform(quiet=True) if self.platform else False
+        res['bundled'] = self.path is None
         if self.path is None:
             res['default'] = True
             res['desc'] = self._builtin_desc(res['type'])
-            res['version'] = Setting.version
+            # A bundled plugin has no file version of its own; it moves with
+            # the app, so the app version is the honest answer.
+            res['version'] = self.version or Setting.version
         return res
 
     def _builtin_desc(self, kind):
@@ -130,39 +250,58 @@ class MacastPlugin:
         return 'Built-in protocol.'
 
     def get_instance(self):
-        if self.plugin_instance is None and self.plugin_class is not None:
-            self.plugin_instance = self.plugin_class()
-
+        if self.plugin_instance is None:
+            if self.plugin_class is not None:
+                self.plugin_instance = self.plugin_class()
+            elif self.plugin_factory is not None:
+                self.plugin_instance = self.plugin_factory()
         return self.plugin_instance
 
-    def check(self):
+    def check(self, quiet=False):
         """ Check if this renderer can run on your device
         """
-        if self.plugin_class is None:
+        # A plugin we could neither import nor build has nothing to run. This
+        # is the expected state for a bundled plugin belonging to another OS:
+        # its manifest is registered but its module was never imported (see
+        # _load_bundled_plugins), and the settings page still lists it greyed
+        # out because get_info() reports `available` from the platform list.
+        if self.plugin_class is None and self.plugin_factory is None:
             return False
         # self.platform is a comma-separated list like 'darwin,win32,linux'.
         # Use an explicit split+membership test instead of `in` on the raw
         # string, which would also match substrings incorrectly.
+        return self.matches_platform(quiet=quiet)
+
+    def matches_platform(self, quiet=False):
+        """Whether this plugin declares support for the running OS.
+
+        Kept separate from `check()` because the settings page must be able to
+        ask "does this plugin fit this machine?" for a plugin whose module has
+        deliberately not been imported yet (see `_load_builtin_renderers`).
+        """
         if sys.platform in [p.strip() for p in self.platform.split(',')]:
             return True
 
-        logger.error("{} support platform: {}".format(self.title, self.platform))
-        logger.error("{} is not suit for this system.".format(self.title))
+        # `quiet` exists because get_info() calls this for every plugin on
+        # every settings-page load: logging a warning per foreign plugin per
+        # refresh drowned the log in complaints about plugins that are simply
+        # not meant for this OS.
+        if not quiet:
+            logger.error("{} support platform: {}".format(self.title, self.platform))
+            logger.error("{} is not suit for this system.".format(self.title))
         return False
 
     def load_from_file(self, path):
         self.path = path
         base_name = os.path.basename(path)[:-3]
-        with open(path, 'r', encoding='utf-8') as f:
-            renderer_file = f.read()
-            metadata = re.findall("<macast.(.*?)>(.*?)</macast", renderer_file)
-            # Logged rather than printed: the manager is refreshed on every
-            # install/uninstall, and these used to spew the whole plugin
-            # manifest onto the console each time the settings page reloaded.
-            logger.debug("Loading plugin from %s", base_name)
-            for key, value in metadata:
-                logger.debug("  %-10s: %s", key, value)
-                setattr(self, key, str(value))
+        metadata = _read_plugin_metadata(path)
+        # Logged rather than printed: the manager is refreshed on every
+        # install/uninstall, and these used to spew the whole plugin
+        # manifest onto the console each time the settings page reloaded.
+        logger.debug("Loading plugin from %s", base_name)
+        for key, value in metadata.items():
+            logger.debug("  %-10s: %s", key, value)
+            setattr(self, key, str(value))
         if hasattr(self, 'renderer'):
             self.plugin_type = 'renderer'
             module = _import_plugin_module(f'{RENDERER_DIR}.{base_name}')
@@ -190,6 +329,9 @@ class MacastPluginManager:
         # not hand out new Chromecast/AirPlay objects, or the running
         # ProtocolGroup would keep talking to the old ones.
         self._builtin_protocols = self._load_builtin_protocols()
+        # Bundled renderers are registered (not instantiated) once, for the
+        # same reason, and because importing their modules is not free.
+        self._builtin_renderers = self._load_builtin_renderers()
         self.renderer_all = []
         self.renderer_list = []
         self.protocol_list = []
@@ -208,8 +350,9 @@ class MacastPluginManager:
         on; ``renderer_list`` is what the rest of the app may select from.
         """
         disabled = set(Setting.get(SettingProperty.Disabled_Plugins, []) or [])
-        renderers = [self._renderer_default]
-        renderers += (self.load_macast_plugin(RENDERER_DIR) or [])
+        installed = self.load_macast_plugin(RENDERER_DIR) or []
+        renderers = [self._renderer_default] + self._builtin_renderers
+        renderers += self._without_builtin_duplicates(installed)
         self.renderer_all = renderers
         self.renderer_list = [p for p in renderers if p.key not in disabled]
         if not self.renderer_list:
@@ -217,8 +360,40 @@ class MacastPluginManager:
             self.renderer_list = [self._renderer_default]
 
         protocols = [self._protocol_default] + self._builtin_protocols
-        protocols += (self.load_macast_plugin(PROTOCOL_DIR) or [])
+        protocols += self._without_builtin_duplicates(
+            self.load_macast_plugin(PROTOCOL_DIR) or [])
         self.protocol_list = protocols
+
+    def _without_builtin_duplicates(self, installed):
+        """Drop installed copies of plugins Macast now bundles itself.
+
+        Every one of these started life in xfangfang/Macast-plugins and was
+        installed by hand; now that they ship with the app, keeping both would
+        list the same renderer twice -- once as a stale file, once as the
+        maintained built-in -- and the menu would offer two identical players.
+        The file itself is left alone (never deleted behind the user's back);
+        it is simply not offered while the bundled version is present.
+        """
+        claimed_titles = set()
+        claimed_classes = set()
+        for plugin in self._builtin_renderers + self._builtin_protocols:
+            claimed_titles.add(plugin.title)
+            module = getattr(plugin, 'module', None)
+            for name, value in vars(module).items() if module else ():
+                if isinstance(value, type) and not name.startswith('_'):
+                    claimed_classes.add(name)
+
+        kept = []
+        for plugin in installed:
+            # Titles are user-editable, class names are not, so either match
+            # is enough to call it a duplicate of something we now ship.
+            exported = getattr(plugin.plugin_class, '__name__', None)
+            if plugin.title in claimed_titles or exported in claimed_classes:
+                logger.info("Not offering installed plugin %s (%s): Macast "
+                            "now bundles it", plugin.title, exported or plugin.title)
+                continue
+            kept.append(plugin)
+        return kept
 
     def plugin_by_key(self, key):
         """Find a plugin by its `key`, including ones that are switched off."""
@@ -510,12 +685,93 @@ class MacastPluginManager:
         """
         from .protocol_cast import ChromecastProtocol
         from .protocol_airplay import AirPlayProtocol
-        return [
+        plugins = [
             MacastPlugin(None, "Chromecast", ChromecastProtocol(), "darwin,win32,linux",
                          desc='接收 Google Cast v2 投屏（Chrome、VLC、Android 等）'),
             MacastPlugin(None, "AirPlay", AirPlayProtocol(), "darwin,win32,linux",
                          desc='接收 AirPlay 视频投屏（iPhone / iPad / macOS）'),
         ]
+        plugins += self._load_bundled_plugins('protocol')
+        return plugins
+
+    def _load_builtin_renderers(self):
+        """Renderers bundled with Macast.
+
+        Same idea as `_load_builtin_protocols`, but renderers are registered
+        lazily: a bundled renderer is only constructed when the user actually
+        picks it. IINA spawns an external app and PotPlayer imports win32-only
+        modules, so building them at startup would be wrong even on the right
+        platform.
+        """
+        return self._load_bundled_plugins('renderer')
+
+    def _load_bundled_plugins(self, kind, directory=None):
+        """Discover plugins under ``macast/plugins/<kind>/``.
+
+        Each module declares itself in a ``<macast.*>`` header comment, exactly
+        like a user-installed plugin, so one parser serves both. The module is
+        imported here (cheap: these modules only define classes) but the plugin
+        instance is not built until something asks for it.
+
+        Modules whose declared platform does not match this OS are still
+        registered -- the settings page shows them greyed out with the reason,
+        which is far more useful than having them silently vanish.
+
+        `directory` is injectable so the verification suite can exercise the
+        loader against fixtures without touching the shipped plugin tree.
+        """
+        if directory is None:
+            directory = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'plugins', kind)
+        if not os.path.isdir(directory):
+            return []
+        plugins = []
+        for entry in sorted(os.listdir(directory)):
+            if not entry.endswith('.py') or entry == '__init__.py':
+                continue
+            base_name = entry[:-3]
+            source = os.path.join(directory, entry)
+            meta = _read_plugin_metadata(source)
+            title = meta.get('title') or base_name.replace('_', ' ').title()
+            platform = meta.get('platform', 'darwin,win32,linux')
+
+            # Read the manifest *before* importing, and skip the import
+            # entirely for a foreign platform. This is not an optimisation: the
+            # PotPlayer plugin imports `win32api` at module level and the
+            # Raspberry Pi one shells out to `sudo pi_fm_rds`, so importing
+            # them off-platform would raise (or worse, half-run) rather than
+            # merely being unused. Registering the metadata alone still lets
+            # the settings page show the plugin, greyed out with its reason.
+            factory = None
+            module = None
+            if sys.platform in [p.strip() for p in platform.split(',')]:
+                dotted = '{}.plugins.{}.{}'.format(__package__, kind, base_name)
+                try:
+                    module = _import_bundled_module(dotted)
+                except Exception as e:
+                    logger.error("Bundled %s plugin %s failed to import: %s",
+                                 kind, entry, e)
+                    continue
+                class_name = meta.get('renderer') or meta.get('protocol')
+                factory = getattr(module, class_name, None) if class_name else None
+                if factory is None:
+                    # Fall back to inferring the class from the module body
+                    # rather than dropping a plugin over a header typo.
+                    factory = _guess_plugin_class(module, kind)
+                if factory is None:
+                    logger.error("Bundled %s plugin %s exports no plugin class",
+                                 kind, entry)
+                    continue
+            plugins.append(MacastPlugin(
+                None, title,
+                platform=platform,
+                desc=meta.get('desc', ''),
+                plugin_factory=factory,
+                module=module,
+                version=meta.get('version', ''),
+                author=meta.get('author', ''),
+            ))
+        return plugins
 
     @staticmethod
     def load_macast_plugin(path: str):
