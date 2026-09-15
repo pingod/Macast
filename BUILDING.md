@@ -139,6 +139,31 @@ file dist/Macast.app/Contents/MacOS/Macast   # → arm64
 du -sh dist/Macast.app                       # → ~39M
 ```
 
+## Verify the bundled plugins actually made it into the artefact
+
+`macast/plugins/**` is imported **by name at runtime**, never by a static
+`import` statement, so no dependency scanner can see it. `packages: ['macast']`
+copies the directory, and `hiddenimports` names each module so modulegraph
+cannot drop it — but a green build still proves nothing, so check the bundle:
+
+```bash
+APP=/Applications/Macast.app     # or dist/Macast.app
+ls "$APP/Contents/Resources/lib/python3.12/macast/plugins/renderer/"
+# → iina.py web.py live.py potplayer.py pi_fm.py
+ls "$APP/Contents/Resources/lib/python3.12/macast/plugins/protocol/"
+# → nirvana.py
+
+# and confirm the app finds them at runtime
+"$APP/Contents/MacOS/Macast" & sleep 10
+curl -s 'http://127.0.0.1:58880/api?query=plugin-info' | python3 -m json.tool \
+  | grep -E '"title"|"available"'
+```
+
+On macOS only `IINA Renderer`, `Web Renderer`, `Live Renderer` and
+`NVA Protocol` should report `"available": true`; PotPlayer (Windows) and
+PIFMRDS (Linux) must still be **listed** with `"available": false`. A plugin
+missing from the list entirely means it was stripped from the bundle.
+
 ## Why py2app and not PyInstaller
 
 The original project uses `py2app` (visible in `setup_py2app.py`,
