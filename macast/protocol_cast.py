@@ -231,6 +231,8 @@ class ChromecastProtocol(Protocol):
         self._position = 0.0
         self._transport_id = "MacastTransport"
         self._lock = threading.Lock()
+        # Bumped on every LOAD so a stale playback watcher stops reporting.
+        self._watch_generation = 0
         self.cast_port = CAST_PORT   # actual bound port (may differ)
         self.setup_port = SETUP_PORT
         self._cert_path = os.path.join(SETTING_DIR, "macast_cast.crt")
@@ -518,6 +520,16 @@ class ChromecastProtocol(Protocol):
         if msg_type == "LOAD":
             media = data.get("media", {})
             url = media.get("contentId") or media.get("contentUrl")
+            # Log what the sender says it is about to serve. This is what makes
+            # a "sound but no picture" report diagnosable from the log alone:
+            # VLC announces `audio/x-matroska` when it has decided to send no
+            # video at all, which is indistinguishable from a receiver bug
+            # unless you record it (see docs/Cast-AirPlay-Testing.md 10.6).
+            logger.info(
+                "Cast LOAD url=%s contentType=%s streamType=%s duration=%s tracks=%d",
+                url, media.get("contentType"), media.get("streamType"),
+                data.get("duration") or media.get("duration"),
+                len(media.get("tracks") or []))
             if not url:
                 # Nothing playable: tell the sender instead of failing silently.
                 self._send(sock, self._transport_id, src, NS_MEDIA, json.dumps({
@@ -529,10 +541,10 @@ class ChromecastProtocol(Protocol):
                 self._session_id = _random_session()
                 self._media = media
                 self._position = float(data.get("currentTime", 0) or 0)
-            logger.info("Cast LOAD url=%s", url)
             self.renderer.set_media_url(url, start=str(int(self._position)))
             self._send_media_status(sock, src, "BUFFERING", data.get("requestId"))
-            self._send_media_status(sock, src, "PLAYING", data.get("requestId"))
+            # PLAYING is reported once the player confirms it, not blindly.
+            self._start_playback_watch(sock, src, data.get("requestId"))
         elif msg_type == "PLAY":
             self.renderer.set_media_resume()
             self._send_media_status(sock, src, "PLAYING", data.get("requestId"))
@@ -553,6 +565,73 @@ class ChromecastProtocol(Protocol):
             self._send_media_status(sock, src, "PLAYING", data.get("requestId"))
         elif msg_type == "GET_STATUS":
             self._send_media_status(sock, src, None, data.get("requestId"))
+
+    #: How long to wait for the player to confirm playback before falling back
+    #: to the optimistic "PLAYING" reply. Long enough for a network stream to
+    #: start, short enough that a sender does not consider the load stalled.
+    LOAD_GRACE_SECONDS = 8.0
+
+    def _renderer_transport(self):
+        """(state, status) from the player, or ('', '') if it cannot say.
+
+        The transport state is DLNA-flavoured, so with DLNA switched off the
+        group may answer ``STOPPED``/``OK`` regardless of what mpv is doing.
+        That is why a missing answer degrades to the old optimistic reply
+        rather than to a false failure.
+        """
+        try:
+            return (self.renderer.get_state_transport_state(),
+                    self.renderer.get_state_transport_status())
+        except Exception as e:
+            logger.debug("Renderer transport state unavailable: %s", e)
+            return '', ''
+
+    def _start_playback_watch(self, sock, src, request_id):
+        with self._lock:
+            self._watch_generation += 1
+            generation = self._watch_generation
+        threading.Thread(target=self._watch_playback,
+                         args=(sock, src, request_id, generation),
+                         name="CAST_STATUS", daemon=True).start()
+
+    def _watch_playback(self, sock, src, request_id, generation):
+        """Push PLAYING once playback really starts -- or LOAD_FAILED.
+
+        Replying "PLAYING" the moment LOAD arrives was a lie: mpv has not even
+        opened the URL yet, so a stream that never plays still looked healthy
+        and the sender had no reason to retry. It also ran off the client
+        thread on purpose -- blocking that reader for seconds would stop us
+        answering the sender's heartbeats, which is how a receiver gets
+        declared dead mid-load.
+        """
+        deadline = time.time() + self.LOAD_GRACE_SECONDS
+        reported = None
+        while time.time() < deadline:
+            with self._lock:
+                if generation != self._watch_generation:
+                    return  # superseded by a newer LOAD
+            if self._stop_event.wait(0.2):
+                return
+            state, status = self._renderer_transport()
+            if status == 'ERROR_OCCURRED':
+                reported = 'LOAD_FAILED'
+                break
+            if state in ('PLAYING', 'PAUSED_PLAYBACK'):
+                reported = 'PAUSED' if state == 'PAUSED_PLAYBACK' else 'PLAYING'
+                break
+        if reported is None:
+            reported = 'PLAYING'
+        try:
+            if reported == 'LOAD_FAILED':
+                logger.warning("Cast load failed: the player reported an error")
+                self._send(sock, self._transport_id, src, NS_MEDIA, json.dumps({
+                    "type": "LOAD_FAILED",
+                    "requestId": request_id,
+                }))
+            else:
+                self._send_media_status(sock, src, reported, request_id)
+        except Exception as e:
+            logger.debug("Cast status push failed: %s", e)
 
     def _send_media_status(self, sock, src, player_state, request_id):
         with self._lock:

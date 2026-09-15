@@ -314,8 +314,13 @@ class VlcSender(object):
         self._note("-> msgReceiverLaunchApp(CC1AD845)")
         self.request_id += 1
 
-    def load(self, url):
-        """Ready: connect to transportId, then msgPlayerLoad()."""
+    def load(self, url, timeout=20.0, content_type=None):
+        """Ready: connect to transportId, then msgPlayerLoad().
+
+        Waits for a *terminal* answer. Accepting BUFFERING as success would
+        make this harness pass on a receiver that never actually plays
+        anything -- which is exactly the class of bug it exists to catch.
+        """
         if not self.transport:
             self._note("!! no transportId")
             return False
@@ -330,23 +335,37 @@ class VlcSender(object):
             "currentTime": 0,
             "media": {
                 "contentId": url,
-                "contentType": "video/mp4",
+                "contentType": content_type or "video/mp4",
                 "streamType": "BUFFERED",
                 "metadata": {"type": 0, "metadataType": 0, "title": "vlc-sim"},
             },
         })
         self._note("-> msgPlayerLoad(%s)" % url)
         self.request_id += 1
-        for msg in self.pump(6.0):
-            if msg["namespace"] == NS_MEDIA and msg["payload_utf8"]:
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            for msg in self.pump(max(0.2, min(2.0, deadline - time.time()))):
+                if msg["namespace"] != NS_MEDIA or not msg["payload_utf8"]:
+                    continue
                 try:
-                    status = json.loads(msg["payload_utf8"]).get("status") or [{}]
+                    payload = json.loads(msg["payload_utf8"])
                 except ValueError:
                     continue
+                if payload.get("type") == "LOAD_FAILED":
+                    self._note("<- LOAD_FAILED")
+                    self._set_state("LoadFailed")
+                    return False
+                status = payload.get("status") or [{}]
                 state = (status[0] or {}).get("playerState")
-                if state in ("PLAYING", "BUFFERING", "PAUSED"):
+                if state:
                     self._set_state(state)
-        return self.state in ("PLAYING", "BUFFERING")
+            if self.state == "LoadFailed":
+                return False
+            if self.state == "PLAYING":
+                return True
+        self._note("!! no PLAYING within %.0fs (state=%s)" % (timeout, self.state))
+        return False
 
 
 def main():
