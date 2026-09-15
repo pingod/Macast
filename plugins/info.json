@@ -1,0 +1,5 @@
+{
+    "_comment": "Macast 在线插件索引。settings.html 读取本文件，按 plugin_v1 渲染「可安装」分组。插件索引地址的唯一来源见 macast/plugin_repo.py；改动本文件后建议同时验证 https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json 可访问。",
+    "repo_url": "https://github.com/pingod/Macast/tree/main/plugins",
+    "plugin_v1": []
+}
