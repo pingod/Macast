@@ -34,7 +34,12 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - **插件索引自持**：设置页「可安装」分组的数据源是本仓库的 [`plugins/info.json`](plugins/info.json)，
   不再读上游 `xfangfang/Macast-plugins`（它的 6 个插件现已全部内置，继续读只会产生重复卡片和
   指回上游旧文件的「可更新」角标）。地址只写在 `macast/plugin_repo.py` 一处，由 `/api?query=plugin-info`
-  下发；浏览器按 `raw.githubusercontent.com` → `cdn.jsdelivr.net` 顺序回退，全都不通时只显示本机插件。
+  下发；浏览器按 `raw.githubusercontent.com` → `ghproxy` 代理 → `cdn.jsdelivr.net` 顺序回退，
+  全都不通时只显示本机插件。插件安装地址**固定到 commit SHA**，所以 CDN 缓存多旧都不会给错文件。
+- **6 个在线插件**（设置页 → 插件 → 可安装，装完即生效）：yt-dlp 下载/边下边播、外部播放器
+  （VLC / MPC-BE / mpv.net）、角落置顶小窗（含实验性壁纸模式）、自动化钩子（投屏/暂停/停止时
+  执行你的命令）、Chromecast 中继（把收到的投屏转投给电视）、AirPlay 音频（RAOP，
+  监督 shairport-sync）。除 RAOP 是协议插件外，其余 5 个是渲染器插件，一次只能选一个。
 - **网页投屏入口**：`GET /api?query=cast&url=<绝对地址>&token=<令牌>`，给 iOS 快捷指令、
   书签、`curl`、脚本用，绕开 DLNA 发现也能投屏；`POST cast-uri` 继续服务设置页的重投。
   令牌是**常驻**的（存在 `macast_setting.json` 的 `Api_Token`），在「状态 → 网页投屏入口」
