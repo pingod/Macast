@@ -87,6 +87,43 @@ docs/                     见 §7
   改成随机值并重置 USN。起新实例前先杀干净（`lsof -nP -iTCP:8009 -sTCP:LISTEN -t`）。
 - **`mpv --http-proxy=` 不能替代摘环境变量**，ffmpeg 的 HTTP 层仍然读 `http_proxy`。
 
+### 4.3 打包（v0.7.11 的产物曾经**全部无法启动**）
+
+**症状**：`.app` / Linux / Windows 产物双击或运行后立刻退出，日志里是
+`ModuleNotFoundError: No module named 'zeroconf'`（或 `... 'zeroconf._services' is not
+a package`）。**源码运行完全正常**，所以很容易漏掉。
+
+**两个原因，都要记住：**
+
+1. **依赖列表写了多份然后漂移。** `zeroconf`（mDNS 广播，`macast/discovery.py` 顶层
+   import）被加进了代码和 `requirements/common.txt`，但 **没**加进
+   `requirements/darwin.txt`、`scripts/build_macos_arm.sh` 的内联 pip 列表、
+   CI 里 4 个 job 各自的内联 pip 列表、以及 `setup_py2app.py` 的 `includes`。
+   于是构建环境里根本没有它，py2app 看不到这个 import，产物就缺。
+   → 现在 **`requirements/darwin.txt` 是唯一来源**（本地构建脚本也改为 `-r` 它）。
+   加新依赖时，请同时检查：`requirements/*.txt`、CI 各 job、`setup_py2app.py`、
+   pyinstaller 的 `--collect-all/--hidden-import`。
+
+2. **`zeroconf` 不能只写进 `includes`，必须写进 `packages`。** 它同时发布 Cython
+   编译产物和 `.py` 源码，而 `zeroconf/_services/__init__` 正是编译版。modulegraph
+   会把 `zeroconf._services` 当成**单个扩展模块**（叶子节点）而不再下钻，包内于是
+   只有 `lib-dynload/zeroconf/_services.so`、没有 `_services/` 目录：
+   `ModuleNotFoundError: No module named 'zeroconf._services.info'; 'zeroconf._services'
+   is not a package`。`packages` 是整目录拷贝，才能带上子模块；顺带把
+   `ifaddr`（zeroconf 的唯一运行时依赖）也放进 `packages`。
+
+**排查手法**（比读 build 配置快）：
+
+```shell
+# 1. 直接跑包里的可执行文件，看真实报错（不要只看 CI 绿）
+env -u PYTHONPATH /Applications/Macast.app/Contents/MacOS/Macast
+# 2. 确认可疑包是否真在包里（py2app 会把纯 Python 部分塞进 lib-dynload 或 zip）
+find /Applications/Macast.app -iname "*zeroconf*" | head
+```
+
+**教训：CI 全绿 ≠ 产物能用。** 发版后一定要把下载下来的产物**真正启动一次**并确认
+它监听了 8009/58880、`/api?query=status` 能返回版本号（见 §8）。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -169,6 +206,28 @@ Windows x86_64，并在版本一致性校验通过后创建 Release。
 产物名形如 `Macast-MacOS-arm64-v<版本>.zip`。
 
 > 也可在 GitHub UI → Actions → Build Macast → Run workflow → `release=true`。
+
+**发版后必做（CI 绿不代表产物能用，见 §4.3）**：
+
+```shell
+# 1. 等 CI 跑完，确认 4 个产物都在（本机没有 gh CLI，用 REST API）
+#    https://api.github.com/repos/pingod/Macast/releases/tags/v<版本>
+# 2. 下载 macOS 产物、替换安装（旧包先移废纸篓，不要硬删）
+#    注意下载来的包带 quarantine 属性，需 xattr -dr com.apple.quarantine
+# 3. 真正启动并验证
+open -a /Applications/Macast.app && sleep 15
+lsof -nP -iTCP:8009 -sTCP:LISTEN      # 应有进程
+curl -s 'http://127.0.0.1:58880/api?query=status' | head -c 200   # 应返回版本号
+dns-sd -B _googlecast._tcp            # 5 秒后应有 Macast-<主机名>
+```
+
+**改成了同一版本号重新发布时**：由于无法用 API 删除已发布的 release（本机没有 token），
+做法是把 tag 移到修复提交后强推（`git tag -f v<x> && git push -f origin v<x>`），
+CI 会用同名文件**替换** release 里的产物。用 digest 对比确认真的换了：
+
+```shell
+# GET /releases/tags/v<x> 里每个 asset 的 digest 字段
+```
 
 ## 9. 当前能力边界（别当成 bug）
 
