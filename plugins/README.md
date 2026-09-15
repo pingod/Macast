@@ -84,8 +84,9 @@ https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/info.json            # �
 ```
 
 设置页按顺序试，第一个能通的即采用；三个都不通就只显示本机插件，并给一句提示。
-jsDelivr 垫底是因为它**缓存分支文件**（可能给出过期索引）；ghproxy 类镜像按需代理 raw，
-拿到的是最新内容。改这个顺序前先想清楚「新插件多久能被看到」。
+jsDelivr 垫底是因为它**缓存分支文件数小时**（可能给出过期索引，且 `?v=` 破不了）；
+ghproxy 类镜像按需代理 raw，实测最多滞后约 5 分钟（`cache-control: max-age=300`）。
+改这个顺序前先想清楚「新插件多久能被看到」。
 
 > 浏览器直接抓取要求对方返回 CORS 头 —— raw.githubusercontent.com 与
 > cdn.jsdelivr.net 都满足；如果将来换成别的托管，先确认这一点。
@@ -129,8 +130,9 @@ jsDelivr 垫底是因为它**缓存分支文件**（可能给出过期索引）�
 - `raw.githubusercontent.com` 最权威但国内经常拉不动；
 - `cdn.jsdelivr.net` 能通，**但它会缓存分支文件数小时，而且 `?v=` 查询串不能破它的缓存**
   （实测：把插件升到 0.2 后，`...macast_ytdlp.py?v=0.2` 返回的仍是 0.1 的内容）；
-- `ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，**每次都是最新文件**，
-  所以索引里的 `url` 用它。
+- `ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，实测响应头是
+  `cache-control: max-age=300`，也就是**最多滞后约 5 分钟**，所以索引里的 `url` 用它
+  （比 jsDelivr 的「数小时且 ?v= 无效」好三个数量级）。
 
 ghproxy 挂了的时候，把 raw 直链粘到设置页的「从网址安装」即可。索引里的
 `url` 一律按这个规则写，Part 5c 会检查它不是缓存型 CDN。

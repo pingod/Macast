@@ -218,8 +218,9 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
   当前 6 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
 - 地址是三个，按「新鲜度」排序：`raw.githubusercontent.com`（永远最新）→
-  `ghproxy.net/https://raw.githubusercontent.com/...`（按需代理 raw，也是最新的，国内可达）
-  → `cdn.jsdelivr.net`（**分支文件会缓存数小时，可能给出过期索引，所以只能垫底**）。
+  `ghproxy.net/https://raw.githubusercontent.com/...`（按需代理 raw，国内可达，响应头
+  `cache-control: max-age=300`，最多滞后约 5 分钟）→ `cdn.jsdelivr.net`
+  （**分支文件缓存数小时、`?v=` 也破不了，可能给出过期索引，所以只能垫底**）。
   浏览器按序回退；三者都必须返回 CORS 头，因为这是在**浏览器里** fetch，不是 Python 抓。
   改顺序前先想一遍：把会缓存的放前面 = 用户看到的插件列表可能落后半天。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
@@ -229,7 +230,8 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `cdn.jsdelivr.net` 能通但**缓存分支文件数小时，而且 `?v=` 查询串破不了它的缓存**
   （把插件升到 0.2 后请求 `...macast_ytdlp.py?v=0.2`，拿回来仍是 0.1 的内容 —— 页面上就会
   永远显示同一个「可更新」）；`ghproxy.net/https://raw.githubusercontent.com/...` 按需代理 raw，
-  每次都是最新文件。所以索引里的 `url` 一律用 ghproxy 代理形式，Part 5c 会拦住缓存型 CDN。
+  响应头 `cache-control: max-age=300`，最多滞后约 5 分钟。所以索引里的 `url` 一律用 ghproxy
+  代理形式，Part 5c 会拦住缓存型 CDN。
   安装是 Python 侧 `requests`（`MacastPluginManager.install_url`）拉的，没有浏览器多地址回退，
   出问题时把 raw 直链粘到设置页的「从网址安装」即可（后端本来就先 `split('?')[0]` 再判 `.py`）。
 - 在线插件与内置插件是**两回事**：`plugins/` 里的是「用户自己装、单个 .py、只能用

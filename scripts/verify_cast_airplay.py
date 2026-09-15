@@ -1210,11 +1210,11 @@ try:
               _bundled.get(_class_key) == _entry.get(_class_key),
               "manifest={!r} index={!r}".format(_bundled.get(_class_key),
                                                 _entry.get(_class_key)))
-        # The install url must come from a source that is fresh *per request*.
-        # jsDelivr was measured doing the opposite: it serves a branch file from
-        # its cache for hours and the `?v=` query string does not bust it, so a
-        # bumped plugin installed the previous file while the page kept offering
-        # the same "update". A raw-proxy (ghproxy-style) fetches on demand.
+        # The install url must not come from the hours-long cache. jsDelivr was
+        # measured doing exactly that: it serves a branch file from its cache for
+        # hours and `?v=` does not bust it, so a bumped plugin installed the
+        # previous file while the page kept offering the same "update". A
+        # raw-proxy caches for ~5 minutes instead (`cache-control: max-age=300`).
         _url = _entry.get("url", "")
         check("{} install url is not the caching CDN".format(_fname),
               "jsdelivr" not in _url, _url)
