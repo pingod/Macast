@@ -15,14 +15,14 @@
 
 import base64
 import logging
-import os
 import random
 import socket
 import threading
+import time
 
 from .discovery import MDNSAdvertiser
 from .protocol import Protocol
-from .utils import Setting, SETTING_DIR
+from .utils import Setting
 
 logger = logging.getLogger("AirPlay")
 
@@ -41,6 +41,57 @@ PORT_FALLBACK_RANGE = 20
 # Deliberately NOT advertised: VideoFairPlay (0x04, no DRM decryption),
 # screen mirroring, AirPlay audio/RAOP, and AirPlay 2 multi-room.
 FEATURES = 0x01 | 0x02 | 0x08 | 0x10 | 0x20
+
+#: The RTSP methods we actually implement. One tuple, used both to advertise
+#: ``Public``/``Allow`` and to decide whether a request is answerable, so the
+#: two can never drift apart.
+SUPPORTED_METHODS = (
+    "OPTIONS", "ANNOUNCE", "SETUP", "RECORD", "PLAY", "PAUSE", "FLUSH",
+    "STOP", "TEARDOWN", "SET_PARAMETER", "GET_PARAMETER",
+)
+
+#: RTSP status codes -> reason phrase (RFC 2326 section 12). The old code only
+#: ever produced ``200 OK`` or the literal word ``Error``, which is not a valid
+#: status line for any other code.
+REASON_PHRASES = {
+    200: "OK",
+    400: "Bad Request",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    454: "Session Not Found",
+    455: "Method Not Valid In This State",
+    500: "Internal Server Error",
+    501: "Not Implemented",
+}
+
+
+class _BadRequest(Exception):
+    """Raised while parsing, so the caller can answer 400 instead of hanging up."""
+
+
+def get_header(headers, name, default=None):
+    """Case-insensitive header lookup.
+
+    RTSP header names are case-insensitive, but the parser used to build a
+    plain dict verbatim from the wire. A client sending ``cseq:`` (or
+    ``content-location:``) therefore missed every lookup and the reply carried
+    a fabricated ``CSeq: 1``, leaving the client's sequence numbers permanently
+    out of step. Plain dicts are supported too, so callers that build headers by
+    hand keep working.
+    """
+    if not headers:
+        return default
+    try:
+        if name in headers:
+            return headers[name]
+    except TypeError:  # not a mapping at all
+        return default
+    wanted = name.lower()
+    for key, value in headers.items():
+        if isinstance(key, str) and key.lower() == wanted:
+            return value
+    return default
+
 
 
 def _random_mac():
@@ -139,21 +190,23 @@ class AirPlayProtocol(Protocol):
         return Handler
 
     def _handle_rtsp(self, method, headers, body, uri="/"):
-        cseq = headers.get("CSeq", "1")
-        base = {"CSeq": cseq, "Server": Setting.get_server_info()}
+        base = {"Server": Setting.get_server_info()}
+        # Echo the client's CSeq back if it sent one -- and only if. Inventing
+        # ``CSeq: 1`` for a request that arrived without one desynchronises the
+        # client's sequence bookkeeping for the rest of the connection.
+        cseq = get_header(headers, "CSeq")
+        if cseq is not None:
+            base["CSeq"] = cseq
         # Some clients GET /info over the same socket to read device capability.
         if method == "GET" and uri.startswith("/info"):
             base["Content-Type"] = "text/x-apple-plist+xml"
             return 200, base, self._info_plist()
         if method == "OPTIONS":
-            base["Public"] = (
-                "ANNOUNCE, SETUP, RECORD, PLAY, PAUSE, FLUSH, STOP, "
-                "SET_PARAMETER, GET_PARAMETER, TEARDOWN"
-            )
+            base["Public"] = ", ".join(SUPPORTED_METHODS)
             # In AirPlay the *client* sends Apple-Challenge and the receiver
             # answers with a signed Apple-Response. We have no signing key, so
             # we deliberately do not promise one (see module docstring).
-            if headers.get("Apple-Challenge"):
+            if get_header(headers, "Apple-Challenge"):
                 logger.info(
                     "Client sent Apple-Challenge; signature auth is not "
                     "implemented, continuing without Apple-Response")
@@ -163,10 +216,16 @@ class AirPlayProtocol(Protocol):
             return 200, base, ""
         if method == "ANNOUNCE":
             url = self._parse_content_location(headers, body)
-            if url:
-                with self._lock:
-                    self._current_url = url
-                logger.info("AirPlay ANNOUNCE url=%s", url)
+            if not url:
+                # Answering 200 here promised a play that could never happen,
+                # and the PLAY that followed reported Range/RTP-Info for a
+                # stream that did not exist.
+                logger.warning("AirPlay ANNOUNCE carried no Content-Location; "
+                               "refusing rather than pretending to load")
+                return 400, base, ""
+            with self._lock:
+                self._current_url = url
+            logger.info("AirPlay ANNOUNCE url=%s", url)
             return 200, base, ""
         if method == "SETUP":
             self._session += 1
@@ -177,15 +236,25 @@ class AirPlayProtocol(Protocol):
             base["Session"] = "{}".format(max(self._session, 1))
             return 200, base, ""
         if method == "PLAY":
+            stale = self._stale_session(headers)
+            if stale is not None:
+                return stale, base, ""
             with self._lock:
                 url = self._current_url
-            if url:
-                self.renderer.set_media_url(url)
+            if not url:
+                # Nothing was announced: 455 rather than a 200 that claims
+                # playback started.
+                logger.warning("AirPlay PLAY without a prior ANNOUNCE url")
+                return 455, base, ""
+            self.renderer.set_media_url(url)
             base["Session"] = "{}".format(max(self._session, 1))
             base["Range"] = "npt=now-"
             base["RTP-Info"] = "seq=0;rtptime=0"
             return 200, base, ""
         if method in ("PAUSE", "SET_PARAMETER"):
+            stale = self._stale_session(headers)
+            if stale is not None:
+                return stale, base, ""
             if method == "PAUSE":
                 self.renderer.set_media_pause()
             elif "volume" in body.lower():
@@ -204,8 +273,34 @@ class AirPlayProtocol(Protocol):
             return 200, base, ""
         if method == "GET_PARAMETER":
             return 200, base, "volume: 100\r\n"
-        # fallback
-        return 200, base, ""
+        # Anything else: say so instead of answering 200 to a request we never
+        # performed. ``Allow`` tells the client what it may ask for.
+        logger.info("AirPlay unsupported RTSP method %r from a client", method)
+        base["Allow"] = ", ".join(SUPPORTED_METHODS)
+        return 501, base, ""
+
+    def _stale_session(self, headers):
+        """454 if the client names a session we do not own, else None.
+
+        A ``Session`` value may carry parameters (``1;timeout=60``); only the id
+        before the semicolon identifies the session, and comparing the raw
+        string rejected legal requests. A request that names no session at all
+        is accepted: before SETUP there is nothing to compare against, and being
+        strict there would break clients that PLAY without one.
+        """
+        if self._session <= 0:
+            return None
+        sent = get_header(headers, "Session")
+        if sent is None:
+            return None
+        session_id = sent.split(";", 1)[0].strip()
+        if not session_id:
+            return None
+        if session_id != str(self._session):
+            logger.info("AirPlay stale session %r (ours is %d)",
+                        session_id, self._session)
+            return 454
+        return None
 
     def _info_plist(self):
         """Device capability plist served on GET /info."""
@@ -226,7 +321,7 @@ class AirPlayProtocol(Protocol):
     @staticmethod
     def _parse_content_location(headers, body):
         # Header form:  Content-Location: <url>
-        cl = headers.get("Content-Location")
+        cl = get_header(headers, "Content-Location")
         if cl:
             return cl.strip()
         # SDP body form: a=content-location:<url>
@@ -245,20 +340,43 @@ class AirPlayProtocol(Protocol):
 class _RtspHandlerBase:
     """A tiny RTSP request handler (one connection per instance)."""
 
+    #: How long an idle control connection may sit before we reclaim it. RTSP
+    #: clients keep the socket open between commands, so this must be generous;
+    #: its purpose is only to stop a sender that vanished without a FIN (Wi-Fi
+    #: drop, app killed) from parking a thread and an fd forever.
+    IDLE_TIMEOUT_SECONDS = 120.0
+
     def __init__(self, server, conn, addr):
         self.server = server
         self.conn = conn
         self.addr = addr
         self.protocol = getattr(server, "protocol", None)
+        # Bytes read but not yet consumed. Keeping them is the whole point: a
+        # client that coalesces SETUP+PLAY into one segment used to lose the
+        # second request, because the parser read the rest of the buffer as part
+        # of the first request's body and then dropped it.
+        self._buf = b""
+        try:
+            conn.settimeout(self.IDLE_TIMEOUT_SECONDS)
+        except OSError:  # pragma: no cover - defensive
+            pass
 
     def handle(self):
         try:
             while True:
-                request_line, headers, body = self._read_request()
+                try:
+                    request_line, headers, body = self._read_request()
+                except _BadRequest as e:
+                    logger.info("RTSP bad request from %s: %s", self.addr, e)
+                    self._send_response(400, {}, "")
+                    break
                 if request_line is None:
                     break
                 parts = request_line.split()
                 if len(parts) < 3:
+                    logger.info("RTSP malformed request line from %s: %r",
+                                self.addr, request_line)
+                    self._send_response(400, {}, "")
                     break
                 method = parts[0].upper()
                 uri = parts[1] if len(parts) > 1 else "/"
@@ -275,15 +393,27 @@ class _RtspHandlerBase:
             except Exception:
                 pass
 
+    def _fill(self):
+        """Pull one more chunk into the buffer; False on EOF or idle timeout."""
+        try:
+            chunk = self.conn.recv(4096)
+        except socket.timeout:
+            logger.info("RTSP idle timeout from %s, closing connection", self.addr)
+            return False
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        self._buf += chunk
+        return True
+
     def _read_request(self):
         # Read headers (terminated by blank line).
-        raw = b""
-        while b"\r\n\r\n" not in raw:
-            chunk = self.conn.recv(4096)
-            if not chunk:
+        while b"\r\n\r\n" not in self._buf:
+            if not self._fill():
                 return None, {}, ""
-            raw += chunk
-        header_blob, _, rest = raw.partition(b"\r\n\r\n")
+        header_blob, _, rest = self._buf.partition(b"\r\n\r\n")
+        self._buf = rest
         lines = header_blob.decode("utf-8", "replace").split("\r\n")
         request_line = lines[0]
         headers = {}
@@ -292,19 +422,24 @@ class _RtspHandlerBase:
                 k, v = line.split(":", 1)
                 headers[k.strip()] = v.strip()
         # Read body if Content-Length present (SDP for ANNOUNCE).
-        length = int(headers.get("Content-Length", "0"))
-        body = rest.decode("utf-8", "replace")
-        while len(rest) < length:
-            chunk = self.conn.recv(4096)
-            if not chunk:
+        raw_length = get_header(headers, "Content-Length") or "0"
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            # Used to raise straight out of the handler thread: the connection
+            # died with no response at all and nothing in the log.
+            raise _BadRequest("non-numeric Content-Length: {!r}".format(raw_length))
+        if length < 0:
+            raise _BadRequest("negative Content-Length: {}".format(length))
+        while len(self._buf) < length:
+            if not self._fill():
                 break
-            rest += chunk
-        if length:
-            body = rest[:length].decode("utf-8", "replace")
+        body = self._buf[:length].decode("utf-8", "replace") if length else ""
+        self._buf = self._buf[length:]
         return request_line, headers, body
 
     def _send_response(self, code, headers, body):
-        reason = "OK" if code == 200 else "Error"
+        reason = REASON_PHRASES.get(code, "Unknown")
         out = "RTSP/1.0 {} {}\r\n".format(code, reason)
         for k, v in headers.items():
             out += "{}: {}\r\n".format(k, v)
@@ -336,8 +471,17 @@ class _RtspServer:
         while self._serving:
             try:
                 conn, addr = self.sock.accept()
-            except OSError:
-                break
+            except OSError as e:
+                if not self._serving:
+                    break
+                # A *single* failed accept (ECONNABORTED, EMFILE) must not take
+                # the listener down for good: mDNS would keep advertising this
+                # port, leaving the device visible and silently uncastable. This
+                # is the same trap as the Chromecast accept loop (AGENTS.md
+                # section 4.1), which killed TLS with one flaky handshake.
+                logger.warning("RTSP accept failed, listener kept alive: %s", e)
+                time.sleep(0.2)
+                continue
             if not self._serving:
                 break
             h = self.handler_class(self, conn, addr)
