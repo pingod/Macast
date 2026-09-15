@@ -5,13 +5,68 @@
     "plugin_v1": [
         {
             "author": "pingod",
-            "desc": "把投屏链接交给 yt-dlp 下载到本地（B站 / YouTube / m3u8 等），不播放。需要自行安装 yt-dlp 命令。",
+            "desc": "把投屏链接交给 yt-dlp 下载到本地（B站 / YouTube / m3u8 等），或边下边播；菜单里切换。需要自行安装 yt-dlp 命令。",
             "host_version": "0.7",
             "platform": "darwin,linux,win32",
             "renderer": "YTDLPRenderer",
             "title": "yt-dlp Downloader",
             "type": "renderer",
-            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/macast_ytdlp.py?v=0.1",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/macast_ytdlp.py?v=0.2",
+            "version": "0.2"
+        },
+        {
+            "author": "pingod",
+            "desc": "用你自己的播放器放投屏内容（VLC / MPC-BE / MPC-HC / mpv.net），菜单里选一个。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "ExternalPlayerRenderer",
+            "title": "External Player (VLC / MPC-BE / mpv.net)",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/external_player.py?v=0.1",
+            "version": "0.1"
+        },
+        {
+            "author": "pingod",
+            "desc": "角落里的置顶小窗，办公时余光看；含实验性的桌面壁纸模式。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "FloatingRenderer",
+            "title": "Floating Player",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/floating.py?v=0.1",
+            "version": "0.1"
+        },
+        {
+            "author": "pingod",
+            "desc": "收到投屏 / 暂停 / 继续 / 停止时执行你自己的命令：切音频输出、暂停音乐、关灯、发通知。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "HooksRenderer",
+            "title": "Automation Hooks",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/hooks.py?v=0.1",
+            "version": "0.1"
+        },
+        {
+            "author": "pingod",
+            "desc": "把收到的投屏转投给局域网里的另一台 Chromecast（电视 / 音箱），Mac 只做协议转换。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "CastBridgeRenderer",
+            "title": "Chromecast Bridge",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/cast_bridge.py?v=0.1",
+            "version": "0.1"
+        },
+        {
+            "author": "pingod",
+            "desc": "接收 iPhone / iPad 的 AirPlay 音频并放到本机音箱（Macast 只做了视频那一半）。由 shairport-sync 实现，需要自己安装。",
+            "host_version": "0.7",
+            "platform": "darwin,linux",
+            "protocol": "AirPlayAudioProtocol",
+            "title": "AirPlay Audio (RAOP)",
+            "type": "protocol",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@main/plugins/raop.py?v=0.1",
             "version": "0.1"
         }
     ]

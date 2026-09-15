@@ -2252,6 +2252,124 @@ except Exception as e:
     check("web cast entry behaves", False, "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
+# Plugin harness (shared by Parts 13-17)
+#
+# The online plugins in plugins/ are written against the app's public surface:
+# `macast`, `macast.renderer`, `macast.gui` and `macast_renderer.mpv`. This
+# suite loads macast's submodules by hand, so before any plugin is imported:
+#
+#   * REPO goes on sys.path, for `macast_renderer`;
+#   * the GUI toolkits are stubbed if they are missing (same trick as Part 5 --
+#     `macast.gui` imports rumps at module level);
+#   * `macast_renderer.mpv` is imported for real, and so is `macast.gui`: the
+#     number of ways a plugin can get the player's command line or a menu tree
+#     wrong is exactly why these are tested against the real classes.
+# --------------------------------------------------------------------------
+print("\n=== plugin harness ===")
+_plugin_dir = os.path.join(REPO, "plugins")
+
+
+def _load_plugin(name, filename=None):
+    """Import plugins/<filename> as a standalone module (as Macast does)."""
+    path = os.path.join(_plugin_dir, filename or (name + ".py"))
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_fake(bindir, name, body):
+    """Drop an executable `name` into `bindir` (a stand-in for a real tool)."""
+    os.makedirs(bindir, exist_ok=True)
+    path = os.path.join(bindir, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.chmod(path, 0o755)
+    return path
+
+
+def _wait_until(predicate, timeout=10.0, interval=0.1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+class _StateRec(object):
+    """Stands in for the protocol a renderer reports to."""
+
+    def __init__(self):
+        self.rows = []
+
+    def set_state_url(self, v):
+        self.rows.append(('url', v))
+
+    def set_state(self, k, v):
+        self.rows.append((k, v))
+
+    def set_state_position(self, v):
+        self.rows.append(('position', v))
+
+    def set_state_duration(self, v):
+        self.rows.append(('duration', v))
+
+    def set_state_transport(self, v):
+        self.rows.append(('transport', v))
+
+    def set_state_transport_error(self):
+        self.rows.append(('error', True))
+
+    def get_state_title(self):
+        return 'Some Title'
+
+
+try:
+    if REPO not in sys.path:
+        sys.path.insert(0, REPO)
+
+    class _AnyModule(types.ModuleType):
+        def __getattr__(self, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return object
+
+    for _name in ("rumps", "pystray"):
+        try:
+            __import__(_name)
+        except ImportError:
+            sys.modules.setdefault(_name, _AnyModule(_name))
+
+    # Part 5 installed a *stub* for `macast_renderer.mpv` (macast.py only needed
+    # the symbol). The plugins need the real one, so drop the stub first -- a
+    # stub reports a truthy attribute for every name, which would make these
+    # tests pass while testing nothing.
+    for _name in ("macast_renderer.mpv", "macast_renderer"):
+        _mod = sys.modules.get(_name)
+        if _mod is not None and getattr(_mod, "__file__", None) is None:
+            sys.modules.pop(_name, None)
+
+    import macast.gui as gui_mod            # noqa: E402  (needs the stubs above)
+    import macast_renderer.mpv as mpv_mod   # noqa: E402
+
+    _pkg = sys.modules["macast"]
+    # User plugins say `from macast import Setting, MenuItem, gui`; bind the real
+    # objects behind those names rather than doubles, so a menu the plugin builds
+    # is the menu Macast would build.
+    _pkg.Setting = utils.Setting
+    _pkg.MenuItem = gui_mod.MenuItem
+    _pkg.App = gui_mod.App
+    _pkg.gui = lambda *a, **k: None
+    check("the real mpv renderer and gui are importable for plugin tests",
+          mpv_mod.MPVRenderer is not None and gui_mod.MenuItem is not None)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("plugin harness is usable", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Part 13: the yt-dlp downloader shipped as an online plugin
 #
 # plugins/macast_ytdlp.py is the first entry in the (previously empty) index:
@@ -2280,7 +2398,7 @@ try:
     _saved_dir5 = utils.SETTING_DIR
     _saved_path5 = os.environ.get('PATH', '')
     _tmp5 = _tempfile.mkdtemp(prefix="macast-ytdlp-")
-    _notify_rec = lambda *a: _notifications.append(a)      # noqa: E731
+    _notify_rec = lambda *a, **k: _notifications.append(a)  # noqa: E731
     _notifications = []
     try:
         utils.SETTING_DIR = _tmp5
@@ -2291,19 +2409,8 @@ try:
         _downloads5 = os.path.join(_tmp5, "downloads")
 
         # The plugin imports its names off the `macast` package, the way every
-        # real user plugin does. This suite loads macast's submodules by hand,
-        # so those few names are bound here. MenuItem and gui are only reached
-        # by the menu and the __main__ block, neither of which runs below.
-        _pkg = sys.modules["macast"]
-
-        class _MenuItem(object):
-            def __init__(self, *a, **k):
-                pass
-
-        _pkg.MenuItem = _MenuItem
-        _pkg.gui = lambda *a, **k: None
-        _pkg.Setting = utils.Setting
-
+        # real user plugin does; the harness above has already bound the real
+        # Setting / MenuItem / gui behind those names.
         _spec = importlib.util.spec_from_file_location("macast_ytdlp_plugin",
                                                        _plugin_file)
         _plug = importlib.util.module_from_spec(_spec)
@@ -2455,6 +2562,427 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     check("yt-dlp downloader plugin behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 14: the player adapters, the floating window and the yt-dlp modes
+#
+# These plugins live or die on the command line they build, and a wrong option
+# is not a small mistake: mpv refuses to start on an unknown option, and the
+# launcher's response to "mpv never connected" is to retry three times and then
+# stop the service. So the assertions below are about argv, not about vibes.
+# --------------------------------------------------------------------------
+print("\n=== Part 14: player adapters / floating / yt-dlp modes ===")
+try:
+    _saved_setting6 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir6 = utils.SETTING_DIR
+    _saved_path6 = os.environ.get('PATH', '')
+    _tmp6 = _tempfile.mkdtemp(prefix="macast-plugins-")
+    _notify6 = []
+    _notify6_rec = lambda *a, **k: _notify6.append(a)      # noqa: E731
+    try:
+        utils.SETTING_DIR = _tmp6
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp6, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify6_rec)
+
+        # -- external player -------------------------------------------
+        _bin6 = os.path.join(_tmp6, "bin")
+        _argv6 = os.path.join(_tmp6, "argv.txt")
+        _fake_vlc = _write_fake(
+            _bin6, "vlc",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 30\n".format(_argv6))
+        _fake_ytdlp = _write_fake(_bin6, "yt-dlp", "#!/bin/sh\nexit 0\n")
+        os.environ['PATH'] = _bin6 + os.pathsep + _saved_path6
+
+        ext = _load_plugin("ext_player", "external_player.py")
+        check("an installed player is found (with the url as one argv element)",
+              ext.find_player(ext.PLAYERS['VLC']) == _fake_vlc,
+              str(ext.find_player(ext.PLAYERS['VLC'])))
+        check("a player that is not installed is reported missing",
+              ext.find_player(ext.PLAYERS['MPC-BE / MPC-HC']) is None,
+              str(ext.find_player(ext.PLAYERS['MPC-BE / MPC-HC'])))
+        check("only the installed players are offered",
+              [name for name, _ in ext.installed_players()] == ['VLC'],
+              str(ext.installed_players()))
+
+        _rec14 = _StateRec()
+
+        class _ExtRenderer(ext.ExternalPlayerRenderer):
+            @property
+            def protocol(self):
+                return _rec14
+
+        external = _ExtRenderer()
+        external.set_media_url('http://host/movie file.mp4')
+        check("the cast url really reaches the player's argv",
+              _wait_until(lambda: os.path.exists(_argv6))
+              and open(_argv6, encoding='utf-8').read().split('\n')[0]
+              == 'http://host/movie file.mp4',
+              open(_argv6, encoding='utf-8').read() if os.path.exists(_argv6) else 'no argv')
+        check("launching is reported as playing",
+              ('transport', 'PLAYING') in _rec14.rows, str(_rec14.rows))
+        _proc14 = external._proc
+        external.set_media_stop()
+        check("stop really kills the player process",
+              _proc14 is not None and _proc14.poll() is not None,
+              repr(_proc14.poll() if _proc14 else None))
+
+        # A player the user does not have must be reported, not crash.
+        _real_find14 = ext.find_player
+        ext.find_player = lambda entry: None
+        _rec14.rows = []
+        external.set_media_url('http://host/other.mp4')
+        check("a missing player is reported as an error",
+              ('error', True) in _rec14.rows, str(_rec14.rows))
+        check("the error is announced to the user",
+              any('外部播放器' in str(n) for n in _notify6), str(_notify6))
+        ext.find_player = _real_find14
+
+        # -- floating window / wallpaper -------------------------------
+        flo = _load_plugin("floating_player", "floating.py")
+        utils.Setting.set(mpv_mod.SettingProperty.PlayerSize,
+                          mpv_mod.SettingProperty.PlayerSize_FullScreen.value)
+        floating = flo.FloatingRenderer(path='mpv')
+        params = floating.build_mpv_params()
+        check("the floating window owns its geometry, whatever the global size says",
+              '--fullscreen' not in params
+              and len([p for p in params if p.startswith('--geometry=')]) == 1,
+              str([p for p in params if p.startswith(('--geometry', '--autofit', '--fullscreen'))]))
+        check("the floating window is small and on top",
+              any(p.startswith('--autofit=') for p in params) and '--ontop' in params,
+              str([p for p in params if 'autofit' in p or 'ontop' in p]))
+
+        utils.Setting.set(flo.SettingProperty.Floating_Mode, 1)
+        flo.mpv_supports = lambda path, option: True
+        params = floating.build_mpv_params()
+        check("wallpaper mode asks for the desktop window level",
+              '--ontop-level=desktop' in params, str(params))
+        flo.mpv_supports = lambda path, option: False
+        params = floating.build_mpv_params()
+        check("an mpv without that level degrades to a normal window",
+              not any(p.startswith('--ontop-level=') for p in params)
+              and '--ontop' in params, str(params))
+        utils.Setting.set(flo.SettingProperty.Floating_Mode, 0)
+        utils.Setting.set(mpv_mod.SettingProperty.PlayerSize,
+                          mpv_mod.SettingProperty.PlayerSize_Normal.value)
+
+        # -- yt-dlp: download vs stream --------------------------------
+        def _without_socket(params):
+            # The ipc socket path carries a random suffix per instance, so it is
+            # never part of "did the plugin change the command line".
+            return [p for p in params if not p.startswith('--input-ipc-server=')]
+
+        ytdlp = _load_plugin("ytdlp_plugin_2", "macast_ytdlp.py")
+        ytdlp_renderer = ytdlp.YTDLPRenderer(path='mpv')
+        check("yt-dlp defaults to downloading", ytdlp_renderer.stream_mode() is False)
+        check("download mode leaves the player command line untouched",
+              _without_socket(ytdlp_renderer.build_mpv_params())
+              == _without_socket(mpv_mod.MPVRenderer(path='mpv').build_mpv_params()),
+              str(ytdlp_renderer.build_mpv_params()))
+
+        utils.Setting.set(ytdlp.SettingProperty.YTDLP_Mode, 1)
+        check("stream mode is what the setting says", ytdlp_renderer.stream_mode() is True)
+        params = ytdlp_renderer.build_mpv_params()
+        hook = [p for p in params if 'ytdl_hook-ytdl_path' in p]
+        check("stream mode tells mpv's ytdl hook where yt-dlp is",
+              len(hook) == 1 and _fake_ytdlp in hook[0], str(hook))
+        check("the ytdl path is merged into the existing script options",
+              len([p for p in params if p.startswith('--script-opts=')]) == 1,
+              str([p for p in params if p.startswith('--script-opts=')]))
+
+        _commands14 = []
+        ytdlp_renderer.send_command = lambda command: _commands14.append(command) or True
+        ytdlp_renderer.set_media_url('https://example.com/watch?v=abc')
+        check("stream mode hands the page url to mpv",
+              _commands14[-1:] == [['loadfile', 'https://example.com/watch?v=abc',
+                                    'replace']],
+              str(_commands14))
+        check("stream mode does not also start a download",
+              ytdlp_renderer._thread is None)
+        utils.Setting.set(ytdlp.SettingProperty.YTDLP_Mode, 0)
+    finally:
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify6_rec)
+        except Exception:
+            pass
+        os.environ['PATH'] = _saved_path6
+        utils.SETTING_DIR = _saved_dir6
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting6
+        _shutil.rmtree(_tmp6, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("player adapters and floating window behave", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 15: automation hooks
+#
+# The point of a hook is that it runs the *user's* command at the right moment
+# with the right environment. Both halves are tested with a real shell command
+# writing to a file: an event that fires with the wrong url is as broken as one
+# that never fires.
+# --------------------------------------------------------------------------
+print("\n=== Part 15: automation hooks ===")
+try:
+    _saved_setting7 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir7 = utils.SETTING_DIR
+    _tmp7 = _tempfile.mkdtemp(prefix="macast-hooks-")
+    try:
+        utils.SETTING_DIR = _tmp7
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp7, "macast_setting.json")
+        _hooklog = os.path.join(_tmp7, "hooks.log")
+        hooks = _load_plugin("hooks_plugin", "hooks.py")
+
+        utils.Setting.set(
+            hooks.SettingProperty.Hook_On_Cast,
+            'echo "cast:$MACAST_EVENT:$MACAST_URL:$MACAST_TITLE" >> ' + _hooklog)
+        utils.Setting.set(hooks.SettingProperty.Hook_On_Pause,
+                          'echo pause >> ' + _hooklog)
+        utils.Setting.set(hooks.SettingProperty.Hook_On_Stop,
+                          'echo stop >> ' + _hooklog)
+
+        _rec15 = _StateRec()
+
+        class _HooksRenderer(hooks.HooksRenderer):
+            @property
+            def protocol(self):
+                return _rec15
+
+        hooks_renderer = _HooksRenderer(path='mpv')
+        hooks_renderer.send_command = lambda command: True   # no mpv in this test
+        hooks_renderer.set_media_url('http://host/film.mp4')
+        check("the cast hook runs with the event, url and title in its environment",
+              _wait_until(lambda: os.path.exists(_hooklog)
+                          and 'cast:cast:http://host/film.mp4:Some Title'
+                          in open(_hooklog, encoding='utf-8').read()),
+              open(_hooklog, encoding='utf-8').read() if os.path.exists(_hooklog) else 'no log')
+
+        hooks_renderer.set_media_pause()
+        hooks_renderer.set_media_stop()
+        _wait_until(lambda: os.path.exists(_hooklog)
+                    and 'stop' in open(_hooklog, encoding='utf-8').read())
+        body = open(_hooklog, encoding='utf-8').read()
+        check("the pause hook runs on pause", 'pause' in body, body)
+        check("the stop hook runs on stop", 'stop' in body, body)
+        check("an unconfigured event runs nothing",
+              hooks.run_hook('resume', 'http://host/film.mp4') is False)
+        # Fire-and-forget is the design: the command is the user's, and a
+        # failure in it must never surface as an exception inside the CherryPy
+        # worker that is answering the phone.
+        utils.Setting.set(hooks.SettingProperty.Hook_On_Resume,
+                          '/nonexistent/macast-hook-xyz')
+        try:
+            hooks.run_hook('resume', 'http://host/film.mp4')
+            raised = False
+        except Exception as exc:
+            raised = '{}: {}'.format(type(exc).__name__, exc)
+        check("a hook command that cannot succeed does not raise into the worker",
+              raised is False, str(raised))
+
+        # Opening the menu is what creates the four keys in the settings file,
+        # which is how the feature is discovered (a menu cannot ask for input).
+        hooks.HooksRendererSetting().build_menu()
+        check("the menu creates the hook keys in the settings file",
+              all(utils.Setting.has(hooks.SettingProperty[key])
+                  for key in ('Hook_On_Cast', 'Hook_On_Pause',
+                              'Hook_On_Resume', 'Hook_On_Stop')),
+              str(sorted(k for k in utils.Setting.setting if k.startswith('Hook_'))))
+    finally:
+        utils.SETTING_DIR = _saved_dir7
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting7
+        _shutil.rmtree(_tmp7, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("automation hooks behave", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 16: the Chromecast bridge, driven against Macast's own receiver
+#
+# This is the sender half of a protocol Macast implements as a receiver -- which
+# makes for an unusually good test: start a real ChromecastProtocol (the same
+# class the app runs), point the bridge at 127.0.0.1:<its port> and check that
+# a genuine device-auth / CONNECT / LAUNCH / CONNECT transport / LOAD sequence
+# arrives intact. No real TV needed, and nothing here is simulated except the
+# player behind the receiver.
+# --------------------------------------------------------------------------
+print("\n=== Part 16: Chromecast bridge ===")
+try:
+    _saved_setting8 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir8 = utils.SETTING_DIR
+    _tmp8 = _tempfile.mkdtemp(prefix="macast-bridge-")
+    _notify8 = []
+    _notify8_rec = lambda *a, **k: _notify8.append(a)      # noqa: E731
+    _receiver = None
+    try:
+        utils.SETTING_DIR = _tmp8
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp8, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify8_rec)
+
+        bridge = _load_plugin("cast_bridge_plugin", "cast_bridge.py")
+        _rec16 = _StateRec()
+
+        class _Bridge(bridge.CastBridgeRenderer):
+            @property
+            def protocol(self):
+                return _rec16
+
+        bridged = _Bridge()
+        utils.Setting.set(bridge.SettingProperty.Bridge_Timeout, 3)
+
+        # -- no target chosen ------------------------------------------
+        utils.Setting.set(bridge.SettingProperty.Bridge_Target, '')
+        _rec16.rows = []
+        bridged.set_media_url('http://bridge/nowhere.mp4')
+        check("a bridge cast without a target is reported, not attempted",
+              _wait_until(lambda: ('error', True) in _rec16.rows, timeout=5),
+              str(_rec16.rows))
+        check("the report says how to fix it",
+              any('Target' in str(row[1]) for row in _rec16.rows
+                  if row[0] == 'CurrentTrackTitle'), str(_rec16.rows))
+
+        # -- a real receiver on the loopback ----------------------------
+        _CTX.renderer = MockRenderer()
+        _receiver = TestProtocol()
+        _receiver.start()
+        utils.Setting.set(bridge.SettingProperty.Bridge_Target,
+                          '127.0.0.1:{}'.format(_receiver.cast_port))
+        _rec16.rows = []
+        bridged.set_media_url('http://bridge/movie.mp4')
+        check("the bridge completes the Cast handshake and loads the url",
+              _wait_until(lambda: _CTX.renderer.called('set_media_url'), timeout=20)
+              and _CTX.renderer.last_arg('set_media_url') == 'http://bridge/movie.mp4',
+              str(_CTX.renderer.calls))
+        check("a confirmed load is reported as playing",
+              ('transport', 'PLAYING') in _rec16.rows, str(_rec16.rows))
+
+        bridged.set_media_pause()
+        check("pause reaches the other device",
+              _wait_until(lambda: _CTX.renderer.called('set_media_pause'), timeout=10),
+              str(_CTX.renderer.calls))
+        bridged.set_media_resume()
+        check("resume reaches the other device",
+              _wait_until(lambda: _CTX.renderer.called('set_media_resume'), timeout=10),
+              str(_CTX.renderer.calls))
+        bridged.set_media_stop()
+        check("stop reaches the other device",
+              _wait_until(lambda: _CTX.renderer.called('set_media_stop'), timeout=10),
+              str(_CTX.renderer.calls))
+        check("the bridge releases the connection on stop",
+              bridged._sender is None)
+
+        # -- an unreachable target --------------------------------------
+        utils.Setting.set(bridge.SettingProperty.Bridge_Target, '127.0.0.1:1')
+        _rec16.rows = []
+        bridged.set_media_url('http://bridge/unreachable.mp4')
+        check("an unreachable target is reported instead of hanging",
+              _wait_until(lambda: ('error', True) in _rec16.rows, timeout=15),
+              str(_rec16.rows))
+        check("the failure is announced with the device name",
+              any('投屏到' in str(n) or '失败' in str(n) for n in _notify8),
+              str(_notify8))
+    finally:
+        if _receiver is not None:
+            try:
+                _receiver.stop()
+            except Exception:
+                pass
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify8_rec)
+        except Exception:
+            pass
+        utils.SETTING_DIR = _saved_dir8
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting8
+        _shutil.rmtree(_tmp8, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the Chromecast bridge behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 17: AirPlay audio (RAOP) supervision
+#
+# The plugin does not implement RAOP; it keeps shairport-sync running with a
+# config that carries the Macast name. So the tests are about the supervisor:
+# it must start the binary with the right argv, notice a connection from the
+# log, and never leave a process behind when it is switched off or when the
+# binary is simply not installed.
+# --------------------------------------------------------------------------
+print("\n=== Part 17: AirPlay audio (RAOP) ===")
+try:
+    _saved_setting9 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir9 = utils.SETTING_DIR
+    _saved_path9 = os.environ.get('PATH', '')
+    _tmp9 = _tempfile.mkdtemp(prefix="macast-raop-")
+    _notify9 = []
+    _notify9_rec = lambda *a, **k: _notify9.append(a)      # noqa: E731
+    try:
+        utils.SETTING_DIR = _tmp9
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp9, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify9_rec)
+
+        raop = _load_plugin("raop_plugin", "raop.py")
+        check("RAOP does not force the SSDP server on",
+              raop.AirPlayAudioProtocol.uses_ssdp is False)
+        check("a quote in the device name cannot break the generated config",
+              '\\"' in raop.config_body('My "Mac"'), raop.config_body('My "Mac"'))
+
+        _bin9 = os.path.join(_tmp9, "bin")
+        _argv9 = os.path.join(_tmp9, "argv.txt")
+        _fake_shair = _write_fake(
+            _bin9, "shairport-sync",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n"
+            "echo 'Connection from 10.0.0.9:1234.'\n"
+            "exec sleep 30\n".format(_argv9))
+        os.environ['PATH'] = _bin9 + os.pathsep + _saved_path9
+        check("shairport-sync is found on PATH",
+              raop.find_shairport() == _fake_shair, str(raop.find_shairport()))
+
+        protocol9 = raop.AirPlayAudioProtocol()
+        protocol9.start()
+        check("the supervisor starts the binary", protocol9.running())
+        config9 = os.path.join(_tmp9, raop.CONFIG_NAME)
+        check("a config carrying the Macast name is written",
+              os.path.exists(config9) and 'name = ' in open(config9, encoding='utf-8').read(),
+              open(config9, encoding='utf-8').read() if os.path.exists(config9) else 'missing')
+        check("the config file is what the binary was pointed at",
+              _wait_until(lambda: os.path.exists(_argv9))
+              and config9 in open(_argv9, encoding='utf-8').read(),
+              open(_argv9, encoding='utf-8').read() if os.path.exists(_argv9) else 'no argv')
+        check("an AirPlay client connecting is surfaced to the user",
+              _wait_until(lambda: any('AirPlay' in str(n) for n in _notify9), timeout=10),
+              str(_notify9))
+        protocol9.stop()
+        check("stopping the plugin stops the binary", not protocol9.running())
+
+        _real_find9 = raop.find_shairport
+        raop.find_shairport = lambda: None
+        _notify9[:] = []
+        protocol9b = raop.AirPlayAudioProtocol()
+        protocol9b.start()
+        check("a missing shairport-sync is reported with the install hint",
+              any('shairport-sync' in str(n) for n in _notify9), str(_notify9))
+        check("a missing binary leaves no process behind", protocol9b._proc is None)
+        raop.find_shairport = _real_find9
+    finally:
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify9_rec)
+        except Exception:
+            pass
+        os.environ['PATH'] = _saved_path9
+        utils.SETTING_DIR = _saved_dir9
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting9
+        _shutil.rmtree(_tmp9, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the AirPlay audio supervisor behaves", False,
           "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------

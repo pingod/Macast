@@ -332,75 +332,87 @@ class MPVRenderer(Renderer):
             self.ipc_sock.close()
             logger.error("mpv ipc stopped")
 
+    def build_mpv_params(self):
+        """The mpv command line, built fresh for every start attempt.
+
+        Split out of `start_mpv` so a renderer plugin can extend it -- a small
+        always-on-top window, an experimental wallpaper mode, pointing mpv's
+        ytdl hook at the user's yt-dlp binary -- without copying the whole
+        launcher. Keep it pure: `start_mpv` retries it, so no side effects.
+        """
+        # mpv default params
+        params = [
+            self.path,
+            '--input-ipc-server={}'.format(self.mpv_sock),
+            '--image-display-duration=inf',
+            '--idle=yes',
+            '--no-terminal',
+            '--on-all-workspaces',
+            '--hwdec=yes',
+            '--save-position-on-quit=yes',
+            '--script-opts=osc-timetotal=yes,osc-layout=bottombar,' +
+            'osc-title=${title},osc-showwindowed=yes,' +
+            'osc-seekbarstyle=bar,osc-visibility=auto'
+        ]
+
+        ontop = Setting.get(SettingProperty.PlayerOntop,
+                            default=SettingProperty.PlayerOntop_True.value)
+        if ontop:
+            params.append('--ontop')
+
+        # set player position
+        player_position = Setting.get(SettingProperty.PlayerPosition,
+                                      default=SettingProperty.PlayerPosition_RightTop.value)
+        player_position_data = [[2, 5], [2, 98], [98, 5], [98, 98], [50, 50]]
+        x = player_position_data[player_position][0]
+        y = player_position_data[player_position][1]
+        params.append('--geometry={}%:{}%'.format(x, y))
+
+        # set lua scripts
+        scripts_path = Setting.get_base_path('scripts')
+        if os.path.exists(scripts_path):
+            scripts = os.listdir(scripts_path)
+            scripts = filter(lambda s: s.endswith('.lua'), scripts)
+            for script in scripts:
+                path = os.path.join(scripts_path, script)
+                params.append('--script={}'.format(path))
+
+        # set player size
+        player_size = Setting.get(SettingProperty.PlayerSize,
+                                  default=SettingProperty.PlayerSize_Normal.value)
+        if player_size <= SettingProperty.PlayerSize_Large.value:
+            params.append('--autofit={}%'.format(
+                int(15 - 2.5 * player_size + 7.5 * player_size ** 2)))
+        elif player_size == SettingProperty.PlayerSize_Auto.value:
+            params.append('--autofit-larger=90%')
+        elif player_size == SettingProperty.PlayerSize_FullScreen.value:
+            params.append('--fullscreen')
+
+        # set darwin only options
+        if sys.platform == 'darwin':
+            params += [
+                '--ontop-level=system',
+                '--on-all-workspaces',
+                '--macos-app-activation-policy=accessory',
+            ]
+
+        # set hardware
+        hw = Setting.get(SettingProperty.PlayerHW,
+                         default=SettingProperty.PlayerHW_Enable.value)
+        if hw == SettingProperty.PlayerHW_Disable.value:
+            params.remove('--hwdec=yes')
+        elif hw == SettingProperty.PlayerHW_Force.value:
+            params.append('--macos-force-dedicated-gpu=yes')
+
+        return params
+
     def start_mpv(self):
         """Start mpv thread
         """
         error_time = 3
         while self.running and error_time > 0:
             self.set_state_speed('1')
-            # mpv default params
-            params = [
-                self.path,
-                '--input-ipc-server={}'.format(self.mpv_sock),
-                '--image-display-duration=inf',
-                '--idle=yes',
-                '--no-terminal',
-                '--on-all-workspaces',
-                '--hwdec=yes',
-                '--save-position-on-quit=yes',
-                '--script-opts=osc-timetotal=yes,osc-layout=bottombar,' +
-                'osc-title=${title},osc-showwindowed=yes,' +
-                'osc-seekbarstyle=bar,osc-visibility=auto'
-            ]
-
-            ontop = Setting.get(SettingProperty.PlayerOntop,
-                                default=SettingProperty.PlayerOntop_True.value)
-            if ontop:
-                params.append('--ontop')
-
-            # set player position
-            player_position = Setting.get(SettingProperty.PlayerPosition,
-                                          default=SettingProperty.PlayerPosition_RightTop.value)
-            player_position_data = [[2, 5], [2, 98], [98, 5], [98, 98], [50, 50]]
-            x = player_position_data[player_position][0]
-            y = player_position_data[player_position][1]
-            params.append('--geometry={}%:{}%'.format(x, y))
-
-            # set lua scripts
-            scripts_path = Setting.get_base_path('scripts')
-            if os.path.exists(scripts_path):
-                scripts = os.listdir(scripts_path)
-                scripts = filter(lambda s: s.endswith('.lua'), scripts)
-                for script in scripts:
-                    path = os.path.join(scripts_path, script)
-                    params.append('--script={}'.format(path))
-
-            # set player size
-            player_size = Setting.get(SettingProperty.PlayerSize,
-                                      default=SettingProperty.PlayerSize_Normal.value)
-            if player_size <= SettingProperty.PlayerSize_Large.value:
-                params.append('--autofit={}%'.format(
-                    int(15 - 2.5 * player_size + 7.5 * player_size ** 2)))
-            elif player_size == SettingProperty.PlayerSize_Auto.value:
-                params.append('--autofit-larger=90%')
-            elif player_size == SettingProperty.PlayerSize_FullScreen.value:
-                params.append('--fullscreen')
-
-            # set darwin only options
-            if sys.platform == 'darwin':
-                params += [
-                    '--ontop-level=system',
-                    '--on-all-workspaces',
-                    '--macos-app-activation-policy=accessory',
-                ]
-
-            # set hardware
-            hw = Setting.get(SettingProperty.PlayerHW,
-                             default=SettingProperty.PlayerHW_Enable.value)
-            if hw == SettingProperty.PlayerHW_Disable.value:
-                params.remove('--hwdec=yes')
-            elif hw == SettingProperty.PlayerHW_Force.value:
-                params.append('--macos-force-dedicated-gpu=yes')
+            params = self.build_mpv_params()
 
             # start mpv
             logger.info("mpv starting")
