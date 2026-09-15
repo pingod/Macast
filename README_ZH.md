@@ -91,8 +91,9 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - **进阶用户**  
   1. 以前要手动下载的插件（IINA、Web、Live、PotPlayer、PIFMRDS、NVA 协议）现在**都已内置**，
      在设置页 → 插件里直接启用 / 停用 / 卸载即可，即时生效、不用重启。
-  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录（目前为空，因为上游合集的插件全部内置了）。
-     设置页拉不到索引时只会显示本机插件，不影响使用。
+  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录：目前可选装 **yt-dlp Downloader**
+     —— 把投屏链接交给 `yt-dlp` 下载到本地而不是播放（B站 / YouTube / m3u8），
+     需要你自己先装 `yt-dlp` 命令。设置页拉不到索引时只会显示本机插件，不影响使用。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **程序员**  
