@@ -27,7 +27,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 218/218）
+# 2) 回归验证（当前 237/237）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -40,7 +40,7 @@ Macast.py                  入口（GUI / CLI 两种模式）
 macast/
   macast.py                MacastApp（菜单栏）、MacastPlugin / MacastPluginManager（插件热插拔）
   server.py                CherryPy 服务、HTTP/HTTPS 通道、SSDP 生命周期
-  protocol.py              DLNA 协议 + DLNAHandler（Web UI / 管理 API 都在这里）、PlaybackGuard
+  protocol.py              DLNA 协议 + DLNAHandler（Web UI / 管理 API / 网页投屏入口都在这里）、api_token、PlaybackGuard
   protocol_group.py        ProtocolGroup：把多个协议伪装成一个，扇出 start/stop/set_state_*
   protocol_cast.py         Chromecast 接收端（mDNS + Cast v2 over TLS:8009 + setup HTTP:8008）
   protocol_airplay.py      AirPlay 接收端（mDNS + RTSP:7000，仅视频 URL）
@@ -225,6 +225,30 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 
 索引格式、字段表与验证命令见 `plugins/README.md`。
 
+### 4.7 网页投屏入口：GET 版即使来自本机也要求令牌
+
+给「只能打开网址」的调用方（iOS 快捷指令、书签、`curl`、脚本）留了
+`GET /api?query=cast&url=<绝对地址>&token=<令牌>`，绕开 DLNA 发现。设置页重投历史用的
+`POST cast-uri` 语义保持不变。
+
+- **GET 版必须带令牌，loopback 也不例外**：任何网页都能发一个
+  `GET http://127.0.0.1:58880/api?query=cast&...`（`<img>` / `fetch`）。若沿用
+  「本机即可信」，就等于随便哪个网页都能指使你的 Mac 开始播片。POST 版没这条通道，
+  所以继续信任 loopback —— 但 `cast-uri` 不在 `_MANAGEMENT_PARAMS` 里，它靠的正是
+  `_management_allowed()` 的本机判定，**动这里之前先想清楚 CSRF**。
+- **令牌常驻**：`protocol.api_token()` 存在 `macast_setting.json` 的 `Api_Token`，
+  首次使用时生成（`threading.Lock` 串行化，避免并发首用生成两个）。以前它是
+  `secrets.token_hex(16)` 每进程随机、且从不显示在任何地方 —— 等于管理 API 对
+  「另一台设备」永久不可用，快捷指令根本没法配。改完必须保持稳定，否则已配好的
+  快捷指令会在下次启动后 403。
+- 令牌出现在两处：设置页「状态 → 网页投屏入口」（可复制，附 curl 例子）和高级设置的
+  JSON 里。`cast-info` 查询本身走管理门控（本机 / HTTPS / 令牌），局域网拿不到它 ——
+  这是「令牌不外泄」的唯一防线，别把它从门控名单里删掉。
+- 回归用例是 Part 12（19 条）。它借 CherryPy 在**无请求上下文**时给出的假 loopback
+  请求真跑门控（`cherrypy.serving.request` 可直接改 `params` / `headers` / `remote` /
+  `scheme`），不需要真起服务；唯一被打桩的是 `Setting.is_service_running`（GET 在服务
+  未启动时会回 503）。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -255,7 +279,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（218/218）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引 |
+| `verify_cast_airplay.py` | **主验证套件**（237/237）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引 + 网页投屏入口与令牌门控 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `smoke_discovery.py` | 真实网络发现验证 |
@@ -340,6 +364,7 @@ CI 会用同名文件**替换** release 里的产物。用 digest 对比确认�
 | AirPlay 音频（RAOP）/ 屏幕镜像 | **未实现** |
 | DRM 内容 | **不可能支持** |
 | 插件 | 支持启用/停用/卸载/安装（**热生效，不重启**）；卸载进 `.trash/` 可恢复 |
+| 网页投屏入口 | `GET /api?query=cast&url=<绝对地址>&token=<令牌>`（脚本 / 快捷指令 / 书签，绕开 DLNA 发现）；令牌常驻并显示在设置页 |
 
 ## 10. 与用户协作的约定（这个仓库的历史教训）
 

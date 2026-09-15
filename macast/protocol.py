@@ -1134,16 +1134,40 @@ class DLNAProtocol(Protocol):
         return bool(self.get_state('DisplayCurrentSubtitle'))
 
 
+#: Serialises the first-time generation of the management token.
+_api_token_lock = threading.Lock()
+
+
+def api_token():
+    """The management token, stable across restarts.
+
+    It used to be ``secrets.token_hex(16)`` per process and was never shown
+    anywhere, which quietly made every management endpoint unusable from
+    outside the loopback interface: a phone Shortcut or a script has no way to
+    learn a value that only ever existed in this process's memory. It is now
+    persisted in the settings file and displayed on the settings page
+    (状态 → 网页投屏入口), so configuring a Shortcut once keeps working.
+    """
+    if Setting.has(SettingProperty.Api_Token):
+        token = Setting.get(SettingProperty.Api_Token, '')
+        if token:
+            return token
+    with _api_token_lock:
+        # Another worker thread may have generated it while we waited.
+        if Setting.has(SettingProperty.Api_Token):
+            token = Setting.get(SettingProperty.Api_Token, '')
+            if token:
+                return token
+        token = secrets.token_hex(16)
+        Setting.set(SettingProperty.Api_Token, token)
+    return token
+
+
 @cherrypy.expose
 class Handler:
 
     def __init__(self):
         self.setting_page = load_xml(XMLPath.SETTING_PAGE.value).encode()
-        # Random token used to protect management endpoints (install-plugin,
-        # save-launch-param, status/log/launch-param queries) when the request
-        # comes from outside the loopback interface. The local settings page is
-        # always served from 127.0.0.1, so it never needs to send the token.
-        self._api_token = secrets.token_hex(16)
         self.local_dir = os.path.join(SETTING_DIR, 'local_files')
         os.makedirs(self.local_dir, exist_ok=True)
 
@@ -1154,6 +1178,17 @@ class Handler:
             logger.error("Unable to find an available protocol.")
             return Protocol()
         return protocols.pop()
+
+    def _token_present(self):
+        """Whether this request carries the management token.
+
+        The header is what scripts use; the query parameter is what anything
+        that can only open a URL (a phone Shortcut, a bookmarklet) can use.
+        """
+        token = cherrypy.request.headers.get('X-Macast-Token')
+        if not token:
+            token = cherrypy.request.params.get('token')
+        return bool(token and token == api_token())
 
     def _management_allowed(self):
         """Management endpoints must only be reachable from an authenticated
@@ -1172,10 +1207,30 @@ class Handler:
         # authenticated: the user explicitly opened https://host:port.
         if getattr(cherrypy.request, 'scheme', 'http') == 'https':
             return True
-        token = cherrypy.request.headers.get('X-Macast-Token')
-        if not token:
-            token = cherrypy.request.params.get('token')
-        return bool(token and token == self._api_token)
+        return self._token_present()
+
+    def _cast_url(self, url, title=''):
+        """Push an absolute URL to the renderer, as a JSON-ready result.
+
+        Shared by the POST ``cast-uri`` field (the settings page re-casting a
+        history entry) and the GET ``cast`` query (Shortcuts, scripts, curl),
+        so both validate and report the same way.
+        """
+        url = (url or '').strip()
+        if not url:
+            return {'code': 1, 'message': 'missing url'}
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', url):
+            # A bare path would reach the player as a relative URL and fail far
+            # away from here, with an error that says nothing about the cause.
+            return {'code': 1,
+                    'message': 'url must be absolute, e.g. http://host/movie.mp4'}
+        try:
+            self.protocol.cast_uri(url, title)
+        except Exception as e:
+            logger.error('cast url error: %s' % e)
+            return {'code': 1, 'message': 'cast failed'}
+        logger.info('cast url from web endpoint: %s', url)
+        return {'code': 0, 'message': 'success', 'url': url, 'title': title}
 
     def reload(self):
         cherrypy.server.httpserver = _cpnative_server.CPHTTPServer(cherrypy.server)
@@ -1358,8 +1413,25 @@ class Handler:
         if param == 'api':
             cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
             query = kwargs.get('query', '')
+            if query == 'cast':
+                # The GET flavour exists for callers that can only open a URL:
+                # a phone Shortcut, a bookmarklet, `curl`. It demands the token
+                # *even from the loopback interface*, unlike the POST endpoint
+                # below -- any page the user visits can fire a GET at
+                # 127.0.0.1, and "start playing this URL" must not be
+                # triggerable by a drive-by. See docs in _management_allowed.
+                if not self._token_present():
+                    return json.dumps(
+                        {'code': 403,
+                         'message': 'Forbidden: cast requires the api token '
+                                    '(see the settings page)'},
+                        indent=4).encode()
+                return json.dumps(
+                    self._cast_url(kwargs.get('url', ''), kwargs.get('title', '')),
+                    indent=4).encode()
             # Sensitive management queries: block unless local or token-bearing.
-            if query in ('status', 'log', 'launch-param', 'interfaces', 'subscribers') \
+            if query in ('status', 'log', 'launch-param', 'interfaces',
+                         'subscribers', 'cast-info') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1390,6 +1462,14 @@ class Handler:
                     # the coordinates in one Python-side place (see
                     # macast/plugin_repo.py) and lets the suite assert on them.
                     'plugin_repo': plugin_repo.describe(),
+                }
+            elif query == 'cast-info':
+                # Everything the settings page needs to show the web cast
+                # entry point: the token (so a Shortcut can be configured) and
+                # the port. Gated with the other sensitive queries above.
+                res = {
+                    'token': api_token(),
+                    'port': Setting.get_port(),
                 }
             elif query == 'status':
                 res = self.get_status()
@@ -1565,12 +1645,7 @@ class Handler:
                 res['code'] = 403
                 res['message'] = 'Forbidden: management API requires local access or token'
                 return json.dumps(res, indent=4).encode()
-            try:
-                self.protocol.cast_uri(kwargs.get('cast-uri'))
-            except Exception as e:
-                logger.error('cast uri error: %s' % e)
-                res['code'] = 1
-                res['message'] = 'cast failed'
+            res = self._cast_url(kwargs.get('cast-uri'), kwargs.get('cast-title', ''))
         elif kwargs.get('clear-play-history', None) is not None:
             if not self._management_allowed():
                 res['code'] = 403

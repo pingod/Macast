@@ -21,8 +21,10 @@ A menu bar application using mpv as **DLNA Media Renderer**. You can push videos
 
 This fork (`pingod/Macast`) additionally acts as a **Chromecast** and **AirPlay** receiver,
 can run all three protocols at the same time, lets you pick which network interface is
-advertised, and supports installing / enabling / disabling / uninstalling plugins from the
-settings page **without restarting**. See [README_ZH.md](README_ZH.md) for the full list.
+advertised, supports installing / enabling / disabling / uninstalling plugins from the
+settings page **without restarting**, and exposes a token-protected HTTP cast entry
+(`GET /api?query=cast&url=...&token=...`) for Shortcuts, bookmarks and scripts.
+See [README_ZH.md](README_ZH.md) for the full list.
 
 > Working on the code? Start with **[AGENTS.md](AGENTS.md)** — repo map, the list of
 > hardware-only pitfalls this project has already been bitten by, and the release process.

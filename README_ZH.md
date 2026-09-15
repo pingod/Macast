@@ -35,6 +35,11 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
   不再读上游 `xfangfang/Macast-plugins`（它的 6 个插件现已全部内置，继续读只会产生重复卡片和
   指回上游旧文件的「可更新」角标）。地址只写在 `macast/plugin_repo.py` 一处，由 `/api?query=plugin-info`
   下发；浏览器按 `raw.githubusercontent.com` → `cdn.jsdelivr.net` 顺序回退，全都不通时只显示本机插件。
+- **网页投屏入口**：`GET /api?query=cast&url=<绝对地址>&token=<令牌>`，给 iOS 快捷指令、
+  书签、`curl`、脚本用，绕开 DLNA 发现也能投屏；`POST cast-uri` 继续服务设置页的重投。
+  令牌是**常驻**的（存在 `macast_setting.json` 的 `Api_Token`），在「状态 → 网页投屏入口」
+  里可一键复制；GET 版即使来自本机也要求令牌 —— 任意网页都能往 `127.0.0.1` 发 GET，
+  不能让它们指使你的 Mac 播片。
 - **播放状态如实上报**：Chromecast 的 `LOAD` 不再无脑回 `PLAYING`，而是等播放器确认；
   播放器报错则回 `LOAD_FAILED`。
 
