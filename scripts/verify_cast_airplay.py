@@ -16,6 +16,7 @@
 #
 
 import importlib.util
+import http.client
 import json
 import os
 import shutil as _shutil
@@ -28,6 +29,7 @@ import tempfile as _tempfile
 import threading
 import time
 import types
+import uuid
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MACAST = os.path.join(REPO, "macast")
@@ -444,6 +446,121 @@ check("airplay FLUSH 200", code == 200)
 # 2f features bitmask must not claim unsupported FairPlay
 check("airplay features omit FairPlay bit (0x04)",
       airplay.FEATURES & 0x04 == 0, hex(airplay.FEATURES))
+
+# 2g RTSP message hygiene. Every one of these was a real defect: the fallback
+# answered 200 to requests it had never performed, the header dict was
+# case-sensitive, and CSeq was fabricated when the client sent none.
+code, headers, body = ap._handle_rtsp("OPTIONS", {"CSeq": "1"}, "")
+# Read through getattr so that deleting SUPPORTED_METHODS fails this check
+# instead of aborting the whole suite with an AttributeError.
+_supported = list(getattr(airplay, "SUPPORTED_METHODS", ()))
+check("airplay Public lists exactly the implemented methods",
+      bool(_supported) and headers.get("Public", "").split(", ") == _supported,
+      str(headers.get("Public")))
+
+code, headers, body = ap._handle_rtsp("DESCRIBE", {"CSeq": "9"}, "")
+check("an unimplemented RTSP method is refused, not answered 200",
+      code == 501, "code={}".format(code))
+check("the refusal tells the client what is allowed",
+      "OPTIONS" in headers.get("Allow", "") and "PLAY" in headers.get("Allow", ""),
+      str(headers.get("Allow")))
+
+ap2 = TestAirPlay()
+code, _h, _b = ap2._handle_rtsp("ANNOUNCE", {"CSeq": "2"}, "")
+check("ANNOUNCE without Content-Location is refused",
+      code == 400, "code={}".format(code))
+_CTX.renderer = MockRenderer()
+code, headers, body = ap2._handle_rtsp("PLAY", {"CSeq": "3"}, "")
+check("PLAY with nothing announced is refused",
+      code == 455, "code={}".format(code))
+check("a refused PLAY does not touch the player",
+      not _CTX.renderer.called("set_media_url"))
+
+# A client that sends lowercase header names must still be understood, and the
+# reply must carry *its* CSeq -- not an invented 1.
+code, headers, _b = ap2._handle_rtsp(
+    "ANNOUNCE", {"cseq": "42", "content-location": "http://example.com/lower.mp4"}, "")
+check("lowercase header names are understood",
+      code == 200 and headers.get("CSeq") == "42", "{} {}".format(code, headers))
+ap2._handle_rtsp("SETUP", {"cseq": "43"}, "")
+code, headers, _b = ap2._handle_rtsp("PLAY", {"cseq": "44", "session": "1"}, "")
+check("a lowercase session header is accepted",
+      code == 200 and headers.get("CSeq") == "44", "{} {}".format(code, headers))
+check("case-insensitive Content-Location reached the player",
+      _CTX.renderer.last_arg("set_media_url") == "http://example.com/lower.mp4",
+      str(_CTX.renderer.last_arg("set_media_url")))
+
+code, headers, _b = ap2._handle_rtsp("OPTIONS", {}, "")
+check("no CSeq in the request means no CSeq in the reply",
+      "CSeq" not in headers, str(headers))
+
+# Session parameters are legal and are not part of the session id.
+code, _h, _b = ap2._handle_rtsp("PLAY", {"CSeq": "45", "Session": "1;timeout=60"}, "")
+check("a Session carrying parameters is not rejected",
+      code == 200, "code={}".format(code))
+code, _h, _b = ap2._handle_rtsp("PAUSE", {"CSeq": "46", "Session": "99"}, "")
+check("a stale Session is answered 454",
+      code == 454, "code={}".format(code))
+
+# --------------------------------------------------------------------------
+# Part 2b: RTSP framing over a real socket
+# --------------------------------------------------------------------------
+print("\n=== Part 2b: RTSP framing over a real socket ===")
+_CTX.renderer = MockRenderer()
+ap3 = TestAirPlay()
+try:
+    ap3.start()
+    s = socket.create_connection(("127.0.0.1", ap3.rtsp_port))
+    # Fail the check instead of wedging the whole suite if a reply never comes:
+    # a framing regression means the second coalesced request is dropped, and
+    # without a timeout the harness would block on readline() forever.
+    s.settimeout(10.0)
+    f = s.makefile("rwb")
+
+    def read_status():
+        line = f.readline().decode()
+        while not line.strip():
+            line = f.readline().decode()
+        while f.readline().decode().strip():
+            pass
+        return line
+
+    # Coalesced requests: SETUP and PLAY in a single write, the shape a sender
+    # produces when it does not wait for the first reply. The old parser
+    # consumed everything up to the body length and discarded the remainder,
+    # so PLAY vanished and the client hung until it gave up.
+    blob = (
+        "ANNOUNCE rtsp://airplay RTSP/1.0\r\n"
+        "CSeq: 1\r\nContent-Location: http://e2e/coalesced.mp4\r\n"
+        "Content-Length: 0\r\n\r\n"
+        "SETUP rtsp://airplay RTSP/1.0\r\nCSeq: 2\r\nContent-Length: 0\r\n\r\n"
+        "PLAY rtsp://airplay RTSP/1.0\r\nCSeq: 3\r\nSession: 1\r\nContent-Length: 0\r\n\r\n"
+    )
+    f.write(blob.encode())
+    f.flush()
+    codes = [read_status() for _ in range(3)]
+    check("three coalesced RTSP requests are all answered",
+          all(" 200 " in c for c in codes), str(codes))
+    check("the coalesced PLAY still reached the player",
+          _CTX.renderer.last_arg("set_media_url") == "http://e2e/coalesced.mp4",
+          str(_CTX.renderer.last_arg("set_media_url")))
+
+    # A non-numeric Content-Length used to raise inside the handler thread: the
+    # connection died with no response and no log line.
+    f.write(b"OPTIONS rtsp://airplay RTSP/1.0\r\nCSeq: 4\r\n"
+            b"Content-Length: banana\r\n\r\n")
+    f.flush()
+    status = read_status()
+    check("a malformed Content-Length is answered with 400",
+          " 400 " in status, status)
+    s.close()
+except Exception as e:
+    check("airplay RTSP framing over a real socket", False, repr(e))
+finally:
+    try:
+        ap3.stop()
+    except Exception:
+        pass
 
 # --------------------------------------------------------------------------
 # Part 3: End-to-end over real TLS(8009) / RTSP(7000) sockets
@@ -3021,6 +3138,308 @@ except Exception as e:
     traceback.print_exc()
     check("the AirPlay audio supervisor behaves", False,
           "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 18: what a real Cast sender stack requires of the receiver
+# --------------------------------------------------------------------------
+# Every check below corresponds to a concrete expectation of pychromecast (the
+# client library mkchromecast and Home Assistant talk to receivers with), and
+# each one used to fail. Line references are to pychromecast 14.0.10.
+print("\n=== Part 18: Cast receiver conformance ===")
+
+
+def _cast_msgs(sock):
+    """Every CastMessage written to a FakeSock, oldest first."""
+    out, buf = [], sock.sent
+    while len(buf) >= 4:
+        (n,) = struct.unpack(">I", buf[:4])
+        if len(buf) < 4 + n:
+            break
+        out.append(cast.parse_cast_message(buf[4 : 4 + n]))
+        buf = buf[4 + n :]
+    return out
+
+
+def _cast_to(proto, sock, ns, payload):
+    proto._on_message(sock, {
+        "source_id": "sender-0", "destination_id": "receiver-0",
+        "namespace": ns, "payload_type": 0,
+        "payload_utf8": json.dumps(payload), "payload_binary": b"",
+    })
+
+
+def _last_json(sock):
+    msgs = _cast_msgs(sock)
+    return json.loads(msgs[-1]["payload_utf8"]) if msgs else {}
+
+
+_CTX.renderer = MockRenderer()
+p18 = TestProtocol()
+
+# The media app must be running before RECEIVER_STATUS carries applications[].
+sock = FakeSock()
+_cast_to(p18, sock, cast.NS_RECEIVER, {"type": "LAUNCH", "appId": "CC1AD845"})
+launch = _last_json(sock)
+app = launch["status"]["applications"][0]
+# A real device answers "Default Media Receiver" for CC1AD845 and senders key
+# off it: mkchromecast's --hijack re-issues LOAD every 5 seconds while the name
+# differs, which is an endless restart loop against us (cast.py:410-447).
+check("the media receiver reports the name real devices use",
+      app.get("displayName") == "Default Media Receiver",
+      str(app.get("displayName")))
+check("a working receiver does not advertise itself as standby",
+      launch["status"].get("isStandBy") is False,
+      str(launch["status"].get("isStandBy")))
+
+# SET_VOLUME must be acknowledged. pychromecast sends it and blocks in
+# WaitResponse(REQUEST_TIMEOUT=10.0) until a RECEIVER_STATUS carrying the same
+# requestId arrives (controllers/receiver.py set_volume, const.py:13); staying
+# silent made every volume change raise RequestTimeout on the sender.
+sock = FakeSock()
+_cast_to(p18, sock, cast.NS_RECEIVER,
+         {"type": "SET_VOLUME", "volume": {"level": 0.4}, "requestId": 7})
+vol_status = _last_json(sock)
+check("SET_VOLUME is acknowledged",
+      vol_status.get("type") == "RECEIVER_STATUS", str(vol_status.get("type")))
+check("the acknowledgement echoes the sender's requestId",
+      vol_status.get("requestId") == 7, str(vol_status.get("requestId")))
+check("the reported volume is the one just set",
+      vol_status.get("status", {}).get("volume", {}).get("level") == 0.4,
+      str(vol_status.get("status", {}).get("volume")))
+check("the player was actually asked to change volume",
+      _CTX.renderer.last_arg("set_media_volume") == 40,
+      str(_CTX.renderer.last_arg("set_media_volume")))
+
+sock = FakeSock()
+_cast_to(p18, sock, cast.NS_RECEIVER,
+         {"type": "SET_VOLUME", "volume": {"muted": True}, "requestId": 8})
+sock = FakeSock()
+_cast_to(p18, sock, cast.NS_RECEIVER, {"type": "GET_STATUS", "requestId": 9})
+reported = _last_json(sock)["status"]["volume"]
+# Senders compute the next volume from what we report (level +/- 0.1), so a
+# hardcoded 1.0 froze their slider and lost the mute state entirely.
+check("mute survives and the level is not reset to 1.0",
+      reported.get("muted") is True and reported.get("level") == 0.4, str(reported))
+
+# Volume arrives off the wire; a bad value must not kill the connection, which
+# is what an exception escaping the handler would do.
+sock = FakeSock()
+_cast_to(p18, sock, cast.NS_RECEIVER,
+         {"type": "SET_VOLUME", "volume": {"level": "loud"}, "requestId": 10})
+check("a malformed volume level is ignored, not raised on",
+      _last_json(sock).get("type") == "RECEIVER_STATUS",
+      str(_last_json(sock)))
+
+
+def _media_entry(proto, request_id=12):
+    s = FakeSock()
+    _cast_to(proto, s, cast.NS_MEDIA, {"type": "GET_STATUS", "requestId": request_id})
+    return json.loads(_cast_msgs(s)[0]["payload_utf8"])["status"][0]
+
+
+sock_load = FakeSock()
+_cast_to(p18, sock_load, cast.NS_MEDIA,
+         {"type": "LOAD", "requestId": 11,
+          "media": {"contentId": "http://e2e/a.mp4", "contentType": "video/mp4",
+                    "streamType": "BUFFERED"}})
+check("LOAD is answered with BUFFERING",
+      json.loads(_cast_msgs(sock_load)[0]["payload_utf8"])["status"][0]["playerState"]
+      == "BUFFERING",
+      str(_cast_msgs(sock_load)[0]))
+
+entry = _media_entry(p18)
+check("a stream with no news yet is still reported PLAYING",
+      entry["playerState"] == "PLAYING" and "idleReason" not in entry, str(entry))
+
+p18.set_state_pause()
+entry = _media_entry(p18)
+check("GET_STATUS follows the player into PAUSED",
+      entry["playerState"] == "PAUSED", str(entry["playerState"]))
+
+p18.set_state_eof()
+entry = _media_entry(p18)
+# This is the whole point of the observation plumbing: GET_STATUS used to keep
+# answering PLAYING for as long as a media descriptor existed, so a video that
+# had already ended still looked healthy to the sender.
+check("a finished video is reported IDLE, not PLAYING",
+      entry["playerState"] == "IDLE", str(entry["playerState"]))
+check("a finished video carries idleReason FINISHED",
+      entry.get("idleReason") == "FINISHED", str(entry))
+
+# mpv fires `idle` immediately after end-of-file, which maps onto
+# set_state_stop(); it must not relabel a finished video as cancelled.
+p18.set_state_stop()
+entry = _media_entry(p18)
+check("the trailing stop event does not downgrade FINISHED",
+      entry.get("idleReason") == "FINISHED", str(entry))
+
+sock_load = FakeSock()
+_cast_to(p18, sock_load, cast.NS_MEDIA,
+         {"type": "LOAD", "requestId": 13,
+          "media": {"contentId": "http://e2e/b.mp4", "contentType": "video/mp4",
+                    "streamType": "BUFFERED"}})
+entry = _media_entry(p18)
+check("a new LOAD clears the previous idle reason",
+      entry["playerState"] == "PLAYING" and "idleReason" not in entry, str(entry))
+
+# mpv reports the end-file of the file a LOAD just replaced *after* the new one
+# is in place. Taking that as the new media's outcome labelled a video that then
+# played to completion as CANCELLED -- the live probe found this, no stubbed test
+# could have.
+p18.set_state_stop()
+entry = _media_entry(p18)
+check("a superseded media's end-file does not condemn the new one",
+      entry["playerState"] == "PLAYING" and "idleReason" not in entry, str(entry))
+
+p18.set_state_play()
+p18.set_state_eof()
+entry = _media_entry(p18)
+check("the new media still reports FINISHED when it really ends",
+      entry.get("idleReason") == "FINISHED", str(entry))
+
+# A fresh media, to prove ERROR is reachable and that a terminal reason is
+# cleared per LOAD rather than latching onto the next session.
+sock_load = FakeSock()
+_cast_to(p18, sock_load, cast.NS_MEDIA,
+         {"type": "LOAD", "requestId": 14,
+          "media": {"contentId": "http://e2e/c.mp4", "contentType": "video/mp4",
+                    "streamType": "BUFFERED"}})
+p18.set_state_play()
+p18.set_state_transport_error()
+entry = _media_entry(p18)
+check("a playback error is reported as ERROR",
+      entry.get("idleReason") == "ERROR", str(entry))
+check("MEDIA_STATUS reports the real volume, not a constant",
+      entry.get("volume") == {"level": 0.4, "muted": True}, str(entry.get("volume")))
+
+# eureka_info is what pychromecast's host-scanning fallback reads when mDNS is
+# unavailable; a value it cannot parse makes it give up on the device entirely.
+info = TestProtocol()._make_setup_handler()._eureka_info(
+    "/setup/eureka_info?params=device_info,name")
+udn = info.get("device_info", {}).get("ssdp_udn")
+try:
+    uuid.UUID(str(udn).replace("-", ""))
+    udn_parses = True
+except Exception:
+    udn_parses = False
+check("ssdp_udn is a bare UUID a client can parse", udn_parses, repr(udn))
+check("multi-room support is explicitly denied",
+      info["device_info"]["capabilities"].get("multizone_supported") is False,
+      str(info["device_info"]["capabilities"]))
+
+# --------------------------------------------------------------------------
+# Part 19: the HTTPS setup API on 8443
+# --------------------------------------------------------------------------
+# pychromecast's get_cast_type -- what the mDNS discovery path calls -- asks
+# https://host:8443 and has NO plain-HTTP fallback, so without this listener the
+# device_info branch never runs. This part deliberately passes on a machine
+# where 8443 is taken (Docker, OrbStack, dev servers): in that case the correct
+# behaviour is to degrade silently, and that is what gets checked.
+print("\n=== Part 19: Cast HTTPS setup API (8443) ===")
+
+_CTX.renderer = MockRenderer()
+p19 = TestProtocol()
+p19._ensure_cert()
+extra_servers = []
+try:
+    p19._start_setup_server()
+    try:
+        p19._start_https_setup_server()
+        started = True
+    except Exception as e:
+        started = False
+        check("starting the HTTPS setup server never raises", False, repr(e))
+
+    if started:
+        # The whole point: same document, same ?params= filtering, over TLS.
+        http_conn = http.client.HTTPConnection("127.0.0.1", p19.setup_port, timeout=5)
+        http_conn.request("GET", "/setup/eureka_info?params=device_info,name")
+        plain = json.loads(http_conn.getresponse().read().decode())
+        http_conn.close()
+
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        tls_conn = http.client.HTTPSConnection(
+            "127.0.0.1", p19.https_setup_port, timeout=5, context=ctx)
+        tls_conn.request("GET", "/setup/eureka_info?params=device_info,name")
+        resp = tls_conn.getresponse()
+        tls_status = resp.status
+        secure = json.loads(resp.read().decode())
+        tls_conn.close()
+
+        check("8443 answers the eureka_info request",
+              p19.https_setup_port == 8443 and tls_status == 200,
+              "port={} status={}".format(p19.https_setup_port, tls_status))
+        check("the HTTPS document matches the plain one",
+              secure == plain, "{} vs {}".format(secure, plain))
+        # Only the two requested top-level keys, and device_info nested.
+        check("?params= filtering still applies over TLS",
+              set(secure) == {"device_info", "name"}, str(list(secure)))
+        check("device_info over TLS carries the bare UUID",
+              len(secure["device_info"]["ssdp_udn"]) == 36,
+              repr(secure["device_info"]["ssdp_udn"]))
+
+        # A client that does not speak TLS must not take the listener down with
+        # it: wrapping the *listener* would run the handshake inside accept(),
+        # and one SSLError there is an OSError, which is exactly the mistake
+        # that once killed the Cast accept loop (AGENTS.md section 4.1).
+        for _ in range(3):
+            try:
+                raw = socket.create_connection(("127.0.0.1", 8443), timeout=5)
+                raw.sendall(b"GET /setup/eureka_info HTTP/1.0\r\n\r\n")
+                raw.close()
+            except OSError:
+                pass
+        try:
+            tls_conn = http.client.HTTPSConnection(
+                "127.0.0.1", 8443, timeout=5, context=ctx)
+            tls_conn.request("GET", "/setup/eureka_info")
+            still_up = tls_conn.getresponse().status
+            tls_conn.close()
+        except Exception as e:
+            still_up = repr(e)
+        check("plain-TCP clients do not kill the HTTPS listener",
+              still_up == 200, str(still_up))
+
+        # A second instance must give way, not fight for the port.
+        p19b = TestProtocol()
+        p19b._ensure_cert()
+        try:
+            p19b._start_https_setup_server()
+            check("a second instance degrades instead of stealing 8443",
+                  p19b.https_setup_port is None,
+                  "port={}".format(p19b.https_setup_port))
+        except Exception as e:
+            check("a second instance degrades instead of stealing 8443",
+                  False, repr(e))
+        if p19b._https_setup_server is not None:
+            p19b._https_setup_server.shutdown()
+            p19b._https_setup_server.server_close()
+    else:
+        check("8443 is already in use, so the listener degrades quietly",
+              p19.https_setup_port is None,
+              "port={}".format(p19.https_setup_port))
+        http_conn = http.client.HTTPConnection("127.0.0.1", p19.setup_port, timeout=5)
+        http_conn.request("GET", "/setup/eureka_info?params=device_info,name")
+        still_serving = http_conn.getresponse().status
+        http_conn.close()
+        check("the plain 8008 setup API is unaffected when 8443 is taken",
+              still_serving == 200, str(still_serving))
+finally:
+    for srv in extra_servers:
+        try:
+            srv.shutdown()
+            srv.server_close()
+        except Exception:
+            pass
+    for srv in (p19._https_setup_server, p19._setup_server):
+        if srv is not None:
+            try:
+                srv.shutdown()
+                srv.server_close()
+            except Exception:
+                pass
 
 # --------------------------------------------------------------------------
 # Summary
