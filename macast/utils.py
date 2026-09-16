@@ -26,6 +26,10 @@ if sys.platform == 'darwin':
 
 logger = logging.getLogger("Utils")
 DEFAULT_PORT = 58880
+#: The single log file every part of Macast writes to or reads from (the
+#: rotating handler in Macast.py, the settings page's log API and its "clear"
+#: action). Kept here so the three of them cannot drift apart.
+LOG_FILE_NAME = 'macast.log'
 SETTING_DIR = appdirs.user_config_dir('Macast', 'xfangfang')
 PROTOCOL_DIR = 'protocol'
 RENDERER_DIR = 'renderer'

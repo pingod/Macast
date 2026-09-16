@@ -1,5 +1,6 @@
 # Copyright (c) 2021 by xfangfang. All Rights Reserved.
 import json
+import glob
 import os
 import re
 import sys
@@ -16,7 +17,7 @@ from queue import Queue
 from enum import Enum
 from cherrypy import _cpnative_server
 
-from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR
+from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR, LOG_FILE_NAME
 from .discovery import advertisable_addresses
 from . import plugin_repo
 
@@ -1163,6 +1164,78 @@ def api_token():
     return token
 
 
+#: How much of macast.log `?query=log` hands the settings page by default.
+#: The file grows ~27 KB/min on a busy instance (every HTTP access line, every
+#: SOAP body, every mpv property change), so a run that lasts a day used to
+#: produce tens of MB -- and the page shipped *all* of it to the browser and
+#: into the DOM on every load. Default to the tail; callers can ask for more.
+LOG_TAIL_LINES = 2000
+LOG_TAIL_MAX_LINES = 50000
+LOG_TAIL_BYTES = 512 * 1024
+LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
+#: Ceiling for `?query=log&all=1`; anything bigger is a download, not a page.
+LOG_ALL_MAX_BYTES = 20 * 1024 * 1024
+
+
+def read_log_tail(path, max_lines=LOG_TAIL_LINES, max_bytes=None):
+    """Return ``(text, truncated, size)`` for the *end* of a log file.
+
+    Reads backwards in blocks, so showing the last 2000 lines of a 40 MB log
+    does not require loading the whole thing. ``truncated`` reports whether
+    anything before the returned text was dropped.
+
+    ``max_bytes`` defaults to a budget that scales with the requested line
+    count (~256 B/line, i.e. enough for the long SOAP/URL lines this log is
+    full of), otherwise asking for 10000 lines would quietly return 5000.
+
+    Decoding uses ``errors='replace'`` on purpose: the block boundary almost
+    always lands inside a multi-byte character (a Chinese media title is enough
+    to test that), and a strict decode would raise UnicodeDecodeError instead
+    of just showing one replacement glyph.
+    """
+    try:
+        max_lines = int(max_lines)
+    except (TypeError, ValueError):
+        max_lines = LOG_TAIL_LINES
+    max_lines = max(1, min(max_lines, LOG_TAIL_MAX_LINES))
+    if max_bytes is None:
+        max_bytes = min(LOG_TAIL_MAX_BYTES,
+                        max(LOG_TAIL_BYTES, max_lines * 256))
+    block = 64 * 1024
+    with open(path, 'rb') as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        data = b''
+        pos = size
+        while pos > 0 and data.count(b'\n') <= max_lines \
+                and len(data) < max_bytes:
+            step = min(block, pos)
+            pos -= step
+            f.seek(pos)
+            data = f.read(step) + data
+    truncated = pos > 0
+    text = data.decode('utf-8', errors='replace')
+    if truncated:
+        # The window was cut mid-line; drop that partial line rather than
+        # showing half a log record at the top.
+        cut = text.find('\n')
+        text = text[cut + 1:] if cut != -1 else ''
+    lines = text.splitlines()
+    if len(lines) > max_lines:
+        lines = lines[-max_lines:]
+        truncated = True
+    return '\n'.join(lines), truncated, size
+
+
+def read_log_all(path, max_bytes=LOG_ALL_MAX_BYTES):
+    """Whole-file flavour of `read_log_tail` (bounded by ``max_bytes``)."""
+    with open(path, 'rb') as f:
+        data = f.read(max_bytes + 1)
+    size = os.path.getsize(path)
+    truncated = len(data) > max_bytes
+    return data[:max_bytes].decode('utf-8', errors='replace'), truncated, size
+
+
 @cherrypy.expose
 class Handler:
 
@@ -1430,8 +1503,8 @@ class Handler:
                     self._cast_url(kwargs.get('url', ''), kwargs.get('title', '')),
                     indent=4).encode()
             # Sensitive management queries: block unless local or token-bearing.
-            if query in ('status', 'log', 'launch-param', 'interfaces',
-                         'subscribers', 'cast-info') \
+            if query in ('status', 'log', 'log-download', 'launch-param',
+                         'interfaces', 'subscribers', 'cast-info') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1441,14 +1514,21 @@ class Handler:
                 'api?query=settings': 'get settings of macast',
             }
             if query == 'log':
-                log_path = os.path.join(SETTING_DIR, 'macast.log')
-                data = ''
+                res = self._log_payload(kwargs)
+            elif query == 'log-download':
+                # Whole file as an attachment. The page itself only ever
+                # renders the tail above; pulling everything down is an
+                # explicit click (or a bug report), so it stays a separate
+                # endpoint instead of an `all=1` the page might default to.
+                cherrypy.response.headers['Content-Type'] = \
+                    'text/plain; charset=utf-8'
+                cherrypy.response.headers['Content-Disposition'] = \
+                    'attachment; filename="{}"'.format(LOG_FILE_NAME)
                 try:
-                    with open(log_path, 'r', encoding='utf-8') as f:
-                        data = f.read()
-                except:
-                    pass
-                res = {"logs": data}
+                    with open(os.path.join(SETTING_DIR, LOG_FILE_NAME), 'rb') as f:
+                        return f.read()
+                except OSError:
+                    return b''
             elif query == 'launch-param':
                 res = Setting.setting
             elif query == 'plugin-info':
@@ -1549,6 +1629,53 @@ class Handler:
     #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
     _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
                           'plugin-disable', 'plugin-uninstall', 'set-interface')
+
+    def _log_payload(self, kwargs):
+        """The log tail the settings page renders (`?query=log`).
+
+        `logs` is kept as the response key for older pages; `truncated`/`size`
+        let the new one say "only the last N lines of M bytes" instead of
+        silently pretending it shows everything.
+        """
+        path = os.path.join(SETTING_DIR, LOG_FILE_NAME)
+        want_all = str(kwargs.get('all', '')).lower() in ('1', 'true', 'yes', 'on')
+        try:
+            if want_all:
+                text, truncated, size = read_log_all(path)
+            else:
+                text, truncated, size = read_log_tail(
+                    path, kwargs.get('tail', LOG_TAIL_LINES))
+        except OSError:
+            # No log yet (fresh install, or it was just cleared) is not an
+            # error: the page should show an empty box, not a red banner.
+            text, truncated, size = '', False, 0
+        return {'logs': text, 'truncated': truncated,
+                'lines': len(text.splitlines()) if text else 0, 'size': size}
+
+    def _clear_log(self):
+        """Truncate macast.log and drop its rotated backups.
+
+        Truncating from out here is safe because every handler opens the file
+        in append mode: the next record seeks to the (new) end of the file
+        instead of writing into a hole. The backups have to go too -- they are
+        the older megabytes the user is trying to get rid of.
+        """
+        path = os.path.join(SETTING_DIR, LOG_FILE_NAME)
+        removed = 0
+        try:
+            with open(path, 'w'):
+                pass
+            removed += 1
+        except OSError as e:
+            logger.error('clear log error: %s' % e)
+            return {'code': 1, 'message': 'clear failed'}
+        for extra in glob.glob(path + '.*'):
+            try:
+                os.remove(extra)
+                removed += 1
+            except OSError:
+                pass
+        return {'code': 0, 'message': 'success', 'removed': removed}
 
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
@@ -1657,6 +1784,12 @@ class Handler:
                 logger.error('clear play history error: %s' % e)
                 res['code'] = 1
                 res['message'] = 'clear failed'
+        elif kwargs.get('clear-log', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            res = self._clear_log()
         else:
             logger.info(kwargs)
 
