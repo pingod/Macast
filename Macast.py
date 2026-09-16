@@ -2,15 +2,26 @@
 
 import os
 import sys
+import glob
 import shutil
 import gettext
 import locale
 import logging
+import logging.handlers
 from macast import Setting, SETTING_DIR
+from macast.utils import LOG_FILE_NAME
 from macast.macast import gui
 
 logger = logging.getLogger("Macast")
 logger.setLevel(logging.DEBUG)
+
+#: One run used to be able to write ~40 MB/day (measured on a busy instance:
+#: 27 KB/min with a video playing and the settings page open — every HTTP
+#: request, every SOAP body and every mpv property change goes in there), and
+#: the settings page read the whole file back into the DOM. Keep one file plus
+#: two rotations instead; the file is deleted once per start by `clear_env()`.
+LOG_MAX_BYTES = 2 * 1024 * 1024
+LOG_BACKUP_COUNT = 2
 
 
 def get_base_path(path="."):
@@ -107,13 +118,23 @@ def get_lang():
         logger.error("Macast Loading Default Language en_US")
 
 
+def remove_log_files(directory):
+    """Delete the log and its rotated backups (`macast.log`, `.1`, `.2`, ...).
+
+    Split out of `clear_env()` so the regression suite can prove the rotated
+    backups are cleaned up too -- leaving them behind would defeat the rotation
+    the moment the file is wiped at the next start.
+    """
+    for path in sorted(glob.glob(os.path.join(directory, LOG_FILE_NAME + '*'))):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def clear_env():
     # todo clear pyinstaller file on start
-    log_path = os.path.join(SETTING_DIR, 'macast.log')
-    try:
-        os.remove(log_path)
-    except:
-        pass
+    remove_log_files(SETTING_DIR)
 
 
 def _force_utf8_ctype():
@@ -144,14 +165,21 @@ def setup_logging():
     away. Silent failures are the hardest kind to debug: a HTTPS channel that
     never came up looked exactly like "nothing happened at all".
 
+    The handler rotates (see LOG_MAX_BYTES): this is the *only* writer of
+    macast.log now. CherryPy used to own a second, non-rotating FileHandler on
+    the same path (see macast/server.py), which both duplicated every access
+    line and let the file grow without a ceiling.
+
     Logging must never be able to prevent the app from starting, hence the
     guarded setup (SETTING_DIR is otherwise created later by Setting.init).
     """
     _force_utf8_ctype()
     try:
         os.makedirs(SETTING_DIR, exist_ok=True)
-        handler = logging.FileHandler(os.path.join(SETTING_DIR, 'macast.log'),
-                                      encoding='utf-8')
+        handler = logging.handlers.RotatingFileHandler(
+            os.path.join(SETTING_DIR, LOG_FILE_NAME),
+            maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT,
+            encoding='utf-8')
     except Exception:
         return
     handler.setFormatter(logging.Formatter(

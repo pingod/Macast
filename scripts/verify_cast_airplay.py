@@ -3442,6 +3442,345 @@ finally:
                 pass
 
 # --------------------------------------------------------------------------
+# Part 20: the log file must stay bounded, and reading it must stay cheap
+#
+# Three separate problems used to line up here, all measured on a live instance
+# that had been running for 49 minutes:
+#
+#   * macast.log is deleted once per start (Macast.py `clear_env`) but nothing
+#     capped it *within* a run: 1.35 MB / 49 min = ~27 KB/min = ~40 MB/day.
+#     CherryPy's own FileHandler never rotates; the root handler is now the only
+#     writer and it rotates.
+#   * every request line was written TWICE (2 x 2621 access lines = ~64% of the
+#     file): cherrypy's non-rotating handler wrote a bare copy while the record
+#     also propagated to the root handler. `log.access_file`/`log.error_file`
+#     are now empty, which is only safe *because* those loggers propagate.
+#   * /api?query=log returned the whole file and the page rendered it with
+#     v-html, so the page got slower as the file grew. It now serves a tail.
+# --------------------------------------------------------------------------
+print("\n=== Part 20: log rotation, tail API, clear ===")
+try:
+    import logging
+    import logging.handlers
+    import cherrypy as _cherrypy
+
+    _entry_path = os.path.join(REPO, "Macast.py")
+    # `Macast.py` is the *script* entry point: `from macast import Setting,
+    # SETTING_DIR` is what `macast/__init__.py` provides when it runs as the
+    # package it normally is. This suite replaces `macast` with a stub package
+    # (see the top of the file), so those two names have to be lent to it.
+    _pkg_stub = sys.modules["macast"]
+    _pkg_stub.Setting = utils.Setting
+    _pkg_stub.SETTING_DIR = utils.SETTING_DIR
+    _entry_spec = importlib.util.spec_from_file_location("macast_entry", _entry_path)
+    macast_entry = importlib.util.module_from_spec(_entry_spec)
+    _entry_spec.loader.exec_module(macast_entry)
+
+    _tmp20 = _tempfile.mkdtemp(prefix="macast-log-")
+    _saved_dir20_utils = utils.SETTING_DIR
+    _saved_dir20_proto = protocol.SETTING_DIR
+    _saved_setting20 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_running20 = utils.Setting.is_service_running
+    _saved_entry_dir20 = macast_entry.SETTING_DIR
+    _root_logger = logging.getLogger()
+    _saved_root_handlers20 = list(_root_logger.handlers)
+    _added20 = []
+    log_path20 = os.path.join(_tmp20, utils.LOG_FILE_NAME)
+    try:
+        utils.SETTING_DIR = _tmp20
+        protocol.SETTING_DIR = _tmp20
+        macast_entry.SETTING_DIR = _tmp20
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp20, "macast_setting.json")
+
+        # -- the handler itself ------------------------------------------
+        macast_entry.setup_logging()
+        _added20 = [h for h in _root_logger.handlers
+                    if h not in _saved_root_handlers20]
+        _rot20 = [h for h in _added20
+                  if isinstance(h, logging.handlers.RotatingFileHandler)]
+        check("the log handler rotates instead of appending forever",
+              len(_rot20) == 1, str(_added20))
+        check("rotation is bounded (<= 8 MB per file, at most 2 backups)",
+              bool(_rot20)
+              and _rot20[0].maxBytes == macast_entry.LOG_MAX_BYTES
+              and _rot20[0].backupCount == macast_entry.LOG_BACKUP_COUNT
+              and 0 < macast_entry.LOG_MAX_BYTES <= 8 * 1024 * 1024,
+              str([(h.maxBytes, h.backupCount) for h in _rot20]))
+        check("the handler writes the one log file name shared with protocol.py",
+              bool(_rot20)
+              and os.path.basename(_rot20[0].baseFilename) == utils.LOG_FILE_NAME,
+              str([h.baseFilename for h in _rot20]))
+
+        # Writing through it for real is the only way to prove the attributes
+        # above are not decorative: RotatingFileHandler rolls over once the
+        # stream would pass maxBytes, so a bit over 2 MB has to trigger it.
+        _probe = logging.getLogger("macast.rotation-probe")
+        _payload = "x" * 1024
+        for _i in range(4000):
+            _probe.warning(_payload)
+            if os.path.exists(log_path20 + ".1"):
+                break
+        check("a log that exceeds the limit is actually rolled over",
+              os.path.exists(log_path20 + ".1"),
+              str(sorted(os.listdir(_tmp20))))
+        check("the rolled-over file stays within the configured size",
+              os.path.getsize(log_path20) <= macast_entry.LOG_MAX_BYTES,
+              str(os.path.getsize(log_path20)))
+
+        # -- clear_env() removes the log *and* its backups ---------------
+        for _name in (utils.LOG_FILE_NAME, utils.LOG_FILE_NAME + ".1",
+                      utils.LOG_FILE_NAME + ".2"):
+            with open(os.path.join(_tmp20, _name), "w", encoding="utf-8") as _f:
+                _f.write("stale\n")
+        with open(os.path.join(_tmp20, "macast_setting.json"), "w",
+                  encoding="utf-8") as _f:
+            _f.write("{}")
+        macast_entry.remove_log_files(_tmp20)
+        check("a start wipes the log together with its rotated backups",
+              not any(os.path.exists(os.path.join(_tmp20, _n)) for _n in
+                      (utils.LOG_FILE_NAME, utils.LOG_FILE_NAME + ".1",
+                       utils.LOG_FILE_NAME + ".2")),
+              str(sorted(os.listdir(_tmp20))))
+        check("but it leaves the settings file alone",
+              os.path.exists(os.path.join(_tmp20, "macast_setting.json")))
+
+        for _h in _added20:
+            _root_logger.removeHandler(_h)
+            try:
+                _h.close()
+            except Exception:
+                pass
+        _added20 = []
+
+        # -- the tail reader --------------------------------------------
+        _big20 = os.path.join(_tmp20, "big.log")
+        with open(_big20, "w", encoding="utf-8") as _f:
+            for _i in range(5000):
+                _f.write("line {}\n".format(_i))
+        _text, _truncated, _size = protocol.read_log_tail(_big20, 100)
+        _lines = _text.split("\n")
+        check("the log reader can return just the tail",
+              len(_lines) == 100 and _lines[0] == "line 4900"
+              and _lines[-1] == "line 4999", str(_lines[:1] + _lines[-1:]))
+        check("...and it reports that it dropped the earlier part",
+              _truncated is True and _size == os.path.getsize(_big20),
+              "{} / {}".format(_truncated, _size))
+        _text, _truncated, _ = protocol.read_log_tail(_big20, 100000)
+        check("a log shorter than the requested tail comes back whole",
+              _truncated is False and _text.count("\n") == 4999,
+              "{} / {}".format(_truncated, _text.count("\n")))
+        _text, _truncated, _ = protocol.read_log_tail(_big20, 0)
+        check("a nonsense tail is clamped instead of returning nothing",
+              _truncated is True and _text.split("\n")[-1] == "line 4999",
+              repr(_text[-20:]))
+
+        # The byte budget has to scale with the requested line count: the long
+        # SOAP/URL lines in a real log would otherwise cut "10000 lines" down to
+        # a couple of thousand without the caller asking for that.
+        _long20 = os.path.join(_tmp20, "long.log")
+        with open(_long20, "w", encoding="utf-8") as _f:
+            for _i in range(6000):
+                _f.write("{:05d} {}\n".format(_i, "y" * 200))
+        _text, _truncated, _ = protocol.read_log_tail(_long20, 10000)
+        check("asking for many lines is not silently cut short by the byte cap",
+              _truncated is False and _text.count("\n") == 5999
+              and _text.split("\n")[-1].startswith("05999"),
+              "{} lines / truncated={}".format(_text.count("\n"), _truncated))
+
+        # A byte-capped window almost always starts inside a multi-byte
+        # character (Chinese media titles land in the log all the time); a
+        # strict decode would raise UnicodeDecodeError there.
+        _utf20 = os.path.join(_tmp20, "utf.log")
+        with open(_utf20, "w", encoding="utf-8") as _f:
+            for _i in range(4000):
+                _f.write("中文标题-{}\n".format(_i))
+        _text, _truncated, _ = protocol.read_log_tail(_utf20, 4000, max_bytes=4096)
+        _lines = _text.split("\n")
+        check("a byte-limited window never raises on a split UTF-8 character",
+              _truncated is True and _lines[-1] == "中文标题-3999",
+              repr(_lines[-1:]))
+        check("and the partial first line is dropped, not half-rendered",
+              all(ln.startswith("中文标题-") for ln in _lines),
+              repr(_lines[0]))
+
+        try:
+            protocol.read_log_tail(os.path.join(_tmp20, "missing.log"))
+            _missing20 = False
+        except OSError:
+            _missing20 = True
+        check("a missing log file raises OSError for the API to swallow",
+              _missing20 is True)
+
+        # -- the HTTP surface -------------------------------------------
+        utils.Setting.is_service_running = staticmethod(lambda: True)
+
+        class _LogHandler(protocol.Handler):
+            """Skips the real __init__ (it reads the settings page off disk)."""
+
+            def __init__(self):
+                pass
+
+            @property
+            def protocol(self):
+                return types.SimpleNamespace()
+
+        handler20 = _LogHandler()
+        request20 = _cherrypy.serving.request
+        _saved_params20 = request20.params
+        _saved_remote20 = getattr(request20, "remote", None)
+        _saved_scheme20 = request20.scheme
+        _saved_headers20 = dict(request20.headers)
+        try:
+            def _reset20(ip="127.0.0.1", token=None, scheme="http"):
+                request20.headers.clear()
+                for _k, _v in _saved_headers20.items():
+                    request20.headers[_k] = _v
+                request20.params = {"token": token} if token else {}
+                request20.remote = types.SimpleNamespace(ip=ip)
+                request20.scheme = scheme
+
+            def _get20(**kw):
+                return json.loads(handler20.GET(param="api", **kw).decode())
+
+            def _post20(**kw):
+                return json.loads(handler20.POST(**kw).decode())
+
+            # The page's file: one line per record, 5000 of them.
+            with open(log_path20, "w", encoding="utf-8") as _f:
+                for _i in range(5000):
+                    _f.write("entry {}\n".format(_i))
+
+            _reset20()
+            _res = _get20(query="log")
+            check("the log API defaults to the tail, not the whole file",
+                  _res.get("lines") == protocol.LOG_TAIL_LINES
+                  and _res.get("truncated") is True
+                  and _res.get("logs", "").split("\n")[-1] == "entry 4999",
+                  str({k: v for k, v in _res.items() if k != "logs"}))
+            check("the payload still carries the key older pages expect",
+                  "logs" in _res and _res.get("size") == os.path.getsize(log_path20),
+                  str(_res.get("size")))
+
+            _res = _get20(query="log", tail="100")
+            check("?tail= is honoured",
+                  _res.get("lines") == 100
+                  and _res.get("logs", "").split("\n")[0] == "entry 4900",
+                  str(_res.get("lines")))
+            _res = _get20(query="log", all="1")
+            check("?all=1 still asks for everything (bounded by the reader)",
+                  _res.get("lines") == 5000 and _res.get("truncated") is False,
+                  str(_res.get("lines")))
+
+            _reset20(ip="192.168.1.9")
+            check("the log is not readable from the LAN without the token",
+                  _get20(query="log").get("code") == 403)
+            check("the full-log download is gated the same way",
+                  _get20(query="log-download").get("code") == 403)
+
+            _reset20()
+            _blob = handler20.GET(param="api", query="log-download")
+            check("log-download hands back the raw file",
+                  isinstance(_blob, bytes)
+                  and _blob.startswith(b"entry 0\n")
+                  and _blob.count(b"\n") == 5000,
+                  "{} bytes".format(len(_blob) if isinstance(_blob, bytes) else -1))
+            check("log-download is marked as an attachment, not a page",
+                  "attachment" in
+                  str(_cherrypy.serving.response.headers.get("Content-Disposition", "")),
+                  str(dict(_cherrypy.serving.response.headers)))
+
+            _reset20(ip="192.168.1.9")
+            _res = _post20(**{"clear-log": "1"})
+            check("clear-log refuses an untokened LAN caller",
+                  _res.get("code") == 403
+                  and os.path.getsize(log_path20) > 0, str(_res))
+            _reset20()
+            _res = _post20(**{"clear-log": "1"})
+            check("clear-log truncates the file from the settings page",
+                  _res.get("code") == 0 and os.path.getsize(log_path20) == 0,
+                  "{} / {}".format(_res, os.path.getsize(log_path20)))
+            _res = _get20(query="log")
+            check("an empty (or missing) log is an empty box, not an error",
+                  _res.get("logs") == "" and _res.get("lines") == 0, str(_res))
+            os.remove(log_path20)
+            check("a missing log file is still not an error",
+                  _get20(query="log").get("logs") == "")
+        finally:
+            request20.params = _saved_params20
+            request20.remote = _saved_remote20
+            request20.scheme = _saved_scheme20
+            request20.headers.clear()
+            for _k, _v in _saved_headers20.items():
+                request20.headers[_k] = _v
+
+        # -- the two configuration decisions behind all of that ----------
+        #
+        # `log.access_file` was emptied on the strength of one assumption:
+        # cherrypy's loggers propagate to the root logger, which is what writes
+        # macast.log (with rotation). If that ever stops being true, access
+        # lines would silently disappear instead of merely being duplicated.
+        _root_seen = []
+        _root_probe = logging.Handler()
+        _root_probe.emit = lambda rec: _root_seen.append(rec.name)
+        _access_logger = logging.getLogger("cherrypy.access")
+        # CherryPy may already have a screen handler attached (that is the noise
+        # `log.screen` turns off once the real app starts); park them so the
+        # probe only exercises the root path.
+        _access_handlers = list(_access_logger.handlers)
+        for _h in _access_handlers:
+            _access_logger.removeHandler(_h)
+        _root_logger.addHandler(_root_probe)
+        try:
+            _access_logger.info("127.0.0.1 - - probe")
+        finally:
+            _root_logger.removeHandler(_root_probe)
+            for _h in _access_handlers:
+                _access_logger.addHandler(_h)
+        check("cherrypy access records still reach the rotating root handler",
+              "cherrypy.access" in _root_seen, str(_root_seen))
+
+        with open(os.path.join(MACAST, "server.py"), "r", encoding="utf-8") as _f:
+            _server_src = _f.read()
+        check("cherrypy no longer owns a second, non-rotating writer on macast.log",
+              "'log.access_file': ''" in _server_src
+              and "'log.error_file': ''" in _server_src
+              and "log.access_file': os.path.join" not in _server_src,
+              "log.access_file still points at a file"
+              if "log.access_file': os.path.join" in _server_src else "")
+
+        with open(os.path.join(MACAST, "xml", "setting.html"), "r",
+                  encoding="utf-8") as _f:
+            _html20 = _f.read()
+        check("the page renders the log as text, not through v-html",
+              'v-html="macast_log"' not in _html20
+              and "{{ macast_log }}" in _html20)
+        check("the page asks for a tail and offers clear/download",
+              "query=log&" in _html20 and "clear-log" in _html20
+              and "log-download" in _html20)
+        _mounted20 = _html20.split("mounted()", 1)[1].split("beforeDestroy", 1)[0]
+        check("the page no longer pulls the log on every page load",
+              "this.get_log();" not in _mounted20,
+              "".join(ln for ln in _mounted20.splitlines() if "get_log" in ln))
+    finally:
+        for _h in _added20:
+            _root_logger.removeHandler(_h)
+            try:
+                _h.close()
+            except Exception:
+                pass
+        utils.SETTING_DIR = _saved_dir20_utils
+        protocol.SETTING_DIR = _saved_dir20_proto
+        macast_entry.SETTING_DIR = _saved_entry_dir20
+        (utils.Setting.setting, utils.Setting.setting_path) = _saved_setting20
+        utils.Setting.is_service_running = staticmethod(_saved_running20)
+        _shutil.rmtree(_tmp20, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("log handling behaves", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 passed = sum(1 for _, ok, _ in RESULTS if ok)

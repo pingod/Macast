@@ -17,7 +17,8 @@ cd <repo>
 
 - 依赖：`.venv`（Python 3.12）+ `requirements/darwin.txt` + `pillow zeroconf pyperclip`。
 - Web 设置页：<http://127.0.0.1:58880/>
-- 日志：`~/Library/Application Support/Macast/macast.log`（**排障看这个，不是 stdout**）
+- 日志：`~/Library/Application Support/Macast/macast.log`（**排障看这个，不是 stdout**）。
+  每次启动清空，单文件 2 MB 轮转并保留 2 份备份；设置页「日志」只读末尾若干行（见 §4.10）
 - 配置：`~/Library/Application Support/Macast/macast_setting.json`
 - 用户插件目录：`.../Macast/renderer/` 与 `.../Macast/protocol/`
 
@@ -27,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 411/411）
+# 2) 回归验证（当前 443/443）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -325,6 +326,33 @@ Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP
   mpv 会在 seek/prefetch 时 `end-file reason=error`、`file_error='no audio or video data played'`
   （和 §6 里 ffmpeg 那条是同一个坑）。`cast_conformance.py` 自带一个最小 Range handler。
 
+### 4.10 日志：三处叠加的膨胀（外加一个注入面）
+
+2026-09 在一台跑了 49 分钟的实例上实测：`macast.log` **10809 行 / 1.35 MB**
+（≈27 KB/分钟 ≈ 1.6 MB/小时 ≈ 40 MB/天），而设置页一打开日志面板就把整份文件吃进 DOM。
+三个原因叠在一起，只改其中一个都不够：
+
+| 层 | 原因 | 现在 |
+|---|---|---|
+| 写文件 | 根 logger 用 `logging.FileHandler`（无轮转）；CherryPy 还往**同一个文件**再挂一个不轮转的 handler | 根 logger 换成 `RotatingFileHandler(2 MB × 2 份)`；`log.access_file` / `log.error_file` 留空 |
+| 重复写 | `cherrypy.access` 的记录**同时**被 CherryPy 自己的 handler 和根 handler 各写一遍 —— 每行请求出现两次（实测 2 × 2621 行 ≈ 文件的 **64%**） | 去掉 CherryPy 自己的 handler，记录仍经 propagate 落到根 handler（因此才继续有轮转） |
+| 读日志 | `/api?query=log` 用 `f.read()` 回整份；前端 `v-html` 把它塞进 DOM（10.5k 个 `<br/>`） | 接口只回末尾 N 行（`?tail=` / `?all=1`，默认 2000 行 / 512 KB），前端 `<pre>{{ }}</pre>` 文本渲染，且切到面板才拉 |
+
+**红线（改动前先读这几条）：**
+
+- **`log.access_file` 必须留空，且只在这个前提下才安全**：CherryPy 的 logger 会 propagate 到
+  根 logger，请求日志才继续落在 `macast.log` 里（带轮转）。谁要是给它们设了 `propagate = False`，
+  请求日志就**静默消失**——不再有第二份兜底。Part 20 用一条真实记录守着这个前提。
+- **日志正文永远不要用 `v-html`**：日志里含**发送端提供**的 DIDL `dc:title` / URL
+  （`protocol.py` 会把整段 `CurrentURIMetaData` 打进去），局域网里任何一台设备投一个带
+  `<img onerror=…>` 的标题，打开设置页就会执行。现在是 `<pre>{{ macast_log }}</pre>`。
+- **清空走 POST**（`clear-log`，loopback/令牌门控）：GET 版会被任意网页用 `<img>` 触发。
+  `log-download` 是 GET，所以它和 `log`/`status` 一样在管理门控名单里（Part 20 有用例）。
+- **尾部读取必须 `errors='replace'` 并丢掉切出来的半行**：窗口边界必然落在多字节字符中间，
+  严格解码会抛 `UnicodeDecodeError`。
+- **每次启动由 `clear_env()` → `remove_log_files()` 删掉 `macast.log` 和轮转出的 `.1/.2`**：
+  只删日志本身会让旧备份永远留着。
+
 ## 5. 排障手法（比读代码快）
 
 ```shell
@@ -355,7 +383,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（411/411）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）|
+| `verify_cast_airplay.py` | **主验证套件**（443/443）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程" |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |

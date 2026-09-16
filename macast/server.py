@@ -125,8 +125,23 @@ class Service:
         self.protocol_plugin.subscribe()
         cherrypy.config.update({
             'log.screen': False,
-            'log.access_file': os.path.join(SETTING_DIR, 'macast.log'),
-            'log.error_file': os.path.join(SETTING_DIR, 'macast.log'),
+            # Deliberately *no* CherryPy file handlers. `_cplogging` installs a
+            # plain (never rotating) logging.FileHandler, and CherryPy's
+            # loggers propagate to the root logger, which already writes
+            # macast.log through a RotatingFileHandler. Pointing these at the
+            # same path meant every single line was written twice -- one bare
+            # copy plus one from the root handler -- and the second writer grew
+            # the file without any ceiling:
+            #
+            #   127.0.0.1 - - [...] "GET /api?query=status ..." 200 22735
+            #   [2026-09-16 23:25:39,275] cherrypy.access.4411285168 INFO: ...
+            #
+            # Measured on a live instance: 2 x 2621 access lines in 49 minutes
+            # (~64% of the 1.35 MB file). Leaving the config empty removes only
+            # CherryPy's own handler; the records still reach macast.log
+            # through the root logger, rotation included.
+            'log.access_file': '',
+            'log.error_file': '',
         })
         # cherrypy.engine.autoreload.files.add(Setting.setting_path)
         cherrypy_config = {

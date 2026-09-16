@@ -112,6 +112,22 @@
             border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
         }
         .cast-box .hint { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+        /* 日志面板：整份日志线性增长（实测 ~27KB/分钟），所以只渲染末尾若干行，
+           并且用 <pre> 纯文本而不是 v-html（日志里含发送端提供的标题/URL）。 */
+        .log-bar {
+            display: flex; align-items: center; gap: 12px;
+            flex-wrap: wrap; margin-bottom: 10px;
+        }
+        .log-bar .hint { color: var(--text-soft); font-size: 12px; }
+        .log-bar .log-actions { margin-left: auto; display: flex; gap: 8px; }
+        .macast-log {
+            max-height: 55vh; overflow: auto; margin: 0; padding: 10px 12px;
+            background: var(--panel-2, rgba(127,127,127,.10));
+            border: 1px solid var(--border); border-radius: 8px;
+            color: var(--text); font-size: 12px; line-height: 1.55;
+            white-space: pre-wrap; word-break: break-all;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
         .cast-example {
             margin: 10px 0 0; padding: 8px 10px; border-radius: 8px;
             background: var(--panel-2, rgba(127,127,127,.12)); border: 1px solid var(--border);
@@ -419,14 +435,34 @@
             </div>
         </el-tab-pane>
         <el-tab-pane label="日志" name="3">
-            <span>This page does not display all logs. If you want to view all logs, please run from the source code or refer to </span>
-            <el-link type="primary"
-                     href="https://github.com/xfangfang/Macast/blob/main/.github/ISSUE_TEMPLATE/bug_report.md"
-                     target="_blank">this instruction.
-            </el-link>
-            <br/>
-            <br/>
-            <span v-html="macast_log"></span>
+            <div class="status-card">
+                <div class="log-bar">
+                    <el-select v-model="log_tail" size="small" style="width:158px;"
+                               @change="get_log">
+                        <el-option label="末尾 500 行" :value="500"></el-option>
+                        <el-option label="末尾 2000 行" :value="2000"></el-option>
+                        <el-option label="末尾 10000 行" :value="10000"></el-option>
+                        <el-option label="全部（上限 20MB）" :value="0"></el-option>
+                    </el-select>
+                    <el-switch v-model="log_auto" @change="on_log_auto"
+                               active-text="自动刷新(3s)"></el-switch>
+                    <span class="hint">{{ log_info }}</span>
+                    <span class="log-actions">
+                        <el-button size="small" icon="el-icon-refresh"
+                                   @click="get_log">刷新</el-button>
+                        <el-button size="small" icon="el-icon-download"
+                                   @click="download_log">下载完整日志</el-button>
+                        <el-button size="small" type="danger" icon="el-icon-delete"
+                                   @click="clear_log">清空</el-button>
+                    </span>
+                </div>
+                <pre class="macast-log" ref="logbox" v-if="macast_log">{{ macast_log }}</pre>
+                <div class="hint" v-else>暂无日志。</div>
+                <div class="hint" style="margin-top:8px;">
+                    日志按纯文本渲染，默认只加载末尾若干行（文件随运行时间增长，
+                    整份塞进页面会越来越卡）；要看全部请用「下载完整日志」。
+                </div>
+            </div>
         </el-tab-pane>
         <el-tab-pane label="字幕" name="11">
             <div style="padding: 10px;">
@@ -771,6 +807,12 @@
 
             //log
             macast_log: '',
+            // 只加载末尾若干行：日志会随运行时间线性增长，整份塞进 DOM 会越来越卡。
+            // log_tail = 0 表示全部（后端另有 20MB 上限）。
+            log_tail: 2000,
+            log_info: '',
+            log_auto: false,
+            log_timer: 0,
 
             //status
             status: {server: {}, media: {}, clients: []},
@@ -808,12 +850,23 @@
             console.log(page);
             this.switch_page(page);
             this.load_local_plugin();
-            this.get_log();
+            // 日志不再在页面加载时无条件拉取：只有切到「日志」面板才请求
+            // （switch_page('3') 会调用 get_log）。
             this.load_status();
             this.load_interfaces();
             this.load_cast_info();
             this.status_interval = setInterval(() => this.load_status(), 3000);
             this.registerPWA();
+        },
+        beforeDestroy() {
+            if (this.log_timer) {
+                clearInterval(this.log_timer);
+                this.log_timer = 0;
+            }
+            if (this.status_interval) {
+                clearInterval(this.status_interval);
+                this.status_interval = 0;
+            }
         },
         activated() {
 
@@ -965,13 +1018,56 @@
                 return null;
             },
             async get_log() {
-                let url = '/api?query=log';
-                this.$http.get(url).then(res => {
-                    let logs = res.data.logs.replace(new RegExp("\n", "gm"), '<br/>')
-                    this.macast_log = logs;
-                }).catch(err => {
+                // 只有日志面板可见时才请求；切走时会清掉定时器。
+                if (this.activeIndex !== '3') return;
+                let query = this.log_tail === 0 ? 'all=1' : `tail=${this.log_tail}`
+                try {
+                    let res = await this.$http.get(`/api?query=log&${query}`)
+                    let data = res.data || {}
+                    this.macast_log = data.logs || ''
+                    let size = data.size || 0
+                    let size_h = size >= 1024 * 1024
+                        ? (size / 1024 / 1024).toFixed(2) + ' MB'
+                        : (size / 1024).toFixed(1) + ' KB'
+                    this.log_info = data.truncated
+                        ? `仅末尾 ${data.lines || 0} 行 / 共 ${size_h}`
+                        : `${data.lines || 0} 行 / ${size_h}`
+                    this.$nextTick(() => {
+                        let box = this.$refs.logbox
+                        if (box) box.scrollTop = box.scrollHeight
+                    })
+                } catch (err) {
                     this.$message.error('Error connecting to Macast');
-                });
+                }
+            },
+            on_log_auto(enabled) {
+                if (this.log_timer) {
+                    clearInterval(this.log_timer);
+                    this.log_timer = 0;
+                }
+                if (enabled) {
+                    this.get_log()
+                    this.log_timer = setInterval(() => this.get_log(), 3000)
+                }
+            },
+            async clear_log() {
+                if (!window.confirm('清空当前日志？已轮转的历史日志也会一并删除。')) return
+                let fd = new window.FormData()
+                fd.append('clear-log', '1')
+                try {
+                    let res = await this.$http.post('/api', fd)
+                    if (res.data && res.data.code === 0) {
+                        this.$notify({title: '已清空日志', message: '', duration: 2000})
+                    } else {
+                        this.$message.error((res.data && res.data.message) || '清空失败')
+                    }
+                } catch (err) {
+                    this.$message.error('Error connecting to Macast');
+                }
+                this.get_log()
+            },
+            download_log() {
+                window.open('/api?query=log-download', '_blank')
             },
             async load_interfaces() {
                 return this.$http.get('/api?query=interfaces').then(res => {
@@ -1173,6 +1269,11 @@
                 }
             },
             async handleSelect(tab, event) {
+                // 离开日志面板就停掉自动刷新，后台不再每 3 秒拉一次日志。
+                if (tab.name !== '3' && this.log_timer) {
+                    clearInterval(this.log_timer);
+                    this.log_timer = 0;
+                }
                 this.switch_page(tab.name)
             },
             async switch_page(page_name) {
