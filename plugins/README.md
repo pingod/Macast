@@ -33,7 +33,7 @@
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.5** — 把桌面屏幕实时镜像到局域网：Chromecast、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `screen_mirror.py` | **Screen Mirror v0.6** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 
 **Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
@@ -111,6 +111,19 @@
   DLNA 投了东西，镜像会让位并把收到的 URL 转投给电视；浏览器目标下这样的推送会被明确拒绝，
   而不是把正在跑的镜像弄停。目标同样可以直接写设置：Chromecast 用 `Mirror_Target` =
   `host:port`，DLNA 电视用 `Mirror_Dlna_Control` = 控制 URL（测试走这两条路径）。
+  **v0.6 的第二条 Chromecast 通道 —— 「Chromecast 低延迟（实验 · 无声音）」**：
+  LOAD/mpegts 那条路的延迟来自 MPEG-TS 的缓冲，客厅够用、开会不够。这一档改说
+  Chrome「投放桌面」用的那套协议（Cast Streaming）：直接向电视的镜像接收器
+  （`0F5096E8`）发 OFFER，拿回一个 UDP 端口，然后把画面切成带 Cast 头的 RTP 包
+  推过去 —— 没有 HTTP 服务、没有 `LOAD`、也没有观看网址。**代价与边界要说清**：
+  ① 这条通道**目前没有声音**（镜像接收器的音频流是下一步）；② 单文件插件不能装加密库，
+  加密用纯 Python 实现，所以**码率上限 4.5 Mbps**，1080p 会被压到该上限（菜单会提示）；
+  ③ 帧尺寸是 OFFER 里**先声明后编码**的，所以这一档只跑 360p/720p/1080p 三档，
+  「原始分辨率」会按 1080p 信箱化而不是拉伸；④ **这套字段是从参考实现转写的，还没有在任何
+  真电视上验证过**，所以它是 opt-in：设备不认（`LAUNCH_ERROR`）就自动回落到 LOAD 通道，
+  提示语会说明「此通道还没有声音」。想自己拿真机验一遍：
+  `.venv/bin/python scripts/cast_streaming_probe.py <电视 IP>`（同一份代码，`--live` 采桌面，
+  `--dump` 留下码流给 ffprobe）。
 - **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
   它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
   **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。

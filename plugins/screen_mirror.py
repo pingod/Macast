@@ -4,10 +4,10 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.5</macast.version>
+# <macast.version>0.6</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN, to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -53,6 +53,15 @@
 #     LOAD with streamType LIVE. Framing is reused from
 #     macast.protocol_cast, so no pychromecast dependency (a single-file
 #     plugin cannot install pip packages);
+#   * the 低延迟 target skips LOAD entirely and speaks Cast Streaming, which
+#     Chrome's own "Cast desktop" uses: LAUNCH(0F5096E8) -> an OFFER on
+#     urn:x-cast:com.google.cast.webrtc -> an ANSWER that names a UDP port ->
+#     RTP packets with a 7-byte Cast header, each access unit encrypted once
+#     with AES-128-CTR (pure Python -- a single-file plugin has no crypto
+#     library) and keyed per frame. Nothing is served over HTTP for this one,
+#     so it has no viewer URL and no audio, and because the field layouts are
+#     transcribed rather than observed on a television it is opt-in and falls
+#     back to LOAD when the device refuses the mirroring app;
 #   * ffmpeg is located via PATH *and* the usual install directories, because
 #     a menu-bar app launched from Finder does not inherit the shell PATH;
 #   * capture fails closed: without Screen Recording permission (macOS)
@@ -92,6 +101,11 @@ logger.setLevel(logging.INFO)
 CAST_PORT = 8009
 SERVICE_TYPE = "_googlecast._tcp.local."
 DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
+#: The receiver app that speaks Cast Streaming. Not the Default Media
+#: Receiver: mirroring lives on its own app id, its own namespace, and it never
+#: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
+MIRROR_APP_ID = '0F5096E8'
+NS_WEBRTC = 'urn:x-cast:com.google.cast.webrtc'
 STREAM_PREFIX = "/stream/"
 CHUNK = 4096
 #: How long ffmpeg may survive before its death is blamed on the
@@ -106,6 +120,17 @@ QUALITIES = {'360': (360, 2500000),
              '720': (720, 5000000),
              '1080': (1080, 10000000),
              'source': (0, 12000000)}
+
+
+def quality_preset(key=None):
+    """(height, bitrate) for a menu key; anything unknown is 720p.
+
+    Two callers need this -- the renderer picks the encoder settings, the menu
+    has to say what the low-latency channel will actually do with them.
+    """
+    if key is None:
+        key = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
+    return QUALITIES.get(key, QUALITIES['720'])
 #: keyframe / fragment cadence in seconds. One per second keeps the browser's
 #: MSE join latency and the TV's seek behaviour both honest.
 FPS = 24
@@ -117,6 +142,11 @@ OUTPUTS = {
     'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
                 ['-f', 'mp4', '-movflags',
                  'frag_keyframe+empty_moov+default_base_moof', 'pipe:1']),
+    #: Not a different device: the same Chromecast, driven by its mirroring app
+    #: instead of by LOAD. No HTTP suffix and no Content-Type because nothing is
+    #: served -- these bytes are pushed to a UDP port.
+    'caststream': ('Chromecast 低延迟（实验 · 无声音）', 'h264', None,
+                   ['-f', 'h264', 'pipe:1']),
     #: A DLNA TV is told it is downloading a finite file, so everything about
     #: this target -- container, codec, even the file extension in the URL --
     #: comes from the compatibility profile rather than from here. The muxer
@@ -319,7 +349,7 @@ class SettingProperty(Enum):
     Mirror_Audio_Aggregate = 4
     #: CoreAudio id of the user's real speakers, so「恢复原声音输出」can go back.
     Mirror_Audio_Original = 5
-    #: 'cast' | 'browser' | 'dlna' -- see OUTPUTS
+    #: 'cast' | 'caststream' | 'browser' | 'dlna' -- see OUTPUTS
     Mirror_Output = 6
     #: avfoundation video device index to capture; '' means "first screen".
     Mirror_Screen = 7
@@ -386,7 +416,7 @@ def cursor_enabled():
 
 
 def output_kind():
-    """'cast' | 'browser', validated against OUTPUTS."""
+    """The chosen target, validated against OUTPUTS."""
     kind = str(Setting.get(SettingProperty.Mirror_Output, DEFAULT_OUTPUT)
                or DEFAULT_OUTPUT)
     return kind if kind in OUTPUTS else DEFAULT_OUTPUT
@@ -652,16 +682,38 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     for one_input in capture.inputs:
         cmd += one_input
     cmd += ['-map', '0:v:0']
-    if capture.audio_map:
+    if capture.audio_map and kind != 'caststream':
         cmd += ['-map', capture.audio_map,
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
     else:
+        # The mirroring app takes video only until its audio stream is wired
+        # up, which is why the menu label for this target says 无声音 out loud.
         cmd += ['-an']
-    if height:
+    extra = []
+    if kind == 'caststream':
+        # The OFFER promised a frame of exactly this size, so pin it and
+        # letterbox rather than scaling by height and hoping.
+        _width, height, video_filter = cast_stream_shape(height)
+        bitrate = min(bitrate, CAST_STREAM_MAX_BITRATE)
+        cmd += ['-vf', video_filter]
+        if encoder == 'software':
+            # `-aud` makes every picture start with an access unit delimiter,
+            # which is what lets the splitter close a frame at its boundary
+            # instead of one frame late -- at 24 fps that is 42 ms of the
+            # latency this target exists to avoid. `scenecut=0` because x264
+            # deciding on its own when to redraw is not a promise the OFFER's
+            # one-second GOP can survive, and the PLI path assumes it.
+            # `-aud` is an AVOption, not an ffmpeg flag: it takes its value as
+            # a separate argument, so omitting the 1 eats the next option.
+            extra = ['-aud', '1', '-x264-params',
+                     'keyint={}:min_keyint={}:scenecut=0'.format(FPS, FPS)]
+    elif height:
         # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
         cmd += ['-vf', 'scale=-2:{}'.format(height)]
     cmd += encoder_args(encoder)
     cmd += ['-pix_fmt', 'yuv420p', '-g', str(FPS), '-b:v', str(bitrate)]
+    # Encoder private options only resolve after -c:v, so they ride at the end.
+    cmd += extra
     cmd += OUTPUTS[kind][3]
     return cmd
 
@@ -1712,12 +1764,20 @@ class _CastSender(object):
         self.sock = None
         self.transport_id = None
         self.media_session_id = 1
+        #: Only a mirroring session has one; it is what the receiver's STOP
+        #: names, and without it the app stays running behind us.
+        self.mirror_session_id = None
+        #: A mirroring session writes to this socket from two threads (the
+        #: teardown on the menu thread, the keepalive in the media loop), and
+        #: interleaved CASTV2 frames are how a session dies quietly.
+        self._write_lock = threading.Lock()
 
     def _send(self, destination, namespace, payload, binary=False):
         body = payload if binary else json.dumps(payload)
         blob = encode_cast_message(self.source_id, destination, namespace, body,
                                    binary)
-        self.sock.sendall(struct.pack('>I', len(blob)) + blob)
+        with self._write_lock:
+            self.sock.sendall(struct.pack('>I', len(blob)) + blob)
 
     def _recv_exactly(self, count):
         buf = b""
@@ -1737,6 +1797,17 @@ class _CastSender(object):
         return parse_cast_message(body) if body else None
 
     def _await(self, wanted, timeout=None):
+        return self._await_any((wanted,), timeout)
+
+    def _await_any(self, wanted, timeout=None):
+        """The first message whose `type` is in `wanted`, or None.
+
+        Anything else that arrives in between -- a PONG, a broadcast
+        RECEIVER_STATUS -- is noise to be stepped over, not an error. The
+        mirroring handshake has to watch for two types at once (the status that
+        carries a transportId and the LAUNCH_ERROR that says there never will
+        be one), which is why this exists next to `_await`.
+        """
         deadline = time.time() + (timeout or self.timeout)
         while time.time() < deadline:
             self.sock.settimeout(max(0.2, deadline - time.time()))
@@ -1752,7 +1823,7 @@ class _CastSender(object):
                 data = json.loads(message.get("payload_utf8") or "{}")
             except ValueError:
                 continue
-            if data.get("type") == wanted:
+            if data.get("type") in wanted:
                 return data
         return None
 
@@ -1816,6 +1887,110 @@ class _CastSender(object):
         self._send("receiver-0", NS_RECEIVER,
                    {"type": "SET_VOLUME", "requestId": 6,
                     "volume": {"level": max(0.0, min(1.0, level / 100.0))}})
+
+    # -- mirroring (Cast Streaming): a different app, and no LOAD at all ------
+
+    def receiver_status(self):
+        self._send("receiver-0", NS_RECEIVER,
+                   {"type": "GET_STATUS", "requestId": 7})
+        return (self._await("RECEIVER_STATUS") or {}).get("status") or {}
+
+    def launch_mirroring(self, app_id=MIRROR_APP_ID, timeout=10.0,
+                         settle=0.3):
+        """Bring up the mirroring app and join its transport.
+
+        Two things here are load-bearing rather than defensive, both of them
+        learned from the reference sender: a stale instance of the app has to
+        be stopped *before* LAUNCH, because the next session's first OFFER is
+        otherwise rejected with "Invalid or missing codec on first OFFER"; and
+        the app needs a moment to settle after its transportId appears before
+        it will accept a CONNECT.
+
+        LAUNCH_ERROR doubles as the capability probe -- this plugin does not
+        filter devices by the `ca` mDNS flag, so a receiver without mirroring
+        is discovered here rather than guessed at beforehand.
+        """
+        for app in self.receiver_status().get("applications") or []:
+            if app.get("appId") != app_id:
+                continue
+            self._send("receiver-0", NS_RECEIVER,
+                       {"type": "STOP", "requestId": 8,
+                        "sessionId": app.get("sessionId")
+                        or app.get("transportId")})
+            # The receiver drops the app asynchronously; racing it is exactly
+            # the stale-instance case above.
+            time.sleep(1.0)
+        self._send("receiver-0", NS_RECEIVER,
+                   {"type": "LAUNCH", "appId": app_id, "requestId": 9})
+        deadline = time.time() + timeout
+        session_id = None
+        while time.time() < deadline and not self.transport_id:
+            data = self._await_any(("RECEIVER_STATUS", "LAUNCH_ERROR"),
+                                   max(0.2, deadline - time.time()))
+            if data is None:
+                break
+            if data.get("type") == "LAUNCH_ERROR":
+                raise RuntimeError('这台设备不接受镜像接收器（LAUNCH_ERROR: {}）'.format(
+                    data.get("reason") or "未提供原因"))
+            for app in (data.get("status") or {}).get("applications") or []:
+                if app.get("appId") == app_id and app.get("transportId"):
+                    self.transport_id = app["transportId"]
+                    session_id = app.get("sessionId") or app.get("transportId")
+                    break
+        if not self.transport_id:
+            raise RuntimeError("镜像接收器没有返回 transportId（启动超时）")
+        self.mirror_session_id = session_id
+        time.sleep(settle)
+        self._send(self.transport_id, NS_CONNECTION, {"type": "CONNECT"})
+        return self.transport_id
+
+    def send_offer(self, offer):
+        if self.transport_id is None:
+            raise RuntimeError("还没有镜像会话，无法发出 OFFER")
+        self._send(self.transport_id, NS_WEBRTC, offer)
+
+    def await_answer(self, timeout=10.0):
+        data = self._await_any(("ANSWER",), timeout)
+        if data is None:
+            raise RuntimeError("镜像接收器没有回答 OFFER（等待 ANSWER 超时）")
+        return data
+
+    def ping(self):
+        """Cast v2 keepalive. Deprecated in the spec but every firmware still
+        answers it, and it is the only signal that the TV is still there."""
+        self._send("receiver-0", NS_CONNECTION, {"type": "PING"})
+
+    def poll(self, timeout=0.0):
+        """One pending control message, or None if nothing is waiting.
+
+        `timeout` 0 puts the socket in non-blocking mode, where "no data" is an
+        exception rather than a wait -- which is the whole point: the media loop
+        must never be held by the control plane.
+        """
+        try:
+            self.sock.settimeout(timeout)
+            return self._recv()
+        except (socket.timeout, ssl.SSLError, OSError):
+            return None
+
+    def close_mirroring(self):
+        """Leave the app and the transports, in that order.
+
+        CLOSE on the app transport without a receiver STOP leaves the mirroring
+        app running, and the next session then hits the stale-instance OFFER
+        rejection this class went to some trouble to avoid.
+        """
+        try:
+            if self.transport_id is not None:
+                self._send(self.transport_id, NS_CONNECTION,
+                           {"type": "CLOSE"})
+            self._send("receiver-0", NS_RECEIVER,
+                       {"type": "STOP", "requestId": 11,
+                        "sessionId": getattr(self, "mirror_session_id", None)})
+            self._send("receiver-0", NS_CONNECTION, {"type": "CLOSE"})
+        except (OSError, ssl.SSLError, ValueError) as e:
+            logger.info("could not close the mirroring session: %s", e)
+        self.transport_id = None
 
     def close(self):
         if self.sock is not None:
@@ -2158,6 +2333,811 @@ class _DlnaSender(object):
         pass
 
 
+# -- Cast Streaming: AES-128-CTR without a crypto dependency -----------------
+
+def _xtime(a):
+    a <<= 1
+    return (a ^ 0x1B) & 0xFF if a & 0x100 else a
+
+
+def _build_aes_tables():
+    """Rijndael's S-box and the four encryption T-tables, computed once.
+
+    Generated rather than pasted: a 256-byte literal is a typo waiting to ship,
+    and the derivation is a dozen lines that a test can pin with the FIPS-197
+    vector.
+    """
+    exp = [0] * 256
+    log = [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i] = x
+        log[x] = i
+        x = _xtime(x) ^ x                     # multiply by 3, the field generator
+    sbox = bytearray(256)
+    for i in range(256):
+        b = 0 if i == 0 else exp[(255 - log[i]) % 255]        # GF(2^8) inverse
+        s = b
+        for shift in (1, 2, 3, 4):
+            s ^= ((b << shift) | (b >> (8 - shift))) & 0xFF
+        sbox[i] = (s ^ 0x63) & 0xFF
+    te0 = [0] * 256
+    te1 = [0] * 256
+    te2 = [0] * 256
+    te3 = [0] * 256
+    for i in range(256):
+        s = sbox[i]
+        s2 = _xtime(s)
+        s3 = s2 ^ s
+        te0[i] = (s2 << 24) | (s << 16) | (s << 8) | s3
+        te1[i] = (s3 << 24) | (s2 << 16) | (s << 8) | s
+        te2[i] = (s << 24) | (s3 << 16) | (s2 << 8) | s
+        te3[i] = (s << 24) | (s << 16) | (s3 << 8) | s2
+    return bytes(sbox), tuple(te0), tuple(te1), tuple(te2), tuple(te3)
+
+
+_AES_SBOX, _AES_TE0, _AES_TE1, _AES_TE2, _AES_TE3 = _build_aes_tables()
+
+
+def _aes_expand_key(key):
+    """The 44 round words of an AES-128 key schedule, big-endian."""
+    if len(key) != 16:
+        raise ValueError('AES-128 wants a 16-byte key')
+    w = [int.from_bytes(key[i * 4:i * 4 + 4], 'big') for i in range(4)]
+    rcon = 1
+    for i in range(4, 44):
+        t = w[i - 1]
+        if i % 4 == 0:
+            t = ((t << 8) | (t >> 24)) & 0xFFFFFFFF              # RotWord
+            s = _AES_SBOX
+            t = ((s[t >> 24] << 24) | (s[(t >> 16) & 0xFF] << 16)
+                 | (s[(t >> 8) & 0xFF] << 8) | s[t & 0xFF])
+            t ^= rcon << 24
+            rcon = _xtime(rcon)
+        w.append(w[i - 4] ^ t)
+    return w
+
+
+def _aes_encrypt_block(w, s0, s1, s2, s3):
+    """One 16-byte block through the schedule from `_aes_expand_key`."""
+    te0, te1, te2, te3 = _AES_TE0, _AES_TE1, _AES_TE2, _AES_TE3
+    s0 ^= w[0]
+    s1 ^= w[1]
+    s2 ^= w[2]
+    s3 ^= w[3]
+    o = 4
+    for _ in range(9):
+        t0 = (te0[s0 >> 24] ^ te1[(s1 >> 16) & 0xFF]
+              ^ te2[(s2 >> 8) & 0xFF] ^ te3[s3 & 0xFF] ^ w[o])
+        t1 = (te0[s1 >> 24] ^ te1[(s2 >> 16) & 0xFF]
+              ^ te2[(s3 >> 8) & 0xFF] ^ te3[s0 & 0xFF] ^ w[o + 1])
+        t2 = (te0[s2 >> 24] ^ te1[(s3 >> 16) & 0xFF]
+              ^ te2[(s0 >> 8) & 0xFF] ^ te3[s1 & 0xFF] ^ w[o + 2])
+        t3 = (te0[s3 >> 24] ^ te1[(s0 >> 16) & 0xFF]
+              ^ te2[(s1 >> 8) & 0xFF] ^ te3[s2 & 0xFF] ^ w[o + 3])
+        s0, s1, s2, s3 = t0, t1, t2, t3
+        o += 4
+    s = _AES_SBOX
+    r = w[o:]
+    out = []
+    words = (s0, s1, s2, s3)
+    for c in range(4):                       # last round: SubBytes+ShiftRows+XOR
+        word = 0
+        for row in range(4):
+            shift = 24 - 8 * row
+            byte = (s[(words[(c + row) & 3] >> shift) & 0xFF]
+                    ^ ((r[c] >> shift) & 0xFF)) & 0xFF
+            word |= byte << shift
+        out.append(word)
+    return out
+
+
+class Aes128Ctr(object):
+    """AES-128 in counter mode, over a whole buffer.
+
+    Cast Streaming restarts the counter for every access unit with a nonce the
+    receiver can rebuild from the frame id, so the caller supplies the full
+    16-byte initial counter and we keep keystream generation in one place that
+    a test can pin against the NIST vectors.
+    """
+
+    __slots__ = ('_w',)
+
+    def __init__(self, key):
+        self._w = _aes_expand_key(key)
+
+    def crypt(self, iv, data):
+        """Return `data` XOR the keystream starting at the 16-byte counter `iv`."""
+        w = self._w
+        c0, c1, c2, c3 = struct.unpack('>4I', iv)
+        out = bytearray(data)
+        pos = 0
+        total = len(out)
+        pack = struct.pack
+        while pos < total:
+            k0, k1, k2, k3 = _aes_encrypt_block(w, c0, c1, c2, c3)
+            take = min(16, total - pos)
+            ks = pack('>4I', k0, k1, k2, k3)[:take]
+            chunk = bytes(out[pos:pos + take])
+            out[pos:pos + take] = int.to_bytes(
+                int.from_bytes(chunk, 'big') ^ int.from_bytes(ks, 'big'),
+                take, 'big')
+            pos += take
+            c3 += 1
+            if c3 > 0xFFFFFFFF:
+                c3 = 0
+                c2 += 1
+                if c2 > 0xFFFFFFFF:
+                    c2 = 0
+                    c1 += 1
+                    if c1 > 0xFFFFFFFF:
+                        c1 = 0
+                        c0 = (c0 + 1) & 0xFFFFFFFF
+        return bytes(out)
+
+
+#: NAL types that carry a picture slice (H.264 table 7-1).
+_VCL_NALS = (1, 2, 5)
+#: Parameter sets the receiver needs in front of every IDR, not once per stream.
+_PARAM_NALS = (7, 8)
+#: Access unit delimiter: it names the start of a picture, so it also ends the
+#: previous one. Only x264 gets asked for these (the `aud=1` flag); a stream
+#: without them simply falls back to "closed by the next slice".
+_AUD = 9
+
+
+def _starts_picture(nal, header):
+    """Whether a slice NAL is the first slice of a new picture.
+
+    The slice header opens with `first_mb_in_slice` as an unsigned Exp-Golomb
+    code, and zero -- which is what a picture's first slice carries -- encodes
+    as a single '1' bit: the top bit of the byte after the NAL header. Slices
+    two..n of the same picture have a non-zero first_mb_in_slice, and x264 under
+    `-tune zerolatency` really does emit them, so this is the difference between
+    one picture per frame and a fifth of a picture per frame.
+
+    `header` is where the NAL header byte sits inside `nal` (after its start
+    code). No emulation-prevention unescaping is needed for this one bit: an
+    escape can only follow a run of two zeros, and a NAL header byte is never
+    zero, so the byte after it is always where it looks.
+    """
+    return len(nal) > header + 1 and (nal[header + 1] & 0x80) != 0
+
+
+def _nal_starts(data):
+    """Offsets of every Annex-B start code in `data`, with its length.
+
+    A 4-byte start code is a 3-byte one with a leading zero, so the offset is
+    reported at the first of those zeros and `width` says how many to skip.
+    """
+    out = []
+    i = data.find(b'\x00\x00\x01')
+    while i != -1:
+        width = 4 if i > 0 and data[i - 1] == 0 else 3
+        out.append((i - (width - 3), width))
+        i = data.find(b'\x00\x00\x01', i + 3)
+    return out
+
+
+class _AccessUnits(object):
+    """ffmpeg's Annex-B byte stream -> one buffer per picture.
+
+    Cast Streaming encrypts and timestamps *access units*, so the framing has
+    to happen here rather than in a muxer. A picture is recognised by its first
+    slice (`first_mb_in_slice == 0`, which is ue(v) zero, which is a single '1'
+    bit right after the NAL header) and closed by the next one, or by the access
+    unit delimiter when the encoder emits one. Slicing matters here: x264 under
+    `-tune zerolatency` splits a 1080p picture into several slice NALs, and
+    treating each as a frame would put a fifth of a picture on the panel.
+    Parameter sets belong to the unit that follows them, and an IDR without its
+    SPS/PPS in front is unwatchable, so they are repeated from the last set seen
+    rather than trusted to `repeat_headers`.
+    """
+
+    def __init__(self):
+        self._pending = bytearray()
+        self._units = []
+        self._open = bytearray()        # the unit being filled
+        self._prefix = bytearray()      # non-VCL NALs ahead of the next slice
+        self._params = {}               # nal type -> bytes, last seen
+
+    def feed(self, data):
+        """Queue the complete units this chunk finished; returns them."""
+        self._pending += data
+        self._parse()
+        out, self._units = self._units, []
+        return out
+
+    def flush(self):
+        """Hand over everything the stream ended on.
+
+        A unit is only known to be finished when the next one starts, so at the
+        end of the byte stream the last NAL is still open *and* the unit before
+        it is still waiting for that NAL to be taken. Without this a teardown
+        loses the final pictures; with `-aud` the encoder removes the lag
+        entirely (see `_AUD`).
+        """
+        self._parse(final=True)
+        if self._open:
+            self._close()
+        out, self._units = self._units, []
+        return out
+
+    def _parse(self, final=False):
+        while True:
+            starts = _nal_starts(self._pending)
+            if not starts or (len(starts) < 2 and not final):
+                return                  # the last NAL is still arriving
+            offset, width = starts[0]
+            nxt = starts[1][0] if len(starts) > 1 else len(self._pending)
+            body = offset + width
+            ntype = (self._pending[body] & 0x1F) if body < nxt else 0
+            nal = bytes(self._pending[offset:nxt])
+            del self._pending[:nxt]     # also drops any junk before offset
+            self._take(nal, ntype, width)
+
+    def _take(self, nal, ntype, header):
+        if ntype not in _VCL_NALS:
+            if ntype == _AUD and self._open:
+                # An delimiter announces a new picture, which is what tells us
+                # the one we were filling is over -- one frame earlier than
+                # waiting for its first slice NAL to arrive.
+                self._close()
+            if ntype in _PARAM_NALS:
+                self._params[ntype] = nal
+            self._prefix += nal         # belongs to the unit that follows
+            return
+        if self._open and _starts_picture(nal, header):
+            self._close()
+        if self._open:
+            # Another slice of the picture already being filled.
+            self._open += nal
+            return
+        head = bytearray()
+        if ntype == 5:
+            for t in _PARAM_NALS:
+                cached = self._params.get(t)
+                if cached and cached not in self._prefix:
+                    head += cached
+        # SPS/PPS in front of the prefix, not appended after it: an AU that
+        # hands the decoder SEI -> SPS -> IDR is out of order, and whichever
+        # set the encoder happened to repeat in-band stays where it was.
+        self._open = head + self._prefix + nal
+        self._prefix = bytearray()
+
+    def _close(self):
+        unit = bytes(self._open)
+        self._open = bytearray()
+        if unit.strip(b'\x00'):
+            self._units.append(unit)
+
+
+# -- the mirroring session ---------------------------------------------------
+#
+# Everything below is the media plane: what a Chromecast expects to find on UDP
+# once the control plane has handed it an OFFER. The field layouts follow
+# Google's own openscreen implementation (the C++ that ships in Chrome) as
+# transcribed by the MIT-licensed omacast reference, and each one is pinned by a
+# case in scripts/verify_cast_airplay.py Part 24. What has *not* been verified
+# is a real television: the far end of that loop is a fake receiver built from
+# these same tables, so these bytes are self-consistent rather than
+# field-proven -- AGENTS.md 4.9 is explicit that those are not the same claim.
+
+#: openscreen's payload types, including the pair its own header calls a
+#: "hack for Android TV" -- which is the pair shipping mirroring firmware
+#: answers. The canonical table in the same header (video 101) is for real
+#: WebRTC receivers, and this protocol is not that.
+RTP_VIDEO_PT = 96
+VIDEO_CLOCK = 90000
+#: The receiver's jitter-buffer target. Chrome's tab-cast default of 400 ms
+#: reads as a slideshow from a desktop; 200 ms is what a LAN can hold.
+TARGET_DELAY_MS = 200
+#: 12 bytes of RTP header + 7 bytes of Cast header. The 1400 ceiling keeps the
+#: IP packet inside an ordinary Ethernet MTU: this protocol has no fragmentation
+#: story, because a frame travels as whole access units or not at all.
+MAX_PACKET = 1400
+CAST_PACKET_HEADER = 19
+MAX_PAYLOAD = MAX_PACKET - CAST_PACKET_HEADER
+#: How many frames the receiver may sit on before we call it behind us. The
+#: reference also bounds the window by time; a frame count is what can be
+#: enforced without knowing the round trip.
+MAX_IN_FLIGHT_FRAMES = 12
+#: A receiver will not paint anything until it has the NTP<->RTP mapping, so
+#: the first sender report rides with the first picture rather than waiting for
+#: this timer.
+SR_INTERVAL = 0.5
+#: With nothing new to send, resend the last packet of the newest
+#: un-acknowledged frame. It is the protocol's only way of saying "I am still
+#: here, and this is the frame I am waiting on you for", and it is what unsticks
+#: a receiver that lost a frame's final packet.
+KICKSTART_INTERVAL = 0.25
+CONTROL_PING_SECONDS = 5.0
+#: The reference's own definition of a dead session.
+CONTROL_LOSS_SECONDS = 20.0
+#: Seconds between the NTP epoch (1900) and the UNIX epoch (1970).
+NTP_UNIX_OFFSET = 2208988800
+#: Pure-Python AES-128-CTR runs at about 1.3 MB/s, so this target buys its
+#: latency with a lower ceiling than the LOAD path has: 10 Mbps of 1080p would
+#: leave the encryptor permanently behind the encoder, and the mirror would
+#: slow-walk further and further into the past.
+CAST_STREAM_MAX_BITRATE = 4500000
+#: Requested height -> the frame this target actually pins. The OFFER has to
+#: claim a resolution before the encoder has produced a single picture, and
+#: "whatever the desktop happens to be" cannot be claimed then -- so 'source'
+#: means 1080p on this target, and the scale filter letterboxes into the box
+#: rather than stretching a 3:2 laptop to make the claim true.
+CAST_STREAM_SIZES = {360: (640, 360), 720: (1280, 720), 1080: (1920, 1080),
+                     0: (1920, 1080)}
+
+
+def cast_stream_shape(height):
+    """(width, height, ffmpeg scale/pad filter) for the low-latency target."""
+    width, height = CAST_STREAM_SIZES.get(height, CAST_STREAM_SIZES[720])
+    return width, height, (
+        'scale={w}:{h}:force_original_aspect_ratio=decrease,'
+        'pad={w}:{h}:(ow-iw)/2:(oh-ih)/2'.format(w=width, h=height))
+
+
+def aes_material():
+    """(key, iv mask), sixteen raw bytes each.
+
+    The *sender* makes both up and offers them in the clear; the ANSWER carries
+    no key material at all. Worth being blunt about: this is encryption for
+    framing, not confidentiality. Anyone on the LAN who can read the OFFER can
+    decrypt the picture.
+    """
+    return secrets.token_bytes(16), secrets.token_bytes(16)
+
+
+def frame_iv(iv_mask, frame_id):
+    """openscreen's per-frame counter block: a zero block with the frame id
+    big-endian at bytes 8..12, then the whole thing XORed with the mask."""
+    block = (b'\x00' * 8 + struct.pack('>I', frame_id & 0xFFFFFFFF)
+             + b'\x00' * 4)
+    return bytes(bytearray(a ^ b for a, b in zip(block, iv_mask)))
+
+
+def build_offer(ssrc, key, iv_mask, width, height, fps, bitrate, seq_num=1):
+    """The OFFER for one video stream (audio is phase two -- see the plan).
+
+    `aesKey` and `aesIvMask` have to be exactly 32 hex digits. The receiver
+    reads the length as the key size, so anything else comes back as
+    `result: error` rather than a negotiation.
+    """
+    return {
+        'type': 'OFFER', 'seqNum': seq_num,
+        'offer': {
+            'castMode': 'mirroring',
+            'receiverGetStatus': True,
+            'supportedStreams': [{
+                'index': 0,
+                'type': 'video_source',
+                'codecName': 'h264',
+                'rtpProfile': 'cast',
+                'rtpPayloadType': RTP_VIDEO_PT,
+                'ssrc': ssrc,
+                'targetDelay': TARGET_DELAY_MS,
+                'aesKey': key.hex(),
+                'aesIvMask': iv_mask.hex(),
+                'timeBase': '1/{}'.format(VIDEO_CLOCK),
+                'maxBitRate': bitrate,
+                'maxFrameRate': '{}000/1000'.format(fps),
+                'resolutions': [{'width': width, 'height': height}],
+                'receiverRtcpEventLog': False,
+            }],
+        },
+    }
+
+
+def parse_answer(data):
+    """(udp port, receiver ssrc) out of an ANSWER; raise if it is a refusal.
+
+    `sendIndexes` and `ssrcs` are positional pairs into our own OFFER. The
+    receiver's SSRC exists only so feedback can be addressed -- the RTP we send
+    carries *our* SSRC.
+    """
+    if (data.get('result') or 'ok') != 'ok':
+        raise RuntimeError('接收端拒绝了镜像邀请：{}'.format(
+            json.dumps(data.get('error') or {}, ensure_ascii=False)))
+    answer = data.get('answer') or {}
+    port = answer.get('udpPort')
+    indexes = answer.get('sendIndexes') or []
+    ssrcs = answer.get('ssrcs') or []
+    if not isinstance(port, int) or isinstance(port, bool) or \
+            not 0 < port < 65536:
+        raise RuntimeError('接收端给的 udpPort 不可用：{!r}'.format(port))
+    if not indexes or len(indexes) != len(ssrcs):
+        raise RuntimeError('接收端的 ANSWER 自相矛盾：{} 条流、{} 个 SSRC'.format(
+            len(indexes), len(ssrcs)))
+    if 0 not in indexes:
+        raise RuntimeError('接收端没有接受这条视频流')
+    return port, ssrcs[list(indexes).index(0)]
+
+
+def _unit_is_key(unit):
+    """Whether an access unit holds an IDR, i.e. redraws the picture."""
+    for offset, width in _nal_starts(unit):
+        body = offset + width
+        if body < len(unit) and (unit[body] & 0x1F) == 5:
+            return True
+    return False
+
+
+def cast_packet(payload, ssrc, sequence, timestamp, frame_id, is_key,
+                packet_id, packet_count, referenced_frame_id, marker=False):
+    """One RTP header and Cast header in front of an encrypted slice."""
+    flags = 0x40              # "the referenced frame id field is used"
+    if is_key:
+        flags |= 0x80
+    return struct.pack(
+        '>BBHIIBBHHB', 0x80,
+        (0x80 if marker else 0) | RTP_VIDEO_PT,
+        sequence & 0xFFFF, timestamp & 0xFFFFFFFF, ssrc & 0xFFFFFFFF,
+        flags, frame_id & 0xFF, packet_id, max(0, packet_count - 1),
+        referenced_frame_id & 0xFF) + payload
+
+
+def cast_packets(ciphertext, frame_id, is_key, referenced_frame_id, ssrc,
+                 sequence, timestamp):
+    """Slice one encrypted frame into packets; returns (packets, next sequence).
+
+    The whole access unit is encrypted before slicing -- one nonce per frame,
+    which is why the ciphertext is exactly as long as the plaintext and only the
+    last packet is short. `sequence` advances on every packet *including* a
+    resend, because the receiver's reorder buffer counts arrivals rather than
+    ids. A zero-length frame still sends one header-only packet.
+    """
+    count = max(1, -(-len(ciphertext) // MAX_PAYLOAD))
+    out = []
+    for index in range(count):
+        chunk = ciphertext[index * MAX_PAYLOAD:(index + 1) * MAX_PAYLOAD]
+        out.append(cast_packet(chunk, ssrc, sequence, timestamp, frame_id,
+                               is_key, index, count, referenced_frame_id,
+                               marker=(index == count - 1)))
+        sequence = (sequence + 1) & 0xFFFF
+    return out, sequence
+
+
+def ntp_timestamp(now=None):
+    """32.32 fixed point from the NTP epoch. The receiver pairs this with an
+    RTP timestamp, so both clocks must be read at the same instant."""
+    now = time.time() if now is None else now
+    seconds = int(now)
+    fraction = int((now - seconds) * 0x100000000) & 0xFFFFFFFF
+    return ((seconds + NTP_UNIX_OFFSET) << 32) | fraction
+
+
+def rtcp_sender_report(ssrc, ntp, timestamp, packets, octets):
+    """28 bytes. No report, no picture -- see SR_INTERVAL."""
+    return struct.pack('>BBHIQIII', 0x80, 200, 6, ssrc & 0xFFFFFFFF, ntp,
+                       timestamp & 0xFFFFFFFF, packets & 0xFFFFFFFF,
+                       octets & 0xFFFFFFFF)
+
+
+def parse_rtcp(data, media_ssrc):
+    """The events in one compound RTCP packet that are addressed to us.
+
+    ('picture-loss',), ('checkpoint', frame-id-8, playout-delay-ms) or
+    ('nack', frame-id-8, packet-id, bitmask). The receiver's feedback is RTCP on
+    the media socket, not a message on the control plane: payload-specific
+    (206) with FMT 1 is a picture loss, and FMT 15 carrying the ASCII word
+    CAST is the acknowledgement. A trailing CST2 block is skipped -- we do not
+    retransmit individual packets, so per-packet loss tells us nothing.
+    """
+    events = []
+    position = 0
+    while position + 4 <= len(data):
+        head = data[position]
+        if head >> 6 != 2:
+            break
+        ptype = data[position + 1]
+        length = (struct.unpack('>H', data[position + 2:position + 4])[0]
+                  + 1) * 4
+        body = data[position + 4:position + length]
+        position += length
+        if ptype != 206 or len(body) < 8:
+            continue                # RR / XR / SDES / BYE: nothing to act on
+        if struct.unpack('>I', body[4:8])[0] != media_ssrc:
+            continue                # about somebody else's stream
+        fmt = head & 0x1F
+        if fmt == 1:
+            events.append(('picture-loss',))
+        elif fmt == 15 and len(body) >= 16 and body[8:12] == b'CAST':
+            events.append(('checkpoint', body[12],
+                           struct.unpack('>H', body[14:16])[0]))
+            losses = body[13] * 4
+            for index in range(16, min(len(body), 16 + losses) - 3, 4):
+                events.append(('nack', body[index],
+                               struct.unpack('>H', body[index + 1:index + 3])[0],
+                               body[index + 3]))
+    return events
+
+
+def expand_frame_id(id8, latest):
+    """Widen the 8-bit id a receiver reports back to a full frame id.
+
+    A frame only carries its low byte on the wire, so "17" means 17, 273 or 529
+    -- whichever is within 256 of what we last sent. Get this wrong at a 256
+    boundary and an acknowledgement pops nothing, the window fills, and the
+    mirror sheds every frame from then on.
+    """
+    if latest < 0:
+        return id8
+    candidate = (latest & ~0xFF) | id8
+    return candidate - 256 if candidate > latest else candidate
+
+
+class _CastStreamSender(object):
+    """Access units in, a picture on a television out.
+
+    Threading is deliberately lopsided: the encoder's pump thread is the only
+    caller of `feed`, and it does the sending inline -- queueing frames for a
+    sender thread would just add a buffer whose contents are already stale by
+    the time they leave. One background thread owns the other half (the
+    receiver's feedback, sender reports, kickstart probes and the Cast
+    keepalive), because all four are timers rather than data.
+
+    There is no retransmit path on purpose. This is a live desktop: the next
+    frame supersedes a lost one within 42 ms, and the protocol's own recovery
+    (checkpoint, PLI, the next one-second GOP) is what the reference relies on
+    too.
+    """
+
+    def __init__(self, control, sock, address, ssrc, receiver_ssrc, key,
+                 iv_mask, on_lost=None):
+        self._control = control
+        self._sock = sock
+        self._address = address
+        self.ssrc = ssrc
+        self._receiver_ssrc = receiver_ssrc
+        self._cipher = Aes128Ctr(key)
+        self._iv_mask = iv_mask
+        self._on_lost = on_lost
+        self._units = _AccessUnits()
+        self._frame_id = 0
+        self._sequence = secrets.randbelow(0x10000)
+        self._in_flight = deque()       # (frame id, last packet, timestamp)
+        self._awaiting_key = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._t0 = time.monotonic()
+        self._timestamp = 0
+        self._octets = 0
+        self._last_sent = self._t0
+        self._last_report = 0.0
+        self._last_ping = 0.0
+        self._last_pong = time.time()
+        self._reported = False
+        self.alive = False
+        self.acked = -1
+        self.playout_delay = 0
+        #: The counting surface `_Broadcaster` offers, so the pump and `stats()`
+        #: do not care which target produced these bytes.
+        self.chunks = 0
+        self.bytes = 0
+        self.drops = 0
+        self.frames = 0
+        self.packets = 0
+
+    # -- handshake -----------------------------------------------------------
+
+    @classmethod
+    def open(cls, host, port, width, height, fps, bitrate, timeout=10.0,
+             on_lost=None):
+        """Go all the way to a socket the receiver is listening on.
+
+        Deliberately before the encoder starts: every failure in here is a
+        reason to take the compatible LOAD path instead, and unwinding a live
+        ffmpeg plus an HTTP server to make that decision would be the messy
+        version of the same call.
+        """
+        control = _CastSender(host, port)
+        control.connect()
+        try:
+            control.launch_mirroring(MIRROR_APP_ID, timeout=timeout)
+            key, iv_mask = aes_material()
+            ssrc = secrets.randbits(32) | 1
+            control.send_offer(build_offer(ssrc, key, iv_mask, width, height,
+                                           fps, bitrate))
+            udp_port, receiver_ssrc = parse_answer(
+                control.await_answer(timeout=max(2.0, timeout)))
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # Bound, never connected: the receiver answers from a source port
+            # of its own choosing, and a connected socket makes the kernel drop
+            # those packets before we ever see a checkpoint.
+            sock.bind(('', 0))
+            return cls(control, sock, (host, udp_port), ssrc, receiver_ssrc,
+                       key, iv_mask, on_lost=on_lost)
+        except Exception:
+            # An app we launched and then abandoned is worse than no app: the
+            # next session would meet this one as the stale instance it has to
+            # stop first. Only worth attempting once a socket exists.
+            if control.sock is not None:
+                try:
+                    control.close_mirroring()
+                except Exception as e:
+                    logger.debug('could not leave the mirroring app: %s', e)
+            _close_quietly(control)
+            raise
+
+    def start(self):
+        self.alive = True
+        self._last_pong = time.time()
+        self._thread = threading.Thread(target=self._loop, daemon=True,
+                                        name="CAST_STREAM_LOOP")
+        self._thread.start()
+
+    # -- what the pump thread calls ------------------------------------------
+
+    def feed(self, chunk):
+        self.chunks += 1
+        self.bytes += len(chunk)
+        for unit in self._units.feed(chunk):
+            self._send_unit(unit)
+
+    def flush(self):
+        for unit in self._units.flush():
+            self._send_unit(unit)
+
+    def _send_unit(self, unit):
+        is_key = _unit_is_key(unit)
+        with self._lock:
+            behind = len(self._in_flight) >= MAX_IN_FLIGHT_FRAMES
+        if behind or (self._awaiting_key and not is_key):
+            # Shed *whole* frames: half a picture stays on the screen until the
+            # next IDR, which is worse than the last complete one still there.
+            # Even a key frame waits when the window is full -- the next GOP is
+            # a second away and the checkpoint will free the slots by then.
+            self._awaiting_key = True
+            self.drops += 1
+            return
+        frame_id = self._frame_id
+        self._frame_id += 1
+        now = time.monotonic()
+        timestamp = int((now - self._t0) * VIDEO_CLOCK) & 0xFFFFFFFF
+        cipher = self._cipher.crypt(frame_iv(self._iv_mask, frame_id), unit)
+        packets, self._sequence = cast_packets(
+            cipher, frame_id, is_key, frame_id if is_key else frame_id - 1,
+            self.ssrc, self._sequence, timestamp)
+        try:
+            for packet in packets:
+                self._sock.sendto(packet, self._address)
+        except OSError:
+            # Teardown closed the media socket under us. Counting a frame the
+            # receiver never got would be the worse lie; hand the slot back.
+            self._frame_id -= 1
+            self._awaiting_key = True
+            raise
+        with self._lock:
+            self._in_flight.append((frame_id, packets[-1], timestamp))
+            self._timestamp = timestamp
+            self._octets = (self._octets + len(cipher)) & 0xFFFFFFFF
+            self.packets += len(packets)
+            self.frames += 1
+            self._last_sent = now
+            if is_key:
+                self._awaiting_key = False
+            first = not self._reported
+        if first:
+            self._send_report()
+
+    # -- timers and feedback (the one background thread) ---------------------
+
+    def _send_report(self):
+        self._reported = True
+        self._last_report = time.monotonic()
+        with self._lock:
+            packet = rtcp_sender_report(self.ssrc, ntp_timestamp(),
+                                        self._timestamp, self.packets,
+                                        self._octets)
+        try:
+            self._sock.sendto(packet, self._address)
+        except OSError as e:
+            logger.debug('sender report lost: %s', e)
+
+    def _kickstart(self):
+        with self._lock:
+            packet = self._in_flight[-1][1] if self._in_flight else None
+        if packet is None:
+            return
+        self._sequence = (self._sequence + 1) & 0xFFFF
+        resend = packet[:2] + struct.pack('>H', self._sequence) + packet[4:]
+        try:
+            self._sock.sendto(resend, self._address)
+        except OSError:
+            pass
+
+    def _on_rtcp(self, data):
+        for event in parse_rtcp(data, self.ssrc):
+            if event[0] == 'picture-loss':
+                self._awaiting_key = True
+            elif event[0] == 'checkpoint':
+                with self._lock:
+                    acked = expand_frame_id(event[1], self._frame_id - 1)
+                    while self._in_flight and self._in_flight[0][0] <= acked:
+                        self._in_flight.popleft()
+                    self.acked = max(self.acked, acked)
+                    self.playout_delay = event[2]
+            # 'nack': noted and dropped. See the class docstring.
+
+    def _keepalive(self):
+        self._last_ping = time.monotonic()
+        try:
+            self._control.ping()
+        except (OSError, ssl.SSLError, ValueError) as e:
+            logger.debug('keepalive could not be sent: %s', e)
+            return
+        while True:
+            message = self._control.poll()
+            if message is None:
+                return
+            if message.get('payload_type') != 0:
+                continue
+            try:
+                data = json.loads(message.get('payload_utf8') or '{}')
+            except ValueError:
+                continue
+            if data.get('type') == 'PONG':
+                self._last_pong = time.time()
+                return
+
+    def _loop(self):
+        self._sock.settimeout(0.1)
+        while not self._stop.is_set():
+            now = time.monotonic()
+            try:
+                data, peer = self._sock.recvfrom(65536)
+            except socket.timeout:
+                data = None
+            except OSError:
+                return
+            if data and peer[0] == self._address[0]:
+                self._on_rtcp(data)
+            if now - self._last_report >= SR_INTERVAL:
+                self._send_report()
+            if now - self._last_sent >= KICKSTART_INTERVAL:
+                self._kickstart()
+                # Re-arm the probe ourselves: recvfrom already paced this loop,
+                # so without this every 100 ms would resend the same packet.
+                self._last_sent = now
+            if now - self._last_ping >= CONTROL_PING_SECONDS:
+                self._keepalive()
+            if time.time() - self._last_pong > CONTROL_LOSS_SECONDS:
+                self.alive = False
+                self._stop.set()
+                if self._on_lost is not None:
+                    self._on_lost('电视不再应答保活（可能已关机或换了网络）')
+                return
+
+    # -- status and teardown -------------------------------------------------
+
+    def clients(self):
+        return 1 if self.alive else 0
+
+    def in_flight(self):
+        with self._lock:
+            return len(self._in_flight)
+
+    def stop(self):
+        if self._stop.is_set():
+            return
+        self._stop.set()
+        self.alive = False
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(1.0)
+        self._control.close_mirroring()
+
+    def close(self):
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._control.close()
+
+
 def unicode_text(value):
     return value if isinstance(value, str) else str(value)
 
@@ -2176,6 +3156,11 @@ class ScreenMirrorRenderer(Renderer):
         self._sender = None
         self._proc = None
         self._server = None
+        #: The low-latency target has no HTTP server: the encoder's bytes go
+        #: straight into a sender that pushes them. `_kind` says which target
+        #: this is even when there is no session to ask.
+        self._sink = None
+        self._kind = ''
         self._awake = None
         self._generation = 0
         self._mirroring = False
@@ -2200,8 +3185,7 @@ class ScreenMirrorRenderer(Renderer):
         return host, port, name or host
 
     def quality(self):
-        key = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
-        return QUALITIES.get(key, QUALITIES['720'])
+        return quality_preset()
 
     def is_mirroring(self):
         return self._mirroring
@@ -2224,26 +3208,32 @@ class ScreenMirrorRenderer(Renderer):
         but it also means the numbers are only as fresh as the last chunk.
         """
         with self._lock:
-            server = self._server
-        if server is None:
+            server, sink, kind = self._server, self._sink, self._kind
+        #: Every target counts bytes the same way; only the low-latency one has
+        #: no HTTP server holding a broadcaster to count them with.
+        source = server.broadcaster if server is not None else sink
+        if source is None or not kind:
             return {}
-        bc = server.broadcaster
         seconds = max(1.0, time.time() - self._started_at) \
             if self._started_at else 1.0
-        info = {'kind': server.session.kind,
-                'clients': bc.clients(),
-                'chunks': bc.chunks,
-                'bytes': bc.bytes,
-                'drops': bc.drops,
-                'mbps': round(bc.bytes * 8 / 1000000.0 / seconds, 2),
+        info = {'kind': kind,
+                'clients': source.clients(),
+                'chunks': source.chunks,
+                'bytes': source.bytes,
+                'drops': source.drops,
+                'mbps': round(source.bytes * 8 / 1000000.0 / seconds, 2),
                 'seconds': int(time.time() - self._started_at)
                 if self._started_at else 0}
-        if server.session.bytelog:
+        if kind == 'caststream':
+            info['frames'] = sink.frames
+            info['in_flight'] = sink.in_flight()
+            info['delay'] = sink.playout_delay
+        elif server.session.bytelog:
             # On this target the meaningful health number is how far behind
             # the TV is -- it is reading from the hoard we pre-filled.
             info['profile'] = dlna_profile_id(server.session.profile)
             info['state'] = self._dlna_state
-            info['buffered'] = max(0, bc.end - bc.start)
+            info['buffered'] = max(0, source.end - source.start)
         return info
 
     # -- Renderer API ----------------------------------------------------------
@@ -2266,7 +3256,7 @@ class ScreenMirrorRenderer(Renderer):
             logger.info('ignoring a repeat push of %s', url)
             return
         kind = output_kind()
-        if kind == 'cast':
+        if kind in ('cast', 'caststream'):
             ready = bool(self.target()[0])
         elif kind == 'dlna':
             ready = bool(dlna_target()[1])
@@ -2353,11 +3343,11 @@ class ScreenMirrorRenderer(Renderer):
         host = port = None
         name = ''
         control = ''
-        if kind == 'cast':
+        if kind in ('cast', 'caststream'):
             host, port, name = self.target()
             if host is None:
-                self._fail('还没有选择投屏目标：在菜单栏的「输出目标 → Chromecast」'
-                           '里选一台设备，或改用「浏览器」目标', generation)
+                self._fail('还没有选择投屏目标：在菜单栏的「输出目标」里选一台 '
+                           'Chromecast 设备，或改用「浏览器」目标', generation)
                 return
         elif kind == 'dlna':
             name, control = dlna_target()
@@ -2383,11 +3373,27 @@ class ScreenMirrorRenderer(Renderer):
             encoder = 'software'
         first_bytes = threading.Event()
         tail = deque(maxlen=20)
+        stream = None
+        if kind == 'caststream':
+            # Ask the device first. Its mirroring app is the part of this
+            # target we cannot self-prove, and a device that refuses it is
+            # common enough that the answer is worth having *before* an encoder
+            # and an HTTP server exist to unwind.
+            width, pinned, _filter = cast_stream_shape(height)
+            try:
+                stream = _CastStreamSender.open(
+                    host, port, width, pinned, FPS,
+                    min(bitrate, CAST_STREAM_MAX_BITRATE),
+                    on_lost=self._stream_lost)
+            except Exception as e:
+                logger.warning('Cast Streaming refused (%s); using LOAD', e)
+                kind = 'cast'
         session = _Session(kind, has_audio=bool(capture.audio_map),
                            title=socket.gethostname() or 'Macast',
                            profile=dlna_profile() if kind == 'dlna' else None)
+        handed = False
         try:
-            server = start_stream_server(session)
+            server = None if stream is not None else start_stream_server(session)
             proc = subprocess.Popen(
                 build_ffmpeg_command(ffmpeg, capture, height, bitrate,
                                      kind=kind, encoder=encoder),
@@ -2401,13 +3407,21 @@ class ScreenMirrorRenderer(Renderer):
                 # death through _teardown(), so _mirror must not also clean up.
                 self._proc = proc
                 self._server = server
-            threading.Thread(target=_pump, args=(proc, server.broadcaster,
-                                                 self, generation, first_bytes),
-                             daemon=True, name="SCREEN_MIRROR_PUMP").start()
+                self._sink = stream
+                self._kind = kind
+                handed = True
+            threading.Thread(
+                target=_pump,
+                args=(proc, server.broadcaster if stream is None else stream,
+                      self, generation, first_bytes),
+                daemon=True, name="SCREEN_MIRROR_PUMP").start()
             threading.Thread(target=_drain_stderr, args=(proc, tail),
                              daemon=True, name="SCREEN_MIRROR_LOG").start()
-            url = (dlna_stream_url(server, _url_host(control))
+            url = ('' if stream is not None else
+                   dlna_stream_url(server, _url_host(control))
                    if kind == 'dlna' else stream_url(server))
+            if stream is not None:
+                stream.start()
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
@@ -2430,12 +3444,20 @@ class ScreenMirrorRenderer(Renderer):
                                session.profile)
                 sender.play()
         except _Aborted:
+            if stream is not None and not handed:
+                # Nobody else ever held this sender, and the mirroring app is
+                # already up on the device: leave without saying goodbye and
+                # the next session meets the stale instance it refuses.
+                _cleanup(None, None, None, stream)
             self._teardown()
             return
         except Exception as e:
+            if stream is not None and not handed:
+                _cleanup(None, None, None, stream)
             self._teardown()
             detail = str(e).strip() or ' '.join(list(tail)[-3:])
-            target_label = name if kind in ('cast', 'dlna') else '浏览器'
+            target_label = name if kind in ('cast', 'caststream', 'dlna') \
+                else '浏览器'
             self._fail('镜像到 {} 启动失败：{}'.format(target_label, detail),
                        generation)
             return
@@ -2465,6 +3487,8 @@ class ScreenMirrorRenderer(Renderer):
                 max(1, DLNA_PREFILL_BYTES * 8 // session.profile.bitrate))
         elif kind == 'browser':
             message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
+        elif kind == 'caststream':
+            message = '已开始低延迟镜像到 {}（此通道还没有声音）'.format(name)
         else:
             message = '已开始镜像到 {}'.format(name)
         cherrypy.engine.publish('app_notify', 'Macast', message)
@@ -2567,6 +3591,19 @@ class ScreenMirrorRenderer(Renderer):
             DLNA_PROFILES[nxt].label),
                    self._generation)
 
+    def _stream_lost(self, reason):
+        """The media loop stopped believing the television is there.
+
+        Bumping the generation is what silences the pump: teardown kills the
+        encoder, and without it the resulting exit code 15 would be reported as
+        a capture failure on top of the real reason.
+        """
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+        self._fail(reason, generation)
+        self._teardown()
+
     def _cast_url(self, url, generation):
         """Bridge path: play a finished URL on the device, no capture."""
         host, port, name = self.target()
@@ -2622,20 +3659,24 @@ class ScreenMirrorRenderer(Renderer):
     def _teardown(self):
         with self._lock:
             sender, proc, server = self._sender, self._proc, self._server
+            sink = self._sink
             self._sender = self._proc = self._server = None
+            self._sink = None
+            self._kind = ''
             self._mirroring = False
             # Claim the assert here so a second teardown (the encoder dying
             # right after a manual stop) cannot release someone else's.
             awake, self._awake = self._awake, None
-        _cleanup(sender, proc, server)
+        _cleanup(sender, proc, server, sink)
         if awake is not None:
             _stop_awake(awake)
 
 
-def _cleanup(sender, proc, server):
-    if sender is not None:
-        sender.stop()
-        _close_quietly(sender)
+def _cleanup(sender, proc, server, sink=None):
+    for thing in (sender, sink):
+        if thing is not None:
+            thing.stop()
+            _close_quietly(thing)
     if proc is not None and proc.poll() is None:
         proc.terminate()
         try:
@@ -2669,6 +3710,15 @@ def _pump(proc, broadcaster, owner, generation, first_bytes):
             break
         broadcaster.feed(chunk)
         first_bytes.set()
+    flush = getattr(broadcaster, 'flush', None)
+    if flush is not None:
+        # Only the low-latency sink has one: the last picture is still inside
+        # the splitter when stdout closes, and an unterminated access unit is
+        # a picture nobody ever sees.
+        try:
+            flush()
+        except OSError:
+            pass
     proc.wait()
     owner._encoder_died(generation, proc, started)
 
@@ -2749,7 +3799,7 @@ class ScreenMirrorSetting(RendererSetting):
 
     def build_menu(self):
         kind = output_kind()
-        if kind == 'cast' and not _devices:
+        if kind in ('cast', 'caststream') and not _devices:
             start_search()
         if kind == 'dlna' and not _dlna_devices:
             start_renderer_search()
@@ -2757,7 +3807,7 @@ class ScreenMirrorSetting(RendererSetting):
         mirroring = bool(renderer and renderer.is_mirroring())
 
         items = [
-            MenuItem('Screen Mirror v0.5', enabled=False),
+            MenuItem('Screen Mirror v0.6', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
             MenuItem('输出目标', children=self._output_children(kind)),
@@ -2768,6 +3818,9 @@ class ScreenMirrorSetting(RendererSetting):
             items.append(MenuItem('复制观看地址', self.on_copy_url_clicked))
             items.append(MenuItem(renderer.viewer_url(), enabled=False))
         items.append(MenuItem('画质', children=self._quality_children()))
+        note = self._quality_note()
+        if note:
+            items.append(MenuItem(note, enabled=False))
         screen_children = self._screen_children()
         if screen_children:
             items.append(MenuItem('采集屏幕', children=screen_children))
@@ -2800,8 +3853,10 @@ class ScreenMirrorSetting(RendererSetting):
     def _output_children(self, kind):
         children = [MenuItem(OUTPUTS[key][0], self.on_output_clicked,
                              checked=(kind == key), data=key)
-                    for key in ('cast', 'dlna', 'browser')]
-        if kind == 'cast':
+                    for key in ('cast', 'caststream', 'dlna', 'browser')]
+        if kind in ('cast', 'caststream'):
+            # Both targets are the same device reached a different way, so the
+            # discovered list hangs under either choice.
             children.append(MenuItem('— — —', enabled=False))
             children.extend(self._device_children())
         elif kind == 'dlna':
@@ -2860,6 +3915,15 @@ class ScreenMirrorSetting(RendererSetting):
                          checked=(quality == key), data=key)
                 for key in ('360', '720', '1080', 'source')]
 
+    def _quality_note(self):
+        """The low-latency channel cannot spend what the menu offers."""
+        if output_kind() != 'caststream':
+            return None
+        width, height, _filter = cast_stream_shape(quality_preset()[0])
+        return ('低延迟通道上限 {:.1f} Mbps（软件加密跟不上）· '
+                '帧尺寸固定 {}x{}（信箱化）'.format(
+                    CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
+
     def _screen_children(self):
         """One entry per display the last probe saw; empty when it has no list.
 
@@ -2892,6 +3956,13 @@ class ScreenMirrorSetting(RendererSetting):
                 stats.get('state') or '未上报',
                 max(0, stats.get('buffered', 0)) / 1048576.0)
         minutes, seconds = divmod(stats['seconds'], 60)
+        if stats.get('kind') == 'caststream':
+            #: Frames in the receiver's own words: 在途 is how many pictures it
+            #: has not acknowledged, and 丢帧 counts the ones we shed because
+            #: that number hit its ceiling.
+            return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 帧 · 在途 {:d} · 丢帧 {:d}'.format(
+                minutes, seconds, stats['mbps'], stats['frames'],
+                stats['in_flight'], stats['drops'])
         return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
             minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
 

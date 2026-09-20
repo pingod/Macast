@@ -50,19 +50,19 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 
 | # | 能力 | JustStream 现状 | 我们的覆盖计划 |
 |---|---|---|---|
-| R1 | 镜像到 Chromecast / Google TV | ✅ Cast 协议 | 已有（`screen_mirror.py` LOAD）→ P0/P3 升级低延迟 |
+| R1 | 镜像到 Chromecast / Google TV | ✅ Cast 协议 | **已交付**：兼容的 LOAD/mpegts 通道（既有）+ **P3 的 Cast Streaming 低延迟通道**（`caststream`，设备拒绝即自动回落）；低延迟那条**未经真电视验证** |
 | R2 | 镜像到 Apple TV / AirPlay 2 电视 | ✅ AirPlay 镜像 | ❌ 需要 FairPlay；**不做发送端**，接收端由 `airplay_mirror.py`(P5) 补 |
 | R3 | 镜像到 DLNA/UPnP 智能电视（2012-2018 老电视） | ✅ | **已交付（`screen_mirror.py` v0.5，P2）**：五档兼容档位 + 自动回退；真机矩阵未验证 |
 | R4 | 镜像到 Roku / Fire TV | 厂商标称支持 ⚠️ 机制未证实 | P1「任意浏览器」路线覆盖 Fire TV/Roku 浏览器可用场景 |
-| R5 | 多显示器选择 | ✅ 选屏 | 现插件仅默认屏 → **P1 补选择** |
-| R6 | 光标显示/隐藏、鼠标高亮、缩放适配 | ✅ | 光标开关 → **P1**（`-capture_cursor` 已有开关位）；高亮不做 |
-| R7 | 画质 Auto/720p/1080p、码率、编码器 | 有档位（4K 仅文件模式）⚠️ 具体 UI 未证实 | **P1 预设化**（含 4K/区域） |
+| R5 | 多显示器选择 | ✅ 选屏 | **已交付（P1）**：`采集屏幕` 子菜单，插拔后回落默认屏 |
+| R6 | 光标显示/隐藏、鼠标高亮、缩放适配 | ✅ | **已交付（P1）**：`显示鼠标指针`（`-capture_cursor`）；高亮不做；「缩放适配」= 低延迟通道的信箱化 |
+| R7 | 画质 Auto/720p/1080p、码率、编码器 | 有档位（4K 仅文件模式）⚠️ 具体 UI 未证实 | **已交付（P1）**：四档画质 + macOS VideoToolbox 开关；4K 与区域捕获不做 |
 | R8 | 系统声音，且「不想再装驱动」 | 需要装音频驱动 + 重启（评论吐槽点） | 我们已有 BlackHole 一键辅助 + 多输出聚合（**优于它**）；P0 复核 pyobjc 依赖 |
 | R9 | 投本地文件（AVI/MKV/MOV/MP4/MP3…）+ 边转边投 | ✅ 且带播放列表 | ❌ **空白 → P4 新增 `cast_local_file.py`** |
 | R10 | 字幕/音轨选择、音画同步延迟、字体样式 | ✅（2026 年评论：字幕坏） | P4 做「选轨 + 同步偏移」，样式不做 |
 | R11 | 暂停/继续/拖动进度 | ✅ | P4（Cast MEDIA 命令已有底层） |
-| R12 | 菜单栏启停、防休眠 | ✅（2.14 加了 keep-awake） | P1 补 `caffeinate` 防休眠 |
-| R13 | 延迟 | 评论抱怨 ~5-10 s | **P3 Cast Streaming 目标 <500 ms**（真机待验） |
+| R12 | 菜单栏启停、防休眠 | ✅（2.14 加了 keep-awake） | **已交付（P1）**：`caffeinate -dimsu` 持有断言，停止镜像即释放 |
+| R13 | 延迟 | 评论抱怨 ~5-10 s | **P3 已交付代码路径**（`caststream`，目标 <500 ms）；**数字没人量过**，量它 = `scripts/cast_streaming_probe.py` + 秒表 |
 | R14 | 麦克风直通、HDR、窗口级捕获、Miracast | 未文档化/无 | 不做（avfoundation 无窗口源，见 §2.4） |
 | R15 | 免费 | 20 分钟限制 + $9.99/年 或 $19.99 PRO | GPL-3.0，全功能无限制 |
 
@@ -148,6 +148,25 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   并且**发送任务有监工**（「编码器活着、发送任务死了 = 电视永远静止画面」）。
 - 发现：`_googlecast._tcp`，**优先 IPv4 A 记录**（部分固件 TLS 只监听 v4）；
   它不按 `ca` 位过滤，而是**用 LAUNCH_ERROR 当能力探测**。
+
+**P3 落地的偏差**（2026-09-21）：
+
+- **只做视频**（`video_source` 一条流，ANSWER 里 `sendIndexes` 必须含 0 才继续）。opus 音频
+  是二期：参考实现报的 192 kbps 上限、双声道、PT 127 都记在上面，代码没写。
+- **纯 Python AES-128-CTR**（单文件插件不能加依赖），实测约 1.3 MB/s ⇒ 码率天花板
+  `CAST_STREAM_MAX_BITRATE = 4.5 Mbps`。这是**加密速度**的上限，不是网络的；菜单会直说。
+- 编码器形状与参考实现差两处，且都是**实测出来的**：
+  ① `-tune zerolatency` 已含 `bframes=0` 与 lookahead=0，所以不必再写 `bf=0`；
+  ② x264 参数名是 `keyint` / `min_keyint` / `scenecut`（写 `i-frame-min`、`sc_threshold`
+  只会打印一行 error 然后**静默忽略**）。另外 **`-aud` 是 AVOption，必须带值 `1`**，
+  否则它把下一个选项吞成自己的值。
+- **多 slice 图像是这一阶段最大的坑**：`-tune zerolatency` 下 720p 一帧切成 **10 个 slice NAL**
+  （真 ffmpeg 实测），所以访问单元只能按 `first_mb_in_slice == 0`（NAL 头后第一字节的最高位，
+  即 ue(v) 0）判定新帧起点。按「一个 NAL = 一张图」写的结果是电视上永远只有十分之一张画。
+- 参考实现的「发送任务监工」在这里由 pump 线程 + generation 承担（与 LOAD 通道同一套），
+  没有另起一个看门狗。
+- **以上没有一条见过真电视**：Part 24 的假设备与发送端共用同一张表，只能证明字节自洽
+  （AGENTS.md §4.9 明确这不算证据）。真机那一步是 `scripts/cast_streaming_probe.py`。
 
 ### 2.3 Mac-Screencast：投到任意浏览器
 
@@ -276,7 +295,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | P0 规划 | ✅ 文档落地 | `ed429fe` | 文档型改动 |
 | P1 浏览器目标 + 采集预设 | ✅ 已交付 | `df4a021`（索引指过去）+ 紧随的 info.json 提交 | `pyflakes` 干净；`verify_cast_airplay.py` **582 条全绿**（Part 21 修到 v0.4 契约、新增 Part 22 62 条）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 套件 510/514，Part 22 立刻 `TypeError: build_ffmpeg_command() got an unexpected keyword argument 'kind'` |
 | P2 DLNA 电视目标 | ✅ 已交付 | `94174cb`（插件+测试+文档）+ 紧随的 info.json 提交 | `pyflakes` 干净；`verify_cast_airplay.py` **675 条全绿**（新增 Part 23 93 条）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 套件 582/584，Part 23 当场 `module has no attribute 'DLNA_PROFILES'`（整段 91 条不再执行）。**未验证**：真实老电视兼容矩阵（无设备），见 §2.1 末「P2 落地的偏差」 |
-| P3 Cast Streaming | ⏳ | | |
+| P3 Cast Streaming | ✅ 已交付（**真机未验证**） | `<本次>`（插件 v0.6 + Part 24 + `cast_streaming_probe.py` + 文档）+ 紧随的 info.json 提交 | `pyflakes` 干净；`verify_cast_airplay.py` **756 条全绿**（新增 Part 24 81 条：OFFER/ANSWER 形状、AES 与 `/usr/bin/openssl` 逐字节对齐、19 字节头与切片/序号回绕、SR 与 NTP 纪元、`parse_rtcp` 五种读法、8 位帧号扩展、多 slice 访问单元，再到真 TLS + 真 UDP 上对打自家假设备：清理残留 app → LAUNCH → OFFER → 解密首帧 → 12 帧窗口 → checkpoint 解锁 → PLI → teardown 顺序 → `LAUNCH_ERROR` 回落 LOAD/mpegts）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 676/678，Part 24 两段各自报 `module has no attribute 'build_offer'` / `'MIRROR_APP_ID'`（整段不再执行）。**另用真 ffmpeg 交叉验证**（不是打桩）：2 秒 48 帧、关键帧恰好落在 0 与 24（GOP 承诺成立）、每个访问单元以 AUD 开头、**720p 每帧 10 个 slice** —— 正是这条实测把「一个 NAL 一帧」的写法判死。**未验证**：任何真电视（见 §2.2 末「P3 落地的偏差」与 AGENTS §4.9） |
 | P4 本地文件/播放列表 | ⏳ | | |
 | P5 AirPlay 镜像接收 | ⏳ | | |
 | P6 文档/索引/发版 | ⏳ | | |

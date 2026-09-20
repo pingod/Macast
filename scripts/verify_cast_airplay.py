@@ -5722,6 +5722,808 @@ except Exception as e:
     check("the DLNA target behaves", False, "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
+# Part 24: screen mirror v0.6 -- Cast Streaming, the low-latency target
+#
+# Every claim here is about bytes a *television* is supposed to agree with, and
+# the far end of that loop is a fake built from the same tables as the sender.
+# So read these cases for what they are: the handshake is ordered the way the
+# reference orders it, the framing and the cipher are self-consistent (the AES
+# half is pinned against /usr/bin/openssl output), and the sender reacts to a
+# checkpoint, a PLI and a window full of un-acked frames. None of it is evidence
+# that a real Chromecast paints -- that is scripts/cast_streaming_probe.py, and
+# AGENTS.md 4.9 is explicit that the two are different claims.
+# --------------------------------------------------------------------------
+print("\n=== Part 24: screen mirror v0.6 (Cast Streaming) ===")
+
+_SC24 = b'\x00\x00\x00\x01'
+
+
+def _slice24(kind, first, body=b''):
+    """One Annex-B slice NAL. `first` is first_mb_in_slice == 0, i.e. ue(v)
+    zero, i.e. a single '1' bit -- the top bit of the byte after the header."""
+    return _SC24 + bytes([kind, 0x80 if first else 0x00]) + body
+
+
+# Shared by the fake encoder below and by the assertions, so the two cannot
+# drift apart: `exec` the same source the shell script runs.
+_AU_SOURCE24 = '''
+def au(index):
+    """What the encoder puts on the wire for one picture.
+
+    x264 under -tune zerolatency splits a picture into several slice NALs, so
+    the fake does too: a key picture is AUD + SPS + PPS + two IDR slices, a
+    delta picture is AUD + three P slices.
+    """
+    tag = bytes([index % 251])
+    if index % 6:
+        return (b'\\x00\\x00\\x00\\x01\\x09\\x50'
+                + b'\\x00\\x00\\x00\\x01\\x01\\x80' + tag * 80
+                + b'\\x00\\x00\\x00\\x01\\x01\\x00' + tag * 80
+                + b'\\x00\\x00\\x00\\x01\\x01\\x00' + tag * 80)
+    return (b'\\x00\\x00\\x00\\x01\\x09\\x50'
+            + b'\\x00\\x00\\x00\\x01\\x67\\x80'
+            + b'\\x00\\x00\\x00\\x01\\x68\\x80'
+            + b'\\x00\\x00\\x00\\x01\\x05\\x80' + tag * 900
+            + b'\\x00\\x00\\x00\\x01\\x05\\x00' + tag * 900)
+'''
+
+
+def _decode24(packets, key, iv_mask, mirror):
+    """{frame id: (is_key, access unit)} from the packets a receiver got.
+
+    Decrypting with the key from the OFFER is the point: it proves the sender
+    used the material it announced, per frame, once per access unit rather than
+    once per packet.
+    """
+    frames = {}
+    for packet in packets:
+        (_ver, ptype, _seq, _ts, _ssrc, flags, frame8, packet_id, _count,
+         _ref) = struct.unpack('>BBHII' + 'BBHHB', packet[:19])
+        if ptype & 0x7F != 96:
+            continue
+        if packet_id == 0:
+            frames[frame8] = [flags, bytearray()]
+        frames[frame8][1] += packet[19:]
+    out = {}
+    for frame8, (flags, cipher) in frames.items():
+        plain = mirror.Aes128Ctr(key).crypt(mirror.frame_iv(iv_mask, frame8),
+                                            bytes(cipher))
+        out[frame8] = (bool(flags & 0x80), plain)
+    return out
+
+
+def _header24(packet):
+    return struct.unpack('>BBHII' + 'BBHHB', packet[:19])
+
+
+def _checkpoint24(frame8, media_ssrc, receiver_ssrc, delay=12, losses=b''):
+    """A receiver's CAST acknowledgement, as openscreen writes it.
+
+    The RTCP length field counts 32-bit words *including* the four-byte header,
+    minus one -- so it is just the body's word count here.
+    """
+    body = (struct.pack('>II', receiver_ssrc, media_ssrc) + b'CAST'
+            + bytes([frame8, len(losses) // 4]) + struct.pack('>H', delay)
+            + losses)
+    return struct.pack('>BBH', 0x80 | 15, 206, len(body) // 4) + body
+
+
+def _pli24(media_ssrc, receiver_ssrc=0x1234):
+    body = struct.pack('>II', receiver_ssrc, media_ssrc)
+    return struct.pack('>BBH', 0x80 | 1, 206, len(body) // 4) + body
+
+
+class _FakeCastDevice24(object):
+    """A Chromecast that answers the mirroring app: TLS control, UDP media.
+
+    Real sockets on both planes, because half of what the sender gets wrong is
+    invisible without one -- an unconnected UDP socket, a per-frame nonce, a
+    compound RTCP reply the receiver addresses by media SSRC.
+    """
+
+    def __init__(self, mirror, certfile, keyfile, refuse=False, stale=False):
+        self.mirror = mirror
+        self.refuse = refuse
+        self.received = []          # [(namespace, type, payload)]
+        self.rtp = []               # RTP packets the sender pushed
+        self.rtcp = []              # sender reports
+        self.peer = None            # the sender's media address
+        self.offer = None
+        self.loaded = []
+        self.answer_ssrc = 0x5EED0001
+        self.apps = []
+        self.running = True
+        if stale:
+            self.apps = [{'appId': mirror.MIRROR_APP_ID,
+                          'transportId': 'stale-0', 'sessionId': 'stale-9'}]
+        self.udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp.bind(('127.0.0.1', 0))
+        self.udp_port = self.udp.getsockname()[1]
+        self.context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(('127.0.0.1', 0))
+        self.listener.listen(4)
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+        threading.Thread(target=self._read_udp, daemon=True).start()
+
+    # -- control plane -------------------------------------------------------
+
+    def _accept(self):
+        while self.running:
+            try:
+                raw, _addr = self.listener.accept()
+            except OSError:
+                return
+            try:
+                conn = self.context.wrap_socket(raw, server_side=True)
+            except Exception:
+                raw.close()
+                continue
+            threading.Thread(target=self._serve, args=(conn,),
+                             daemon=True).start()
+
+    @staticmethod
+    def _read(conn, count):
+        buf = b''
+        while len(buf) < count:
+            chunk = conn.recv(count - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return buf
+
+    def _serve(self, conn):
+        with conn:
+            while self.running:
+                try:
+                    head = self._read(conn, 4)
+                    body = self._read(conn, struct.unpack('>I', head)[0])
+                    message = cast.parse_cast_message(body)
+                except Exception:
+                    return
+                if message is None:
+                    return
+                try:
+                    self._dispatch(conn, message)
+                except Exception:
+                    return
+
+    def _write(self, conn, destination, namespace, payload):
+        blob = cast.encode_cast_message('receiver-0', destination, namespace,
+                                        json.dumps(payload))
+        conn.sendall(struct.pack('>I', len(blob)) + blob)
+
+    def _status(self, conn, destination, request_id=None):
+        self._write(conn, destination, self.mirror.NS_RECEIVER, {
+            'type': 'RECEIVER_STATUS', 'requestId': request_id,
+            'status': {'applications': list(self.apps),
+                       'volume': {'level': 1.0, 'muted': False}}})
+
+    def _dispatch(self, conn, message):
+        destination = message['source_id']
+        namespace = message['namespace']
+        if message.get('payload_type') != 0:
+            # The device-auth CHALLENGE: any answer at all walks the sender
+            # past its `connect()`.
+            self._write(conn, destination, self.mirror.NS_RECEIVER,
+                        {'type': 'AUTH'})
+            return
+        data = json.loads(message.get('payload_utf8') or '{}')
+        kind = data.get('type')
+        self.received.append((namespace, kind, data))
+        if kind == 'GET_STATUS':
+            self._status(conn, destination, data.get('requestId'))
+        elif kind == 'STOP':
+            gone = data.get('sessionId')
+            self.apps = [app for app in self.apps
+                         if app.get('sessionId') != gone
+                         and app.get('transportId') != gone]
+            self._status(conn, destination, data.get('requestId'))
+        elif kind == 'LAUNCH':
+            self._launch(conn, destination, data)
+        elif namespace == self.mirror.NS_WEBRTC and kind == 'OFFER':
+            self.offer = data
+            self._write(conn, destination, self.mirror.NS_WEBRTC, {
+                'type': 'ANSWER', 'seqNum': data.get('seqNum'),
+                'result': 'ok',
+                'answer': {'udpPort': self.udp_port, 'sendIndexes': [0],
+                           'ssrcs': [self.answer_ssrc]}})
+        elif kind == 'LOAD':
+            self.loaded.append(data)
+            self._write(conn, destination, self.mirror.NS_MEDIA, {
+                'type': 'MEDIA_STATUS', 'requestId': data.get('requestId'),
+                'status': [{'mediaSessionId': 1, 'playerState': 'PLAYING'}]})
+        elif kind == 'PING':
+            self._write(conn, destination, namespace, {'type': 'PONG'})
+
+    def _launch(self, conn, destination, data):
+        app_id = data.get('appId')
+        if app_id == self.mirror.MIRROR_APP_ID and self.refuse:
+            self._write(conn, destination, self.mirror.NS_RECEIVER, {
+                'type': 'LAUNCH_ERROR', 'requestId': data.get('requestId'),
+                'reason': 'RECEIVER_ERROR_UNHANDLED'})
+            return
+        self.apps = [app for app in self.apps if app.get('appId') != app_id]
+        self.apps.append({'appId': app_id, 'transportId': 'transport-1',
+                          'sessionId': 'session-1'})
+        self._status(conn, destination, data.get('requestId'))
+
+    # -- media plane ---------------------------------------------------------
+
+    def _read_udp(self):
+        self.udp.settimeout(0.2)
+        while self.running:
+            try:
+                data, peer = self.udp.recvfrom(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            self.peer = peer
+            (self.rtcp if data[1] == 200 else self.rtp).append(data)
+
+    def ack(self, frame8, delay=12):
+        self.udp.sendto(_checkpoint24(frame8, self.offer_ssrc,
+                                      self.answer_ssrc, delay), self.peer)
+
+    def nack_picture(self):
+        self.udp.sendto(_pli24(self.offer_ssrc), self.peer)
+
+    @property
+    def offer_ssrc(self):
+        return self.offer['offer']['supportedStreams'][0]['ssrc']
+
+    @property
+    def keys(self):
+        stream = self.offer['offer']['supportedStreams'][0]
+        return (bytes.fromhex(stream['aesKey']),
+                bytes.fromhex(stream['aesIvMask']))
+
+    def close(self):
+        self.running = False
+        for sock in (self.listener, self.udp):
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+try:
+    _saved_setting24 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir24 = utils.SETTING_DIR
+    _tmp24 = _tempfile.mkdtemp(prefix="macast-mirror24-")
+    _notify24 = []
+    _notify24_rec = lambda *a, **k: _notify24.append(a)      # noqa: E731
+    _mir24 = None
+    _saved24 = {}
+    _devices24 = []
+    try:
+        utils.SETTING_DIR = _tmp24
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp24, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify24_rec)
+
+        mirror = _load_plugin("screen_mirror_plugin_v06", "screen_mirror.py")
+        _ns24 = {'bytes': bytes}
+        exec(_AU_SOURCE24, _ns24)
+        _au24 = _ns24['au']
+        _cap24 = mirror._Capture('test', [['-f', 'test', '-i', 'x']],
+                                 screens=[(0, 'Capture screen 0')])
+
+        # -- the OFFER: one video stream, sized before a frame exists --------
+        offer = mirror.build_offer(0x11223344, b'A' * 16, b'B' * 16, 1280, 720,
+                                   mirror.FPS, mirror.CAST_STREAM_MAX_BITRATE)
+        stream = offer['offer']['supportedStreams'][0]
+        check("the OFFER is mirroring mode with one video stream",
+              offer['type'] == 'OFFER' and offer['offer']['castMode'] == 'mirroring'
+              and len(offer['offer']['supportedStreams']) == 1
+              and stream['type'] == 'video_source'
+              and stream['codecName'] == 'h264', json.dumps(offer))
+        check("a cast RTP profile with the mirroring payload type",
+              stream['rtpProfile'] == 'cast'
+              and stream['rtpPayloadType'] == 96
+              and stream['timeBase'] == '1/90000', str(stream))
+        check("aesKey and aesIvMask are exactly 32 hex digits",
+              len(stream['aesKey']) == 32 and len(stream['aesIvMask']) == 32
+              and set(stream['aesKey']) <= set('0123456789abcdef'),
+              stream['aesKey'])
+        check("the frame size and rate are claimed up front",
+              stream['resolutions'] == [{'width': 1280, 'height': 720}]
+              and stream['maxFrameRate'] == '24000/1000'
+              and stream['maxBitRate'] == mirror.CAST_STREAM_MAX_BITRATE
+              and stream['targetDelay'] == 200, str(stream))
+        _key, _mask = mirror.aes_material()
+        check("the sender invents both key and mask, sixteen bytes each",
+              len(_key) == 16 and len(_mask) == 16 and _key != _mask)
+        check("every frame gets its own counter block, big-endian at byte 8",
+              mirror.frame_iv(b'\x00' * 16, 1) == b'\x00' * 8 + b'\x00\x00\x00\x01'
+              + b'\x00' * 4
+              and mirror.frame_iv(b'\x00' * 16, 256)[-4:] == b'\x00' * 4
+              and mirror.frame_iv(b'\xff' * 16, 5)[8:12] == b'\xff\xff\xff\xfa',
+              mirror.frame_iv(b'\x00' * 16, 1).hex())
+
+        # -- the cipher, pinned against /usr/bin/openssl ---------------------
+        _vector = bytes(range(256)) * 3
+        _cipher = mirror.Aes128Ctr(bytes(range(16))).crypt(
+            mirror.frame_iv(bytes([0x0f]) * 16, 7), _vector)
+        check("AES-128-CTR is byte-identical to openssl's",
+              len(_cipher) == len(_vector)
+              and _cipher[:16].hex() == '54be03754f76e8a02f70d7bd5e6414fc'
+              and __import__('hashlib').sha256(_cipher).hexdigest() ==
+              '9b1ef02bb66d8d7d20e417fb65db902e2ddb7f6d5cebf44d470edd4dff2c4a8e',
+              _cipher[:16].hex())
+        check("the keystream counter carries over a block boundary",
+              _cipher[16:20] == mirror.Aes128Ctr(bytes(range(16))).crypt(
+                  mirror.frame_iv(bytes([0x0f]) * 16, 7), _vector)[16:20]
+              and len(mirror.Aes128Ctr(bytes(range(16))).crypt(
+                  mirror.frame_iv(bytes([0x0f]) * 16, 7), b'z' * 17)) == 17)
+
+        # -- the ANSWER ------------------------------------------------------
+        check("sendIndexes and ssrcs pair up positionally",
+              mirror.parse_answer({'type': 'ANSWER', 'result': 'ok', 'answer': {
+                  'udpPort': 50232, 'sendIndexes': [1, 0],
+                  'ssrcs': [11, 22]}}) == (50232, 22))
+        check("an ANSWER without a result field is still an answer",
+              mirror.parse_answer({'type': 'ANSWER', 'answer': {
+                  'udpPort': 1, 'sendIndexes': [0], 'ssrcs': [7]}}) == (1, 7))
+
+        def _refused24(payload):
+            try:
+                mirror.parse_answer(payload)
+            except RuntimeError:
+                return True
+            except Exception:
+                return False
+            return False
+
+        check("an error ANSWER is a refusal, not an empty port",
+              _refused24({'type': 'ANSWER', 'result': 'error',
+                          'error': {'code': 10}}))
+        check("a port that cannot be sent to is a refusal",
+              _refused24({'type': 'ANSWER', 'answer': {'udpPort': 0,
+                                                       'sendIndexes': [0],
+                                                       'ssrcs': [7]}})
+              and _refused24({'type': 'ANSWER', 'answer': {'udpPort': 70000,
+                                                           'sendIndexes': [0],
+                                                           'ssrcs': [7]}}))
+        check("a receiver that took the audio stream but not the video is refused",
+              _refused24({'type': 'ANSWER', 'answer': {'udpPort': 4000,
+                                                       'sendIndexes': [1],
+                                                       'ssrcs': [7]}})
+              and _refused24({'type': 'ANSWER', 'answer': {'udpPort': 4000,
+                                                           'sendIndexes': [0],
+                                                           'ssrcs': []}}))
+
+        # -- RTP + the 7-byte Cast header ------------------------------------
+        packet = mirror.cast_packet(b'x' * 10, 0xABCDEF01, 7, 999, 5, True,
+                                    1, 3, 5, marker=True)
+        fixed = _header24(packet)
+        check("the fixed RTP header says version 2 and our payload type",
+              fixed[0] == 0x80 and fixed[1] == (0x80 | 96)
+              and fixed[2] == 7 and fixed[3] == 999 and fixed[4] == 0xABCDEF01,
+              str(fixed))
+        check("the Cast header flags a key frame and the referenced id in use",
+              fixed[5] == 0xC0 and fixed[6] == 5 and fixed[7] == 1
+              and fixed[8] == 2 and fixed[9] == 5, str(fixed[5:]))
+        check("a delta frame advertises the frame before it and no key flag",
+              _header24(mirror.cast_packet(b'', 1, 0, 0, 9, False, 0, 1,
+                                           8))[5] == 0x40
+              and _header24(mirror.cast_packet(b'', 1, 0, 0, 9, False, 0, 1,
+                                               8))[9] == 8)
+        _big = b'y' * (mirror.MAX_PAYLOAD * 2 + 7)
+        _parts, _next = mirror.cast_packets(_big, 3, False, 2, 0x11, 100, 555)
+        check("a frame is encrypted once and then sliced whole",
+              len(_parts) == 3
+              and sum(len(p) - 19 for p in _parts) == len(_big)
+              and len(_parts[-1]) - 19 == 7, str([len(p) for p in _parts]))
+        check("only the last packet of a frame carries the marker",
+              [(_header24(p)[1] & 0x80) != 0 for p in _parts] == [False, False,
+                                                                  True])
+        check("the sequence number advances on every packet",
+              [_header24(p)[2] for p in _parts] == [100, 101, 102]
+              and _next == 103, str([_header24(p)[2] for p in _parts]))
+        _wrap, _after = mirror.cast_packets(_big, 3, True, 3, 0x11, 0xFFFF, 0)
+        check("and wraps around at sixteen bits",
+              [_header24(p)[2] for p in _wrap] == [0xFFFF, 0, 1]
+              and _after == 2, str([_header24(p)[2] for p in _wrap]))
+        check("an empty frame still says it is one packet long",
+              _header24(mirror.cast_packets(b'', 0, True, 0, 1, 0, 0)[0][0]
+                        )[8] == 0)
+
+        # -- RTCP ------------------------------------------------------------
+        _sr = mirror.rtcp_sender_report(0x11223344, mirror.ntp_timestamp(0.5),
+                                        9000, 12, 3456)
+        check("a sender report is 28 bytes of version 2, type 200, length 6",
+              len(_sr) == 28 and _sr[0] == 0x80 and _sr[1] == 200
+              and struct.unpack('>H', _sr[2:4])[0] == 6, _sr.hex())
+        check("its fields are big-endian and the SSRC is ours",
+              struct.unpack('>I', _sr[4:8])[0] == 0x11223344
+              and struct.unpack('>I', _sr[16:20])[0] == 9000
+              and struct.unpack('>II', _sr[20:28]) == (12, 3456), _sr.hex())
+        check("the NTP stamp is the UNIX clock moved to the 1900 epoch",
+              mirror.ntp_timestamp(0.0) >> 32 == mirror.NTP_UNIX_OFFSET
+              and mirror.ntp_timestamp(0.0) & 0xFFFFFFFF == 0
+              and mirror.ntp_timestamp(0.5) & 0xFFFFFFFF == 0x80000000,
+              hex(mirror.ntp_timestamp(0.5)))
+        check("octet and packet counts wrap at 32 bits",
+              struct.unpack('>H', _sr[2:4])[0] == 6
+              and len(mirror.rtcp_sender_report(1, 2, 3, 1 << 32,
+                                                (1 << 32) + 5)) == 28
+              and struct.unpack('>II', mirror.rtcp_sender_report(
+                  1, 2, 3, 1 << 32, (1 << 32) + 5)[20:28]) == (0, 5))
+        check("a picture loss asks for a redraw",
+              mirror.parse_rtcp(_pli24(0x11), 0x11) == [('picture-loss',)])
+        check("feedback about another stream is not ours to act on",
+              mirror.parse_rtcp(_pli24(0x99), 0x11) == [])
+        check("a checkpoint gives back the 8-bit frame id and the playout delay",
+              mirror.parse_rtcp(_checkpoint24(200, 0x11, 0x22, 37), 0x11)
+              == [('checkpoint', 200, 37)],
+              str(mirror.parse_rtcp(_checkpoint24(200, 0x11, 0x22, 37), 0x11)))
+        _lost = bytes([7, 0x01, 0x02, 0xFF]) + bytes([9, 0xFF, 0xFF, 0x01])
+        check("per-packet loss is read and named, then ignored",
+              mirror.parse_rtcp(_checkpoint24(4, 0x11, 0x22, 5, losses=_lost),
+                                0x11) == [('checkpoint', 4, 5),
+                                          ('nack', 7, 0x0102, 0xFF),
+                                          ('nack', 9, 0xFFFF, 0x01)])
+        _compound = _pli24(0x11) + _checkpoint24(6, 0x11, 0x22)
+        check("compound RTCP is walked block by block",
+              mirror.parse_rtcp(_compound, 0x11) == [('picture-loss',),
+                                                     ('checkpoint', 6, 12)],
+              str(mirror.parse_rtcp(_compound, 0x11)))
+        check("an unknown RTCP type is skipped, not fatal",
+              mirror.parse_rtcp(struct.pack('>BBH', 0x80, 201, 0)
+                                + _checkpoint24(8, 0x11, 0x22), 0x11)
+              == [('checkpoint', 8, 12)])
+        check("a CST2 tail block after the losses is stepped over",
+              mirror.parse_rtcp(_checkpoint24(6, 0x11, 0x22)
+                                + struct.pack('>BBH', 0x80, 206, 1)
+                                + b'CST2', 0x11) == [('checkpoint', 6, 12)])
+        check("an 8-bit frame id widens to the one we actually sent",
+              mirror.expand_frame_id(200, 204) == 200
+              and mirror.expand_frame_id(3, 259) == 259
+              and mirror.expand_frame_id(3, 258) == 3
+              and mirror.expand_frame_id(0, -1) == 0)
+
+        # -- Annex-B access units, with real encoder habits ------------------
+        _units = mirror._AccessUnits()
+        check("a sliced picture is ONE access unit, not three",
+              _units.feed(_au24(0) + _au24(1)) == [_au24(0)]
+              and _units.feed(_au24(2)) == [_au24(1)])
+        # A NAL is only known to be over when the next start code arrives, so
+        # the honest comparison is what it costs to close picture 0: with the
+        # delimiter, its few bytes; without it, the next picture's first slice.
+        check("the delimiter closes a frame before its next slice arrives",
+              mirror._AccessUnits().feed(_au24(0) + _SC24 + b'\x09\x50'
+                                         + _slice24(1, True)) == [_au24(0)]
+              and mirror._AccessUnits().feed(_au24(0)
+                                             + _slice24(1, True)) == [])
+        _dribble = mirror._AccessUnits()
+        _stream = _au24(0) + _au24(1) + _au24(2) + _au24(3)
+        _got = []
+        for _i in range(0, len(_stream), 13):
+            _got += _dribble.feed(_stream[_i:_i + 13])
+        check("chunk boundaries in the middle of a NAL change nothing",
+              _got + _dribble.flush() == [_au24(i) for i in range(4)],
+              '{} vs {}'.format(len(_got), 4))
+        check("a key frame is recognised by its IDR slice, deltas are not",
+              mirror._unit_is_key(_au24(0)) and not mirror._unit_is_key(_au24(1)))
+        _second_key = mirror._AccessUnits()
+        _keys24 = _second_key.feed(_au24(0) + _au24(6)) + _second_key.flush()
+        check("in-band parameter sets are not duplicated in front of the IDR",
+              _au24(0).count(_SC24 + b'\x67') == 1
+              and _keys24[-1] == _au24(6)
+              and _keys24[-1].count(_SC24 + b'\x67') == 1,
+              str([len(u) for u in _keys24]))
+
+        # -- the encoder has to be shaped for this target --------------------
+        _cs24 = mirror.build_ffmpeg_command('ffmpeg', _cap24, 0, 12000000,
+                                            kind='caststream')
+        check("the low-latency target feeds a raw Annex-B pipe, not a muxer",
+              _cs24[-3:] == ['-f', 'h264', 'pipe:1']
+              and 'mpegts' not in _cs24, str(_cs24))
+        check("the OFFER's frame size is pinned, letterboxed not stretched",
+              _cs24[_cs24.index('-vf') + 1]
+              == 'scale=1920:1080:force_original_aspect_ratio=decrease,'
+                 'pad=1920:1080:(ow-iw)/2:(oh-ih)/2', str(_cs24))
+        check("the pure-Python cipher sets the bitrate ceiling",
+              _cs24[_cs24.index('-b:v') + 1] == str(
+                  mirror.CAST_STREAM_MAX_BITRATE), str(_cs24))
+        check("the delimiter and the fixed GOP are promised to x264",
+              _cs24[_cs24.index('-aud') + 1] == '1'
+              and 'scenecut=0' in _cs24[_cs24.index('-x264-params') + 1]
+              and _cs24.index('-x264-params') > _cs24.index('libx264'),
+              str(_cs24[-8:]))
+        check("a hardware encoder is not handed x264-only options",
+              '-x264-params' not in mirror.build_ffmpeg_command(
+                  'ffmpeg', _cap24, 720, 5000000, kind='caststream',
+                  encoder='hardware'))
+        check("the LOAD targets are untouched by any of this",
+              '-aud' not in mirror.build_ffmpeg_command('ffmpeg', _cap24, 720,
+                                                        5000000, kind='cast'))
+        check("this target has no HTTP server and no viewer URL",
+              mirror.OUTPUTS['caststream'][2] is None
+              and '无声音' in mirror.OUTPUTS['caststream'][0],
+              str(mirror.OUTPUTS['caststream']))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        check("the Cast Streaming byte layer is self-consistent", False,
+              "{}: {}".format(type(e).__name__, e))
+
+    # -- the whole handshake, over real sockets ------------------------------
+    try:
+        from macast.server import Service as _Service24
+        _cert24, _key24 = _Service24._ensure_self_signed_cert()
+        check("the fake device can speak TLS with the app's own certificate",
+              bool(_cert24) and os.path.exists(_cert24), str((_cert24, _key24)))
+
+        _saved24 = {name: getattr(mirror, name) for name in (
+            'find_ffmpeg', 'probe_capture', '_keep_awake', '_stop_awake',
+            'start_search', '_devices')}
+        fake24 = _write_fake(os.path.join(_tmp24, "bin24"), "ffmpeg",
+                             "#!%s\nimport os, sys, time\n%s\n"
+                             "out = sys.stdout.buffer\n"
+                             "index = 0\n"
+                             "limit = int(os.environ.get('FAKE_FRAMES', '100000'))\n"
+                             "gap = float(os.environ.get('FAKE_GAP', '0.01'))\n"
+                             "pause = os.environ.get('FAKE_PAUSE', '')\n"
+                             "while index < limit:\n"
+                             "    while pause and os.path.exists(pause):\n"
+                             "        time.sleep(0.02)\n"
+                             "    out.write(au(index))\n"
+                             "    out.flush()\n"
+                             "    index += 1\n"
+                             "    time.sleep(gap)\n" % (sys.executable,
+                                                        _AU_SOURCE24))
+        mirror.find_ffmpeg = lambda: fake24
+        # Platform-specific capture probing is Part 21's and 22's subject; this
+        # part is about what happens to the encoded bytes.
+        mirror.probe_capture = lambda ffmpeg, platform=None: _cap24
+        mirror._keep_awake = lambda: 'awake'
+        mirror._stop_awake = lambda handle: None
+        mirror.start_search = lambda: True
+        mirror._devices = []
+
+        _rec24 = _StateRec()
+
+        class _Mirror24(mirror.ScreenMirrorRenderer):
+            @property
+            def protocol(self):
+                return _rec24
+
+        mir24 = _Mirror24()
+        _mir24 = mir24
+        device24 = _FakeCastDevice24(mirror, _cert24, _key24, stale=True)
+        _devices24.append(device24)
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'caststream')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target,
+                          '127.0.0.1:{}'.format(device24.port))
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target_Name, '客厅的电视')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Quality, '720')
+
+        # The fake encoder honours this flag file; see its loop below.
+        _pause24 = os.path.join(_tmp24, 'paused')
+        os.environ['FAKE_PAUSE'] = _pause24
+        mir24.start_mirror()
+        check("the mirroring app is launched after the stale instance is stopped",
+              _wait_until(lambda: device24.offer is not None, timeout=30),
+              str([t for (_n, t, _d) in device24.received]))
+        _types24 = [t for (_n, t, _d) in device24.received]
+        _stop_at = _types24.index('STOP')
+        check("STOP names the session it is clearing",
+              device24.received[_stop_at][2].get('sessionId') == 'stale-9',
+              str(device24.received[_stop_at]))
+        check("and only then does LAUNCH ask for 0F5096E8",
+              _stop_at < _types24.index('LAUNCH')
+              and device24.received[_types24.index('LAUNCH')][2]['appId']
+              == mirror.MIRROR_APP_ID
+              and _types24.index('LAUNCH') < _types24.index('OFFER'),
+              str(_types24))
+        check("the OFFER the device saw offers one 720p stream",
+              device24.offer['offer']['supportedStreams'][0]['resolutions']
+              == [{'width': 1280, 'height': 720}], str(device24.offer))
+        check("nothing is served over HTTP for this target",
+              mir24._server is None and mir24._sink is not None
+              and mir24.playing_url() == '')
+        check("the LOAD path is not used: no media app, no LOAD",
+              'LOAD' not in _types24 and mirror.DEFAULT_MEDIA_APP_ID
+              not in [d.get('appId') for (_n, t, d) in device24.received
+                      if t == 'LAUNCH'], str(_types24))
+
+        check("the picture arrives as RTP packets on the port we were given",
+              _wait_until(lambda: len(device24.rtp) >= 6, timeout=20),
+              '{} packets'.format(len(device24.rtp)))
+        _frames = _decode24(device24.rtp, device24.keys[0], device24.keys[1],
+                            mirror)
+        check("the first frame decrypts, with the offered key, to the encoder's "
+              "whole access unit",
+              _frames.get(0) == (True, _au24(0)),
+              str((len(_frames), _frames.get(0, (False, b''))[1][:24])))
+        check("a sliced picture arrives as several packets of one frame",
+              len([p for p in device24.rtp
+                   if _header24(p)[6] == 0]) == 2,
+              str([_header24(p)[6:9] for p in device24.rtp[:6]]))
+        check("deltas are not advertised as key frames, and reference the "
+              "frame before them",
+              _frames.get(1) == (False, _au24(1))
+              and _header24([p for p in device24.rtp if _header24(p)[6] == 1]
+                            [0])[9] == 0, str(_frames.get(1, (0, b''))[1][:16]))
+        _seqs = [_header24(p)[2] for p in device24.rtp]
+        check("the sequence number is monotonic across frames",
+              all((b - a) % 0x10000 == 1 for a, b in zip(_seqs, _seqs[1:])),
+              str(_seqs[:10]))
+        check("the SSRC on every packet is the one the OFFER announced",
+              {_header24(p)[4] for p in device24.rtp} == {device24.offer_ssrc},
+              hex(device24.offer_ssrc))
+        check("a sender report goes out with the first picture",
+              _wait_until(lambda: len(device24.rtcp) >= 1, timeout=5)
+              and len(device24.rtcp[0]) == 28
+              and struct.unpack('>I', device24.rtcp[0][4:8])[0]
+              == device24.offer_ssrc, str(device24.rtcp[:1]))
+        _stats24 = mir24.stats()
+        check("the low-latency session reports itself as caststream",
+              _stats24.get('kind') == 'caststream' and _stats24['frames'] >= 1
+              and _stats24['clients'] == 1, str(_stats24))
+
+        check("twelve un-acknowledged frames is the window, then frames shed",
+              _wait_until(lambda: mir24._sink.drops > 0
+                          and mir24._sink.in_flight()
+                          == mirror.MAX_IN_FLIGHT_FRAMES, timeout=20),
+              'drops={} in_flight={}'.format(mir24._sink.drops,
+                                             mir24._sink.in_flight()))
+        # The encoder produces a picture every 10 ms and the window is twelve
+        # deep, so a freed window refills long before a 0.1 s poll can notice.
+        # Pausing the fake encoder is what turns this from a race into a claim.
+        _before24 = mir24._sink.frames
+        open(_pause24, 'w').close()
+        device24.ack(mirror.MAX_IN_FLIGHT_FRAMES - 1)
+        check("a checkpoint frees the whole window at once",
+              _wait_until(lambda: mir24._sink.in_flight() == 0
+                          and mir24._sink.acked
+                          == mirror.MAX_IN_FLIGHT_FRAMES - 1, timeout=10),
+              'in_flight={} acked={}'.format(mir24._sink.in_flight(),
+                                             mir24._sink.acked))
+        os.remove(_pause24)
+        check("and the frames start flowing again",
+              _wait_until(lambda: mir24._sink.frames > _before24, timeout=10),
+              'frames {} -> {}'.format(_before24, mir24._sink.frames))
+        check("and the playout delay the TV reports is kept for the menu",
+              mir24.stats()['delay'] == 12, str(mir24.stats()))
+        _dropped24 = mir24._sink.drops
+        _keys_before24 = {fid for fid, (is_key, _unit) in
+                          _decode24(device24.rtp, device24.keys[0],
+                                    device24.keys[1], mirror).items() if is_key}
+        device24.nack_picture()
+        check("a picture loss stops deltas until the next redraw",
+              _wait_until(lambda: mir24._sink.drops > _dropped24, timeout=10),
+              'drops {} -> {}'.format(_dropped24, mir24._sink.drops))
+        check("the next key frame gets through regardless",
+              _wait_until(lambda: {
+                  fid for fid, (is_key, _unit) in
+                  _decode24(device24.rtp, device24.keys[0], device24.keys[1],
+                            mirror).items() if is_key} - _keys_before24
+                  and mir24._sink._awaiting_key is False, timeout=20),
+              str(mir24._sink._awaiting_key))
+
+        _line24 = mirror.ScreenMirrorSetting._status_line(mir24)
+        check("the menu line counts frames and the window instead of viewers",
+              'caststream' not in _line24 and '帧' in _line24
+              and '在途' in _line24, _line24)
+        # 'source' is a promise this channel cannot keep, and the menu has to
+        # say so out loud rather than quietly letterbox somebody's desktop.
+        utils.Setting.set(mirror.SettingProperty.Mirror_Quality, 'source')
+        _note24 = mirror.ScreenMirrorSetting._quality_note(None)
+        check("the menu admits what the low-latency channel caps",
+              '4.5 Mbps' in _note24 and '1920x1080' in _note24, _note24)
+        utils.Setting.set(mirror.SettingProperty.Mirror_Quality, '720')
+        check("and a 720p request keeps its own size",
+              '1280x720' in mirror.ScreenMirrorSetting._quality_note(None))
+
+        mir24.stop_mirror()
+        check("teardown leaves the app before it drops the transport",
+              _wait_until(lambda: [t for (_n, t, _d) in device24.received][-3:]
+                          == ['CLOSE', 'STOP', 'CLOSE'], timeout=10),
+              str([t for (_n, t, _d) in device24.received][-4:]))
+        check("the STOP carries the mirroring session id",
+              [d for (_n, t, d) in device24.received
+               if t == 'STOP'][-1].get('sessionId') == 'session-1',
+              str([d for (_n, t, d) in device24.received if t == 'STOP']))
+        check("a stopped session reports no state and the sink is gone",
+              _wait_until(lambda: mir24._sink is None and not mir24.is_mirroring()
+                          and mir24.stats() == {}, timeout=10))
+
+        # -- the device that has no mirroring app -----------------------------
+        device2b = _FakeCastDevice24(mirror, _cert24, _key24, refuse=True)
+        _devices24.append(device2b)
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target,
+                          '127.0.0.1:{}'.format(device2b.port))
+        _notify24[:] = []
+        mir24.start_mirror()
+        check("a refused mirroring app falls back to the compatible LOAD path",
+              _wait_until(lambda: bool(device2b.loaded), timeout=30),
+              str([t for (_n, t, _d) in device2b.received]))
+        check("the fallback launches the media receiver instead",
+              [d.get('appId') for (_n, t, d) in device2b.received
+               if t == 'LAUNCH'] == [mirror.MIRROR_APP_ID,
+                                     mirror.DEFAULT_MEDIA_APP_ID],
+              str([d for (_n, t, d) in device2b.received if t == 'LAUNCH']))
+        check("and the session is a normal HTTP-served mirror again",
+              mir24._sink is None and mir24._server is not None
+              and mir24.playing_url().endswith('.ts'), str(mir24.playing_url()))
+        check("the user is told it started, not that it failed",
+              _wait_until(lambda: any('已开始镜像到' in str(n) for n in _notify24),
+                          timeout=10), str(_notify24))
+        check("the LOAD media type is still MPEG-TS",
+              device2b.loaded[0]['media']['contentType'] == 'video/mp2t'
+              and device2b.loaded[0]['media']['streamType'] == 'LIVE',
+              str(device2b.loaded))
+        mir24.stop_mirror()
+        check("a fallback session tears down the same way",
+              _wait_until(lambda: not mir24.is_mirroring(), timeout=10))
+
+        # -- the hardware probe, wired to this same code ---------------------
+        # Nothing here needs a television: the point is that the probe drives
+        # the plugin under test rather than a second copy of the tables, which
+        # is the only way a pass on hardware means anything for the menu bar.
+        _scripts24 = os.path.join(REPO, 'scripts')
+        _added24 = _scripts24 not in sys.path
+        if _added24:
+            sys.path.insert(0, _scripts24)
+        import importlib as _il24
+        probe24 = _il24.import_module('cast_streaming_probe')
+        try:
+            _psm = probe24.load_plugin()
+            check("the probe loads the plugin under test, not its own tables",
+                  _psm is not mirror
+                  and _psm.MIRROR_APP_ID == mirror.MIRROR_APP_ID
+                  and _psm.CAST_STREAM_MAX_BITRATE
+                  == mirror.CAST_STREAM_MAX_BITRATE, str(_psm))
+            _pcap, _label24 = probe24.make_capture(
+                _psm, 'ffmpeg',
+                types.SimpleNamespace(live=False, source=None, height=720))
+            _pcmd = _psm.build_ffmpeg_command(
+                'ffmpeg', _pcap, 720, _psm.CAST_STREAM_MAX_BITRATE,
+                kind='caststream')
+            check("the probe paces its own encoder and shares the builder",
+                  _pcap.inputs[0][0] == '-re' and '-re' in _pcmd
+                  and _pcmd[-3:] == ['-f', 'h264', 'pipe:1']
+                  and 'testsrc2=size=1280x720' in ' '.join(_pcmd), str(_pcmd))
+            probe24.instrument(_psm)
+            _ev24 = _psm.parse_rtcp(_checkpoint24(3, 0x11, 0x22), 0x11)
+            check("watching the feedback does not change the feedback",
+                  _ev24 == mirror.parse_rtcp(_checkpoint24(3, 0x11, 0x22), 0x11)
+                  and probe24.EVENT_TALLY.get('checkpoint') == 1, str(_ev24))
+        finally:
+            if _added24:
+                sys.path.remove(_scripts24)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        check("the Cast Streaming session behaves end to end", False,
+              "{}: {}".format(type(e).__name__, e))
+    finally:
+        os.environ.pop('FAKE_PAUSE', None)
+        for _name, _value in _saved24.items():
+            setattr(mirror, _name, _value)
+        if _mir24 is not None:
+            _mir24.stop_mirror()
+        for _device in _devices24:
+            _device.close()
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify24_rec)
+        except Exception:
+            pass
+        utils.SETTING_DIR = _saved_dir24
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting24
+        _shutil.rmtree(_tmp24, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("screen mirror v0.6 loads", False, "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 passed = sum(1 for _, ok, _ in RESULTS if ok)

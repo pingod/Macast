@@ -154,6 +154,37 @@ Cast LOAD url=http://...
 
 随后 mpv 应拉起并播放。
 
+## 6.5 屏幕镜像「低延迟」通道的真机验证（2026-09-21 起）
+
+这一段验的是**发送端**（`plugins/screen_mirror.py` v0.6 的 Cast Streaming 通道），
+和前面所有小节的方向相反。为什么单独一节：`verify_cast_airplay.py` Part 24 的假设备
+和发送端**共用同一张字段表**，所以它只能证明字节自洽；AGENTS.md §4.9 说清了
+「我们没崩」和「电视认账」是两件事。**Part 24 全绿不等于这一步通过。**
+
+```shell
+dns-sd -B _googlecast._tcp            # 记下电视的 IP
+env -u PYTHONPATH .venv/bin/python scripts/cast_streaming_probe.py 192.168.1.30
+```
+
+先别急着采桌面：探针默认喂 `-re` 限速的测试图案，把「协议对不对」和「桌面内容」分开。
+图案上电视之后再 `--live`（macOS 需要先给终端「屏幕录制」权限），再 `--height 1080`
+试大帧，再 `--dump /tmp/s.h264` 留一份码流给 `ffprobe` 复核。
+
+判读（按出现的顺序，每条都对应代码里的一个决定）：
+
+| 现象 | 结论 | 下一步 |
+|---|---|---|
+| `LAUNCH_ERROR` | 这台固件没有镜像接收器 `0F5096E8` | **正常**，插件会自动回落 LOAD/mpegts；用 `cast_probe.py` 验回落那条即可 |
+| LAUNCH 过了但等不到 ANSWER | OFFER 被拒（帧尺寸/密钥长度声明不对） | 贴 `--height`、`--bitrate` 与电视型号 |
+| 有 ANSWER、`帧` 在涨、`最新已确认帧` 一直是 -1 | 包发出去了，电视没解出可确认的帧（头格式或加密 nonce） | `--dump` 出来的 Annex-B 先过 `ffprobe`，再对照 openscreen 的表 |
+| `收到的 RTCP 事件` 有 `checkpoint`，但**没画面** | 分帧/参数集问题：SPS/PPS 没跟在每个 IDR 前面，或访问单元切错 | 看 `--dump` 的第一个单元是否 `AUD+SPS+PPS+IDR`；**多 slice** 是这里最常见的坑 |
+| 画面**静止不动** | 发送线程死了而编码器还活着 | 记下 `--seconds` 与是否切过 `--encoder hardware` |
+| 画面动，但**越来越卡**（延迟持续增长） | 纯 Python 加密跟不上码率（4.5 Mbps 是算出来的天花板） | 降 `--height 360` 复测；若 360p 也不跟手，才是协议问题 |
+| `电视报告的播放延迟 ms` 有值、丢帧偶发 | 链路活着 | 记录型号 + 固件 + 肉眼延迟（秒表拍一次手机与电视同屏） |
+
+验完请把结果补进 `docs/Casting-Suite-Plan.md` §6 台账的 P3 行（或它下面的偏差段）——
+**这台通道目前是「实验」状态，唯一能让它摘掉「实验」二字的就是这里的记录。**
+
 ## 7. AirPlay 投屏验证
 
 1. iPhone/iPad 与电脑同一 Wi-Fi → 控制中心 → 屏幕镜像 / 或视频 App 的 AirPlay 图标。
