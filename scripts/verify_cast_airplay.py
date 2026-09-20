@@ -4828,6 +4828,899 @@ except Exception as e:
     check("the browser target behaves", False,
           "{}: {}".format(type(e).__name__, e))
 
+print("\n=== Part 23: screen mirror v0.5 (DLNA TV target) ===")
+try:
+    import re as _re23
+    import xml.etree.ElementTree as _ET23
+    import http.server as _httpd23
+    _saved_setting23 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir23 = utils.SETTING_DIR
+    _tmp23 = _tempfile.mkdtemp(prefix="macast-mirror23-")
+    _notify23 = []
+    _notify23_rec = lambda *a, **k: _notify23.append(a)      # noqa: E731
+    _server23 = None
+    _tv23 = None
+    _mir23 = None
+    _taps23 = {}
+    try:
+        utils.SETTING_DIR = _tmp23
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp23, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify23_rec)
+
+        mirror = _load_plugin("screen_mirror_plugin_v05", "screen_mirror.py")
+        fake_ffmpeg23 = _write_fake(os.path.join(_tmp23, "bin"), "ffmpeg", r"""#!/bin/sh
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[avfoundation @ 0x1] The following devices were found:' \
+      '[avfoundation @ 0x1] Video devices:' \
+      '[avfoundation @ 0x1]    "Capture screen 0"' \
+      '[avfoundation @ 0x1] Audio devices:' \
+      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.05
+done
+""")
+
+        # -- the arithmetic of a file that has no end ------------------------
+        check("the DLNA target is a third output, with its own container",
+              'dlna' in mirror.OUTPUTS
+              and mirror.OUTPUTS['dlna'][1] == 'mpg'
+              and mirror.OUTPUTS['dlna'][2] == 'video/mpeg'
+              and mirror.OUTPUTS['dlna'][3] is None, str(mirror.OUTPUTS))
+        _sizes23 = {}
+        for _pid23, _p23 in mirror.DLNA_PROFILES.items():
+            _size23, _dur23 = mirror.advertised_file(_p23.bitrate)
+            _sizes23[_pid23] = _size23
+        check("every profile advertises a file a signed 32-bit client survives",
+              all(0 < s <= mirror.DLNA_MAX_ADVERTISED_SIZE < 2 ** 31
+                  for s in _sizes23.values()), str(_sizes23))
+        _size23, _dur23 = mirror.advertised_file(4500000)
+        _secs23 = sum(int(x) * y for x, y in zip(_dur23.split(':'),
+                                                 (3600, 60, 1)))
+        check("and the advertised duration agrees with the bitrate",
+              abs(_secs23 - _size23 * 8 // 4500000) <= 1, _dur23)
+
+        _pal23 = mirror.DLNA_PROFILES['ps-pal']
+        _h26423 = mirror.DLNA_PROFILES['ts-h264']
+        _pi23 = mirror.protocol_info(_pal23)
+        check("protocolInfo names the container the TV is being lied to about",
+              _pi23.startswith('http-get:*:video/mpeg:')
+              and 'DLNA.ORG_PN=MPEG_PS_PAL' in _pi23
+              and 'DLNA.ORG_OP=01' in _pi23
+              and 'DLNA.ORG_FLAGS=' in _pi23, _pi23)
+        check("an H.264 shape claims no profile name it cannot honour",
+              'DLNA.ORG_PN' not in mirror.protocol_info(_h26423)
+              and 'video/vnd.dlna.mpeg-tts' in mirror.protocol_info(_h26423),
+              mirror.protocol_info(_h26423))
+        check("contentFeatures travels on its own header too",
+              mirror.content_features(_pal23).startswith('DLNA.ORG_OP=01')
+              and 'DLNA.ORG_PN' not in mirror.content_features(_pal23),
+              mirror.content_features(_pal23))
+
+        _didl23 = mirror.build_didl('http://10.0.0.2:9/stream/aa.mpg',
+                                    'TV & <b>host</b>', _pal23, _size23, _dur23)
+        _root23 = _ET23.fromstring(_didl23.encode('utf-8'))
+        _ns23 = 'urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/'
+        _res23 = _root23.find('.//{{{}}}item/{{{}}}res'.format(_ns23, _ns23))
+        check("the DIDL is well formed and carries size, duration and URL",
+              _res23 is not None
+              and _res23.text == 'http://10.0.0.2:9/stream/aa.mpg'
+              and _res23.get('size') == str(_size23)
+              and _res23.get('duration') == _dur23, _didl23[:160])
+        check("a hostname with an ampersand cannot break the envelope",
+              'TV & <b>' not in _didl23 and 'TV &amp; &lt;b&gt;' in _didl23,
+              _didl23[:200])
+
+        # -- what a renderer asks for, and what it must get back -------------
+        check("a byte range is parsed the way a TV writes it",
+              mirror.parse_range('bytes=0-393215') == (0, 393215)
+              and mirror.parse_range('bytes=14680064-') == (14680064, None)
+              and mirror.parse_range('BYTES=10-20') == (10, 20), '')
+        check("a request we cannot answer honestly is refused, not guessed",
+              mirror.parse_range('bytes=0-99,200-299') is None
+              and mirror.parse_range('bytes=-1024') is None
+              and mirror.parse_range('bytes=abc-') is None
+              and mirror.parse_range('items=0-9') is None
+              and mirror.parse_range(None) == (0, None), '')
+
+        # -- the encoder shape an old TV swallows ----------------------------
+        _cap23 = mirror._Capture('test', [['-f', 'test', '-i', 'x']])
+        _ps23 = mirror.build_ffmpeg_command('ffmpeg', _cap23, 1080, 10000000,
+                                           kind='dlna', profile=_pal23)
+        check("the PS shape is MPEG-2 in a VOB, at the DVD frame size",
+              _ps23[_ps23.index('pipe:1') - 1] == 'vob'
+              and 'mpeg2video' in _ps23
+              and _ps23[_ps23.index('-vf') + 1] == 'scale=720:576,setdar=16/9'
+              and _ps23[-1] == 'pipe:1', str(_ps23))
+        check("constant bitrate, because the TV models a fullness buffer",
+              [_ps23[_ps23.index(k) + 1] for k in ('-b:v', '-minrate',
+                                                   '-maxrate')]
+              == ['4500000'] * 3
+              and _ps23[_ps23.index('-g') + 1] == '15'
+              and _ps23[_ps23.index('-r') + 1] == '25', str(_ps23))
+        check("the profile, not the quality menu, decides the picture",
+              '1080' not in ''.join(_ps23) and '10000000' not in ''.join(_ps23),
+              str(_ps23))
+        _psa23 = mirror.build_ffmpeg_command(
+            'ffmpeg', mirror._Capture('test', [['-f', 'test', '-i', 'x']],
+                                      audio_map='1:a:0'),
+            576, 4500000, kind='dlna', profile=_pal23)
+        check("and the audio is the one a DVD-era TV decodes",
+              _psa23[_psa23.index('-c:a') + 1] == 'ac3'
+              and _psa23[_psa23.index('-b:a') + 1] == '192k'
+              and _psa23[_psa23.index('0:v:0') + 1:_psa23.index('0:v:0') + 3]
+              == ['-map', '1:a:0'], str(_psa23))
+        _ntsc23 = mirror.build_ffmpeg_command(
+            'ffmpeg', _cap23, 720, 5000000, kind='dlna',
+            profile=mirror.DLNA_PROFILES['ps-ntsc'])
+        check("NTSC land gets 30 fps and 480 lines",
+              _ntsc23[_ntsc23.index('-r') + 1] == '30'
+              and 'scale=720:480,setdar=16/9' in _ntsc23, str(_ntsc23))
+        _tsh23 = mirror.build_ffmpeg_command('ffmpeg', _cap23, 720, 5000000,
+                                             kind='dlna', profile=_h26423,
+                                             encoder='hardware')
+        check("the TS/H.264 shape keeps the hardware encoder and a 1 s GOP",
+              'h264_videotoolbox' in _tsh23
+              and _tsh23[_tsh23.index('pipe:1') - 1] == 'mpegts'
+              and _tsh23[_tsh23.index('-g') + 1] == '25'
+              and 'mpeg2video' not in _tsh23, str(_tsh23))
+        check("the aspect-preserving shapes scale by height only",
+              _tsh23[_tsh23.index('-vf') + 1] == 'scale=-2:720,setdar=16/9',
+              str(_tsh23))
+        check("the MKV shape is for the renderer that only speaks Matroska",
+              'matroska' in mirror.build_ffmpeg_command(
+                  'ffmpeg', _cap23, 720, 6000000, kind='dlna',
+                  profile=mirror.DLNA_PROFILES['mkv-h264']))
+        check("a machine with no audio tap sends video only",
+              '-an' in _ps23 and '-c:a' not in _ps23, str(_ps23))
+
+        check("an unknown stored profile falls back instead of failing",
+              mirror.dlna_profile('no-such-shape') is _pal23
+              and mirror.dlna_profile() is _pal23)
+        check("the watchdog's suggestion order starts after the current one",
+              mirror.profile_order()[:2] == ['ps-ntsc', 'ts-mpeg2']
+              and len(mirror.profile_order()) == len(mirror.DLNA_PROFILES) - 1,
+              str(mirror.profile_order()))
+        utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Profile, 'ts-h264')
+        check("so switching the profile moves the whole list forward",
+              mirror.profile_order()[0] == 'mkv-h264'
+              and mirror.profile_order()[-1] == 'ts-mpeg2',
+              str(mirror.profile_order()))
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Profile)
+
+        # -- the byte log: a file you can seek inside ------------------------
+        _log23 = mirror._ByteLog(limit=1 << 16)
+        _stream23 = [bytes([i % 251]) * 4096 for i in range(1, 5)]
+        for _c23 in _stream23:
+            _log23.feed(_c23)
+        _all23 = b''.join(_stream23)
+        check("reads are addressed by absolute offset",
+              _log23.read(0, 1024, deadline=1)[0] == _all23[:1024]
+              and _log23.read(5000, 10, deadline=1)[0] == _all23[5000:5010], '')
+        check("an offset behind the window clamps to the oldest byte "
+              "instead of slicing backwards",
+              _log23.read(-4096, 16, deadline=1)[0] == _all23[:16], '')
+        for _n23 in range(20):
+            _log23.feed(b'x' * 8192)
+        check("the ring is bounded, and aging out is what `drops` counts",
+              _log23.start > 0 and _log23.drops > 0
+              and _log23.end - _log23.start <= (1 << 16) + 8192,
+              '{} {} {}'.format(_log23.start, _log23.drops, _log23.end))
+        _late23 = mirror._ByteLog(limit=4096)
+        _full23 = bytes(range(256)) * 40
+        for _c23 in (_full23[i:i + 2560] for i in range(0, len(_full23), 2560)):
+            _late23.feed(_c23)
+        check("a reader that lags the eviction resyncs to what we still hold",
+              _late23.start > 0 and _late23.read(0, 32, deadline=1)[0]
+              == _full23[_late23.start:_late23.start + 32], str(_late23.start))
+        check("the anchor sits prefill bytes behind the live edge",
+              _log23.anchor(8192) == _log23.end - 8192
+              and _log23.anchor(1 << 30) == _log23.start, '')
+        _soon23 = mirror._ByteLog()
+        _got23 = []
+        threading.Thread(target=lambda: _got23.append(
+            _soon23.read(0, 4096, deadline=None)), daemon=True).start()
+        _soon23.feed(b'z' * 4096)
+        check("an unbounded read blocks until the encoder produces the bytes",
+              _wait_until(lambda: _got23 == [(b'z' * 4096, True)], timeout=5),
+              str(_got23))
+        _stall23 = mirror._ByteLog()
+        _data23, _complete23 = _stall23.read(0, 4096, deadline=0.3)
+        check("a bounded read gives up in time instead of hanging the TV",
+              _data23 == b'' and _complete23 is False, repr(_data23))
+        check("padding is a valid MPEG-PS packet, sized to the byte",
+              len(_stall23.pad(4096)) == 4096
+              and _stall23.pad(4096)[:6] == mirror.PS_PADDING
+              and _stall23.pad(0) == b''
+              and len(_stall23.pad(7)) == 7, '')
+        _wake23 = mirror._ByteLog()
+        _woke23 = []
+        threading.Thread(target=lambda: _woke23.append(
+            _wake23.read(0, 4096, deadline=None)), daemon=True).start()
+        _wait_until(lambda: _wake23._readers == 1)
+        _wake23.close()
+        check("teardown wakes a parked reader, so shutdown cannot hang",
+              _wait_until(lambda: bool(_woke23), timeout=5)
+              and _woke23[0] == (b'', False), str(_woke23))
+
+        # -- serving that file over HTTP -------------------------------------
+        _sess23 = mirror._Session('dlna', has_audio=True, title='测试机')
+        _server23 = mirror.start_stream_server(_sess23)
+        _port23 = _server23.server_address[1]
+        _path23 = _sess23.stream_path()
+        _log23b = _server23.broadcaster
+        check("a DLNA session gets a byte log instead of the live queue",
+              isinstance(_log23b, mirror._ByteLog)
+              and _sess23.file_size == mirror.advertised_file(
+                  _sess23.profile.bitrate)[0], str(type(_log23b)))
+
+        def _http23(method, path, range_header=None, timeout=8):
+            conn = http.client.HTTPConnection('127.0.0.1', _port23,
+                                              timeout=timeout)
+            conn.request(method, path, headers={} if range_header is None else
+                         {'Range': range_header})
+            resp = conn.getresponse()
+            out = (resp.status, dict(resp.getheaders()), resp.read())
+            conn.close()
+            return out
+
+        _head23 = _http23('HEAD', _path23)[1]
+        check("a HEAD names the whole file and promises ranges",
+              _head23['Content-Length'] == str(_sess23.file_size)
+              and _head23['Accept-Ranges'] == 'bytes'
+              and _head23['Content-Type'] == 'video/mpeg', str(_head23))
+        check("the two DLNA headers the firmware sniffs are on every answer",
+              _head23['transferMode.dlna.org'] == 'Streaming'
+              and 'DLNA.ORG_OP=01' in _head23['contentFeatures.dlna.org'],
+              str(_head23))
+        check("and a plain 200 carries no Content-Range",
+              'Content-Range' not in _head23, str(_head23))
+
+        _sniff23 = 393216
+        _saved_sniff23 = mirror.DLNA_SNIFF_TIMEOUT
+        mirror.DLNA_SNIFF_TIMEOUT = 0.3
+        _st23, _hd23, _body23 = _http23('GET', _path23,
+                                        'bytes=0-{}'.format(_sniff23 - 1))
+        check("an opening sniff gets EXACTLY the bytes it asked for",
+              _st23 == 206 and len(_body23) == _sniff23
+              and _hd23['Content-Length'] == str(_sniff23)
+              and _hd23['Content-Range'] == 'bytes 0-{}/{}'.format(
+                  _sniff23 - 1, _sess23.file_size),
+              '{} {}'.format(_st23, len(_body23)))
+        check("the gap the encoder has not filled is MPEG-PS padding",
+              _body23.startswith(mirror.PS_PADDING * 2)
+              and _body23[len(_body23) - 6:] == mirror.PS_PADDING[:6],
+              repr(_body23[:12]))
+        _again23 = _http23('GET', _path23, 'bytes=0-{}'.format(_sniff23 - 1))[2]
+        check("the same range twice gives the same bytes: the sniff may retry",
+              _again23 == _body23, str(len(_again23)))
+        check("the file's offset 0 was pinned on the first answer",
+              isinstance(_sess23.file_anchor, int), str(_sess23.file_anchor))
+        mirror.DLNA_SNIFF_TIMEOUT = _saved_sniff23
+
+        for _i23 in range(16):
+            _log23b.feed(bytes([_i23]) * 8192)
+        _held23 = b''.join([bytes([i]) * 8192 for i in range(16)])
+        _st23, _hd23, _body23 = _http23('GET', _path23, 'bytes=0-4095')
+        check("once the encoder has produced bytes, the sniff gets real data",
+              _st23 == 206 and _body23 == _held23[:4096], repr(_body23[:16]))
+        _st23, _hd23, _body23 = _http23('GET', _path23, 'bytes=8192-16383')
+        check("and it is the data at THAT offset, not the live edge",
+              _body23 == _held23[8192:16384]
+              and _hd23['Content-Range'] == 'bytes 8192-16383/{}'.format(
+                  _sess23.file_size), repr(_body23[:8]))
+        check("past the promised end is a 416 that names the size",
+              _http23('GET', _path23, 'bytes=2000000000-')[0] == 416, '')
+        _st416, _hd416, _bd416 = _http23('GET', _path23,
+                                         'bytes={}-{}'.format(
+                                             _sess23.file_size,
+                                             _sess23.file_size + 100))
+        check("the 416 keeps the DLNA headers and an empty body",
+              _hd416['Content-Range'] == 'bytes */{}'.format(
+                  _sess23.file_size) and _bd416 == b''
+              and _hd416['transferMode.dlna.org'] == 'Streaming', str(_hd416))
+        check("a multi-range request is refused rather than half-served",
+              _http23('GET', _path23, 'bytes=0-99,200-299')[0] == 404, '')
+        check("so is a stranger's stream id",
+              _http23('GET', '/stream/deadbeefdeadbeef.mpg')[0] == 404, '')
+
+        # the endless read: a TV filling its buffer towards the "end"
+        def _raw_get23(path, range_header=None, soak=1.0):
+            conn = socket.create_connection(('127.0.0.1', _port23), timeout=5)
+            request = 'GET {} HTTP/1.0\r\nHost: x\r\n'.format(path)
+            if range_header:
+                request += 'Range: {}\r\n'.format(range_header)
+            conn.sendall((request + '\r\n').encode('ascii'))
+            head = b''
+            while b'\r\n\r\n' not in head:
+                piece = conn.recv(4096)
+                if not piece:
+                    break
+                head += piece
+            first, _, rest = head.partition(b'\r\n\r\n')
+            body = bytearray(rest)
+            conn.settimeout(soak)
+            try:
+                while True:
+                    piece = conn.recv(65536)
+                    if not piece:
+                        break
+                    body += piece
+            except OSError:
+                pass
+            conn.close()
+            return first.decode('latin-1'), bytes(body)
+
+        _endless23 = []
+
+        def _read_endless23():
+            _endless23.append(_raw_get23(_path23, 'bytes=32768-', soak=4.0))
+
+        _tail_thread23 = threading.Thread(target=_read_endless23, daemon=True)
+        _tail_thread23.start()
+        _wait_until(lambda: _log23b.clients() >= 1, timeout=5)
+        _more23 = bytes(range(256)) * 64            # 16 KiB
+        _log23b.feed(_more23)
+        check("an open-ended range keeps the connection while the show goes on",
+              _endless23 == [], str(_endless23))
+        _more23b = bytes(range(256)) * 64
+        _log23b.feed(_more23b)
+        _log23b.close()
+        _tail_thread23.join(timeout=15)
+        check("and closes when the session ends, from that offset on",
+              _endless23 and _endless23[0][0].startswith('HTTP/1.0 206')
+              and 'Content-Length: {}'.format(_sess23.file_size - 32768)
+              in _endless23[0][0]
+              and _endless23[0][1] == (_held23 + _more23 + _more23b)[32768:],
+              str([(r.splitlines()[:1], len(b)) for r, b in _endless23]))
+        _server23.shutdown()
+        _server23.server_close()
+        _server23 = None
+
+        _sess23b = mirror._Session('cast', has_audio=True)
+        _server23b = mirror.start_stream_server(_sess23b)
+        _server23b.broadcaster.feed(b'chunk')
+        _conn23b = http.client.HTTPConnection('127.0.0.1',
+                                              _server23b.server_address[1],
+                                              timeout=5)
+        _conn23b.request('GET', _sess23b.stream_path())
+        _resp23b = _conn23b.getresponse()
+        _hd23b = dict(_resp23b.getheaders())
+        _conn23b.close()
+        _server23b.shutdown()
+        _server23b.server_close()
+        check("the Chromecast target keeps its live-edge semantics",
+              _hd23b.get('Accept-Ranges') == 'none'
+              and 'transferMode.dlna.org' not in _hd23b
+              and 'Content-Range' not in _hd23b, str(_hd23b))
+
+        # -- discovery: device descriptions ----------------------------------
+        _desc23 = (
+            '<?xml version="1.0"?>'
+            '<root xmlns="urn:schemas-upnp-org:device-1-0">'
+            '<specVersion><major>1</major><minor>0</minor></specVersion>'
+            '<device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1'
+            '</deviceType><friendlyName> 厨房的小电视 </friendlyName>'
+            '<UDN>uuid:11111111-2222-3333-4444-555555555555</UDN>'
+            '<serviceList><service>'
+            '<serviceType>urn:schemas-upnp-org:service:AVTransport:1'
+            '</serviceType>'
+            '<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>'
+            '<controlURL>/dmr/AVTransport</controlURL>'
+            '<eventSubURL>/dmr/evt</eventSubURL>'
+            '<SCPDURL>/av.xml</SCPDURL></service></serviceList>'
+            '</device></root>').encode('utf-8')
+        check("a renderer with a relative controlURL is still addressable",
+              mirror.parse_description(_desc23, 'http://192.0.2.40:5246/desc',
+                                       '192.0.2.40')
+              == ('厨房的小电视', 'http://192.0.2.40:5246/dmr/AVTransport'), '')
+        check("a device that answers from a different address than it claims "
+              "is believed by its answer",
+              mirror.parse_description(_desc23, 'http://127.0.0.1:5246/desc',
+                                       '192.0.2.40')
+              == ('厨房的小电视', 'http://192.0.2.40:5246/dmr/AVTransport'), '')
+        check("a description with no AVTransport service is not a target",
+              mirror.parse_description(b'<root><device/></root>',
+                                       'http://192.0.2.40/x', '192.0.2.40')
+              is None
+              and mirror.parse_description(b'not xml at all', 'http://x/y',
+                                          '192.0.2.40') is None, '')
+
+        def _fake_ssdp23(st, timeout=3.0, interface=None):
+            _taps23['ssdp'] = _taps23.get('ssdp', 0) + 1
+            if st.endswith('MediaRenderer:1'):
+                return [('http://192.0.2.40:5246/desc', '192.0.2.40'),
+                        ('http://192.0.2.41:5246/desc', '192.0.2.41')]
+            return [('http://192.0.2.40:5246/desc', '192.0.2.40')]
+
+        _saved_ssdp23 = mirror._ssdp_search
+        _saved_adv23 = mirror.Setting.get_advertisable_ip
+        _taps23['desc'] = mirror.describe_renderer
+        mirror._ssdp_search = _fake_ssdp23
+        mirror.Setting.get_advertisable_ip = lambda: ['192.0.2.41']
+        mirror.describe_renderer = lambda url, peer, timeout=3.0: (
+            mirror.parse_description(_desc23, url, peer)
+            if peer == '192.0.2.40' else None)
+        _found23 = mirror.discover_renderers()
+        check("discovery dedupes, skips ourselves, and names the host",
+              _found23 == [('厨房的小电视',
+                            'http://192.0.2.40:5246/dmr/AVTransport',
+                            '192.0.2.40')], str(_found23))
+        check("nothing is chosen until the user picks it",
+              mirror.dlna_target() == (None, ''), str(mirror.dlna_target()))
+        utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Control,
+                          'http://192.0.2.40:5246/dmr/AVTransport')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target_Name, '小电视')
+        check("the control URL lives in its own key, not in host:port",
+              mirror.dlna_target()
+              == ('小电视', 'http://192.0.2.40:5246/dmr/AVTransport')
+              and mirror.output_kind() == 'cast', str(mirror.dlna_target()))
+        check("the route probe answers with a local address without sending",
+              mirror.source_address_for('127.0.0.1') == '127.0.0.1', '')
+        mirror._ssdp_search = _saved_ssdp23
+        mirror.Setting.get_advertisable_ip = _saved_adv23
+        mirror.describe_renderer = _taps23['desc']
+
+        # -- SOAP: what actually goes over the wire --------------------------
+        class _TV23Handler(_httpd23.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _reply(self, action, fields):
+                inner = ''.join('<{k}>{v}</{k}>'.format(k=k, v=v)
+                                for k, v in [('InstanceID', '3')] + list(fields))
+                body = (
+                    '<?xml version="1.0"?>'
+                    '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
+                    ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+                    '<s:Body><u:{a}Response '
+                    'xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+                    '{i}</u:{a}Response></s:Body></s:Envelope>'
+                ).format(a=action, i=inner)
+                raw = body.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/xml; charset="utf-8"')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):
+                n = int(self.headers.get('Content-Length') or 0)
+                raw = self.rfile.read(n).decode('utf-8')
+                action = (self.headers.get('SOAPAction') or '').strip('"')
+                action = action.rsplit('#', 1)[-1]
+                _taps23.setdefault('calls', []).append((action, raw))
+                state = _taps23.setdefault('state', 'NO_MEDIA_PRESENT')
+                if action == 'SetAVTransportURI':
+                    _taps23['uri'] = raw
+                    _taps23['state'] = 'STOPPED'
+                    self._reply(action, [])
+                elif action == 'Play':
+                    _taps23['state'] = 'PLAYING'
+                    self._reply(action, [])
+                elif action == 'Stop':
+                    _taps23['state'] = 'STOPPED'
+                    self._reply(action, [])
+                elif action == 'GetTransportInfo':
+                    if _taps23.get('drop'):
+                        self.send_error(500)
+                        return
+                    self._reply(action, [('CurrentTransportState', state),
+                                         ('CurrentTransportStatus', 'OK'),
+                                         ('CurrentSpeed', '1')])
+                elif action == 'GetPositionInfo':
+                    _taps23['rel'] = _taps23.get('rel', 0) + 1
+                    self._reply(action, [('RelTime',
+                                          '0:00:{:02d}'.format(_taps23['rel']
+                                                               % 60))])
+                else:
+                    self.send_error(501)
+
+        _tv23 = _httpd23.ThreadingHTTPServer(('127.0.0.1', 0), _TV23Handler)
+        threading.Thread(target=_tv23.serve_forever, daemon=True,
+                         name="FAKE_DLNA_TV").start()
+        _control23 = 'http://127.0.0.1:{}/control'.format(
+            _tv23.server_address[1])
+
+        sender23 = mirror._DlnaSender(_control23, timeout=5.0)
+        check("InstanceID starts at 0", sender23.instance_id == '0', '')
+        sender23.set_uri('http://192.0.2.9:9/stream/aa.mpg', '屏幕镜像', _pal23)
+        sender23.play()
+        _calls23 = [c for c, _b in _taps23['calls']]
+        check("the push is SetAVTransportURI then Play, in that order",
+              _calls23 == ['SetAVTransportURI', 'Play'], str(_calls23))
+        check("a renderer that moved off InstanceID 0 is answered in kind",
+              sender23.instance_id == '3', sender23.instance_id)
+        _uri_body23 = _taps23['uri']
+        check("the envelope names the service and carries the DIDL we built",
+              'urn:schemas-upnp-org:service:AVTransport:1' in _uri_body23
+              and 'SetAVTransportURI' in _uri_body23
+              and 'MPEG_PS_PAL' in _uri_body23
+              and 'http-get:*:video/mpeg' in _uri_body23, _uri_body23[:200])
+        check("the transport state we read back is the one the TV reported",
+              sender23.transport_state() == 'PLAYING'
+              and sender23.position().startswith('0:00:'), '')
+        _taps23['drop'] = True
+        try:
+            sender23.transport_state()
+            _raised23 = False
+        except Exception:
+            _raised23 = True
+        _taps23['drop'] = False
+        check("a TV that answers 500 raises instead of reporting PLAYING",
+              _raised23 and sender23.last_state == 'PLAYING',
+              sender23.last_state)
+        sender23.stop()
+        check("teardown tells the renderer to stop, not just hangs up",
+              _taps23['calls'][-1][0] == 'Stop'
+              and _taps23['state'] == 'STOPPED',
+              str([c for c, _b in _taps23['calls']]))
+        sender23.close()
+
+        # Our own receiver is the strictest parser we can reach without a TV:
+        # it has to accept the envelope byte for byte.
+        _pushed23 = []
+
+        class _Dlna23(protocol.DLNAProtocol):
+            @property
+            def renderer(self):
+                return self
+
+            def set_media_url(self, uri, start='0'):
+                _pushed23.append(uri)
+
+            def set_media_title(self, title):
+                _pushed23.append(('title', title))
+
+            def set_media_resume(self):
+                _pushed23.append('resume')
+
+            def set_media_stop(self):
+                _pushed23.append('stop')
+
+            def release_playback(self):
+                pass
+
+        _dp23 = _Dlna23()
+        _accepted23 = []
+        for _action23, _body23 in _taps23['calls']:
+            try:
+                _dp23.call(_body23)
+                _accepted23.append(_action23)
+            except Exception as e:
+                _accepted23.append('{}:{}'.format(_action23, e))
+        check("Macast's own SOAP parser accepts every envelope we send",
+              _accepted23 == ['SetAVTransportURI', 'Play', 'Stop']
+              or _accepted23[:2] == ['SetAVTransportURI', 'Play'],
+              str(_accepted23))
+        check("and it latches the URI and the DIDL title we advertised",
+              'http://192.0.2.9:9/stream/aa.mpg' in _pushed23
+              and _dp23.get_state('CurrentTrackURI')
+              == 'http://192.0.2.9:9/stream/aa.mpg'
+              and ('title', '屏幕镜像') in _pushed23, str(_pushed23))
+
+        # -- the watchdog -----------------------------------------------------
+        _saved_poll23 = mirror.DLNA_POLL_SECONDS
+        _saved_rep23 = mirror.DLNA_MAX_REPUSHES
+        mirror.DLNA_POLL_SECONDS = 0.05
+        mirror.DLNA_MAX_REPUSHES = 20
+        _rec23 = _StateRec()
+
+        class _Mirror23(mirror.ScreenMirrorRenderer):
+            @property
+            def protocol(self):
+                return _rec23
+
+        mir23 = _Mirror23()
+        _mir23 = mir23
+        _failures23 = []
+        mir23._fail = lambda message, generation: _failures23.append(message)
+        _sess_w23 = mirror._Session('dlna', has_audio=True, title='T')
+        _url_w23 = 'http://192.0.2.9:9/stream/wf.mpg'
+        _pushes23 = lambda: sum(1 for c, _b in _taps23['calls']      # noqa: E731
+                                if c == 'SetAVTransportURI')
+        _watch23 = mirror._DlnaSender(_control23)
+        _taps23['state'] = 'PAUSED_PLAYBACK'
+        _before23 = _pushes23()
+        threading.Thread(target=mir23._watch_dlna,
+                         args=(_watch23, _url_w23, _sess_w23,
+                               mir23._generation), daemon=True).start()
+        check("a renderer that fell out of PLAYING gets the URL pushed again",
+              _wait_until(lambda: _pushes23() > _before23, timeout=8)
+              and mir23._dlna_state == 'PAUSED_PLAYBACK', str(mir23._dlna_state))
+        _taps23['state'] = 'PLAYING'
+        _taps23['rel'] = 0
+        check("recovery is recognised, and no advice is shouted on the way",
+              _wait_until(lambda: mir23._dlna_state == 'PLAYING', timeout=8)
+              and _failures23 == [], str(mir23._dlna_state))
+        _taps23['drop'] = True
+        check("giving up is a message that names the next profile to try",
+              _wait_until(lambda: bool(_failures23), timeout=15)
+              and '兼容档位' in _failures23[0]
+              and 'NTSC' in _failures23[0], str(_failures23))
+        _taps23['drop'] = False
+        _watch23.close()
+
+        with mir23._lock:
+            mir23._generation += 1
+        _taps23['state'] = 'STOPPED'
+        _before23 = _pushes23()
+        _stale_thread23 = threading.Thread(
+            target=mir23._watch_dlna,
+            args=(mirror._DlnaSender(_control23), _url_w23, _sess_w23, -7),
+            daemon=True)
+        _stale_thread23.start()
+        _stale_thread23.join(timeout=2)
+        check("a stale generation stops the watchdog without another push",
+              _stale_thread23.is_alive() is False and _pushes23() == _before23,
+              str(_pushes23()))
+        mirror.DLNA_POLL_SECONDS = _saved_poll23
+        mirror.DLNA_MAX_REPUSHES = _saved_rep23
+
+        # -- prefill, the honest reason this target lags ----------------------
+        _saved_prefill23 = mirror.DLNA_PREFILL_BYTES
+        mirror.DLNA_PREFILL_BYTES = 4096
+        _server23c = mirror.start_stream_server(mirror._Session('dlna'))
+        _server23d = mirror.start_stream_server(mirror._Session('dlna'))
+        try:
+            _server23c.broadcaster.feed(b'a' * 8192)
+            mir23._generation += 1
+            _t023 = time.time()
+            mir23._prefill(_server23c, types.SimpleNamespace(poll=lambda: None),
+                           mir23._generation)
+            check("prefill returns as soon as the ring holds the promised hoard",
+                  time.time() - _t023 < 1.5
+                  and _server23c.broadcaster.bytes >= 4096, '')
+            mir23._generation += 1
+            _t023 = time.time()
+            mir23._prefill(_server23d, types.SimpleNamespace(poll=lambda: 1),
+                           mir23._generation)
+            check("and does not wait for an encoder that already died",
+                  time.time() - _t023 < 1.0, '')
+        finally:
+            for _s23c in (_server23c, _server23d):
+                _s23c.broadcaster.close()
+                _s23c.shutdown()
+                _s23c.server_close()
+            mirror.DLNA_PREFILL_BYTES = _saved_prefill23
+
+        # -- the whole thing, end to end --------------------------------------
+        mir23b = _Mirror23()
+        mirror.find_ffmpeg = lambda: fake_ffmpeg23
+        mirror.start_search = lambda: True
+        mirror._devices = []
+        _saved_keep23 = mirror._keep_awake
+        _saved_drop23 = mirror._stop_awake
+        mirror._keep_awake = lambda: 'awake'
+        mirror._stop_awake = lambda handle: _taps23.setdefault(
+            'sleep', []).append(handle)
+        mirror.DLNA_PREFILL_BYTES = 24576
+        mirror.DLNA_POLL_SECONDS = 0.1
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'dlna')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Control, _control23)
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target_Name, '小电视')
+        _taps23['calls'] = []
+        _taps23['state'] = 'NO_MEDIA_PRESENT'
+        _taps23['sleep'] = []
+        try:
+            _notify23.clear()
+            mir23b.start_mirror()
+            check("a DLNA mirror starts against a renderer with no Google stack",
+                  _wait_until(mir23b.is_mirroring, timeout=30), str(_notify23))
+            _m23 = _re23.search(r'<CurrentURI>([^<]+)</CurrentURI>',
+                                _taps23.get('uri', ''))
+            _pushed_url23 = _m23.group(1) if _m23 else ''
+            check("the URL the TV was handed points back at this machine",
+                  _pushed_url23.startswith('http://127.0.0.1:')
+                  and '/stream/' in _pushed_url23
+                  and _pushed_url23.endswith('.mpg'), _pushed_url23)
+            check("the start message says how late this target is",
+                  any('小电视' in str(n) and '秒延迟' in str(n) for n in _notify23),
+                  str(_notify23))
+            _where23 = _pushed_url23.split('//', 1)[1]
+            _conn23 = http.client.HTTPConnection(
+                '127.0.0.1', int(_where23.split('/')[0].rsplit(':', 1)[1]),
+                timeout=10)
+            _conn23.request('GET', '/' + _where23.split('/', 1)[1],
+                            headers={'Range': 'bytes=0-8191'})
+            _resp23 = _conn23.getresponse()
+            _tv_st23, _tv_hd23 = _resp23.status, dict(_resp23.getheaders())
+            _tv_body23 = _resp23.read()
+            _conn23.close()
+            check("what the TV fetches is a 206 of exactly the bytes it wants",
+                  _tv_st23 == 206 and len(_tv_body23) == 8192
+                  and _tv_hd23['Accept-Ranges'] == 'bytes'
+                  and _tv_hd23['transferMode.dlna.org'] == 'Streaming'
+                  and _tv_hd23['Content-Type'] == 'video/mpeg', str(_tv_st23))
+            _stats23 = mir23b.stats()
+            check("the session reports its profile and how much is hoarded",
+                  _stats23.get('kind') == 'dlna'
+                  and _stats23.get('profile') == mirror.dlna_profile_id(
+                      mirror.dlna_profile())
+                  and _stats23.get('buffered', 0) > 0 and _stats23['bytes'] > 0,
+                  str(_stats23))
+            check("the renderer's own state reaches the menu",
+                  _wait_until(lambda: mir23b.stats().get('state') == 'PLAYING',
+                              timeout=10), str(mir23b.stats()))
+            check("a DLNA mirror keeps the machine awake like every other target",
+                  mir23b._awake == 'awake', str(mir23b._awake))
+            _bridged23 = 'http://elsewhere/movie.mp4'
+            _before23 = _pushes23()
+            mir23b.set_media_url(_bridged23)
+            check("a push while mirroring is bridged to the TV, not refused",
+                  _wait_until(lambda: _pushes23() > _before23
+                              and any(_bridged23 in b for _c, b
+                                      in _taps23['calls'][-4:]), timeout=10),
+                  str([c for c, _b in _taps23['calls'][-3:]]))
+            _before23 = len(_taps23['calls'])
+            mir23b.set_media_url(_bridged23)
+            check("the address we are already playing is not a push to bridge",
+                  len(_taps23['calls']) == _before23, str(_before23))
+            mir23b.stop_mirror()
+            # Teardown runs on its own thread and releases the sleep assert
+            # only after the Stop and the server shutdown, so poll for it --
+            # sampling it once proves the thread was scheduled, not the order.
+            check("stopping tells the TV to stop and releases the sleep assert",
+                  _wait_until(lambda: _taps23['sleep'] == ['awake'], timeout=20)
+                  and any(c == 'Stop' for c, _b in _taps23['calls'])
+                  and mir23b.stats() == {},
+                  '{} {} {}'.format([c for c, _b in _taps23['calls'][-3:]],
+                                    mir23b.stats(), _taps23['sleep']))
+        finally:
+            mirror._keep_awake = _saved_keep23
+            mirror._stop_awake = _saved_drop23
+            mirror.DLNA_PREFILL_BYTES = _saved_prefill23
+            mirror.DLNA_POLL_SECONDS = _saved_poll23
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
+            if mir23b.is_mirroring():
+                mir23b.stop_mirror()
+
+        # -- the menu ----------------------------------------------------------
+        class _FakeMirror23(object):
+            def __init__(self):
+                self.stops = 0
+                self.starts = 0
+
+            def is_mirroring(self):
+                return True
+
+            def stop_mirror(self):
+                self.stops += 1
+
+            def start_mirror(self):
+                self.starts += 1
+
+            def viewer_url(self):
+                return ''
+
+            def stats(self):
+                return {'kind': 'dlna', 'clients': 1, 'chunks': 30,
+                        'bytes': 900000, 'drops': 0, 'mbps': 1.2, 'seconds': 75,
+                        'profile': 'ps-pal', 'state': 'PLAYING',
+                        'buffered': 20971520}
+
+        def _menu_texts23(items):
+            texts = []
+            for i in items:
+                texts.append(i.text)
+                texts.extend(_menu_texts23(i.children or []))
+            return texts
+
+        def _find23(items, text):
+            for i in items:
+                if i.text == text:
+                    return i
+                hit = _find23(i.children or [], text)
+                if hit is not None:
+                    return hit
+            return None
+
+        fake23 = _FakeMirror23()
+        setting23 = mirror.ScreenMirrorSetting()
+        _saved_renderer_fn23 = setting23._renderer
+        setting23._renderer = lambda: fake23
+        _saved_devices23 = list(mirror._dlna_devices)
+        mirror._dlna_devices = [('厨房的小电视', _control23, '192.0.2.40'),
+                                ('客厅', 'http://192.0.2.41:49152/x',
+                                 '192.0.2.41')]
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'dlna')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Control, _control23)
+        _searches23 = []
+        _saved_rr23 = mirror.start_renderer_search
+        _saved_cr23 = mirror.start_search
+        mirror.start_renderer_search = lambda: _searches23.append('dlna') or True
+        mirror.start_search = lambda: _searches23.append('cast') or True
+        _items23 = setting23.build_menu()
+        _labels23 = _menu_texts23(_items23)
+        check("the menu offers three targets and marks the running one",
+              _find23(_items23, 'Chromecast / Google TV').checked is False
+              and _find23(_items23, 'DLNA 电视（老电视，MPEG-PS）').checked is True
+              and _find23(_items23, '浏览器（打开网址即可看）').checked is False,
+              str(_labels23))
+        check("a DLNA target lists the renderers discovery found",
+              '厨房的小电视 · 192.0.2.40' in _labels23
+              and '客厅 · 192.0.2.41' in _labels23
+              and '重新搜索' in _labels23, str(_labels23))
+        check("and the live line names the profile, the TV's state and the hoard",
+              any('已镜像 1:15' in t and '档位 ps-pal' in t
+                  and '电视 PLAYING' in t and '缓冲 20 MiB' in t
+                  for t in _labels23), str(_labels23))
+        check("all five compatibility profiles are on the menu",
+              len(_menu_texts23(_find23(_items23, '兼容档位').children or []))
+              == len(mirror.DLNA_PROFILES)
+              and _find23(_items23, 'MPEG-PS · PAL 576p（老电视首选）').checked
+              is True, '')
+        check("a DLNA mirror has no address to copy",
+              '复制观看地址' not in _labels23, str(_labels23))
+        setting23.on_profile_clicked(mirror.MenuItem('x', data='ts-h264'))
+        check("choosing a profile stores it and restarts the running stream",
+              mirror.dlna_profile_id(mirror.dlna_profile()) == 'ts-h264'
+              and fake23.stops == 1 and fake23.starts == 1, str(fake23.stops))
+        fake23.stops = fake23.starts = 0
+        setting23.on_profile_clicked(mirror.MenuItem('x', data='ts-h264'))
+        check("clicking the profile that is already chosen changes nothing",
+              fake23.stops == 0 and fake23.starts == 0)
+        setting23.on_dlna_target_clicked(
+            mirror.MenuItem('x', data=('客厅', 'http://192.0.2.41:49152/x')))
+        check("choosing a TV stores its control URL and leaves the Chromecast "
+              "target alone",
+              mirror.dlna_target() == ('客厅', 'http://192.0.2.41:49152/x')
+              and mirror.output_kind() == 'dlna', str(mirror.dlna_target()))
+        setting23.on_refresh(mirror.MenuItem('重新搜索'))
+        check("refresh on this target re-runs SSDP, not the Chromecast search",
+              _searches23 == ['dlna'], str(_searches23))
+        check("an empty renderer list says so instead of vanishing",
+              (setattr(mirror, '_dlna_devices', []), True)[1]
+              and any('没有发现' in t or '搜索中' in t
+                      for t in _menu_texts23(setting23.build_menu())), '')
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+        _searches23[:] = []
+        setting23.build_menu()
+        check("and a cast target still searches for Chromecasts",
+              _searches23 == ['cast'], str(_searches23))
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'dlna')
+        _searches23[:] = []
+        setting23.build_menu()
+        check("opening the menu on an empty renderer list kicks a search",
+              _searches23 == ['dlna'], str(_searches23))
+        mirror._dlna_devices = [('厨房的小电视', _control23, '192.0.2.40')]
+        _searches23[:] = []
+        setting23.build_menu()
+        check("a full renderer list does not search on every redraw",
+              _searches23 == [], str(_searches23))
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Profile)
+        setting23._renderer = _saved_renderer_fn23
+        mirror.start_renderer_search = _saved_rr23
+        mirror.start_search = _saved_cr23
+        mirror._dlna_devices = _saved_devices23
+    finally:
+        for _s23 in (_server23, _tv23):
+            if _s23 is not None:
+                try:
+                    _s23.shutdown()
+                    _s23.server_close()
+                except Exception:
+                    pass
+        if _mir23 is not None:
+            _mir23.stop_mirror()
+        cherrypy.engine.unsubscribe('app_notify', _notify23_rec)
+        utils.SETTING_DIR = _saved_dir23
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting23
+        _shutil.rmtree(_tmp23, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the DLNA target behaves", False, "{}: {}".format(type(e).__name__, e))
+
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------

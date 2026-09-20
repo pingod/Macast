@@ -4,10 +4,10 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.4</macast.version>
+# <macast.version>0.5</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN, or to any browser on the LAN (open a URL -- no app needed on the TV). ffmpeg captures (avfoundation / gdigrab / x11grab), hard-encodes to H.264, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, or fragmented MP4 played in a bundled web page. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, and VideoToolbox hardware encoding.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN, to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -38,6 +38,16 @@
 #     plus a rolling tail, so it can attach mid-stream; the MPEG-TS target is
 #     deliberately *not* replayed, because a TV would then have a backlog to
 #     drain and would sit seconds behind for the rest of the session;
+#   * the DLNA target is the awkward one, because a ten-year-old MediaRenderer
+#     has no notion of "live": it is handed a URL that pretends to be a finite
+#     file. So the stream is served as one -- Content-Length under 2 GiB (some
+#     firmware does signed 32-bit arithmetic there), Accept-Ranges plus
+#     transferMode/contentFeatures.dlna.org on every answer, a bounded sniff
+#     answered with *exactly* the bytes asked for (MPEG-PS padding, never a
+#     short read), and reconnects served by absolute byte offset out of a ring
+#     that is 48 MiB deep instead of the drop-oldest queue the other targets
+#     use. The URL is only pushed once the ring holds ~20 MiB, which is where
+#     this target's 20-ish seconds of latency comes from;
 #   * the Cast sequence is the sender-side one: deviceauth CHALLENGE ->
 #     CONNECT receiver-0 -> LAUNCH(CC1AD845) -> CONNECT <transportId> ->
 #     LOAD with streamType LIVE. Framing is reused from
@@ -62,6 +72,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -106,9 +117,125 @@ OUTPUTS = {
     'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
                 ['-f', 'mp4', '-movflags',
                  'frag_keyframe+empty_moov+default_base_moof', 'pipe:1']),
+    #: A DLNA TV is told it is downloading a finite file, so everything about
+    #: this target -- container, codec, even the file extension in the URL --
+    #: comes from the compatibility profile rather than from here. The muxer
+    #: slot is None for exactly that reason.
+    'dlna': ('DLNA 电视（老电视，MPEG-PS）', 'mpg', 'video/mpeg', None),
 }
 DEFAULT_OUTPUT = 'cast'
 BROWSER_PATH = '/browser'
+
+
+class _DlnaProfile(object):
+    """One 'shape' of the infinite file a DLNA TV is asked to download.
+
+    Old renderers are a compatibility matrix, not a spec: which one of these
+    works is a property of the TV, which is why the menu offers all five and
+    the watchdog tells you to switch. Facts (container, CBR rates, GOP, the
+    advertised size/duration pair) come from the MirrorCast reference study in
+    docs/Casting-Suite-Plan.md 2.1; **no real old TV has been tested** -- see
+    the same section for what that means for these claims.
+    """
+
+    def __init__(self, label, muxer, suffix, content_type, org_pn,
+                 video_args, audio_args, width, height, fps, bitrate):
+        self.label = label
+        self.muxer = muxer                      # ffmpeg args, minus pipe:1
+        self.suffix = suffix
+        self.content_type = content_type
+        self.org_pn = org_pn
+        self.video_args = video_args
+        self.audio_args = audio_args
+        #: width 0 means "keep the desktop's aspect and scale by height". Only
+        #: the MPEG-PS shapes pin an exact frame: the DVD-derived muxers refuse
+        #: anything else, and a 3400-pixel-wide Retina grab is not 720.
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.bitrate = bitrate
+
+    def video_filter(self):
+        """Anamorphic on purpose: the PS shapes squeeze a 16:9 desktop into a
+        4:3 frame and then tell the TV to stretch it back, which is exactly what
+        a DVD does -- and what the reference implementation is measured on."""
+        if self.width:
+            return 'scale={}:{}'.format(self.width, self.height)
+        return 'scale=-2:{}'.format(self.height)
+
+
+def _mpeg2(fps, bitrate):
+    """CBR MPEG-2: the rate control matters as much as the codec, because the
+    TV models a fullness buffer and a variable bitrate reads as starvation."""
+    return ['-c:v', 'mpeg2video', '-b:v', str(bitrate),
+            '-minrate', str(bitrate), '-maxrate', str(bitrate),
+            '-bufsize', '2304k', '-g', str(fps * 3 // 5), '-r', str(fps),
+            '-pix_fmt', 'yuv420p']
+
+
+#: profile id -> shape. Ordered from "most likely to work on an old TV" to
+#: "modern renderer that only speaks TS/MKV"; the watchdog walks this list
+#: forward when the TV keeps refusing.
+DLNA_PROFILES = {
+    'ps-pal': _DlnaProfile(
+        'MPEG-PS · PAL 576p（老电视首选）', ['-f', 'vob'], 'mpg', 'video/mpeg',
+        'MPEG_PS_PAL', _mpeg2(25, 4500000),
+        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
+        720, 576, 25, 4500000),
+    'ps-ntsc': _DlnaProfile(
+        'MPEG-PS · NTSC 480p（北美/日本老电视）', ['-f', 'vob'], 'mpg',
+        'video/mpeg', 'MPEG_PS_NTSC', _mpeg2(30, 4500000),
+        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
+        720, 480, 30, 4500000),
+    'ts-mpeg2': _DlnaProfile(
+        'MPEG-TS · MPEG-2 576p（认 TS 不认 PS 的电视）', ['-f', 'mpegts'],
+        'ts', 'video/vnd.dlna.mpeg-tts', 'MPEG_TS_SD_EU',
+        _mpeg2(25, 5000000),
+        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
+        720, 576, 25, 5000000),
+    'ts-h264': _DlnaProfile(
+        'MPEG-TS · H.264 720p（较新的电视，清晰度更高）', ['-f', 'mpegts'],
+        'ts', 'video/vnd.dlna.mpeg-tts', None, None,
+        ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2'],
+        0, 720, 25, 6000000),
+    'mkv-h264': _DlnaProfile(
+        'Matroska · H.264 720p（只认 MKV 的电视/Kodi）', ['-f', 'matroska'],
+        'mkv', 'video/x-matroska', None, None,
+        ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2'],
+        0, 720, 25, 6000000),
+}
+DEFAULT_DLNA_PROFILE = 'ps-pal'
+#: How much of the ring the TV is allowed to be behind before we push the URL.
+#: The advertised file is "already 20 MiB long", so the renderer's first big
+#: probe is served from memory instead of stalling on the encoder. This is
+#: where the ~20-25 s of latency on this target comes from -- the price of an
+#: old TV being willing to play a live stream at all.
+DLNA_PREFILL_BYTES = 20 << 20
+#: Ring size: 48 MiB of produced bytes stay addressable by absolute offset.
+DLNA_RING_BYTES = 48 << 20
+#: The advertised file must stay under 2 GiB. Some firmware does signed 32-bit
+#: arithmetic on Content-Length, which turns 3.9 GB into
+#: `Range: bytes=0-18446744072566584319` and "this file is unsupported".
+DLNA_MAX_ADVERTISED_SIZE = 1900000000
+DLNA_SECONDARY_HEADER = 'Streaming'
+DLNA_ORG_FLAGS = '01500000000000000000000000000000'
+#: An MPEG-PS padding packet (private_stream_1, zero length). A renderer that
+#: asks for exactly n bytes gets exactly n bytes -- it is sniffing a file, and
+#: a short answer is what makes it give up.
+PS_PADDING = b'\x00\x00\x01\xbe\x00\x00'
+DLNA_POLL_SECONDS = 5.0
+#: How long a bounded sniff waits for the encoder before we pad the rest.
+#: Longer than a keyframe interval, shorter than most TVs' own read timeout.
+DLNA_SNIFF_TIMEOUT = 10.0
+#: Ceiling on the prefill wait: a slow encoder must not hold the session open
+#: forever, and the TV is better off starting laggy than never starting.
+DLNA_PREFILL_TIMEOUT = 45.0
+DLNA_MAX_REPUSHES = 8
+DLNA_SERVICE = 'urn:schemas-upnp-org:service:AVTransport:1'
+DLNA_SEARCH_TARGETS = ('urn:schemas-upnp-org:device:MediaRenderer:1',
+                       DLNA_SERVICE)
+SSDP_ADDR = '239.255.255.250'
+SSDP_PORT = 1900
 
 _devices = []
 _searching = False
@@ -192,7 +319,7 @@ class SettingProperty(Enum):
     Mirror_Audio_Aggregate = 4
     #: CoreAudio id of the user's real speakers, so「恢复原声音输出」can go back.
     Mirror_Audio_Original = 5
-    #: 'cast' | 'browser' -- see OUTPUTS
+    #: 'cast' | 'browser' | 'dlna' -- see OUTPUTS
     Mirror_Output = 6
     #: avfoundation video device index to capture; '' means "first screen".
     Mirror_Screen = 7
@@ -200,6 +327,12 @@ class SettingProperty(Enum):
     Mirror_Cursor = 8
     #: 'software' | 'hardware' (h264_videotoolbox, macOS only)
     Mirror_Encoder = 9
+    #: key into DLNA_PROFILES -- which container/codec an old TV swallows is a
+    #: property of the TV, so the user (and the watchdog) picks it.
+    Mirror_Dlna_Profile = 10
+    #: AVTransport control URL of the chosen DLNA renderer. Its own key
+    #: because Mirror_Target holds `host:port` for a Chromecast.
+    Mirror_Dlna_Control = 11
 
 
 # -- ffmpeg ----------------------------------------------------------------
@@ -266,6 +399,88 @@ def encoder_kind():
     if kind != 'hardware' or sys.platform != 'darwin':
         return 'software'
     return 'hardware'
+
+
+def dlna_profile(profile_id=None):
+    """The compatibility shape in use for the DLNA target.
+
+    Unknown or missing values fall back to the default rather than failing:
+    the menu writes these, and a stale setting from a rolled-back plugin must
+    not make the mirror refuse to start.
+    """
+    if profile_id is None:
+        profile_id = str(Setting.get(SettingProperty.Mirror_Dlna_Profile,
+                                     DEFAULT_DLNA_PROFILE)
+                         or DEFAULT_DLNA_PROFILE)
+    return DLNA_PROFILES.get(profile_id, DLNA_PROFILES[DEFAULT_DLNA_PROFILE])
+
+
+def dlna_profile_id(profile):
+    """The stored key for a profile object (the menu and the watchdog both
+    need to name the current one to the user)."""
+    for key, value in DLNA_PROFILES.items():
+        if value is profile:
+            return key
+    return DEFAULT_DLNA_PROFILE
+
+
+def profile_order():
+    """Profiles in "try this next" order, starting after the current one."""
+    keys = list(DLNA_PROFILES)
+    current = dlna_profile_id(dlna_profile())
+    return keys[keys.index(current) + 1:] + keys[:keys.index(current)]
+
+
+def advertised_file(bitrate):
+    """(size, 'H:MM:SS') claimed for the endless stream.
+
+    The two numbers have to agree with each other and with the bitrate, or a
+    renderer that cross-checks them sees a broken file. The size is capped
+    below 2 GiB because some firmware treats Content-Length as a signed 32-bit
+    integer and asks for `bytes=0-18446744072566584319`.
+    """
+    size = min(bitrate * 3600 // 8, DLNA_MAX_ADVERTISED_SIZE)
+    seconds = max(1, size * 8 // bitrate)
+    return size, '{}:{:02d}:{:02d}'.format(seconds // 3600,
+                                           seconds % 3600 // 60, seconds % 60)
+
+
+def protocol_info(profile):
+    """The DIDL `protocolInfo` attribute for a DLNA profile."""
+    parts = ['DLNA.ORG_OP=01', 'DLNA.ORG_CI=0',
+             'DLNA.ORG_FLAGS={}'.format(DLNA_ORG_FLAGS)]
+    if profile.org_pn:
+        parts.insert(0, 'DLNA.ORG_PN={}'.format(profile.org_pn))
+    return 'http-get:*:{}:{}'.format(profile.content_type, ';'.join(parts))
+
+
+def content_features(profile):
+    """The `contentFeatures.dlna.org` response header. Renderers that sniff it
+    refuse the stream when it is missing, so it travels with every answer."""
+    return ('DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS={}'.format(
+        DLNA_ORG_FLAGS))
+
+
+def build_didl(url, title, profile, size, duration):
+    """DIDL-Lite for SetAVTransportURI.
+
+    Both interpolations are escaped: `title` is this machine's hostname and
+    `url` is ours while mirroring, but the same builder is used when a phone
+    pushes a third-party URL through us -- an unescaped & or < there is a
+    malformed envelope the TV blames on us.
+    """
+    from xml.sax.saxutils import escape
+    return (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="-1" restricted="1">'
+        '<dc:title>{title}</dc:title>'
+        '<upnp:class>object.item.videoItem</upnp:class>'
+        '<res protocolInfo="{pn}" size="{size}" duration="{duration}">'
+        '{url}</res></item></DIDL-Lite>'
+    ).format(title=escape(title), pn=escape(protocol_info(profile)),
+             size=size, duration=escape(duration), url=escape(url))
 
 
 def probe_capture(ffmpeg, platform=None, cursor=None):
@@ -425,7 +640,14 @@ def has_hardware_encoder(ffmpeg, platform=None):
 
 
 def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
-                         encoder='software'):
+                         encoder='software', profile=None):
+    if kind == 'dlna':
+        # A renderer of ten years ago is being handed this file, so the
+        # profile -- not the user's quality menu -- decides the shape: the
+        # height, the codec, the rate control and the container all have to be
+        # ones that TV's demuxer knows.
+        return build_dlna_command(ffmpeg, capture,
+                                  profile or dlna_profile(), encoder)
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
     for one_input in capture.inputs:
         cmd += one_input
@@ -444,12 +666,37 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     return cmd
 
 
+def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
+    cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
+    for one_input in capture.inputs:
+        cmd += one_input
+    cmd += ['-map', '0:v:0']
+    if capture.audio_map:
+        cmd += ['-map', capture.audio_map] + profile.audio_args
+    else:
+        cmd += ['-an']
+    # setdar because a scaled desktop is not 4:3 just because the frame is.
+    cmd += ['-vf', profile.video_filter() + ',setdar=16/9']
+    if profile.video_args is not None:
+        cmd += profile.video_args
+    else:
+        # The H.264 shapes: same encoder path as the other targets, with the
+        # frame rate the profile advertises and a one-second GOP so a TV that
+        # joins mid-file finds an IDR quickly.
+        cmd += encoder_args(encoder)
+        cmd += ['-pix_fmt', 'yuv420p', '-g', str(profile.fps),
+                '-r', str(profile.fps), '-b:v', str(profile.bitrate)]
+    cmd += profile.muxer + ['pipe:1']
+    return cmd
+
+
 def capture_unavailable_hint():
     if sys.platform == 'darwin':
         return 'ffmpeg 没有列出任何屏幕采集设备（avfoundation）'
     if sys.platform == 'win32':
         return '这个 ffmpeg 构建不支持 gdigrab'
-    return '没有 DISPLAY：x11grab 只认 X11 会话（纯 Wayland 桌面请暂用 DLNA 投屏）'
+    return ('没有 DISPLAY：x11grab 只认 X11 会话（Wayland 下 ffmpeg 无法截屏，'
+            '本插件的三种目标都收不到画面；请切到 XWayland/X11 会话）')
 
 
 # -- macOS 系统声音辅助：一键安装 BlackHole + 多输出设备 -----------------------
@@ -937,6 +1184,168 @@ class _Broadcaster(object):
             return len(self._subs)
 
 
+class _ByteLog(object):
+    """Encoder output kept addressable by **absolute byte offset**.
+
+    A DLNA renderer is not watching a live stream: it was handed a URL it
+    believes is a 1.9 GB file, so it closes the connection mid-way and comes
+    back with `Range: bytes=14680064-` as if nothing happened. Unlike the
+    queue broadcaster, nothing here is dropped for being slow -- the last 48
+    MiB of produced bytes stay readable, and a reader that wants bytes the
+    encoder has not made yet waits for them.
+    """
+
+    def __init__(self, limit=DLNA_RING_BYTES, pad=PS_PADDING):
+        self._limit = limit
+        self._pad = pad
+        self._chunks = deque()
+        self._held = 0
+        self._start = 0                 # absolute offset of _chunks[0]
+        self._end = 0                   # absolute offset of the next byte
+        self._cond = threading.Condition()
+        self._closed = False
+        self._readers = 0
+        #: Same names as _Broadcaster, so stats() can read either.
+        self.chunks = 0
+        self.bytes = 0
+        self.drops = 0                  # chunks that aged out of the window
+
+    def feed(self, chunk):
+        with self._cond:
+            self.chunks += 1
+            self.bytes += len(chunk)
+            self._end += len(chunk)
+            self._chunks.append(chunk)
+            self._held += len(chunk)
+            while self._held > self._limit and len(self._chunks) > 1:
+                evicted = self._chunks.popleft()
+                self._held -= len(evicted)
+                self._start += len(evicted)
+                self.drops += 1
+            self._cond.notify_all()
+
+    def close(self):
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    @property
+    def start(self):
+        with self._cond:
+            return self._start
+
+    @property
+    def end(self):
+        with self._cond:
+            return self._end
+
+    def clients(self):
+        with self._cond:
+            return self._readers
+
+    def reader_enter(self):
+        with self._cond:
+            self._readers += 1
+            return self._readers
+
+    def reader_leave(self):
+        with self._cond:
+            self._readers = max(0, self._readers - 1)
+
+    def anchor(self, prefill=DLNA_PREFILL_BYTES):
+        """Where the advertised file's offset 0 sits.
+
+        `prefill` bytes behind the live edge, so the renderer's opening sniff
+        is answered out of memory instead of stalling on the encoder. That
+        hoard is also the whole latency of this target: the TV drains it at
+        line rate and then tracks the live edge from ~20 s behind.
+        """
+        with self._cond:
+            return max(self._start, self._end - prefill)
+
+    def read(self, absolute, length, deadline=None):
+        """Up to `length` bytes at `absolute`, blocking until they exist.
+
+        Returns (data, complete). `complete` is False when the encoder could
+        not keep up before `deadline` -- or the session ended -- and the
+        caller has to fill the rest in itself, because a renderer that asked
+        for exactly n bytes must get exactly n bytes back.
+        """
+        out = bytearray()
+        with self._cond:
+            while len(out) < length:
+                # Re-checked every round: the window keeps sliding while we
+                # wait, and a reader that lags the eviction must resync to the
+                # oldest byte still held rather than index off the front of the
+                # deque (a negative slice would hand back the *tail* of a chunk
+                # and the TV would blame our encoder for the garbage).
+                cursor = max(absolute + len(out), self._start)
+                have = self._collect(cursor, length - len(out))
+                if have:
+                    out += have
+                    continue
+                if self._closed:
+                    return bytes(out), False
+                remaining = None if deadline is None else deadline - time.time()
+                if remaining is not None and remaining <= 0:
+                    return bytes(out), False
+                self._cond.wait(0.5 if remaining is None
+                                else min(0.5, remaining))
+            return bytes(out), True
+
+    def _collect(self, absolute, length):
+        """Bytes available right now in [absolute, absolute+length).
+
+        Caller holds the lock; `absolute` must already be clamped to `_start`.
+        """
+        if absolute >= self._end:
+            return b''
+        offset = self._start
+        for chunk in self._chunks:
+            nxt = offset + len(chunk)
+            if nxt > absolute:
+                cut = absolute - offset
+                return chunk[cut:min(len(chunk), cut + length)]
+            offset = nxt
+        return b''
+
+    def pad(self, length):
+        """`length` bytes of MPEG-PS padding: what a bounded sniff gets
+        filled in with when the encoder has not produced that much yet."""
+        if length <= 0:
+            return b''
+        return (self._pad * (length // len(self._pad) + 1))[:length]
+
+
+def parse_range(header):
+    """`Range: bytes=100-200` -> (100, 200); `bytes=100-` -> (100, None).
+
+    Only a single range is meaningful here: the "file" is one endless stream,
+    so a multi-range request is a client we cannot serve honestly. Suffix
+    ranges (`bytes=-1024`) are dropped for the same reason -- "the last 1 kB of
+    a file with no end" has no answer a TV would like.
+    """
+    if not header:
+        return 0, None
+    unit, _, spec = header.partition('=')
+    if unit.strip().lower() != 'bytes' or ',' in spec:
+        return None
+    first, _, last = spec.partition('-')
+    try:
+        start = int(first)
+    except ValueError:
+        return None
+    stop = None
+    if last:
+        try:
+            stop = int(last)
+        except ValueError:
+            return None
+    if stop is not None and stop < start:
+        return None
+    return start, stop
+
+
 class _StreamHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
 
@@ -963,6 +1372,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
             return name == self.session.stream_name(suffix)
 
     def do_HEAD(self):
+        # Renderers probe with HEAD before they commit to a read.
         if self.path.partition('?')[0].startswith(STREAM_PREFIX):
             self.do_GET(head_only=True)
         else:
@@ -975,6 +1385,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if path.startswith(STREAM_PREFIX):
             if not self._authorized(self.session.suffix):
                 return self._not_found()
+            if self.session.bytelog:
+                return self._serve_infinite_file(head_only)
             return self._serve_stream(head_only)
         return self._not_found()
 
@@ -1002,6 +1414,107 @@ class _StreamHandler(BaseHTTPRequestHandler):
         finally:
             broadcaster.unsubscribe(queue)
 
+    def _serve_infinite_file(self, head_only=False):
+        """The DLNA target: answer as if this were a finite media file.
+
+        Three things make a ten-year-old renderer accept an endless stream:
+        every response names a size below 2 GiB, a bounded sniff is answered
+        with *exactly* the number of bytes it asked for (PS padding fills the
+        gap while the encoder catches up), and a reconnect with an absolute
+        byte offset lands on the same byte it left -- see _ByteLog.
+        """
+        log = self.server.broadcaster
+        session = self.session
+        if session.file_anchor is None:
+            session.file_anchor = log.anchor()
+        requested = parse_range(self.headers.get('Range'))
+        if requested is None:
+            self._not_found()
+            return
+        start, stop = requested
+        if start >= session.file_size:
+            # Past the end of the file we promised. 416 with our own size is
+            # honest and keeps the client from concluding the file is broken.
+            self.send_response(416)
+            self.send_header('Content-Range',
+                             'bytes */{}'.format(session.file_size))
+            self.send_header('Content-Length', '0')
+            self._dlna_headers()
+            self.end_headers()
+            return
+        # A Range *header* is what makes this a 206, even when it only names a
+        # start; a missing one means "the whole file", which is the same body
+        # but a 200 and no Content-Range.
+        has_range = bool(self.headers.get('Range'))
+        bounded = stop is not None
+        last = session.file_size - 1
+        if bounded:
+            last = min(stop, last)
+        length = last - start + 1
+        self.send_response(206 if has_range else 200)
+        self.send_header('Content-Type', session.content_type)
+        self.send_header('Content-Length', str(length))
+        if has_range:
+            # Content-Range on a 200 is malformed, and a 200 here means "the
+            # whole file, from the top" -- which is also what the length says.
+            self.send_header('Content-Range', 'bytes {}-{}/{}'.format(
+                start, last, session.file_size))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self._dlna_headers()
+        self.end_headers()
+        if head_only:
+            return
+        log.reader_enter()
+        try:
+            absolute = session.file_anchor + start
+            written = 0
+            deadline = None if not bounded else \
+                time.time() + DLNA_SNIFF_TIMEOUT
+            while written < length:
+                want = min(length - written, 1 << 20)
+                if not bounded:
+                    # Unbounded means "play until I say stop": block for as
+                    # long as the encoder is alive, because a short body makes
+                    # the renderer think the file ended and tear down.
+                    data, complete = log.read(absolute, want)
+                    if not data and not complete:
+                        return          # the session closed
+                else:
+                    data, complete = log.read(absolute, want, deadline=deadline)
+                    if not complete:
+                        data += log.pad(want - len(data))
+                if not data:
+                    return
+                self.wfile.write(data)
+                self.wfile.flush()
+                written += len(data)
+                absolute += len(data)
+                if bounded and written >= length:
+                    return      # exactly n bytes, then the connection closes
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # The TV reconnecting with a Range is normal, not an error: it is
+            # how a renderer fills its own buffer.
+            logger.debug('the renderer closed the file read at offset %s',
+                         start)
+        finally:
+            log.reader_leave()
+
+    def _dlna_headers(self):
+        """The DLNA-specific headers, on every answer of a DLNA session.
+
+        `transferMode.dlna.org: Streaming` is what tells the renderer not to
+        wait for the whole file; plenty of firmware refuses the stream without
+        `contentFeatures.dlna.org`, and `Accept-Ranges: bytes` has to be there
+        because the client's buffering strategy *is* seeking.
+        """
+        if self.session.kind != 'dlna':
+            return
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('transferMode.dlna.org', DLNA_SECONDARY_HEADER)
+        self.send_header('contentFeatures.dlna.org',
+                         content_features(self.session.profile))
+
     def _serve_page(self, head_only=False):
         import hmac
         import urllib.parse
@@ -1026,9 +1539,23 @@ class _StreamHandler(BaseHTTPRequestHandler):
 class _Session(object):
     """What this mirror session looks like to the HTTP server."""
 
-    def __init__(self, kind, has_audio=False, title='Macast'):
+    def __init__(self, kind, has_audio=False, title='Macast', profile=None):
         self.kind = kind if kind in OUTPUTS else DEFAULT_OUTPUT
         self.label, self.suffix, self.content_type, _args = OUTPUTS[self.kind]
+        #: The DLNA target answers as a finite file, so it needs a profile
+        #: (which container, which codec, which advertised size) and a byte log
+        #: instead of the queue broadcaster. The other targets leave both None
+        #: and keep the live-edge semantics.
+        self.profile = None
+        self.bytelog = False
+        self.file_anchor = None
+        if self.kind == 'dlna':
+            self.profile = profile or dlna_profile()
+            self.suffix = self.profile.suffix
+            self.content_type = self.profile.content_type
+            self.bytelog = True
+            self.file_size, self.file_duration = advertised_file(
+                self.profile.bitrate)
         #: A browser can only attach to a live fragmented stream at a
         #: keyframe, so replaying the header plus a short tail is what makes
         #: "open the URL a second time" work. A TV is never replayed: it would
@@ -1054,8 +1581,10 @@ class _Session(object):
 def start_stream_server(session, broadcaster=None):
     server = ThreadingHTTPServer(('0.0.0.0', 0), _StreamHandler)
     server.session = session
-    server.broadcaster = broadcaster or _Broadcaster(
-        init_marker=session.init_marker)
+    if broadcaster is None:
+        broadcaster = _ByteLog() if session.bytelog else _Broadcaster(
+            init_marker=session.init_marker)
+    server.broadcaster = broadcaster
     server.daemon_threads = True
     # A client that vanished mid-stream stays in queue.get for seconds;
     # server_close must not wait for it.
@@ -1297,6 +1826,342 @@ class _CastSender(object):
             self.sock = None
 
 
+# -- DLNA control point (the TV is a renderer; we are its remote) -------------
+#
+# Everything above this line speaks Cast, to a device that wants to be told
+# what to play. A DLNA MediaRenderer is the same idea over UPnP: SSDP to find
+# it, an XML description to learn where its AVTransport control endpoint is,
+# and SOAP to say "here is a URL, play it". Written on purpose from the
+# standard library: `macast/ssdp.py` is a *device* (it answers M-SEARCH), not a
+# control point, and a single-file plugin cannot pip-install one.
+
+
+def _ssdp_search(st, timeout=3.0, interface=None):
+    """(LOCATION, answering ip) pairs for one SSDP search target."""
+    request = '\r\n'.join([
+        'M-SEARCH * HTTP/1.1',
+        'HOST: {}:{}'.format(SSDP_ADDR, SSDP_PORT),
+        'MAN: "ssdp:discover"',
+        'MX: 2',
+        'ST: {}'.format(st),
+        '', ''])
+    found = set()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.4)
+    if interface:
+        # Binding is how a multi-homed Mac (VPN, bridges) picks which interface
+        # the multicast leaves on -- the same worry AGENTS.md 4.1 has for the
+        # mDNS advertiser.
+        try:
+            sock.bind((interface, 0))
+        except OSError as e:
+            logger.info('cannot search from %s: %s', interface, e)
+    try:
+        sock.sendto(request.encode('ascii'), (SSDP_ADDR, SSDP_PORT))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                data, peer = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            for line in data.decode('utf-8', 'replace').splitlines():
+                name, _, value = line.partition(':')
+                if name.strip().lower() != 'location':
+                    continue
+                value = value.strip()
+                if value.startswith('http'):
+                    found.add((value, peer[0]))
+    finally:
+        sock.close()
+    return sorted(found)
+
+
+def _local_name(tag):
+    return tag.rpartition('}')[2].lower() if isinstance(tag, str) else ''
+
+
+def parse_description(raw, base_url, peer_ip):
+    """(friendly name, absolute AVTransport control URL) or None.
+
+    Namespaces are matched by local name because UPnP descriptions in the wild
+    disagree on prefix and case. The control URL is resolved against the
+    description's own base, and a device that describes itself on a loopback or
+    unspecified address is rewritten to the address that actually answered --
+    a renderer behind a router hits that more often than the spec admits.
+    """
+    import urllib.parse
+    import xml.etree.ElementTree as ET
+    import ipaddress
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return None
+    if root is None:
+        return None
+
+    def first_text(tag):
+        for node in root.iter():
+            if _local_name(node.tag) == tag:
+                return (node.text or '').strip()
+        return ''
+
+    name = first_text('friendlyname') or peer_ip
+    parsed = urllib.parse.urlsplit(base_url)
+    host = parsed.hostname or peer_ip
+    port = _port_suffix(parsed)
+    try:
+        if ipaddress.ip_address(host).is_loopback or host == '0.0.0.0':
+            host = peer_ip
+    except ValueError:
+        pass                      # a hostname: keep it, DNS is the LAN's job
+    control = ''
+    for service in root.iter():
+        if _local_name(service.tag) != 'service':
+            continue
+        values = {}
+        for child in service:
+            values[_local_name(child.tag)] = (child.text or '').strip()
+        if values.get('servicetype', '').endswith(':AVTransport:1'):
+            control = values.get('controlurl', '')
+            break
+    if not control:
+        return None
+    if not control.startswith('http'):
+        # The port belongs to the answer, not to the hostname: dropping it
+        # here sends every SOAP call to port 80 of a TV that serves it on 5246.
+        same_origin = '{}://{}{}'.format(parsed.scheme, host, port)
+        prefix = same_origin + ('' if control.startswith('/')
+                                else parsed.path.rsplit('/', 1)[0])
+        control = prefix + (control if control.startswith('/')
+                            else '/' + control)
+    else:
+        described = urllib.parse.urlsplit(control)
+        if described.hostname != host:
+            control = '{}://{}{}{}'.format(described.scheme, host,
+                                           _port_suffix(described, port),
+                                           described.path)
+    return name, control
+
+
+def describe_renderer(url, peer_ip, timeout=3.0):
+    import urllib.request
+    try:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=timeout) as response:
+            raw = response.read(512 * 1024)
+    except Exception as e:
+        logger.debug('cannot read %s: %s', url, e)
+        return None
+    return parse_description(raw, url, peer_ip)
+
+
+def discover_renderers(timeout=3.0):
+    """[(friendly name, control url, host)] for DLNA renderers on the LAN.
+
+    The host is what `advertise_host()` must be compared against: a TV on
+    another subnet can answer SSDP and still never reach our stream URL.
+    """
+    seen = {}
+    try:
+        ours = set(Setting.get_advertisable_ip())
+    except Exception:
+        ours = set()
+    for st in DLNA_SEARCH_TARGETS:
+        for location, peer in _ssdp_search(st, timeout=timeout):
+            if peer in ours:
+                continue                      # do not mirror to ourselves
+            parsed = describe_renderer(location, peer)
+            if parsed is None:
+                continue
+            name, control = parsed
+            host = _url_host(control) or peer
+            seen[host] = (name, control, host)
+    return sorted(seen.values())
+
+
+_dlna_devices = []
+_dlna_searching = False
+
+
+def start_renderer_search():
+    """Refresh the DLNA renderer list in the background (menu-safe)."""
+    global _dlna_searching
+    with _search_lock:
+        if _dlna_searching:
+            return False
+        _dlna_searching = True
+
+    def _run():
+        global _dlna_devices, _dlna_searching
+        try:
+            found = discover_renderers()
+            if found:
+                _dlna_devices = found
+        finally:
+            with _search_lock:
+                _dlna_searching = False
+
+    threading.Thread(target=_run, daemon=True,
+                     name="SCREEN_MIRROR_DLNA_SEARCH").start()
+    return True
+
+
+def dlna_target():
+    """(name, control url) of the renderer chosen in the menu.
+
+    A separate key from `Mirror_Target` on purpose: that one holds
+    `host:port` for a Chromecast, and parsing a URL with that splitter is how
+    'http://10.0.0.5:49152/x' turns into a host named 'http'.
+    """
+    control = Setting.get(SettingProperty.Mirror_Dlna_Control, '') or ''
+    name = Setting.get(SettingProperty.Mirror_Target_Name, '') or ''
+    if not control:
+        return None, ''
+    return (name or control), control
+
+
+def source_address_for(peer_ip):
+    """Which of our own addresses reaches this TV.
+
+    A UDP connect() asks the routing table without sending anything. Mirroring
+    from the wrong interface looks like a broken stream: the TV fetches the
+    URL, gets nothing routable back, and reports 'file unsupported'.
+    """
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError:
+        return advertise_host()
+    try:
+        probe.connect((peer_ip, 9))
+        return probe.getsockname()[0]
+    except OSError:
+        return advertise_host()
+    finally:
+        probe.close()
+
+
+def _url_host(url):
+    """The hostname inside a URL, for the route probe."""
+    import urllib.parse
+    return urllib.parse.urlsplit(url).hostname or ''
+
+
+def _port_suffix(parts, default=''):
+    """:port for a urlsplit result, `default` when it names none.
+
+    ``parts.port`` raises on a non-numeric port, and a hand-written device
+    description is exactly where that turns up; losing the renderer silently
+    is worse than guessing the scheme's own port.
+    """
+    try:
+        return ':{}'.format(parts.port) if parts.port else default
+    except ValueError:
+        return default
+
+
+def dlna_stream_url(server, peer_ip=None):
+    """The stream address as the TV on the other end will have to write it."""
+    host = source_address_for(peer_ip) if peer_ip else advertise_host()
+    return 'http://{}:{}{}'.format(host, server.server_address[1],
+                                   server.session.stream_path())
+
+
+class _DlnaSender(object):
+    """The handful of AVTransport actions a mirror needs, over SOAP.
+
+    InstanceID is remembered from whatever the renderer last answered with: a
+    device is allowed to move off 0, and a control point that keeps sending 0
+    gets error 701 from exactly the quirky firmware this target exists for.
+    """
+
+    def __init__(self, control_url, timeout=5.0):
+        self.control_url = control_url
+        self.timeout = timeout
+        self.instance_id = '0'
+        self.last_state = ''
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))
+
+    def _request(self, action, args):
+        from xml.sax.saxutils import escape
+        import xml.etree.ElementTree as ET
+        fields = ''.join('<{name}>{value}</{name}>'.format(
+            name=name, value=escape(unicode_text(args[name])))
+            for name in args)
+        body = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+            '<s:Body><u:{action} xmlns:u="{service}">'
+            '<InstanceID>{instance}</InstanceID>{fields}'
+            '</u:{action}></s:Body></s:Envelope>'
+        ).format(action=action, service=DLNA_SERVICE,
+                 instance=self.instance_id, fields=fields)
+        # Byte length, not str length: a Chinese device name is multi-byte, and
+        # a Content-Length that counts characters truncates the envelope on the
+        # wire -- the renderer then answers a SOAP fault and the mirror looks
+        # like a dead TV rather than like our own bug.
+        payload = body.encode('utf-8')
+        request = urllib.request.Request(
+            self.control_url, data=payload,
+            headers={'SOAPAction': '"{}#{}"'.format(DLNA_SERVICE, action),
+                     'Content-Type': 'text/xml; charset="utf-8"',
+                     'Content-Length': str(len(payload)),
+                     'Connection': 'close'})
+        with self._opener.open(request, timeout=self.timeout) as response:
+            raw = response.read(512 * 1024)
+        values = {}
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            logger.warning('%s replied with something that is not XML',
+                           action)
+            return values
+        for node in root.iter():
+            if _local_name(node.tag) == 'instanceid' and (node.text or '').strip():
+                self.instance_id = node.text.strip()
+            if _local_name(node.tag).endswith('response'):
+                for child in node:
+                    values[_local_name(child.tag)] = (child.text or '').strip()
+        return values
+
+    def set_uri(self, url, title, profile):
+        size, duration = advertised_file(profile.bitrate)
+        return self._request('SetAVTransportURI', {
+            'CurrentURI': url,
+            'CurrentURIMetaData': build_didl(url, title, profile, size,
+                                             duration)})
+
+    def play(self):
+        return self._request('Play', {'Speed': '1'})
+
+    def stop(self):
+        try:
+            self._request('Stop', {})
+        except Exception as e:
+            logger.debug('the renderer did not accept Stop: %s', e)
+
+    def transport_state(self):
+        state = self._request('GetTransportInfo', {}).get(
+            'currenttransportstate', '')
+        if state:
+            self.last_state = state
+        return self.last_state
+
+    def position(self):
+        return self._request('GetPositionInfo', {}).get('reltime', '')
+
+    def close(self):
+        pass
+
+
+def unicode_text(value):
+    return value if isinstance(value, str) else str(value)
+
+
 # -- the renderer ------------------------------------------------------------
 
 class _Aborted(Exception):
@@ -1316,6 +2181,8 @@ class ScreenMirrorRenderer(Renderer):
         self._mirroring = False
         self._started_at = 0.0
         self._url = ''
+        #: What the DLNA renderer last said (TransportState), for the menu.
+        self._dlna_state = ''
         self.renderer_setting = ScreenMirrorSetting()
 
     # -- settings helpers ----------------------------------------------------
@@ -1363,7 +2230,7 @@ class ScreenMirrorRenderer(Renderer):
         bc = server.broadcaster
         seconds = max(1.0, time.time() - self._started_at) \
             if self._started_at else 1.0
-        return {'kind': server.session.kind,
+        info = {'kind': server.session.kind,
                 'clients': bc.clients(),
                 'chunks': bc.chunks,
                 'bytes': bc.bytes,
@@ -1371,6 +2238,13 @@ class ScreenMirrorRenderer(Renderer):
                 'mbps': round(bc.bytes * 8 / 1000000.0 / seconds, 2),
                 'seconds': int(time.time() - self._started_at)
                 if self._started_at else 0}
+        if server.session.bytelog:
+            # On this target the meaningful health number is how far behind
+            # the TV is -- it is reading from the hoard we pre-filled.
+            info['profile'] = dlna_profile_id(server.session.profile)
+            info['state'] = self._dlna_state
+            info['buffered'] = max(0, bc.end - bc.start)
+        return info
 
     # -- Renderer API ----------------------------------------------------------
 
@@ -1391,21 +2265,32 @@ class ScreenMirrorRenderer(Renderer):
             # tear the stream down and start it again.
             logger.info('ignoring a repeat push of %s', url)
             return
-        if output_kind() != 'cast' and self.target()[0] is None:
-            # Nothing to bridge to: a browser-only user has no Chromecast, and
-            # mpv is not ours to drive here. Say so instead of silently
-            # swallowing the push (or killing a running mirror for it).
+        kind = output_kind()
+        if kind == 'cast':
+            ready = bool(self.target()[0])
+        elif kind == 'dlna':
+            ready = bool(dlna_target()[1])
+        else:
+            # A browser target has nothing to bridge to: its "device" is a
+            # webpage we drive by streaming, not by pushing a URL.
+            ready = False
+        if not ready:
+            # Nothing to bridge to: this user has no device selected, and mpv
+            # is not ours to drive here. Say so instead of silently swallowing
+            # the push (or killing a running mirror for it).
             cherrypy.engine.publish(
                 'app_notify', 'Macast',
                 'Screen Mirror 无法播放推送的网址：把「输出目标」切到 '
-                'Chromecast 做中继，或换回默认渲染器播放', sound=False)
+                'Chromecast 或 DLNA 电视做中继，或换回默认渲染器播放',
+                sound=False)
             return
         self._url = url
         with self._lock:
             self._generation += 1
             generation = self._generation
         self._teardown_async()
-        threading.Thread(target=self._cast_url, args=(url, generation),
+        runner = self._cast_url if kind != 'dlna' else self._dlna_url
+        threading.Thread(target=runner, args=(url, generation),
                          daemon=True, name="SCREEN_MIRROR_CAST").start()
         self.set_state_transport('PLAYING')
         cherrypy.engine.publish('renderer_av_uri', url)
@@ -1427,6 +2312,12 @@ class ScreenMirrorRenderer(Renderer):
         with self._lock:
             sender = self._sender
         if sender is None:
+            return
+        if not hasattr(sender, 'set_volume'):
+            # A DLNA renderer's volume lives in RenderingControl, a different
+            # service we never resolved -- and every TV has a remote for it.
+            logger.info('volume left to the renderer: this target speaks no '
+                        'Cast volume channel')
             return
         try:
             sender.set_volume(int(data))
@@ -1461,11 +2352,18 @@ class ScreenMirrorRenderer(Renderer):
         kind = output_kind()
         host = port = None
         name = ''
+        control = ''
         if kind == 'cast':
             host, port, name = self.target()
             if host is None:
                 self._fail('还没有选择投屏目标：在菜单栏的「输出目标 → Chromecast」'
                            '里选一台设备，或改用「浏览器」目标', generation)
+                return
+        elif kind == 'dlna':
+            name, control = dlna_target()
+            if not control:
+                self._fail('还没有选择 DLNA 电视：在菜单栏的「输出目标 → DLNA '
+                           '电视」里选一台，或改用「浏览器」目标', generation)
                 return
         ffmpeg = find_ffmpeg()
         if ffmpeg is None:
@@ -1486,7 +2384,8 @@ class ScreenMirrorRenderer(Renderer):
         first_bytes = threading.Event()
         tail = deque(maxlen=20)
         session = _Session(kind, has_audio=bool(capture.audio_map),
-                           title=socket.gethostname() or 'Macast')
+                           title=socket.gethostname() or 'Macast',
+                           profile=dlna_profile() if kind == 'dlna' else None)
         try:
             server = start_stream_server(session)
             proc = subprocess.Popen(
@@ -1507,26 +2406,36 @@ class ScreenMirrorRenderer(Renderer):
                              daemon=True, name="SCREEN_MIRROR_PUMP").start()
             threading.Thread(target=_drain_stderr, args=(proc, tail),
                              daemon=True, name="SCREEN_MIRROR_LOG").start()
-            url = stream_url(server)
+            url = (dlna_stream_url(server, _url_host(control))
+                   if kind == 'dlna' else stream_url(server))
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
             first_bytes.wait(timeout=3.0)
             if proc.poll() is not None or generation != self._generation:
                 raise _Aborted()
+            if kind == 'dlna':
+                self._prefill(server, proc, generation)
+                if generation != self._generation:
+                    raise _Aborted()
             sender = None
             if kind == 'cast':
                 sender = _CastSender(host, port)
                 sender.connect()
                 sender.launch()
                 sender.load(url, content_type=session.content_type, live=True)
+            elif kind == 'dlna':
+                sender = _DlnaSender(control)
+                sender.set_uri(url, '屏幕镜像 · {}'.format(session.page_title),
+                               session.profile)
+                sender.play()
         except _Aborted:
             self._teardown()
             return
         except Exception as e:
             self._teardown()
             detail = str(e).strip() or ' '.join(list(tail)[-3:])
-            target_label = name if kind == 'cast' else '浏览器'
+            target_label = name if kind in ('cast', 'dlna') else '浏览器'
             self._fail('镜像到 {} 启动失败：{}'.format(target_label, detail),
                        generation)
             return
@@ -1544,13 +2453,119 @@ class ScreenMirrorRenderer(Renderer):
             self._started_at = time.time()
             self._url = url
         self.set_state_transport('PLAYING')
-        if kind == 'browser':
+        if kind == 'dlna':
+            # The renderer needs a push of its own to recover from the pauses
+            # and seek-stalls old firmware does on a stream it thinks is a
+            # file. It is ours to hold, so it dies with the generation.
+            threading.Thread(target=self._watch_dlna,
+                             args=(sender, url, session, generation),
+                             daemon=True, name="SCREEN_MIRROR_DLNA_WATCH").start()
+            message = '已开始镜像到 {}（档位 {}，约 {} 秒延迟）'.format(
+                name, session.profile.label,
+                max(1, DLNA_PREFILL_BYTES * 8 // session.profile.bitrate))
+        elif kind == 'browser':
             message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
         else:
             message = '已开始镜像到 {}'.format(name)
         cherrypy.engine.publish('app_notify', 'Macast', message)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
+
+    def _prefill(self, server, proc, generation):
+        """Hold the URL back until the ring holds `DLNA_PREFILL_BYTES`.
+
+        The renderer's first move is a bounded sniff of a few megabytes; if we
+        have to answer it by waiting on the encoder, the TV concludes the file
+        is broken. Waiting here is what buys a steady read -- and the latency
+        this target has, which is why the start message says so.
+        """
+        log = server.broadcaster
+        deadline = time.time() + DLNA_PREFILL_TIMEOUT
+        while time.time() < deadline and generation == self._generation:
+            if log.bytes >= DLNA_PREFILL_BYTES or proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        else:
+            logger.info('prefill stopped at %s bytes', log.bytes)
+
+    def _dlna_url(self, url, generation):
+        """Bridge path for a DLNA renderer: play a pushed URL, no capture."""
+        name, control = dlna_target()
+        if not control:
+            self._fail('还没有选择 DLNA 电视：在菜单栏的「输出目标 → DLNA 电视」'
+                       '里选一台', generation)
+            return
+        profile = dlna_profile()
+        try:
+            sender = _DlnaSender(control)
+            sender.set_uri(url, 'Macast · {}'.format(name), profile)
+            sender.play()
+        except Exception as e:
+            self._fail('投给 {} 失败：{}'.format(name, e), generation)
+            return
+        with self._lock:
+            if generation != self._generation:
+                _close_quietly(sender)
+                return
+            self._sender = sender
+        logger.info('cast %s to %s via %s', url, name, control)
+
+    def _watch_dlna(self, sender, url, session, generation):
+        """Keep a renderer that stopped on its own going.
+
+        Old firmware pauses, seeks into a corner of the fake file, or just
+        drops out of PLAYING when a sniff came back short. `GetTransportInfo`
+        every few seconds is the only window into that; the success proof is
+        `RelTime` actually moving, because a renderer will happily report
+        PLAYING while it sits on a frozen frame.
+        """
+        misses = 0
+        last_position = None
+        while True:
+            with self._lock:
+                if generation != self._generation:
+                    return
+            time.sleep(DLNA_POLL_SECONDS)
+            try:
+                state = sender.transport_state()
+                position = sender.position()
+            except Exception as e:
+                logger.debug('DLNA poll failed: %s', e)
+                misses += 1
+                if misses >= DLNA_MAX_REPUSHES:
+                    self._give_up(sender, '电视不再应答（可能已关机，或换了网络）')
+                    return
+                continue
+            if state == 'PLAYING':
+                if position and position != last_position:
+                    last_position = position
+                    misses = 0
+                with self._lock:
+                    self._dlna_state = state
+                continue
+            with self._lock:
+                self._dlna_state = state
+            misses += 1
+            if misses >= DLNA_MAX_REPUSHES:
+                self._give_up(sender, '电视连续 {} 次没有播起来'.format(misses))
+                return
+            logger.info('renderer is %s; pushing again (%d/%d)',
+                        state, misses, DLNA_MAX_REPUSHES)
+            try:
+                sender.set_uri(url, '屏幕镜像 · {}'.format(session.page_title),
+                               session.profile)
+                sender.play()
+            except Exception as e:
+                logger.debug('re-push failed: %s', e)
+
+    def _give_up(self, sender, reason):
+        """Stop blaming the TV one poll at a time and tell the user why."""
+        current = dlna_profile_id(dlna_profile())
+        nxt = profile_order()[0]
+        self._fail('{}：当前档位是「{}」。在菜单栏「兼容档位」里换成「{}」再试一次'.format(
+            reason, DLNA_PROFILES[current].label,
+            DLNA_PROFILES[nxt].label),
+                   self._generation)
 
     def _cast_url(self, url, generation):
         """Bridge path: play a finished URL on the device, no capture."""
@@ -1607,12 +2622,14 @@ class ScreenMirrorRenderer(Renderer):
     def _teardown(self):
         with self._lock:
             sender, proc, server = self._sender, self._proc, self._server
-            awake = self._awake
             self._sender = self._proc = self._server = None
-            self._awake = None
             self._mirroring = False
+            # Claim the assert here so a second teardown (the encoder dying
+            # right after a manual stop) cannot release someone else's.
+            awake, self._awake = self._awake, None
         _cleanup(sender, proc, server)
-        _stop_awake(awake)
+        if awake is not None:
+            _stop_awake(awake)
 
 
 def _cleanup(sender, proc, server):
@@ -1626,6 +2643,11 @@ def _cleanup(sender, proc, server):
         except Exception:
             proc.kill()
     if server is not None:
+        # A DLNA reader is parked in _ByteLog.read() waiting for the next
+        # byte; nothing else releases it before server_close() would block.
+        close = getattr(server.broadcaster, 'close', None)
+        if close is not None:
+            close()
         server.shutdown()
         server.server_close()
 
@@ -1729,15 +2751,19 @@ class ScreenMirrorSetting(RendererSetting):
         kind = output_kind()
         if kind == 'cast' and not _devices:
             start_search()
+        if kind == 'dlna' and not _dlna_devices:
+            start_renderer_search()
         renderer = self._renderer()
         mirroring = bool(renderer and renderer.is_mirroring())
 
         items = [
-            MenuItem('Screen Mirror v0.4', enabled=False),
+            MenuItem('Screen Mirror v0.5', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
             MenuItem('输出目标', children=self._output_children(kind)),
         ]
+        if kind == 'dlna':
+            items.append(MenuItem('兼容档位', children=self._profile_children()))
         if kind == 'browser' and mirroring:
             items.append(MenuItem('复制观看地址', self.on_copy_url_clicked))
             items.append(MenuItem(renderer.viewer_url(), enabled=False))
@@ -1774,11 +2800,39 @@ class ScreenMirrorSetting(RendererSetting):
     def _output_children(self, kind):
         children = [MenuItem(OUTPUTS[key][0], self.on_output_clicked,
                              checked=(kind == key), data=key)
-                    for key in ('cast', 'browser')]
+                    for key in ('cast', 'dlna', 'browser')]
         if kind == 'cast':
             children.append(MenuItem('— — —', enabled=False))
             children.extend(self._device_children())
+        elif kind == 'dlna':
+            children.append(MenuItem('— — —', enabled=False))
+            children.extend(self._renderer_children())
         return children
+
+    def _renderer_children(self):
+        """DLNA renderers from the last background SSDP search.
+
+        Cached like the Chromecast list: the menu is built on the UI thread and
+        a search sends multicast and waits seconds for replies.
+        """
+        name, control = dlna_target()
+        children = []
+        for device_name, device_control, host in list(_dlna_devices):
+            children.append(MenuItem('{} · {}'.format(device_name, host),
+                                     self.on_dlna_target_clicked,
+                                     checked=(device_control == control),
+                                     data=(device_name, device_control)))
+        if not children:
+            children.append(MenuItem('搜索中…再展开一次菜单' if _dlna_searching
+                                     else '没有发现 DLNA 电视', enabled=False))
+        children.append(MenuItem('重新搜索', self.on_refresh))
+        return children
+
+    def _profile_children(self):
+        current = dlna_profile_id(dlna_profile())
+        return [MenuItem(profile.label, self.on_profile_clicked,
+                         checked=(current == key), data=key)
+                for key, profile in DLNA_PROFILES.items()]
 
     def _device_children(self):
         """The discovered Chromecasts, as the v0.3 menu had them."""
@@ -1831,6 +2885,12 @@ class ScreenMirrorSetting(RendererSetting):
         stats = renderer.stats()
         if not stats:
             return '状态：正在启动…'
+        if stats.get('kind') == 'dlna':
+            minutes, seconds = divmod(stats['seconds'], 60)
+            return '已镜像 {:d}:{:02d} · 档位 {} · 电视 {} · 缓冲 {:.0f} MiB'.format(
+                minutes, seconds, stats.get('profile', '?'),
+                stats.get('state') or '未上报',
+                max(0, stats.get('buffered', 0)) / 1048576.0)
         minutes, seconds = divmod(stats['seconds'], 60)
         return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
             minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
@@ -1886,6 +2946,14 @@ class ScreenMirrorSetting(RendererSetting):
         Setting.set(SettingProperty.Mirror_Target_Name, name)
         cherrypy.engine.publish('app_notify', 'Macast',
                                 '镜像目标：{}'.format(name), sound=False)
+        self._restart()
+
+    def on_dlna_target_clicked(self, item):
+        name, control = item.data
+        Setting.set(SettingProperty.Mirror_Dlna_Control, control)
+        Setting.set(SettingProperty.Mirror_Target_Name, name)
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                'DLNA 电视：{}'.format(name), sound=False)
         self._restart()
 
     def on_output_clicked(self, item):
@@ -1958,7 +3026,26 @@ class ScreenMirrorSetting(RendererSetting):
             cherrypy.engine.publish('app_notify', 'Macast',
                                     '画质将在下次镜像时生效', sound=False)
 
+    def on_profile_clicked(self, item):
+        """A profile is a different encoder, muxer and advertised file, so the
+        running stream is wrong the instant the choice changes. Unlike quality
+        this one restarts immediately: the menu offers five shapes precisely
+        because the TV rejects the first one, and making the user toggle the
+        mirror again after each try is busywork."""
+        if item.data == dlna_profile_id(dlna_profile()):
+            return
+        Setting.set(SettingProperty.Mirror_Dlna_Profile, item.data)
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                '兼容档位：{}'.format(DLNA_PROFILES[item.data].label),
+                                sound=False)
+        self._restart()
+
     def on_refresh(self, item):
+        if output_kind() == 'dlna':
+            start_renderer_search()
+            cherrypy.engine.publish('app_notify', 'Macast',
+                                    '正在搜索 DLNA 电视…', sound=False)
+            return
         start_search()
         cherrypy.engine.publish('app_notify', 'Macast', '正在搜索 Chromecast…',
                                 sound=False)

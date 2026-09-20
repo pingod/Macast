@@ -33,7 +33,7 @@
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.4** — 把桌面屏幕实时镜像到局域网：Chromecast、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `screen_mirror.py` | **Screen Mirror v0.5** — 把桌面屏幕实时镜像到局域网：Chromecast、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 
 **Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
@@ -60,7 +60,7 @@
   `Cast_Bridge_Target` = `host:port`，测试就是靠这条路径）。它复用 `macast.protocol_cast`
   的 Cast v2 收发实现，**不引入 pychromecast 依赖**。首次投屏前必须选好目标。
 - **Screen Mirror**：菜单栏「输出目标」先选一类，再「开始镜像」。链路是 ffmpeg 屏幕采集 →
-  H.264 → 插件内的 HTTP 服务持续输出实时流。两类目标只是**封装不同**：
+  H.264/MPEG-2 → 插件内的 HTTP 服务持续输出实时流。三类目标只是**封装不同**：
   **Chromecast / Google TV** 走 `video/mp2t`（MPEG-TS）+ Cast `LOAD streamType=LIVE`；
   **浏览器**走分片 MP4（`frag_keyframe+empty_moov+default_base_moof`），镜像开始时菜单会给出
   一个 `http://<本机>:<端口>/browser?token=…` 网址，局域网里任何浏览器打开即看（MSE 播，
@@ -74,8 +74,30 @@
   不再 spawn ffmpeg），机器上没这个编码口时就直接拒绝。镜像期间用 `caffeinate` 阻止 Mac 休眠，
   停止镜像即释放；镜像中的状态行显示「已镜像时长 · 实时码率 · 观看端数 · 丢块数」。
   观看地址带**每会话随机**的 stream id 和页面 token（不是应用那个常驻管理令牌），
-  所以 token 外泄只影响一次会话，别人也猜不到你的流。**只有浏览器目标会重播缓冲**
-  （后加入的观看端要立刻看到画面）；电视目标永远只拿「接下来」的字节，否则它会永远慢着几秒。
+  所以 token 外泄只影响一次会话，别人也猜不到你的流。**Chromecast 目标永远只拿「接下来」的字节**
+  （否则会永远慢着几秒）；**浏览器目标重播缓冲**（后加入的观看端要立刻看到画面）；
+  **DLNA 目标把直播当成一个「无限大的文件」来供**，见下。
+  **v0.5 的 DLNA 电视目标**（给没有 Google 栈、也不开浏览器的那类电视：老智能电视、
+  机顶盒、只认 DLNA 的投影仪）：这类设备只肯播它能 `HEAD`/`Range` 到的**固定大小文件**，
+  所以插件把直播伪装成一个文件 —— 对外报一个按档位码率算出来的固定 `Content-Length`
+  （永远小于 2³¹，老固件的有符号 32 位上限），每个响应都带 `Accept-Ranges: bytes` +
+  `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`，探边界的那几个请求
+  必须**恰好**回 n 个字节（不够就用 MPEG-PS 的填充包补齐），断线重连按**绝对字节偏移**
+  从一个 48 MiB 环形缓冲里取，偏移落在环外就报丢块而不是回错数据。代价是**延迟**：
+  推流前先攒够约 20 MiB（菜单状态行与开始提示都会说出这个秒数），所以这条链路是
+  「客厅挂机上给爸妈看屏幕」而不是「会议低延迟投屏」。封装由**兼容档位**决定
+  （`ps-pal` / `ps-ntsc` / `ts-mpeg2` / `ts-h264` / `mkv-h264`，PAL 与 NTSC 分两套帧率与
+  帧尺寸，声音是 AC-3 而不是 AAC —— DVD 时代的电视认得它），菜单里可手选；
+  连续读不到 `PLAYING` 会**自动换到下一个档位**并重启编码链路，全部试完就给一句
+  「在菜单栏「兼容档位」里换成 X 再试一次」。电视的发现走 SSDP `MediaRenderer:1` →
+  抓设备描述 → 只认带 `AVTransport:1` 的（控制 URL 可能是相对路径，也可能是设备自称的
+  另一个地址；描述里漏端口/写错地址都按**实际应答的那个地址**修正），菜单「输出目标 →
+  DLNA 电视」里列出候选，选中即写入 `Mirror_Dlna_Control`（与 Chromecast 的 `Mirror_Target`
+  分开的键 —— 那是 `host:port`，用它存 URL 会把 `http` 当成主机名）。推给电视的
+  `SetAVTransportURI` 里带 DIDL-Lite（`protocolInfo` 与档位一致），之后每 5 秒
+  `GetTransportInfo` 看门狗：掉出 `PLAYING` 就重投 URL，`RelTime` 在动才算真的活着。
+  **让位/中继**：DLNA 与 Chromecast 目标一样，镜像期间手机再投别的内容会把该 URL
+  转投给电视（电视已经在放那个网址时不重复推），浏览器目标下这样的推送会被明确拒绝。
   **系统声音**跟随条件：macOS 需要虚拟声卡 `blackhole-2ch`（FFmpeg 至今没有任何发行版
   能直接抓 mac 系统音频——提议中的 screencapturekit demuxer 从未合并）。**v0.3 起不用你手动装**：
   菜单「系统声音 → 一键设置（BlackHole + 多输出设备）」会自动下载官方 pkg（地址与 sha256
@@ -85,9 +107,10 @@
   任何一步失败会降级为帮你打开「音频 MIDI 设置」并给出文字指引。Linux 走 PulseAudio/PipeWire 的
   `<sink>.monitor`，通常开箱即有。Windows 仅画面。macOS 首次使用需在
   「系统设置 → 隐私与安全性 → 屏幕录制」给 Macast 授权（没授权时插件会明确报出来，
-  不会静默黑屏）。**让位/中继行为只属于 Chromecast 目标**：镜像进行中若手机 DLNA 投了东西，
-  镜像会让位并把收到的 URL 转投给电视；浏览器目标下这样的推送会被明确拒绝，而不是把正在跑的
-  镜像弄停。目标同样可以直接写设置 `Mirror_Target` = `host:port`（测试走这条路径）。
+  不会静默黑屏）。**让位/中继行为属于两个电视目标**（Chromecast 与 DLNA）：镜像进行中若手机
+  DLNA 投了东西，镜像会让位并把收到的 URL 转投给电视；浏览器目标下这样的推送会被明确拒绝，
+  而不是把正在跑的镜像弄停。目标同样可以直接写设置：Chromecast 用 `Mirror_Target` =
+  `host:port`，DLNA 电视用 `Mirror_Dlna_Control` = 控制 URL（测试走这两条路径）。
 - **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
   它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
   **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。

@@ -52,7 +52,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 |---|---|---|---|
 | R1 | 镜像到 Chromecast / Google TV | ✅ Cast 协议 | 已有（`screen_mirror.py` LOAD）→ P0/P3 升级低延迟 |
 | R2 | 镜像到 Apple TV / AirPlay 2 电视 | ✅ AirPlay 镜像 | ❌ 需要 FairPlay；**不做发送端**，接收端由 `airplay_mirror.py`(P5) 补 |
-| R3 | 镜像到 DLNA/UPnP 智能电视（2012-2018 老电视） | ✅ | ❌ **完全空白 → P2 新增** |
+| R3 | 镜像到 DLNA/UPnP 智能电视（2012-2018 老电视） | ✅ | **已交付（`screen_mirror.py` v0.5，P2）**：五档兼容档位 + 自动回退；真机矩阵未验证 |
 | R4 | 镜像到 Roku / Fire TV | 厂商标称支持 ⚠️ 机制未证实 | P1「任意浏览器」路线覆盖 Fire TV/Roku 浏览器可用场景 |
 | R5 | 多显示器选择 | ✅ 选屏 | 现插件仅默认屏 → **P1 补选择** |
 | R6 | 光标显示/隐藏、鼠标高亮、缩放适配 | ✅ | 光标开关 → **P1**（`-capture_cursor` 已有开关位）；高亮不做 |
@@ -109,6 +109,15 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   「只广播承载默认路由的网卡」同源，我们有 `Setting.get_advertisable_ip()` 可用。
 - 代价：**约 20-25 s 延迟**（预填 20 MiB 缓冲防电视卡顿），默认 720×576 SD（文字发糊）。
   这是「老电视能播」的物理代价，不是我们的实现问题。
+
+**P2 落地的偏差**（2026-09-21）：环形缓冲取 **48 MiB**（上面那句「64 KiB（约 48 MiB）」按
+4.5 Mbps 只有 0.1 秒余量，任何一次重连都会掉出环外）；`size` 不再固定 1.9e9，而是**按档位码率
+反算出自洽的整数**（`Duration` 与它同源，否则电视按 `<res size>`/码率估的进度会和我们报的时长
+打架）；档位从 3 个扩到 **5 个**（PAL 与 NTSC 分开：帧率 / `-g` / `protocolInfo` 三样都不同，
+合并会让另一半电视在第一秒就判「不支持」）；预填之后的等待是**阻塞式按偏移读**，编码器死了要
+立刻醒（`_ByteLog.close()` 唤醒所有 parked reader，teardown 才不会挂在 `server.shutdown()`）。
+**未验证项**（诚实记录）：真实老电视兼容矩阵 —— 打桩用例能证明「我们发出去的字节和 SOAP 连自家
+接收端都认账」，**不能**证明某台 2014 年的电视认账（AGENTS.md §4.9 同一族陷阱）。
 
 ### 2.2 omacast：Chromecast 真正的低延迟镜像走的是 Cast Streaming，不是 LOAD
 
@@ -239,7 +248,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 |---|---|---|---|---|
 | **P0** | 本文档 + 台账 | 取证与许可判定 | — | 无 |
 | **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
-| **P2** | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的 MPEG-PS HTTP（<2³¹、精确有界探测、PS padding）、64 KiB 绝对偏移环形缓冲+阻塞式按字节重连、stdlib SSDP/SOAP、`GetTransportInfo` 看门狗、5 档 profile、`transferMode/contentFeatures` 头 | **Part 23** | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端 + Kodi/upmpdcli 当替身；真实兼容矩阵必须标注「未验证」 |
+| **P2** ✅ | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的直播 HTTP：对外 `Content-Length` = 按档位码率算出的固定值且 **< 2³¹**（`DLNA_MAX_ADVERTISED_SIZE = 1.9e9`）、探测请求**恰好回 n 字节**（不足补 MPEG-PS 填充包）、`Accept-Ranges` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`、**48 MiB**（`DLNA_RING_BYTES`，计划里的 64 KiB 太小：按 4.5 Mbps 只有 0.1 秒余量）按绝对字节偏移的阻塞式重连 + 20 MiB 预填（`DLNA_PREFILL_BYTES` ⇒ 菜单明说的 ~35 s 延迟）、stdlib SSDP/SOAP（`urllib`，不打第三方）、`GetTransportInfo` 看门狗 + `RelTime` 前进才算活着、**5 档 profile**（ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264，PAL/NTSC 用 AC-3）、连续失败自动换档并在用尽后提示手选 | **Part 23**（93 条） | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端当替身；真实兼容矩阵必须标注「未验证」 |
 | **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**纯 Python AES-128-CTR**（无新依赖）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/在途 12 帧；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
 | **P4** | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗 | **Part 25** | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有 |
 | **P5** | `airplay_mirror` v.1（protocol 插件，`uses_ssdp=False`）+ §9 边界改写 | 监督 uxplay（`$UXPLAYRC` 生成 + 无窗口参数 + 日志解析连接/断开），一期让它自己开窗，二期尝试 `-vrtp/-artp → mpv` 统一渲染；`selfcheck` 里检查 uxplay 是否可用并给出安装指引 | **Part 26** | 中：macOS 无现成二进制（Homebrew 未证实）→ 必须**明确标注需要用户自备**，且 Apple 砍 Legacy 会静默失效 |

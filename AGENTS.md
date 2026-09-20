@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 582/582）
+# 2) 回归验证（当前 675/675）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -305,13 +305,15 @@ Chromecast 中继 / AirPlay 音频 / 屏幕镜像）。它们是**单文件**插
 | hooks | 命令是 shell 命令（用户自己写的），但 **url 只走环境变量**，不拼进命令串。spawn 完即返回，不阻塞 CherryPy 工作线程。 |
 | cast_bridge | 复用 `protocol_cast` 的 Cast v2 收发，不引 pychromecast。投屏序列是 deviceauth CHALLENGE → CONNECT receiver-0 → LAUNCH → CONNECT transportId → LOAD，`transportId` 来自 LAUNCH 的回复，**不要硬编码**。发现用 mDNS 且必须在后台跑（`build_menu` 在 UI 线程上）。 |
 | raop | 只监督 shairport-sync（生成最小配置 + 拉起 + 报连接/断开），**不**把 RAOP 映射成 DLNA 播放状态。`uses_ssdp = False`，否则只有它启用时也会把 SSDP 服务拉起来。 |
-| screen_mirror | 实时链路：ffmpeg 截屏（darwin avfoundation / win32 gdigrab / linux x11grab，**Wayland 不支持要明说**）→ 插件内 HTTP 服务持续吐一条实时流 → **封装由「输出目标」决定**（`cast` → `video/mp2t` + Cast `LOAD streamType=LIVE`；`browser` → 分片 MP4 `frag_keyframe+empty_moov+default_base_moof` + 自带 MSE 播放页）。**编码器不是平台决定的**：默认 CPU x264，macOS 上可切 VideoToolbox（`has_hardware_encoder()` 会 spawn ffmpeg 问一次，缓存**按 ffmpeg + 平台**分键，菜单在 UI 线程上，绝不为它 spawn）。**慢消费者丢整块、绝不阻塞读管道**（阻塞会把编码器冻住）；ffmpeg 进程和 HTTP 服务**一启动就移交 renderer 持有**，终止统一由 pump 线程按 generation 判定上报（否则权限被拒会静默黑屏、或双线程抢清理）。杀掉/让位前先增 generation，让 pump 的死亡上报闭嘴。**重播不对称**（红线）：只有浏览器会话重播 init segment + 8 MiB 环形尾部，电视会话永远只拿「接下来」的字节 —— 给电视重播积压 = 它此后一直慢几秒。**`_retain` 里 init 头必须切到第一个 `moof` 才算完**（晚加入的观看端拿双份头 = 花屏，别把它想成"缓存一点前缀"）。观看地址带**每会话随机**的 `stream_id` + `page_token`（`hmac.compare_digest` 常量时间比对），**故意不用应用的常驻 `Api_Token`** —— 那是管理令牌，泄露一次等于永久开放整套管理 API，而镜像页 URL 会被复制/转发/贴进群。页面 JS 只用 `textContent`，响应带 `nosniff` + `no-store`。DLNA 推流来时**让位**并转投该 URL（Bridge 行为）**只在 cast 目标**；浏览器目标下推送会被明确拒绝而不是杀镜像（`set_media_url` 的守卫顺序：空 url → 同一 URL 重复推 → 无目标）。镜像期间 `caffeinate -dimsu` 持有休眠断言，teardown 释放。**系统声音只在有采集口时开**：macOS 认 BlackHole 设备（FFmpeg 发行版至今抓不了 mac 系统音频）、Linux 认 pulse `<sink>.monitor`、Windows 仅画面；探测结果缓存在 `_capture_cache`（键含 cursor —— 指针开关会改采集命令，改指针/屏幕要 `invalidate_capture_cache()`）。**v0.3 起一键辅助装 BlackHole**（菜单「系统声音 → 一键设置」）：地址与 sha256 以 Homebrew cask API 为准（拉不到用 PINNED 兜底）→ `open` 图形安装器（用户输一次密码，.pkg 无法静默装，**别把它想成全自动**）→ 轮询设备出现 → ctypes 调 CoreAudio 建/复用**多输出聚合设备**并切默认输出（UID `com.macast.screenmirror.output`，原默认存 `Mirror_Audio_Original` 供「恢复原声音输出」）；**任何一步失败降级为打开「音频 MIDI 设置」+ 文字指引**。CoreAudio 的坑：`kAudioObjectSystemObject` 是 **1**（0x1000 是 hardware model，问它要设备列表回 `'nope'`）；`inDataSize` 是 `size_t`；NULL-data 的探测在本机被拒——直接带大缓冲问。CLI 沙箱里设备枚举不可用（只有 `dOut` 通），所以这套 ctypes **要在真 Mac 上验收**；读接口都在，测试只打桩不触碰。 |
+| screen_mirror | 实时链路：ffmpeg 截屏（darwin avfoundation / win32 gdigrab / linux x11grab，**Wayland 不支持要明说**）→ 插件内 HTTP 服务持续吐一条实时流 → **封装由「输出目标」决定**（`cast` → `video/mp2t` + Cast `LOAD streamType=LIVE`；`browser` → 分片 MP4 `frag_keyframe+empty_moov+default_base_moof` + 自带 MSE 播放页；`dlna` → 见下「伪装成文件」）。**编码器不是平台决定的**：默认 CPU x264，macOS 上可切 VideoToolbox（`has_hardware_encoder()` 会 spawn ffmpeg 问一次，缓存**按 ffmpeg + 平台**分键，菜单在 UI 线程上，绝不为它 spawn）。**慢消费者丢整块、绝不阻塞读管道**（阻塞会把编码器冻住）；ffmpeg 进程和 HTTP 服务**一启动就移交 renderer 持有**，终止统一由 pump 线程按 generation 判定上报（否则权限被拒会静默黑屏、或双线程抢清理）。杀掉/让位前先增 generation，让 pump 的死亡上报闭嘴。**重播不对称**（红线）：浏览器会话重播 init segment + 8 MiB 环形尾部，cast（Chromecast）会话永远只拿「接下来」的字节 —— 给电视重播积压 = 它此后一直慢几秒；`dlna` 会话是第三种形状：**按绝对字节偏移**从 48 MiB 环形缓冲里取（电视把它当文件读，会 HEAD、探边界、断线重连同一偏移），见下「伪装成文件」。**`_retain` 里 init 头必须切到第一个 `moof` 才算完**（晚加入的观看端拿双份头 = 花屏，别把它想成"缓存一点前缀"）。观看地址带**每会话随机**的 `stream_id` + `page_token`（`hmac.compare_digest` 常量时间比对），**故意不用应用的常驻 `Api_Token`** —— 那是管理令牌，泄露一次等于永久开放整套管理 API，而镜像页 URL 会被复制/转发/贴进群。页面 JS 只用 `textContent`，响应带 `nosniff` + `no-store`。DLNA 推流来时**让位**并转投该 URL（Bridge 行为）—— **cast 与 dlna 两个电视目标都会**；浏览器目标下推送会被明确拒绝而不是杀镜像（`set_media_url` 的守卫顺序：空 url → 同一 URL 重复推 → 无目标；"无目标"按当前 kind 分别查 `target()` / `dlna_target()`，**别只查一个**，否则浏览器目标会误以为有中继对象）。镜像期间 `caffeinate -dimsu` 持有休眠断言，teardown 释放。**系统声音只在有采集口时开**：macOS 认 BlackHole 设备（FFmpeg 发行版至今抓不了 mac 系统音频）、Linux 认 pulse `<sink>.monitor`、Windows 仅画面；探测结果缓存在 `_capture_cache`（键含 cursor —— 指针开关会改采集命令，改指针/屏幕要 `invalidate_capture_cache()`）。**v0.3 起一键辅助装 BlackHole**（菜单「系统声音 → 一键设置」）：地址与 sha256 以 Homebrew cask API 为准（拉不到用 PINNED 兜底）→ `open` 图形安装器（用户输一次密码，.pkg 无法静默装，**别把它想成全自动**）→ 轮询设备出现 → ctypes 调 CoreAudio 建/复用**多输出聚合设备**并切默认输出（UID `com.macast.screenmirror.output`，原默认存 `Mirror_Audio_Original` 供「恢复原声音输出」）；**任何一步失败降级为打开「音频 MIDI 设置」+ 文字指引**。CoreAudio 的坑：`kAudioObjectSystemObject` 是 **1**（0x1000 是 hardware model，问它要设备列表回 `'nope'`）；`inDataSize` 是 `size_t`；NULL-data 的探测在本机被拒——直接带大缓冲问。CLI 沙箱里设备枚举不可用（只有 `dOut` 通），所以这套 ctypes **要在真 Mac 上验收**；读接口都在，测试只打桩不触碰。**v0.5 的 DLNA 电视目标 = 把直播伪装成一个文件**（MirrorCast 那一族的做法），红线集中在四处：① `Content-Length` 必须是**按档位码率算出来的固定值且 < 2³¹**（老固件用有符号 32 位记长度，报 `-1`/报超大都不播），时长与 `Duration` 要和这个长度自洽；② 每次响应都要带 `Accept-Ranges: bytes` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`，探边界的请求要**恰好**回 n 字节（不足用 MPEG-PS 填充包 `00 00 01 BE 00 00` 补），206 才配 `Content-Range`（**没带 Range 的请求即使语义上是"整个文件"也必须回 200 且不发 `Content-Range`**，`bounded` 和 `has_range` 是两件事）；③ 推流前先攒 `DLNA_PREFILL_BYTES`（约 20 MiB）再交给电视，代价是**看得见说得出的延迟**（状态行/开始提示都要报秒数），环外偏移要报丢块而不是回错字节（`_ByteLog.read` 里 `max(absolute, _start)` 的钳制不能省 —— 负数切片会真的把**新**数据当成旧偏移发出去）；④ **档位**（`DLNA_PROFILES`：ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264）决定封装、帧率、帧尺寸、`-g` 和**音频编码**（PAL/NTSC 用 AC-3 不用 AAC，DVD 时代的电视不认），看门狗每 5 秒 `GetTransportInfo`，掉出 `PLAYING` 重投 URL，`RelTime` 在动才算活着，连续失败自动换下一档位并在试完后提示手选。**发送端（我们）自己的 SOAP 也有一条红线**：`Content-Length` 必须按 **UTF-8 字节数**算，`len(str)` 会让带中文设备名的 DIDL 在局域网里被**截断**（电视回 SOAP Fault，症状是"电视没反应"而不是"我们发错了"）。发现侧：控制 URL 可能是相对路径，也可能是设备自称的另一地址/漏端口 —— 以**实际应答的地址+端口**为准（`parse_description` 里 `netloc` 而不是 `hostname`，端口用 `_port_suffix()` 兜非数字）。回归用例 **Part 23**：把**我们自己的 DLNA 接收端**（`protocol.DLNAProtocol().call()`）当最严格的 SOAP/DIDL 校验器用 —— 它真的 lxml 解析并解嵌 DIDL，所以"我们发的东西连自己都不认账"这类问题在打桩测试里也能被抓出来。 |
 
 回归用例：Part 14（外部播放器 / 小窗 / yt-dlp 两种模式）、Part 15（钩子）、
 Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP 监督）、
 Part 21（屏幕镜像：假 ffmpeg + 自家 Cast 接收端对打，真 HTTP 实时流；v0.3 的一键
 BlackHole 路径全部打桩——CoreAudio/下载/安装器都不被触碰，纯测编排与降级）、
-**Part 22（v0.4：两种封装、重播不对称、每会话凭据、播放页、采集预设与菜单）**。
+**Part 22（v0.4：两种封装、重播不对称、每会话凭据、播放页、采集预设与菜单）**、
+**Part 23（v0.5：伪装成文件的字节账本 + 真 HTTP 语义（HEAD/206/恰好 n 字节/416/重连同偏移）、
+SSDP 发现与设备描述、SOAP 发送序列（喂给自家接收端校验）、档位回退与看门狗、端到端镜像与菜单）**。
 测试用的是假二进制（PATH 上放个 shell 脚本），所以跑测试不需要 yt-dlp / VLC / shairport-sync / ffmpeg。
 
 ### 4.9 Cast 接收端一致性：打桩测试永远抓不到的那一类
@@ -400,7 +402,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（582 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 7 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设）|
+| `verify_cast_airplay.py` | **主验证套件**（675 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 7 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程" |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
@@ -490,7 +492,7 @@ CI 会用同名文件**替换** release 里的产物。用 digest 对比确认�
 | AirPlay 屏幕镜像 | **未实现**（需要 FairPlay 解密，不打算做） |
 | DRM 内容 | **不可能支持** |
 | 插件 | 支持启用/停用/卸载/安装（**热生效，不重启**）；卸载进 `.trash/` 可恢复 |
-| 在线插件目录 | `plugins/` 下 7 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）、屏幕镜像（三平台 → Chromecast **或任意浏览器打开一个网址**；画质四档 + 多显示器 + 指针开关 + macOS VideoToolbox；系统音频 mac 有**一键辅助安装 BlackHole**、Linux 走 pulse monitor、Windows 仅画面）|
+| 在线插件目录 | `plugins/` 下 7 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）、屏幕镜像（三平台 → Chromecast、**没有 Google 栈的老电视（DLNA，伪装成文件，五档兼容档位 + 档位自动回退）**、**或任意浏览器打开一个网址**；画质四档 + 多显示器 + 指针开关 + macOS VideoToolbox；系统音频 mac 有**一键辅助安装 BlackHole**、Linux 走 pulse monitor、Windows 仅画面）|
 | 网页投屏入口 | `GET /api?query=cast&url=<绝对地址>&token=<令牌>`（脚本 / 快捷指令 / 书签，绕开 DLNA 发现）；令牌常驻并显示在设置页 |
 
 ## 10. 与用户协作的约定（这个仓库的历史教训）
