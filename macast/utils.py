@@ -66,6 +66,10 @@ class SettingProperty(Enum):
     # loopback interface. Persisted (rather than generated per run) so a phone
     # Shortcut or a script can be configured once; shown on the settings page.
     Api_Token = 18
+    # "启用国内镜像地址": every GitHub URL the app fetches (plugin index,
+    # install downloads, update check) goes through a domestic mirror.
+    # Absent key == off; see macast/plugin_repo.py.
+    Github_CN_Mirror = 19
 
 
 def unadvertisable_reason(addr, netmask):

@@ -15,6 +15,7 @@ import gettext
 import importlib
 
 from .utils import SettingProperty, SETTING_DIR, notify_error, format_class_name
+from . import plugin_repo
 # This fork is distributed from pingod/Macast; the "check for updates" feature
 # must query that repo, not the upstream xfangfang/Macast.
 GITHUB_REPO = 'pingod/Macast'
@@ -538,6 +539,9 @@ class MacastPluginManager:
         plugin_type = 'protocol' if plugin_type == 'protocol' else 'renderer'
         if not url:
             raise ValueError('缺少插件下载地址')
+        # Mirror mode rewrites canonical GitHub hosts only; the SHA-pinned
+        # jsDelivr URLs the index ships with pass through unchanged.
+        url = plugin_repo.mirror_url(url)
         filename = os.path.basename(url.split('?')[0])
         if not filename.endswith('.py'):
             raise ValueError('插件下载地址必须以 .py 结尾')
@@ -1087,8 +1091,10 @@ class Macast(App):
         self.service.run_async()
 
     def check_update(self, verbose=True):
-        release_url = 'https://github.com/{}/releases/latest'.format(GITHUB_REPO)
-        api_url = 'https://api.github.com/repos/{}/releases/latest'.format(GITHUB_REPO)
+        release_url = plugin_repo.mirror_url(
+            'https://github.com/{}/releases/latest'.format(GITHUB_REPO))
+        api_url = plugin_repo.mirror_url(
+            'https://api.github.com/repos/{}/releases/latest'.format(GITHUB_REPO))
         try:
             res = json.loads(requests.get(api_url, timeout=10).text)
             # Strip leading 'v' and grab the first dot-separated version

@@ -223,6 +223,15 @@
             <p v-else-if="repo_failed" class="plugin-loading">
                 在线插件索引暂时不可达，下面只列出本机已有的插件。
             </p>
+            <div class="mirror-row">
+                <el-switch v-model="github_mirror" :disabled="mirror_saving"
+                           @change="set_github_mirror"></el-switch>
+                <span>启用国内镜像地址</span>
+                <span class="section-hint">
+                    开启后，插件索引、插件下载与版本检查里的 GitHub 地址全部改走国内镜像
+                    （jsDelivr 地址本身就是镜像，保持不变）；保存后立即重拉索引。
+                </span>
+            </div>
             <a v-if="repo_url" :href="repo_url" target="_blank">
                 <el-tooltip class="item" effect="dark" content="打开插件仓库目录" placement="left">
                     <el-button class="macast-plugin-repo" icon="el-icon-search" circle>
@@ -788,10 +797,13 @@
             repo_ok: true,
             // 索引拉取失败（而不是"索引为空"）时给用户一句解释。
             repo_failed: false,
-            // 由 /api?query=plugin-info 下发：{repo_url, index_urls}。
+            // 由 /api?query=plugin-info 下发：{repo_url, index_urls, mirror_enabled}。
             // 地址不再写死在这个页面里，见 macast/plugin_repo.py。
             plugin_repo: {repo_url: '', index_urls: []},
             repo_url: '',
+            // 「启用国内镜像地址」后台设置的页面侧状态（真值在 Setting 里）。
+            github_mirror: false,
+            mirror_saving: false,
             platform: '',
             macast_version: 0,
             // 网页投屏入口：token + 端口由 /api?query=cast-info 下发
@@ -1325,7 +1337,14 @@
                 this.repo_plugins = [];
                 for (let i = 0; i < urls.length; i++) {
                     try {
-                        const res = await this.$http.get(urls[i], {timeout: 6000});
+                        // 时间戳查询串只为绕开**浏览器**的 HTTP 缓存：索引刚推上
+                        // 去时普通刷新常常还在吃旧副本，"插件卡片不见了"多数就
+                        // 是这个。CDN 服务端缓存会忽略未知参数，真正装到手的
+                        // 文件走固定 SHA 的 URL，不受影响。
+                        let fetch_url = urls[i] +
+                            (urls[i].indexOf('?') === -1 ? '?' : '&') +
+                            't=' + Date.now();
+                        const res = await this.$http.get(fetch_url, {timeout: 6000});
                         // vue-resource 只在响应"看起来像 JSON"时才解析它，而 raw
                         // 域名返回的 Content-Type 是 text/plain。正常情况下靠内容
                         // 启发式也能解析，但代理/门户插进来的 HTML 会原样留成字符串
@@ -1358,6 +1377,31 @@
                 this.update_plugins();
                 return false;
             },
+            set_github_mirror(value) {
+                // 开关只写后台（Github_CN_Mirror，见 macast/plugin_repo.py）；
+                // 页面不自己改写地址。保存成功后后端回传新的 index_urls，
+                // 立刻按新地址重拉一次索引。
+                this.mirror_saving = true;
+                let fd = new window.FormData();
+                fd.append('set-github-mirror', value ? '1' : '0');
+                this.$http.post('/api', fd).then(res => {
+                    this.mirror_saving = false;
+                    const data = res.data || {};
+                    if (data.code === 0) {
+                        this.plugin_repo = data.plugin_repo || this.plugin_repo;
+                        this.github_mirror = !!data.mirror_enabled;
+                        this.load_repo_plugin();
+                    } else {
+                        this.github_mirror = !value;
+                        this.$message.error('镜像设置保存失败');
+                    }
+                }).catch(err => {
+                    console.log(err);
+                    this.mirror_saving = false;
+                    this.github_mirror = !value;
+                    this.$message.error('无法连接 Macast 服务');
+                });
+            },
             async load_local_plugin() {
                 let url = '/api?query=plugin-info'
                 return this.$http.get(url).then(res => {
@@ -1367,6 +1411,8 @@
                     this.local_plugins = res.data.plugins;
                     // 索引地址由后端下发 —— 页面里不再写死插件仓库地址。
                     this.plugin_repo = res.data.plugin_repo || this.plugin_repo;
+                    this.github_mirror = !!(this.plugin_repo &&
+                                           this.plugin_repo.mirror_enabled);
                     this.plugins = []
                     this.$nextTick(() => {
                         this.update_plugins();
@@ -1602,6 +1648,7 @@
     }
 
     .plugin-group { margin-bottom: 6px; }
+    .mirror-row { display: flex; align-items: center; gap: 10px; margin: 18px 0 6px; }
 
     .plugin-loading { color: var(--text-soft); font-size: 13px; }
 

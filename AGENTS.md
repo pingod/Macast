@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 489/489）
+# 2) 回归验证（当前 517/517）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -219,7 +219,7 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
-  当前 6 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
+  当前 7 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
 - **索引本身**（唯一一个没法固定 SHA 的文件）走三个地址，按「新鲜度」排序：
   `raw.githubusercontent.com`（永远最新，国内常拉不动）→
   `ghproxy.net/https://raw.githubusercontent.com/...`（国内可达；自称 `max-age=300`，
@@ -228,6 +228,19 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   （安装 URL 固定了 SHA，见下）。
   浏览器按序回退；三者都必须返回 CORS 头，因为这是在**浏览器里** fetch，不是 Python 抓。
   改顺序前先想一遍：把会缓存的放前面 = 用户看到的插件列表可能落后半天。
+- **设置页拉索引必须带时间戳查询串**（`?t=Date.now()`）：只治**浏览器**的 HTTP 缓存 ——
+  索引刚推上去时普通刷新常常还在吃旧副本，「插件卡片不见了」多数就是这么来的。
+  CDN 服务端缓存会忽略未知参数，所以固定 SHA 那套不受影响。Part 5c 有用例守着。
+- **「启用国内镜像地址」**（`Github_CN_Mirror`，缺 key == 关；关掉走 `Setting.unset` 而不是
+  存 `False`）：一个开关改写**所有运行时 fetch 的 GitHub 地址** —— 插件索引（`index_urls()`
+  去重后 ghproxy → jsDelivr）、「从网址安装」的下载（`install_url()`）、版本检查
+  （api.github.com / releases）、「打开插件仓库」按钮。改写规则只有三个 host 前缀
+  （github.com / raw.githubusercontent.com / api.github.com → 加 `https://ghproxy.net/` 前缀），
+  **jsDelivr 本身就是国内可达的镜像，绝不再加前缀**。全部逻辑在 `plugin_repo.py`
+  （`to_mirror_url` 纯函数 / `mirror_url` 按开关 / `index_urls` / `describe`），页面只发
+  `POST set-github-mirror`（在 `_MANAGEMENT_PARAMS` 门控名单里），**页面里不允许出现镜像前缀
+  字符串** —— Part 5c 有 `"ghproxy" not in _html` 这条用例。切换成功后后端直接回传新的
+  `describe()`，页面立刻按新地址重拉索引。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
   `version` 必须与 `.py` 里 `<macast.version>` 一致，否则又是假的「可更新」。整个条目
   和 `.py` 顶部清单必须逐字对齐 —— Part 5c 会比对 title / version / platform / 类名。
@@ -386,7 +399,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（489/489）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 7 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21，假 ffmpeg 对打自家 Cast 接收端）|
+| `verify_cast_airplay.py` | **主验证套件**（517/517）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 7 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21，假 ffmpeg 对打自家 Cast 接收端）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程" |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |

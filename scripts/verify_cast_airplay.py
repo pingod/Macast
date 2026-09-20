@@ -1253,6 +1253,13 @@ def _git_show(sha, path):
 
 
 print("\n=== Part 5c: plugin index ===")
+# The mirror switch lives in Setting; run this whole part against a temp
+# config so neither the user's real settings nor leftover state from another
+# part can change the expected index ordering (AGENTS §10).
+_saved_setting5c = (utils.Setting.setting, utils.Setting.setting_path)
+_tmp5c = _tempfile.mkdtemp(prefix="macast-index-")
+utils.Setting.setting = {}
+utils.Setting.setting_path = os.path.join(_tmp5c, "macast_setting.json")
 try:
     repo_mod = _load("plugin_repo", "plugin_repo.py")
     _repo_info = repo_mod.describe()
@@ -1281,6 +1288,61 @@ try:
     check("the repository button has somewhere to go",
           _repo_info.get("repo_url", "").startswith("https://github.com/" + repo_mod.REPO),
           repr(_repo_info.get("repo_url")))
+
+    # -- 「启用国内镜像地址」（Github_CN_Mirror）-----------------------------
+    # One switch rewrites every GitHub URL the app fetches; the rewrite rules
+    # are pure functions here, the wiring to the fetch sites is source-checked
+    # below and exercised end-to-end in Parts 7 and 12.
+    check("the mirror switch is off until the user says otherwise",
+          repo_mod.mirror_enabled() is False and
+          'Github_CN_Mirror' not in utils.Setting.setting,
+          repr(utils.Setting.setting))
+    check("github.com urls mirror onto the domestic prefix",
+          repo_mod.to_mirror_url("https://github.com/a/b") ==
+          "https://ghproxy.net/https://github.com/a/b")
+    check("raw.githubusercontent urls mirror too",
+          repo_mod.to_mirror_url("https://raw.githubusercontent.com/a/b") ==
+          "https://ghproxy.net/https://raw.githubusercontent.com/a/b")
+    check("api.github.com urls mirror too",
+          repo_mod.to_mirror_url("https://api.github.com/repos/a/b") ==
+          "https://ghproxy.net/https://api.github.com/repos/a/b")
+    check("jsDelivr urls are already a reachable mirror and stay put",
+          repo_mod.to_mirror_url("https://cdn.jsdelivr.net/gh/a@b/c.py") ==
+          "https://cdn.jsdelivr.net/gh/a@b/c.py")
+    check("non-GitHub urls are never rewritten",
+          repo_mod.to_mirror_url("https://existential.audio/x.pkg") ==
+          "https://existential.audio/x.pkg")
+    check("mirroring is idempotent",
+          repo_mod.to_mirror_url(repo_mod.to_mirror_url("https://github.com/a/b")) ==
+          "https://ghproxy.net/https://github.com/a/b")
+
+    repo_mod.set_mirror_enabled(True)
+    check("enabling persists exactly one settings key",
+          utils.Setting.setting.get('Github_CN_Mirror') is True and
+          repo_mod.mirror_enabled() is True, repr(utils.Setting.setting))
+    _mir_info = repo_mod.describe()
+    check("mirror mode keeps the bare raw host out of the index chain",
+          all(not _u.startswith("https://raw.githubusercontent.com/")
+              for _u in _mir_info["index_urls"]), str(_mir_info["index_urls"]))
+    check("mirror mode still tries more than one host",
+          len(_mir_info["index_urls"]) >= 2, str(_mir_info["index_urls"]))
+    check("mirror mode keeps the caching CDN last",
+          "jsdelivr" in _mir_info["index_urls"][-1], _mir_info["index_urls"][-1])
+    check("mirror mode mirrors the repository button as well",
+          _mir_info["repo_url"].startswith("https://ghproxy.net/https://github.com/"),
+          _mir_info["repo_url"])
+    check("plugin-info tells the page the mirror is on",
+          _mir_info["mirror_enabled"] is True, repr(_mir_info))
+    check("with the mirror on, GitHub fetch urls are rewritten",
+          repo_mod.mirror_url("https://github.com/x/y/raw/p.py") ==
+          "https://ghproxy.net/https://github.com/x/y/raw/p.py")
+    repo_mod.set_mirror_enabled(False)
+    check("disabling removes the key instead of persisting False",
+          'Github_CN_Mirror' not in utils.Setting.setting and
+          repo_mod.mirror_enabled() is False, repr(utils.Setting.setting))
+    check("the canonical fresh-first index chain returns with the mirror off",
+          repo_mod.index_urls()[0].startswith("https://raw.githubusercontent.com/"),
+          repo_mod.index_urls()[0])
 
     _index_file = os.path.join(REPO, repo_mod.INDEX_PATH)
     check("the plugin index lives in the repo", os.path.isfile(_index_file),
@@ -1385,14 +1447,32 @@ try:
           "index_urls" in _html and "plugin_repo" in _html)
     check("the settings page hides the repository button without a URL",
           'v-if="repo_url"' in _html)
+    check("the mirror prefix is a backend fact, not page folklore",
+          "ghproxy" not in _html)
+    check("the settings page busts its own HTTP cache when fetching the index",
+          "Date.now()" in _html)
     with open(os.path.join(MACAST, "protocol.py"), "r", encoding="utf-8") as _f:
         _proto_src = _f.read()
     check("plugin-info hands the index coordinates to the page",
           "plugin_repo.describe()" in _proto_src)
+    check("the mirror toggle is a gated management endpoint",
+          "set-github-mirror" in _proto_src[
+              _proto_src.index("_MANAGEMENT_PARAMS = ("):
+              _proto_src.index(")", _proto_src.index("_MANAGEMENT_PARAMS = ("))])
+    with open(os.path.join(MACAST, "macast.py"), "r", encoding="utf-8") as _f:
+        _macast_src = _f.read()
+    check("plugin downloads honour the mirror switch",
+          "url = plugin_repo.mirror_url(url)" in _macast_src)
+    check("the update check honours the mirror switch",
+          "release_url = plugin_repo.mirror_url(" in _macast_src and
+          "api_url = plugin_repo.mirror_url(" in _macast_src)
 except Exception as e:
     import traceback
     traceback.print_exc()
     check("plugin index behaves", False, "{}: {}".format(type(e).__name__, e))
+finally:
+    utils.Setting.setting, utils.Setting.setting_path = _saved_setting5c
+    _shutil.rmtree(_tmp5c, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 # Part 6: running several protocols at once (ProtocolGroup)
@@ -2205,6 +2285,40 @@ try:
     check("install_url refuses a non-.py url",
           _rejects(lambda: mgr2.install_url("https://example.com/p.zip",
                                             "renderer")))
+
+    # --- install_url obeys the mirror switch --------------------------------
+    # Only the URL handed to requests.get is under test: the download and the
+    # install itself are covered elsewhere, so both get stubbed.
+    _seen_urls7 = []
+    _real_get7 = macast_mod.requests.get
+    _real_install_file7 = mgr2.install_file
+
+    class _Resp7(object):
+        content = b''
+
+        def raise_for_status(self):
+            pass
+
+    macast_mod.requests.get = lambda url, *a, **k: (
+        _seen_urls7.append(url), _Resp7())[1]
+    mgr2.install_file = lambda *a, **k: None
+    try:
+        macast_mod.plugin_repo.set_mirror_enabled(True)
+        mgr2.install_url("https://github.com/x/y/raw/mirrorplug.py", "renderer")
+        check("plugin downloads go through the mirror when it is on",
+              _seen_urls7 == ["https://ghproxy.net/https://github.com/x/y/raw/mirrorplug.py"],
+              str(_seen_urls7))
+        _seen_urls7[:] = []
+        macast_mod.plugin_repo.set_mirror_enabled(False)
+        mgr2.install_url("https://github.com/x/y/raw/mirrorplug.py", "renderer")
+        check("and straight to GitHub when it is off",
+              _seen_urls7 == ["https://github.com/x/y/raw/mirrorplug.py"],
+              str(_seen_urls7))
+    finally:
+        macast_mod.requests.get = _real_get7
+        mgr2.install_file = _real_install_file7
+        macast_mod.plugin_repo.set_mirror_enabled(False)
+
     check("unknown keys are reported, not silently ignored",
           mgr2.plugin_by_key("renderer:nope") is None)
 finally:
@@ -2350,6 +2464,29 @@ try:
             _reset(ip='192.168.1.9', scheme='https')
             check("the HTTPS admin channel is still trusted without a token",
                   handler._management_allowed() is True)
+
+            # -- 「启用国内镜像地址」toggle ---------------------------------
+            _reset(ip='192.168.1.9')
+            res = _post(**{'set-github-mirror': '1'})
+            check("a LAN caller without the token cannot flip the mirror switch",
+                  res.get('code') == 403, str(res))
+            check("and the refused flip persists nothing",
+                  'Github_CN_Mirror' not in utils.Setting.setting,
+                  repr(utils.Setting.setting))
+            _reset()
+            res = _post(**{'set-github-mirror': '1'})
+            check("locally the mirror flips on and the page gets new coordinates",
+                  res.get('code') == 0 and res.get('mirror_enabled') is True and
+                  all(u.startswith('https://ghproxy.net/') or 'jsdelivr' in u
+                      for u in res['plugin_repo']['index_urls']), str(res))
+            check("the mirror state is now in the settings",
+                  utils.Setting.setting.get('Github_CN_Mirror') is True,
+                  repr(utils.Setting.setting))
+            _reset()
+            res = _post(**{'set-github-mirror': 'off'})
+            check("the mirror flips back off and the key is removed",
+                  res.get('code') == 0 and res.get('mirror_enabled') is False and
+                  'Github_CN_Mirror' not in utils.Setting.setting, str(res))
 
             # -- validation -------------------------------------------------
             _reset(token=_token)

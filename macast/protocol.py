@@ -1628,7 +1628,8 @@ class Handler:
     #: Parameters that mutate state. They are only honoured from a trusted
     #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
     _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
-                          'plugin-disable', 'plugin-uninstall', 'set-interface')
+                          'plugin-disable', 'plugin-uninstall', 'set-interface',
+                          'set-github-mirror')
 
     def _log_payload(self, kwargs):
         """The log tail the settings page renders (`?query=log`).
@@ -1676,6 +1677,23 @@ class Handler:
             except OSError:
                 pass
         return {'code': 0, 'message': 'success', 'removed': removed}
+
+    def _set_github_mirror(self, value):
+        """Toggle "启用国内镜像地址" and hand the page the new coordinates.
+
+        Returning the fresh `plugin_repo.describe()` saves a second
+        plugin-info round trip: the page re-fetches the index straight away
+        with the mirrored URLs.
+        """
+        on = str(value).lower() in ('1', 'true', 'yes', 'on')
+        try:
+            plugin_repo.set_mirror_enabled(on)
+        except Exception as e:
+            logger.error('set github mirror error: %s' % e)
+            return {'code': 1, 'message': 'set failed'}
+        return {'code': 0, 'message': 'success',
+                'mirror_enabled': plugin_repo.mirror_enabled(),
+                'plugin_repo': plugin_repo.describe()}
 
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
@@ -1733,6 +1751,8 @@ class Handler:
             res = self._plugin_change('disable', key=kwargs.get('plugin-key', ''))
         elif kwargs.get('plugin-uninstall', None) is not None:
             res = self._plugin_change('uninstall', key=kwargs.get('plugin-key', ''))
+        elif kwargs.get('set-github-mirror', None) is not None:
+            res = self._set_github_mirror(kwargs.get('set-github-mirror'))
         elif kwargs.get('save-launch-param', None) is not None:
             setting = kwargs.get('save-launch-param', None)
             try:
