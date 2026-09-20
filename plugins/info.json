@@ -60,14 +60,14 @@
         },
         {
             "author": "pingod",
-            "desc": "把本机桌面屏幕实时镜像到局域网的 Chromecast（三平台）。macOS 系统声音可在菜单里一键装好：自动下载并校验官方 BlackHole、弹安装器、自动配好多输出设备；Linux 走 PulseAudio，Windows 仅画面。需要自行安装 ffmpeg。",
+            "desc": "把本机桌面屏幕实时镜像到局域网：投给 Chromecast / Google TV，或者让任何一台电脑、手机、平板直接用浏览器打开一个网址观看（电视上不用装 App，三平台）。可选项：显示器、鼠标指针、四档画质、macOS 硬件编码；观看网址每次镜像都是新地址。macOS 系统声音可在菜单里一键装好：自动下载并校验官方 BlackHole、弹安装器、自动配好多输出设备；Linux 走 PulseAudio，Windows 仅画面。需要自行安装 ffmpeg。",
             "host_version": "0.7",
             "platform": "darwin,win32,linux",
             "renderer": "ScreenMirrorRenderer",
             "title": "Screen Mirror",
             "type": "renderer",
-            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@bf0df258591d5864736bf5ece5dd5846570452d6/plugins/screen_mirror.py",
-            "version": "0.3"
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@df4a0219379f0bd62955c719d4cf222f47dd798b/plugins/screen_mirror.py",
+            "version": "0.4"
         },
         {
             "author": "pingod",

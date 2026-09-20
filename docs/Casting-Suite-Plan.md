@@ -265,7 +265,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | 阶段 | 状态 | commit | 验证 |
 |---|---|---|---|
 | P0 规划 | ✅ 文档落地 | `ed429fe` | 文档型改动 |
-| P1 浏览器目标 + 采集预设 | ✅ 已交付 | 本次提交 | `pyflakes` 干净；`verify_cast_airplay.py` **582 条全绿**（Part 21 修到 v0.4 契约、新增 Part 22 62 条）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 套件 510/514，Part 22 立刻 `TypeError: build_ffmpeg_command() got an unexpected keyword argument 'kind'` |
+| P1 浏览器目标 + 采集预设 | ✅ 已交付 | `df4a021`（索引指过去）+ 紧随的 info.json 提交 | `pyflakes` 干净；`verify_cast_airplay.py` **582 条全绿**（Part 21 修到 v0.4 契约、新增 Part 22 62 条）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 套件 510/514，Part 22 立刻 `TypeError: build_ffmpeg_command() got an unexpected keyword argument 'kind'` |
 | P2 DLNA 电视目标 | ⏳ | | |
 | P3 Cast Streaming | ⏳ | | |
 | P4 本地文件/播放列表 | ⏳ | | |
