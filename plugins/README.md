@@ -33,10 +33,11 @@
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
+| `screen_mirror.py` | **Screen Mirror v0.3** — 把桌面屏幕镜像到局域网的 Chromecast（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 
 **Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
-`hooks` / `cast_bridge` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
+`hooks` / `cast_bridge` / `screen_mirror` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
 
 各插件要点：
 
@@ -58,6 +59,22 @@
 - **Chromecast Bridge**：目标在菜单里选（mDNS 搜索 `_googlecast._tcp`，也可以直接在设置里写
   `Cast_Bridge_Target` = `host:port`，测试就是靠这条路径）。它复用 `macast.protocol_cast`
   的 Cast v2 收发实现，**不引入 pychromecast 依赖**。首次投屏前必须选好目标。
+- **Screen Mirror**：菜单栏选目标后「开始镜像」。链路是 ffmpeg 屏幕采集 →
+  libx264 zerolatency → 插件内的 HTTP 服务持续输出实时 `video/mp2t` → Cast `LOAD
+  streamType=LIVE` 推给电视。采集按平台分派：macOS `avfoundation`、Windows
+  `gdigrab`、Linux `x11grab`（**只认 X11 会话**，纯 Wayland 会明确报出来）。
+  **系统声音**跟随条件：macOS 需要虚拟声卡 `blackhole-2ch`（FFmpeg 至今没有任何发行版
+  能直接抓 mac 系统音频——提议中的 screencapturekit demuxer 从未合并）。**v0.3 起不用你手动装**：
+  菜单「系统声音 → 一键设置（BlackHole + 多输出设备）」会自动下载官方 pkg（地址与 sha256
+  以 Homebrew cask API 为准，校验后才安装）、弹出图形安装器（你只需输一次密码——.pkg
+  无法静默安装），装好后用 CoreAudio 自动创建「多输出设备」（扬声器 + BlackHole，
+  这样电视有声、你自己也听得见）并把默认输出切过去；再点一次可「恢复原声音输出」。
+  任何一步失败会降级为帮你打开「音频 MIDI 设置」并给出文字指引。Linux 走 PulseAudio/PipeWire 的
+  `<sink>.monitor`，通常开箱即有。Windows 仅画面。macOS 首次使用需在
+  「系统设置 → 隐私与安全性 → 屏幕录制」给 Macast 授权（没授权时插件会明确报出来，
+  不会静默黑屏）。镜像进行中若手机 DLNA 投了东西，镜像会**让位**并把收到的 URL
+  转投给电视（Bridge 行为）。目标同样可以直接写设置 `Mirror_Target` = `host:port`
+  （测试走这条路径）。
 - **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
   它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
   **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。

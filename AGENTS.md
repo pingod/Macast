@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 443/443）
+# 2) 回归验证（当前 478/478）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -270,14 +270,14 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   `scheme`），不需要真起服务；唯一被打桩的是 `Setting.is_service_running`（GET 在服务
   未启动时会回 503）。
 
-### 4.8 在线插件目录（`plugins/`）：6 个插件，各自的红线
+### 4.8 在线插件目录（`plugins/`）：7 个插件，各自的红线
 
-`plugins/` 现在提供 6 个插件（yt-dlp 下载 / 外部播放器 / 小窗+壁纸 / 自动化钩子 /
-Chromecast 中继 / AirPlay 音频）。它们是**单文件**插件，所以：
+`plugins/` 现在提供 7 个插件（yt-dlp 下载 / 外部播放器 / 小窗+壁纸 / 自动化钩子 /
+Chromecast 中继 / AirPlay 音频 / 屏幕镜像）。它们是**单文件**插件，所以：
 
 - 只能用「Macast 已带的库 + 标准库 + 机器上已有的命令行程序」。要 pip 库就走内置插件
   路线（§4.4 的三处打包配置）。
-- **Macast 一次只能选一种渲染器**：5 个渲染器类插件互斥（菜单栏切换），`raop.py` 是协议
+- **Macast 一次只能选一种渲染器**：6 个渲染器类插件互斥（菜单栏切换），`raop.py` 是协议
   插件，可以和任意渲染器共存。
 - 定位一律用 PATH + 常见安装目录（GUI 从 Finder 启动拿不到 shell 的 PATH；`yt-dlp`
   / `shairport-sync` / 播放器都踩这条）。
@@ -292,10 +292,13 @@ Chromecast 中继 / AirPlay 音频）。它们是**单文件**插件，所以：
 | hooks | 命令是 shell 命令（用户自己写的），但 **url 只走环境变量**，不拼进命令串。spawn 完即返回，不阻塞 CherryPy 工作线程。 |
 | cast_bridge | 复用 `protocol_cast` 的 Cast v2 收发，不引 pychromecast。投屏序列是 deviceauth CHALLENGE → CONNECT receiver-0 → LAUNCH → CONNECT transportId → LOAD，`transportId` 来自 LAUNCH 的回复，**不要硬编码**。发现用 mDNS 且必须在后台跑（`build_menu` 在 UI 线程上）。 |
 | raop | 只监督 shairport-sync（生成最小配置 + 拉起 + 报连接/断开），**不**把 RAOP 映射成 DLNA 播放状态。`uses_ssdp = False`，否则只有它启用时也会把 SSDP 服务拉起来。 |
+| screen_mirror | 实时链路：ffmpeg 截屏（darwin avfoundation / win32 gdigrab / linux x11grab，**Wayland 不支持要明说**）→ 插件内 HTTP 服务持续吐 `video/mp2t` → Cast `LOAD streamType=LIVE`。**系统声音只在有采集口时开**：macOS 认 BlackHole 设备（FFmpeg 发行版至今抓不了 mac 系统音频）、Linux 认 pulse `<sink>.monitor`、Windows 仅画面；探测结果缓存在 `_capture_cache`（菜单在 UI 线程上，绝不为它 spawn ffmpeg）。**慢消费者丢整块、绝不阻塞读管道**（阻塞会把编码器冻住）；ffmpeg 进程和 HTTP 服务**一启动就移交 renderer 持有**，终止统一由 pump 线程按 generation 判定上报（否则权限被拒会静默黑屏、或双线程抢清理）。杀掉/让位前先增 generation，让 pump 的死亡上报闭嘴。DLNA 推流来时**让位**并转投该 URL（Bridge 行为）。**v0.3 起一键辅助装 BlackHole**（菜单「系统声音 → 一键设置」）：地址与 sha256 以 Homebrew cask API 为准（拉不到用 PINNED 兜底）→ `open` 图形安装器（用户输一次密码，.pkg 无法静默装，**别把它想成全自动**）→ 轮询设备出现 → ctypes 调 CoreAudio 建/复用**多输出聚合设备**并切默认输出（UID `com.macast.screenmirror.output`，原默认存 `Mirror_Audio_Original` 供「恢复原声音输出」）；**任何一步失败降级为打开「音频 MIDI 设置」+ 文字指引**。CoreAudio 的坑：`kAudioObjectSystemObject` 是 **1**（0x1000 是 hardware model，问它要设备列表回 `'nope'`）；`inDataSize` 是 `size_t`；NULL-data 的探测在本机被拒——直接带大缓冲问。CLI 沙箱里设备枚举不可用（只有 `dOut` 通），所以这套 ctypes **要在真 Mac 上验收**；读接口都在，测试只打桩不触碰。 |
 
 回归用例：Part 14（外部播放器 / 小窗 / yt-dlp 两种模式）、Part 15（钩子）、
-Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP 监督）。
-测试用的是假二进制（PATH 上放个 shell 脚本），所以跑测试不需要 yt-dlp / VLC / shairport-sync。
+Part 16（中继对打 Macast 自己的 Chromecast 接收端）、Part 17（RAOP 监督）、
+Part 21（屏幕镜像：假 ffmpeg + 自家 Cast 接收端对打，真 HTTP 实时流；v0.3 的一键
+BlackHole 路径全部打桩——CoreAudio/下载/安装器都不被触碰，纯测编排与降级）。
+测试用的是假二进制（PATH 上放个 shell 脚本），所以跑测试不需要 yt-dlp / VLC / shairport-sync / ffmpeg。
 
 ### 4.9 Cast 接收端一致性：打桩测试永远抓不到的那一类
 
@@ -383,7 +386,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（443/443）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 6 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）|
+| `verify_cast_airplay.py` | **主验证套件**（478/478）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 网页投屏入口与令牌门控 + 7 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21，假 ffmpeg 对打自家 Cast 接收端）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程" |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
@@ -471,7 +474,7 @@ CI 会用同名文件**替换** release 里的产物。用 digest 对比确认�
 | AirPlay 屏幕镜像 | **未实现**（需要 FairPlay 解密，不打算做） |
 | DRM 内容 | **不可能支持** |
 | 插件 | 支持启用/停用/卸载/安装（**热生效，不重启**）；卸载进 `.trash/` 可恢复 |
-| 在线插件目录 | `plugins/` 下 6 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）|
+| 在线插件目录 | `plugins/` 下 7 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）、屏幕镜像（→Chromecast，三平台；系统音频 mac 有**一键辅助安装 BlackHole**、Linux 走 pulse monitor、Windows 仅画面）|
 | 网页投屏入口 | `GET /api?query=cast&url=<绝对地址>&token=<令牌>`（脚本 / 快捷指令 / 书签，绕开 DLNA 发现）；令牌常驻并显示在设置页 |
 
 ## 10. 与用户协作的约定（这个仓库的历史教训）

@@ -3781,6 +3781,393 @@ except Exception as e:
     check("log handling behaves", False, "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
+# Part 21: the screen mirror plugin (live capture -> HTTP -> Cast sender)
+#
+# Same gift as Part 16: the plugin's counterpart is a protocol Macast itself
+# implements, so a real ChromecastProtocol on the loopback proves the whole
+# handshake. The only stand-in is ffmpeg itself -- a shell script that prints
+# a canned avfoundation device list and then emits TS-shaped bytes forever.
+# Real screen capture is never touched (and the plugin's ffmpeg lookup is
+# monkeypatched so a Homebrew ffmpeg on this machine cannot leak in).
+# --------------------------------------------------------------------------
+print("\n=== Part 21: screen mirror plugin ===")
+try:
+    _saved_setting21 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir21 = utils.SETTING_DIR
+    _tmp21 = _tempfile.mkdtemp(prefix="macast-mirror-")
+    _notify21 = []
+    _notify21_rec = lambda *a, **k: _notify21.append(a)      # noqa: E731
+    _receiver21 = None
+    try:
+        utils.SETTING_DIR = _tmp21
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp21, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify21_rec)
+
+        mirror = _load_plugin("screen_mirror_plugin", "screen_mirror.py")
+        fake_ffmpeg21 = _write_fake(os.path.join(_tmp21, "bin"), "ffmpeg", r"""#!/bin/sh
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[avfoundation @ 0x1] The following devices were found:' \
+      '[avfoundation @ 0x1] Video devices:' \
+      '[avfoundation @ 0x1]    "FaceTime HD Camera"' \
+      '[avfoundation @ 0x1]    "Capture screen 0"' \
+      '[avfoundation @ 0x1] Audio devices:' \
+      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+        _saved_find21 = mirror.find_ffmpeg
+        _saved_search21 = mirror.start_search
+        _saved_devices21 = mirror._devices
+        _saved_cache21 = dict(mirror._capture_cache)
+        mirror.start_search = lambda: True    # the menu must not touch zeroconf
+
+        _rec21 = _StateRec()
+
+        class _Mirror21(mirror.ScreenMirrorRenderer):
+            @property
+            def protocol(self):
+                return _rec21
+
+        mir21 = _Mirror21()
+
+        # -- capture probing --------------------------------------------------
+        cap21 = mirror.probe_capture(fake_ffmpeg21)
+        check("the screen is found by name and indexed within the video list",
+              cap21 is not None and cap21.inputs[0][-1] == '1:none',
+              str(cap21.inputs if cap21 else None))
+        _cmd21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap21, 720, 5000000)
+        check("without a BlackHole device the mirror stays video only",
+              cap21.audio_map is None and '-an' in _cmd21, str(_cmd21))
+
+        fake_bh21 = _write_fake(os.path.join(_tmp21, "binbh"), "ffmpeg", r"""#!/bin/sh
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[avfoundation @ 0x1] The following devices were found:' \
+      '[avfoundation @ 0x1] Video devices:' \
+      '[avfoundation @ 0x1]    "FaceTime HD Camera"' \
+      '[avfoundation @ 0x1]    "Capture screen 0"' \
+      '[avfoundation @ 0x1] Audio devices:' \
+      '[avfoundation @ 0x1]    "MacBook Pro Microphone"' \
+      '[avfoundation @ 0x1]    "BlackHole 2ch"'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+        cap_bh21 = mirror.probe_capture(fake_bh21)
+        _cmd_bh21 = mirror.build_ffmpeg_command(fake_bh21, cap_bh21, 720, 5000000)
+        check("a BlackHole device turns system audio on",
+              cap_bh21.audio_map == '0:a:0'
+              and cap_bh21.inputs[0][-1] == '1:1'
+              and '-c:a' in _cmd_bh21 and 'aac' in _cmd_bh21,
+              str(_cmd_bh21))
+
+        # -- the other two platforms' dispatch (pure builders; the platform
+        #    argument is the seam, nothing about this process changes) ------
+        cap_win21 = mirror.probe_capture(fake_ffmpeg21, 'win32')
+        _cmd_win21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap_win21, 720, 5000000)
+        check("windows dispatches to gdigrab, video only",
+              'gdigrab' in _cmd_win21 and '-an' in _cmd_win21, str(_cmd_win21))
+
+        _saved_disp21 = os.environ.pop('DISPLAY', None)
+        _saved_pulse21 = mirror._default_pulse_monitor
+        try:
+            mirror._default_pulse_monitor = lambda: None
+            check("linux without DISPLAY refuses instead of guessing",
+                  mirror.probe_capture(fake_ffmpeg21, 'linux') is None)
+            os.environ['DISPLAY'] = ':0'
+            mirror._capture_cache.pop((fake_ffmpeg21, 'linux'), None)
+            cap_lin21 = mirror.probe_capture(fake_ffmpeg21, 'linux')
+            check("linux dispatches to x11grab on the session display",
+                  'x11grab' in cap_lin21.inputs[0]
+                  and ':0+0,0' in cap_lin21.inputs[0]
+                  and cap_lin21.audio_map is None,
+                  str(cap_lin21.inputs))
+            mirror._default_pulse_monitor = lambda: 'alsa_out.monitor'
+            mirror._capture_cache.pop((fake_ffmpeg21, 'linux'), None)
+            cap_lina21 = mirror.probe_capture(fake_ffmpeg21, 'linux')
+            _cmd_lina21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap_lina21,
+                                                      720, 5000000)
+            check("a PulseAudio monitor sink rides along as a second input",
+                  cap_lina21.audio_map == '1:a:0'
+                  and 'alsa_out.monitor' in cap_lina21.inputs[1]
+                  and '1:a:0' in _cmd_lina21 and 'aac' in _cmd_lina21,
+                  str(_cmd_lina21))
+        finally:
+            mirror._default_pulse_monitor = _saved_pulse21
+            if _saved_disp21 is not None:
+                os.environ['DISPLAY'] = _saved_disp21
+            else:
+                os.environ.pop('DISPLAY', None)
+        mirror._capture_cache.clear()
+
+        # -- no ffmpeg ------------------------------------------------------
+        mirror.find_ffmpeg = lambda: None
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target, '127.0.0.1:9')
+        _rec21.rows = []
+        mir21.start_mirror()
+        check("a missing ffmpeg is reported, not attempted",
+              _wait_until(lambda: ('error', True) in _rec21.rows, timeout=5),
+              str(_rec21.rows))
+        check("the message names the fix",
+              'ffmpeg' in str(_notify21), str(_notify21))
+
+        # -- a real receiver, a fake encoder --------------------------------
+        mirror.find_ffmpeg = lambda: fake_ffmpeg21
+        _CTX.renderer = MockRenderer()
+        _receiver21 = TestProtocol()
+        _receiver21.start()
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target,
+                          '127.0.0.1:{}'.format(_receiver21.cast_port))
+        _notify21.clear()
+        mir21.start_mirror()
+        check("the mirror completes the Cast handshake and loads a live url",
+              _wait_until(lambda: _CTX.renderer.called('set_media_url'),
+                          timeout=20)
+              and str(_CTX.renderer.last_arg('set_media_url')).endswith('/screen.ts'),
+              str(_CTX.renderer.calls))
+        check("the mirror is reported as playing",
+              ('transport', 'PLAYING') in _rec21.rows, str(_rec21.rows))
+        check("the start is announced",
+              any('镜像' in str(n) for n in _notify21), str(_notify21))
+
+        _live_url21 = str(_CTX.renderer.last_arg('set_media_url'))
+        _port21 = int(_live_url21.rsplit(':', 1)[1].split('/')[0])
+        _conn21 = http.client.HTTPConnection('127.0.0.1', _port21, timeout=10)
+        _conn21.request('GET', '/screen.ts')
+        _resp21 = _conn21.getresponse()
+        _body21 = _resp21.read(4096)
+        _conn21.close()
+        check("the encoder output is served to the TV",
+              _resp21.status == 200 and b'TTTT' in _body21,
+              "{} / {} bytes".format(_resp21.status, len(_body21)))
+        check("the stream is typed as live MPEG-TS and uncacheable",
+              _resp21.getheader('Content-Type') == 'video/mp2t'
+              and _resp21.getheader('Cache-Control') == 'no-store',
+              "{} / {}".format(_resp21.getheader('Content-Type'),
+                               _resp21.getheader('Cache-Control')))
+
+        # -- a pushed url wins over the mirror -------------------------------
+        mir21.set_media_url('http://mirror/movie.mp4')
+        check("a DLNA push takes the device away from the live mirror",
+              _wait_until(lambda: _CTX.renderer.last_arg('set_media_url')
+                          == 'http://mirror/movie.mp4', timeout=20)
+              and not mir21.is_mirroring(),
+              str(_CTX.renderer.calls))
+        check("the capture process is released when the mirror yields",
+              _wait_until(lambda: mir21._proc is None, timeout=10),
+              "ffmpeg still owned")
+
+        mir21.set_media_stop()
+        check("stop releases the sender",
+              _wait_until(lambda: mir21._sender is None
+                          and not mir21.is_mirroring(), timeout=10),
+              str(_rec21.rows))
+
+        # -- an unreachable target --------------------------------------------
+        utils.Setting.set(mirror.SettingProperty.Mirror_Target, '127.0.0.1:1')
+        _rec21.rows = []
+        mir21.start_mirror()
+        check("an unreachable target is reported instead of hanging",
+              _wait_until(lambda: ('error', True) in _rec21.rows, timeout=25),
+              str(_rec21.rows))
+        check("a failed start leaves no capture behind",
+              not mir21.is_mirroring()
+              and _wait_until(lambda: mir21._proc is None, timeout=10),
+              str(_rec21.rows))
+
+        # -- the menu -----------------------------------------------------------
+        def _menu_texts21(items):
+            texts = []
+            for i in items:
+                texts.append(i.text)
+                texts.extend(_menu_texts21(i.children or []))
+            return texts
+
+        mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
+
+        mirror._capture_cache.clear()
+        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
+        check("the menu offers a start entry and a target submenu",
+              any('开始镜像' in t for t in _labels21)
+              and any(t == 'Target' for t in _labels21), str(_labels21))
+        check("before the first probe the menu defers the audio state",
+              any('系统声音：开始镜像后' in t for t in _labels21), str(_labels21))
+        if sys.platform == 'darwin':
+            check("before the first probe the menu already offers the one click",
+                  any('一键设置' in t for t in _labels21), str(_labels21))
+        mirror.probe_capture(fake_ffmpeg21)          # the video-only fake
+        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
+        check("a BlackHole-less probe names the fix instead of staying mute",
+              any('blackhole' in t.lower() for t in _labels21), str(_labels21))
+        mirror._capture_cache.clear()
+        mirror.probe_capture(fake_bh21)              # the BlackHole fake
+        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
+        check("with system audio captured the menu says so",
+              any('系统声音：已启用' in t for t in _labels21), str(_labels21))
+        if sys.platform == 'darwin':
+            check("once audio works the one-click entry steps aside",
+                  not any('一键设置' in t for t in _labels21), str(_labels21))
+
+        # -- v0.3: the assisted BlackHole install --------------------------------
+        _good21 = ('{"url":"https://existential.audio/BlackHole2ch-0.8.0.pkg",'
+                   '"sha256":"__SHA__"}').replace('__SHA__', 'a' * 64).encode()
+        _url21, _sha21 = mirror.blackhole_pkg_source(_good21)
+        check("the cask API decides what gets downloaded",
+              _url21.endswith('0.8.0.pkg') and _sha21 == 'a' * 64,
+              "{} / {}".format(_url21, _sha21[:8]))
+        for _junk21 in (b'not json', b'{}',
+                        b'{"url":"https://x/tool.exe","sha256":"' + b'b' * 64 + b'"}',
+                        b'{"url":"https://x/a.pkg","sha256":"short"}'):
+            _u21, _s21 = mirror.blackhole_pkg_source(_junk21)
+            if (_u21, _s21) != (mirror.BLACKHOLE_PKG_URL,
+                                mirror.BLACKHOLE_PKG_SHA256):
+                break
+        else:
+            _u21, _s21 = mirror.BLACKHOLE_PKG_URL, mirror.BLACKHOLE_PKG_SHA256
+        check("an unusable cask answer falls back to the pinned pkg",
+              (_u21, _s21) == (mirror.BLACKHOLE_PKG_URL,
+                               mirror.BLACKHOLE_PKG_SHA256), str(_junk21))
+
+        _stub21 = {}
+        _audio_saved = {}
+        _real_route21 = mirror._route_audio_through_blackhole
+
+        def _stub_audio21(**over):
+            for _name, _fn in [('find_ffmpeg', lambda: 'ffmpeg'),
+                               ('_has_blackhole', lambda f: False),
+                               ('_download_blackhole',
+                                lambda: _stub21.setdefault('pkg', '/tmp/bh.pkg')),
+                               ('_wait_for_blackhole', lambda f, timeout=0: True),
+                               ('_route_audio_through_blackhole', lambda f: True),
+                               ('_open_audio_midi_setup', lambda rep: None),
+                               ('_audio_devices', lambda: []),
+                               ('_find_blackhole', lambda f: None),
+                               ('_default_output', lambda: None),
+                               ('_set_default_output', lambda d: True),
+                               ('_create_aggregate', lambda uids: None)]:
+                if _name not in _audio_saved:
+                    _audio_saved[_name] = getattr(mirror, _name)
+                setattr(mirror, _name, over.get(_name, _fn))
+
+        def _unstub_audio21():
+            for _name, _fn in _audio_saved.items():
+                setattr(mirror, _name, _fn)
+            _audio_saved.clear()
+
+        try:
+            _stub21.clear()
+            _stub_audio21()
+            mirror._capture_cache[('ffmpeg', 'darwin')] = object()
+            _msgs21 = []
+            _ok21 = mirror.setup_system_audio(_msgs21.append)
+            check("the assisted setup installs, waits, routes and reports",
+                  _ok21 and 'downloading' not in _stub21
+                  and mirror._capture_cache == {},
+                  str(_msgs21))
+            _stub21.clear()
+            _msgs21 = []
+
+            def _route_fail21(f):
+                _msgs21.append('routing')
+                return False
+
+            _stub_audio21(_route_audio_through_blackhole=_route_fail21)
+            _ok21 = mirror.setup_system_audio(_msgs21.append)
+            check("a routing failure degrades to the manual pane",
+                  not _ok21 and 'routing' in _msgs21, str(_msgs21))
+
+            # CoreAudio stubs only -- nothing is touched on this machine
+            _stub_audio21(
+                _route_audio_through_blackhole=_real_route21,
+                _has_blackhole=lambda f: True,
+                _audio_devices=lambda: [(7, 'builtin-uid'),
+                                        (8, 'BlackHole2ch-uid')],
+                _find_blackhole=lambda f: (8, 'BlackHole2ch-uid'),
+                _default_output=lambda: 7,
+                _create_aggregate=lambda uids: _stub21.setdefault(
+                    'created', uids) and 99)
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Aggregate)
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Original)
+            _ok21 = mirror._route_audio_through_blackhole('ffmpeg')
+            check("the aggregate mixes BlackHole with the real speakers",
+                  _ok21 and _stub21.get('created') == ['BlackHole2ch-uid',
+                                                       'builtin-uid'],
+                  str(_stub21))
+            check("the routing remembers the original output to restore later",
+                  utils.Setting.get(mirror.SettingProperty.Mirror_Audio_Original,
+                                    None) == 7
+                  and utils.Setting.get(mirror.SettingProperty.Mirror_Audio_Aggregate,
+                                        None) == 99,
+                  str(utils.Setting.setting))
+            _stub21.clear()
+            _stub_audio21(
+                _audio_devices=lambda: [(99, mirror.MACAST_AGGREGATE_UID),
+                                        (8, 'BlackHole2ch-uid')],
+                _create_aggregate=lambda uids: _stub21.setdefault(
+                    'created', uids) and 123)
+            _ok21 = mirror._route_audio_through_blackhole('ffmpeg')
+            check("a second run reuses the aggregate instead of stacking one",
+                  _ok21 and 'created' not in _stub21
+                  and utils.Setting.get(mirror.SettingProperty.Mirror_Audio_Aggregate,
+                                        None) == 99,
+                  str(_stub21))
+            _stub_audio21(_route_audio_through_blackhole=_real_route21,
+                          _audio_devices=lambda: [])
+            check("with no CoreAudio device visible the route fails softly",
+                  mirror._route_audio_through_blackhole('ffmpeg') is False)
+
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Original)
+            check("restore without a saved output does nothing",
+                  mirror.restore_system_audio() is False)
+            utils.Setting.set(mirror.SettingProperty.Mirror_Audio_Original, 7)
+            _set21 = []
+            _stub_audio21(_set_default_output=lambda d: _set21.append(d) or True)
+            check("restore points the default output back at the speakers",
+                  mirror.restore_system_audio() is True and _set21 == [7],
+                  str(_set21))
+        finally:
+            _unstub_audio21()
+            mirror._capture_cache.clear()
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Aggregate)
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Original)
+    finally:
+        mirror.find_ffmpeg = _saved_find21
+        mirror.start_search = _saved_search21
+        mirror._devices = _saved_devices21
+        mirror._capture_cache.clear()
+        mirror._capture_cache.update(_saved_cache21)
+        if _receiver21 is not None:
+            try:
+                _receiver21.stop()
+            except Exception:
+                pass
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify21_rec)
+        except Exception:
+            pass
+        utils.SETTING_DIR = _saved_dir21
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting21
+        _shutil.rmtree(_tmp21, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the screen mirror plugin behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 passed = sum(1 for _, ok, _ in RESULTS if ok)
