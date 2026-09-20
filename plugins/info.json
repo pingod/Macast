@@ -60,6 +60,17 @@
         },
         {
             "author": "pingod",
+            "desc": "把本机桌面屏幕实时镜像到局域网的 Chromecast（三平台）。macOS 系统声音可在菜单里一键装好：自动下载并校验官方 BlackHole、弹安装器、自动配好多输出设备；Linux 走 PulseAudio，Windows 仅画面。需要自行安装 ffmpeg。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "ScreenMirrorRenderer",
+            "title": "Screen Mirror",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@bf0df258591d5864736bf5ece5dd5846570452d6/plugins/screen_mirror.py",
+            "version": "0.3"
+        },
+        {
+            "author": "pingod",
             "desc": "接收 iPhone / iPad 的 AirPlay 音频并放到本机音箱（Macast 只做了视频那一半）。由 shairport-sync 实现，需要自己安装。",
             "host_version": "0.7",
             "platform": "darwin,linux",
