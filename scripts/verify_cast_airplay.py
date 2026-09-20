@@ -3482,7 +3482,10 @@ try:
     p19._start_setup_server()
     try:
         p19._start_https_setup_server()
-        started = True
+        # Not "did it raise": _start_https_setup_server swallows a taken port
+        # on purpose, so the only honest test for "the listener is ours" is the
+        # port it recorded.
+        started = p19.https_setup_port is not None
     except Exception as e:
         started = False
         check("starting the HTTPS setup server never raises", False, repr(e))
@@ -4025,7 +4028,7 @@ done
             check("linux without DISPLAY refuses instead of guessing",
                   mirror.probe_capture(fake_ffmpeg21, 'linux') is None)
             os.environ['DISPLAY'] = ':0'
-            mirror._capture_cache.pop((fake_ffmpeg21, 'linux'), None)
+            mirror._capture_cache.pop((fake_ffmpeg21, 'linux', True), None)
             cap_lin21 = mirror.probe_capture(fake_ffmpeg21, 'linux')
             check("linux dispatches to x11grab on the session display",
                   'x11grab' in cap_lin21.inputs[0]
@@ -4033,7 +4036,7 @@ done
                   and cap_lin21.audio_map is None,
                   str(cap_lin21.inputs))
             mirror._default_pulse_monitor = lambda: 'alsa_out.monitor'
-            mirror._capture_cache.pop((fake_ffmpeg21, 'linux'), None)
+            mirror._capture_cache.pop((fake_ffmpeg21, 'linux', True), None)
             cap_lina21 = mirror.probe_capture(fake_ffmpeg21, 'linux')
             _cmd_lina21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap_lina21,
                                                       720, 5000000)
@@ -4073,7 +4076,8 @@ done
         check("the mirror completes the Cast handshake and loads a live url",
               _wait_until(lambda: _CTX.renderer.called('set_media_url'),
                           timeout=20)
-              and str(_CTX.renderer.last_arg('set_media_url')).endswith('/screen.ts'),
+              and '/stream/' in str(_CTX.renderer.last_arg('set_media_url'))
+              and str(_CTX.renderer.last_arg('set_media_url')).endswith('.ts'),
               str(_CTX.renderer.calls))
         check("the mirror is reported as playing",
               ('transport', 'PLAYING') in _rec21.rows, str(_rec21.rows))
@@ -4082,8 +4086,9 @@ done
 
         _live_url21 = str(_CTX.renderer.last_arg('set_media_url'))
         _port21 = int(_live_url21.rsplit(':', 1)[1].split('/')[0])
+        _path21 = '/' + _live_url21.split('/', 3)[3]
         _conn21 = http.client.HTTPConnection('127.0.0.1', _port21, timeout=10)
-        _conn21.request('GET', '/screen.ts')
+        _conn21.request('GET', _path21)
         _resp21 = _conn21.getresponse()
         _body21 = _resp21.read(4096)
         _conn21.close()
@@ -4139,7 +4144,7 @@ done
         _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
         check("the menu offers a start entry and a target submenu",
               any('开始镜像' in t for t in _labels21)
-              and any(t == 'Target' for t in _labels21), str(_labels21))
+              and any(t == '输出目标' for t in _labels21), str(_labels21))
         check("before the first probe the menu defers the audio state",
               any('系统声音：开始镜像后' in t for t in _labels21), str(_labels21))
         if sys.platform == 'darwin':
@@ -4207,7 +4212,7 @@ done
         try:
             _stub21.clear()
             _stub_audio21()
-            mirror._capture_cache[('ffmpeg', 'darwin')] = object()
+            mirror._capture_cache[('ffmpeg', 'darwin', True)] = object()
             _msgs21 = []
             _ok21 = mirror.setup_system_audio(_msgs21.append)
             check("the assisted setup installs, waits, routes and reports",
@@ -4302,6 +4307,525 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     check("the screen mirror plugin behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 22: screen mirror v0.4 -- the browser target and the capture options
+#
+# Part 21 proved the capture -> encode -> broadcast -> Chromecast chain. This
+# part covers what v0.4 added, where the interesting failures are: a second
+# muxer behind the same pump, the replay asymmetry (a browser can attach
+# mid-stream; a TV handed a backlog sits seconds behind forever), the two
+# credentials the HTTP endpoint carries, and the capture choices that reach
+# ffmpeg through a *cached* probe.
+# --------------------------------------------------------------------------
+print("\n=== Part 22: screen mirror v0.4 (browser target, capture options) ===")
+try:
+    _saved_setting22 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir22 = utils.SETTING_DIR
+    _tmp22 = _tempfile.mkdtemp(prefix="macast-mirror22-")
+    _notify22 = []
+    _notify22_rec = lambda *a, **k: _notify22.append(a)      # noqa: E731
+    _server22 = None
+    _mir22 = None
+    try:
+        utils.SETTING_DIR = _tmp22
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp22, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify22_rec)
+
+        mirror = _load_plugin("screen_mirror_plugin_v04", "screen_mirror.py")
+        fake_ffmpeg22 = _write_fake(os.path.join(_tmp22, "bin"), "ffmpeg", r"""#!/bin/sh
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[avfoundation @ 0x1] The following devices were found:' \
+      '[avfoundation @ 0x1] Video devices:' \
+      '[avfoundation @ 0x1]    "Capture screen 0"' \
+      '[avfoundation @ 0x1]    "Capture screen 1"' \
+      '[avfoundation @ 0x1]    "Capture screen 2"' \
+      '[avfoundation @ 0x1] Audio devices:' \
+      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+        _rec22 = _StateRec()
+
+        class _Mirror22(mirror.ScreenMirrorRenderer):
+            @property
+            def protocol(self):
+                return _rec22
+
+        mir22 = _Mirror22()
+        _mir22 = mir22
+        mirror.find_ffmpeg = lambda: fake_ffmpeg22
+        mirror.start_search = lambda: True
+        mirror._devices = []
+
+        # -- one muxer per output target ----------------------------------
+        _cap22 = mirror._Capture('test', [['-f', 'test', '-i', 'x']])
+        _ts22 = mirror.build_ffmpeg_command('ffmpeg', _cap22, 720, 5000000,
+                                            kind='cast')
+        _mp22 = mirror.build_ffmpeg_command('ffmpeg', _cap22, 720, 5000000,
+                                           kind='browser')
+        check("the browser target muxes fragmented MP4 into the pipe",
+              'mp4' in _mp22
+              and 'frag_keyframe+empty_moov+default_base_moof' in ''.join(_mp22)
+              and 'pipe:1' in _mp22 and 'mpegts' not in _mp22, str(_mp22))
+        check("the Chromecast target still muxes MPEG-TS",
+              'mpegts' in _ts22 and 'mp4' not in _ts22, str(_ts22))
+        check("one keyframe a second is what makes both of them joinable",
+              _mp22[_mp22.index('-g') + 1] == str(mirror.FPS)
+              and _ts22[_ts22.index('-g') + 1] == str(mirror.FPS), str(_mp22))
+
+        # -- quality presets -------------------------------------------------
+        check("the four presets name a height and a bitrate",
+              mirror.QUALITIES['360'] == (360, 2500000)
+              and mirror.QUALITIES['1080'] == (1080, 10000000)
+              and mirror.QUALITIES['source'][0] == 0, str(mirror.QUALITIES))
+        check("the source preset asks for no scaling at all",
+              '-vf' not in mirror.build_ffmpeg_command('ffmpeg', _cap22, 0,
+                                                       12000000))
+        check("a preset with a height scales to even edges",
+              _ts22[_ts22.index('-vf') + 1] == 'scale=-2:720', str(_ts22))
+        check("the encoder is chosen per target, not baked into the pipeline",
+              'h264_videotoolbox' in mirror.build_ffmpeg_command(
+                  'ffmpeg', _cap22, 720, 5000000, encoder='hardware')
+              and 'h264_videotoolbox' not in mirror.build_ffmpeg_command(
+                  'ffmpeg', _cap22, 720, 5000000, encoder='software'),
+              str(_mp22))
+
+        # -- what the encoder probe decides, and how often ------------------
+        _count22 = os.path.join(_tmp22, "enc_calls")
+        _vt22 = _write_fake(os.path.join(_tmp22, "binenc"), "ffmpeg-vt",
+                            '#!/bin/sh\necho x >> "%s"\n'
+                            'printf "h264_videotoolbox\\n"\n' % _count22)
+        _no22 = _write_fake(os.path.join(_tmp22, "binenc"), "ffmpeg-no",
+                            '#!/bin/sh\necho x >> "%s"\nprintf "libx264\\n"\n'
+                            % _count22)
+        check("VideoToolbox is offered on macOS and refused elsewhere",
+              'h264_videotoolbox' in mirror.encoder_args('hardware', 'darwin')
+              and 'libx264' in mirror.encoder_args('hardware', 'linux')
+              and 'libx264' in mirror.encoder_args('hardware', 'win32'))
+        check("the probe reads what this ffmpeg actually lists",
+              mirror.has_hardware_encoder(_vt22, 'darwin') is True
+              and mirror.has_hardware_encoder(_no22, 'darwin') is False,
+              _vt22)
+        _before22 = open(_count22).read()
+        mirror.has_hardware_encoder(_vt22, 'darwin')
+        check("and pays for that answer once, because the menu asks every redraw",
+              open(_count22).read() == _before22,
+              repr(open(_count22).read()))
+        check("a machine without the tap never gets asked to encode on it",
+              mirror.has_hardware_encoder(_vt22, 'linux') is False
+              and open(_count22).read() == _before22)
+
+        # -- the pointer, and the display to grab ---------------------------
+        _win22 = os.path.join(_tmp22, "binwin")
+        check("the pointer is drawn until the user says otherwise",
+              mirror.cursor_enabled() is True)
+        utils.Setting.set(mirror.SettingProperty.Mirror_Cursor, False)
+        check("and not afterwards", mirror.cursor_enabled() is False)
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Cursor)
+
+        _cur_on22 = mirror.probe_capture(_win22, 'win32', True)
+        _cur_off22 = mirror.probe_capture(_win22, 'win32', False)
+        check("the cursor choice reaches the capture command",
+              _cur_on22.inputs[0][_cur_on22.inputs[0].index('-draw_mouse')
+                                  + 1] == '1'
+              and _cur_off22.inputs[0][_cur_off22.inputs[0].index('-draw_mouse')
+                                       + 1] == '0', str(_cur_on22.inputs))
+        check("so it is part of the probe cache key, not an afterthought",
+              _cur_on22 is not _cur_off22
+              and mirror.probe_capture(_win22, 'win32', True) is _cur_on22)
+        mirror.invalidate_capture_cache()
+        check("invalidate_capture_cache() really empties it",
+              mirror._capture_cache == {})
+
+        _screen22 = mirror.probe_capture(fake_ffmpeg22, 'darwin', True)
+        check("the probe keeps the display list the picker needs",
+              [i for i, _n in _screen22.screens] == [0, 1, 2],
+              str(_screen22.screens))
+        utils.Setting.set(mirror.SettingProperty.Mirror_Screen, '2')
+        mirror.invalidate_capture_cache()
+        check("a saved display is the one captured",
+              mirror.probe_capture(fake_ffmpeg22, 'darwin', True).inputs[0][-1]
+              == '2:none')
+        utils.Setting.set(mirror.SettingProperty.Mirror_Screen, '9')
+        mirror.invalidate_capture_cache()
+        _gone22 = mirror.probe_capture(fake_ffmpeg22, 'darwin', True)
+        check("a display that has been unplugged falls back instead of failing",
+              _gone22 is not None and _gone22.inputs[0][-1] == '0:none')
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Screen)
+        mirror.invalidate_capture_cache()
+
+        # -- the two shapes of session ---------------------------------------
+        _sess_b22 = mirror._Session('browser', has_audio=True, title='Test')
+        _sess_c22 = mirror._Session('cast', has_audio=True)
+        check("a browser session is replayed, a TV session never is",
+              _sess_b22.replay is True and _sess_c22.replay is False)
+        check("only the browser session knows where its header ends",
+              _sess_b22.init_marker == b'moof' and _sess_c22.init_marker is None)
+        check("each output names its own suffix and content type",
+              _sess_b22.suffix == 'm4s' and _sess_b22.content_type == 'video/mp4'
+              and _sess_c22.suffix == 'ts'
+              and _sess_c22.content_type == 'video/mp2t'
+              and _sess_b22.stream_path().endswith('.m4s'),
+              "{} / {}".format(_sess_b22.stream_path(), _sess_c22.content_type))
+        check("the codec string says whether there is audio to decode",
+              'mp4a.40.2' in _sess_b22.codecs
+              and 'mp4a' not in mirror._Session('browser').codecs)
+        check("two sessions never share a stream id",
+              mirror._Session('browser').stream_id
+              != mirror._Session('browser').stream_id)
+
+        # -- the broadcaster's replay bookkeeping ----------------------------
+        bc22 = mirror._Broadcaster(init_marker=b'moof')
+        bc22.feed(b'ftypisom')
+        check("the header is held back from every subscriber until it is whole",
+              bc22.init_segment == b'' and bc22.tail() == [])
+        bc22.feed(b'xxmoofAAAA')
+        check("everything before the first moof is the header",
+              bc22.init_segment == b'ftypisomxx' and bc22.tail() == [b'moofAAAA'],
+              "{} / {}".format(bc22.init_segment, bc22.tail()))
+        bc22.feed(b'moofBBBB')
+        _late22 = bc22.subscribe(replay=True)
+        _live22 = bc22.subscribe(replay=False)
+        check("a late joiner is handed the header, then the tail",
+              _late22.get_nowait() == b'ftypisomxx'
+              and _late22.get_nowait() == b'moofAAAA'
+              and _late22.get_nowait() == b'moofBBBB')
+        _joined22 = False
+        try:
+            _live22.get_nowait()
+        except Exception:
+            _joined22 = True
+        check("a TV that connects at the same moment gets only what comes next",
+              _joined22)
+        bc22.feed(b'moofCCCC')
+        _small22 = mirror._Broadcaster(maxsize=2, ring_bytes=0)
+        _slow22 = _small22.subscribe()
+        for _ in range(6):
+            _small22.feed(b'x' * 100)
+        check("a slow viewer loses whole chunks instead of stalling the encoder",
+              _small22.drops >= 4 and _slow22.qsize() == 2,
+              "drops={} qsize={}".format(_small22.drops, _slow22.qsize()))
+        _ring22 = mirror._Broadcaster(ring_bytes=250)
+        for _ in range(10):
+            _ring22.feed(b'y' * 100)
+        check("the replay tail is bounded, so a long session cannot grow",
+              sum(len(c) for c in _ring22.tail()) <= 350,
+              str([len(c) for c in _ring22.tail()]))
+        _noinit22 = mirror._Broadcaster()
+        _noinit22.feed(b'raw')
+        check("a container with no header keeps its bytes in the tail",
+              _noinit22.tail() == [b'raw'] and _noinit22.init_segment == b'')
+
+        # -- the browser endpoint over a real socket -------------------------
+        _server22 = mirror.start_stream_server(_sess_b22)
+        _port22 = _server22.server_address[1]
+        _server22.broadcaster.feed(b'ftypisomxxmoofAAAA')
+        _path22 = _sess_b22.stream_path()
+        _html_path22 = '{}?token={}'.format(mirror.BROWSER_PATH,
+                                            _sess_b22.page_token)
+
+        def _get22(path, read=0):
+            conn = http.client.HTTPConnection('127.0.0.1', _port22, timeout=5)
+            conn.request('GET', path)
+            resp = conn.getresponse()
+            body = resp.read(read) if read else b''
+            conn.close()
+            return resp, body
+
+        _resp22, _body22 = _get22(_path22, 14)
+        check("the browser pulls the live stream by its session id",
+              _resp22.status == 200 and _body22.startswith(b'ftypisomxxmoof'),
+              "{} / {!r}".format(_resp22.status, _body22[:16]))
+        check("the stream is typed as MP4 and marked uncacheable",
+              _resp22.getheader('Content-Type') == 'video/mp4'
+              and _resp22.getheader('Cache-Control') == 'no-store'
+              and _resp22.getheader('X-Content-Type-Options') == 'nosniff',
+              str(dict(_resp22.getheaders())))
+        _guessed22, _junk22 = _get22('/stream/0011223344556677.m4s')
+        check("an invented stream id is a 404, not somebody else's screen",
+              _guessed22.status == 404, str(_guessed22.status))
+        _noauth22, _junk22 = _get22(mirror.BROWSER_PATH)
+        check("the player page refuses a caller with no token",
+              _noauth22.status == 403, str(_noauth22.status))
+        _wrong22, _junk22 = _get22(mirror.BROWSER_PATH + '?token=deadbeef')
+        check("and one with the wrong token", _wrong22.status == 403,
+              str(_wrong22.status))
+        _page22, _html22 = _get22(_html_path22, 1 << 16)
+        check("with the token it is the player page",
+              _page22.status == 200
+              and b'<video' in _html22 and _path22.encode() in _html22,
+              str(_page22.status))
+        check("the page is ours end to end: no template hole, no innerHTML",
+              b'@STREAM@' not in _html22 and b'innerHTML' not in _html22
+              and b'document.write' not in _html22, str(_html22[:80]))
+        _head22 = http.client.HTTPConnection('127.0.0.1', _port22, timeout=5)
+        _head22.request('HEAD', _path22)
+        _hresp22 = _head22.getresponse()
+        _head22.close()
+        check("a HEAD probe of the stream costs nothing to the pump",
+              _hresp22.status == 200 and _hresp22.read() == b'',
+              str(_hresp22.status))
+        _miss22, _junk22 = _get22('/nope')
+        check("nothing else on this port is a page", _miss22.status == 404,
+              str(_miss22.status))
+        _server22.shutdown()
+        _server22.server_close()
+        _server22 = None
+
+        # -- a mirror whose output is a browser, end to end -------------------
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'browser')
+        _keep22 = []
+        _saved_keep22 = mirror._keep_awake
+        _saved_drop22 = mirror._stop_awake
+        mirror._keep_awake = lambda: 'awake'
+        mirror._stop_awake = lambda handle: _keep22.append(handle)
+        try:
+            _notify22.clear()
+            mir22.start_mirror()
+            check("a browser mirror needs no Chromecast at all",
+                  _wait_until(mir22.is_mirroring, timeout=25)
+                  and mir22._sender is None, str(_notify22))
+            check("the announced address is the one the page is served on",
+                  any('浏览器打开' in str(n) for n in _notify22)
+                  and 'http' in str(_notify22)
+                  and mirror.BROWSER_PATH in str(_notify22), str(_notify22))
+            _viewer22 = mir22.viewer_url()
+            check("viewer_url() is the tokened page while the mirror runs",
+                  _viewer22.startswith('http://') and 'token=' in _viewer22,
+                  _viewer22)
+            _vport22 = int(_viewer22.split('//')[1].split('/')[0].rsplit(':', 1)[1])
+            _vconn22 = http.client.HTTPConnection(
+                '127.0.0.1', _vport22, timeout=5)
+            _vconn22.request('GET', '/' + _viewer22.split('/', 3)[3])
+            _vresp22 = _vconn22.getresponse()
+            _vconn22.close()
+            check("and it really answers from another connection",
+                  _vresp22.status == 200, str(_vresp22.status))
+            _stats22 = mir22.stats()
+            check("the pump's numbers are readable without touching it",
+                  _stats22.get('kind') == 'browser' and _stats22.get('chunks', 0)
+                  > 0 and 'mbps' in _stats22 and 'drops' in _stats22,
+                  str(_stats22))
+            check("the sleep assertion is taken for as long as we mirror",
+                  mir22._awake == 'awake', str(mir22._awake))
+
+            # A push cannot be played here: bridge behaviour needs a device.
+            _url_before22 = mir22.playing_url()
+            _notify22.clear()
+            mir22.set_media_url('http://elsewhere/movie.mp4')
+            check("a pushed url is refused loudly instead of killing the mirror",
+                  any('无法播放' in str(n) for n in _notify22)
+                  and mir22.is_mirroring()
+                  and mir22.playing_url() == _url_before22, str(_notify22))
+            _notify22.clear()
+            mir22.set_media_url(_url_before22)
+            check("the mirror's own stream address is not a push to bridge",
+                  _notify22 == [] and mir22.is_mirroring(), str(_notify22))
+        finally:
+            mir22.stop_mirror()
+            # Teardown is a thread, and it releases the sleep assertion only
+            # after the broadcaster has shut down — wait for the whole thing,
+            # not merely for the handles to be cleared.
+            _wait_until(lambda: mir22._proc is None and mir22._server is None
+                        and _keep22, timeout=20)
+            mirror._keep_awake = _saved_keep22
+            mirror._stop_awake = _saved_drop22
+        check("stopping drops the sleep assertion and the viewer url",
+              _keep22 == ['awake'] and mir22.viewer_url() == ''
+              and mir22.stats() == {}, str(_keep22))
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+
+        # -- caffeinate for real ---------------------------------------------
+        _caf_dir22 = os.path.join(_tmp22, 'bincaf')
+        _write_fake(_caf_dir22, 'caffeinate', '#!/bin/sh\nsleep 30\n')
+        _path_saved22 = os.environ['PATH']
+        os.environ['PATH'] = _caf_dir22 + os.pathsep + _path_saved22
+        try:
+            _handle22 = mirror._keep_awake('darwin')
+            check("caffeinate is what holds the Mac awake",
+                  _handle22 is not None and _handle22.poll() is None)
+            mirror._stop_awake(_handle22)
+            check("and teardown lets go of it",
+                  _wait_until(lambda: _handle22.poll() is not None, timeout=8),
+                  str(_handle22.poll()))
+        finally:
+            os.environ['PATH'] = _path_saved22
+        check("a platform without caffeinate asserts nothing",
+              mirror._keep_awake('linux') is None
+              and mirror._keep_awake('win32') is None)
+        mirror._stop_awake(None)      # the no-handle case must be inert
+
+        # -- ffmpeg's stderr cannot be allowed to fill up --------------------
+        _noise22 = _write_fake(os.path.join(_tmp22, 'binerr'), 'ffmpeg-noise',
+                               '#!/bin/sh\necho "avfoundation: denied" 1>&2\n'
+                               'echo "incompatible pixel format" 1>&2\n')
+        _proc22 = subprocess.Popen([_noise22], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.PIPE)
+        _tail22 = []
+        mirror._drain_stderr(_proc22, _tail22)
+        check("ffmpeg is read until it closes, and the last lines are kept",
+              _tail22 == ['avfoundation: denied', 'incompatible pixel format'],
+              str(_tail22))
+        _proc22.wait(timeout=5)
+
+        # -- the menu ---------------------------------------------------------
+        class _FakeMirror22(object):
+            def __init__(self):
+                self.stops = 0
+                self.starts = 0
+
+            def is_mirroring(self):
+                return True
+
+            def stop_mirror(self):
+                self.stops += 1
+
+            def start_mirror(self):
+                self.starts += 1
+
+            def viewer_url(self):
+                return 'http://192.0.2.9:5555/browser?token=abc123'
+
+            def stats(self):
+                return {'kind': 'browser', 'clients': 2, 'chunks': 40,
+                        'bytes': 500000, 'drops': 3, 'mbps': 4.2, 'seconds': 65}
+
+        def _menu_texts22(items):
+            texts = []
+            for i in items:
+                texts.append(i.text)
+                texts.extend(_menu_texts22(i.children or []))
+            return texts
+
+        def _find22(items, text):
+            for i in items:
+                if i.text == text:
+                    return i
+                hit = _find22(i.children or [], text)
+                if hit is not None:
+                    return hit
+            return None
+
+        fake22 = _FakeMirror22()
+        mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
+        setting22 = mirror.ScreenMirrorSetting()
+        _saved_renderer_fn22 = setting22._renderer
+        setting22._renderer = lambda: fake22
+        utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'browser')
+        mirror.probe_capture(fake_ffmpeg22, 'darwin', True)
+        _items22 = setting22.build_menu()
+        _labels22 = _menu_texts22(_items22)
+        check("both output targets are offered, and the running one is checked",
+              _find22(_items22, 'Chromecast / Google TV').checked is False
+              and _find22(_items22, '浏览器（打开网址即可看）').checked is True,
+              str(_labels22))
+        check("a browser mirror stops offering Chromecast devices",
+              'Living Room TV · 192.0.2.7' not in _labels22, str(_labels22))
+        check("and offers the viewing address to copy instead",
+              '复制观看地址' in _labels22
+              and 'http://192.0.2.9:5555/browser?token=abc123' in _labels22,
+              str(_labels22))
+        check("all four quality presets are on the menu",
+              sum(1 for t in _menu_texts22(
+                  _find22(_items22, '画质').children or []) if 'Mbps' in t) == 4,
+              str(_labels22))
+        check("the display picker is filled from the cached probe",
+              _find22(_items22, '采集屏幕') is not None
+              and any('Capture screen 1' in t for t in _labels22),
+              str(_labels22))
+        check("a running mirror reports what it is costing",
+              any('已镜像 1:05' in t and '4.2 Mbps' in t and '丢块 3' in t
+                  for t in _labels22), str(_labels22))
+
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+        _items22 = setting22.build_menu()
+        _labels22 = _menu_texts22(_items22)
+        check("the Chromecast target puts the devices back on the menu",
+              _find22(_items22, 'Chromecast / Google TV').checked is True
+              and 'Living Room TV · 192.0.2.7' in _labels22
+              and '重新搜索' in _labels22, str(_labels22))
+        check("a Chromecast mirror has no address to copy",
+              '复制观看地址' not in _labels22, str(_labels22))
+
+        setting22.on_output_clicked(mirror.MenuItem('x', data='browser'))
+        check("switching the output restarts the running pipeline",
+              mirror.output_kind() == 'browser' and fake22.stops == 1
+              and fake22.starts == 1, str(fake22.stops))
+        fake22.stops = fake22.starts = 0
+        setting22.on_output_clicked(mirror.MenuItem('x', data='browser'))
+        check("clicking the output that is already chosen changes nothing",
+              fake22.stops == 0 and fake22.starts == 0)
+
+        mirror._capture_cache[('ffmpeg', 'darwin', True)] = object()
+        setting22.on_cursor_clicked(mirror.MenuItem('显示鼠标指针'))
+        check("the pointer toggle stores the wish and clears the probe cache",
+              mirror.cursor_enabled() is False and mirror._capture_cache == {})
+        mirror._capture_cache[('ffmpeg', 'darwin', False)] = object()
+        setting22.on_cursor_clicked(mirror.MenuItem('显示鼠标指针'))
+        check("clicking the pointer entry again puts it back, and empties the cache",
+              mirror.cursor_enabled() is True and mirror._capture_cache == {})
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Cursor)
+
+        setting22.on_encoder_clicked(mirror.MenuItem('硬件编码'))
+        check("the encoder toggle is only honest about what it can do",
+              mirror.encoder_kind() == ('hardware' if sys.platform == 'darwin'
+                                        else 'software'),
+              str(utils.Setting.get(mirror.SettingProperty.Mirror_Encoder, '')))
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Encoder)
+
+        setting22.on_screen_clicked(mirror.MenuItem('2 · Capture screen 1',
+                                                   data='2'))
+        check("choosing a display stores the index the probe uses",
+              str(utils.Setting.get(mirror.SettingProperty.Mirror_Screen, '')) == '2')
+        setting22.on_screen_clicked(mirror.MenuItem('第一块屏幕（默认）', data=''))
+        check("choosing the default takes the stored value away again",
+              not utils.Setting.has(mirror.SettingProperty.Mirror_Screen))
+
+        _clip22 = types.ModuleType('pyperclip')
+        _copied22 = []
+        _clip22.copy = lambda text: _copied22.append(text)
+        _py22 = sys.modules.get('pyperclip')
+        sys.modules['pyperclip'] = _clip22
+        try:
+            utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'browser')
+            setting22.on_copy_url_clicked(mirror.MenuItem('复制观看地址'))
+            check("the copy entry puts the session address on the clipboard",
+                  _copied22 == ['http://192.0.2.9:5555/browser?token=abc123'],
+                  str(_copied22))
+        finally:
+            if _py22 is not None:
+                sys.modules['pyperclip'] = _py22
+            else:
+                sys.modules.pop('pyperclip', None)
+            utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
+            setting22._renderer = _saved_renderer_fn22
+    finally:
+        if _server22 is not None:
+            try:
+                _server22.shutdown()
+                _server22.server_close()
+            except Exception:
+                pass
+        if _mir22 is not None:
+            _mir22.stop_mirror()
+        cherrypy.engine.unsubscribe('app_notify', _notify22_rec)
+        utils.SETTING_DIR = _saved_dir22
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting22
+        _shutil.rmtree(_tmp22, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the browser target behaves", False,
           "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------

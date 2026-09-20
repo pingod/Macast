@@ -4,10 +4,10 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.3</macast.version>
+# <macast.version>0.4</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN: ffmpeg captures (avfoundation / gdigrab / x11grab), hard-encodes to H.264, a live MPEG-TS stream is served from this machine and LOADed on the TV. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN, or to any browser on the LAN (open a URL -- no app needed on the TV). ffmpeg captures (avfoundation / gdigrab / x11grab), hard-encodes to H.264, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, or fragmented MP4 played in a bundled web page. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, and VideoToolbox hardware encoding.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -15,10 +15,16 @@
 #
 # Implementation notes, because this is a *live* sender (see also
 # cast_bridge.py, which forwards a finished URL):
-#   * the pipeline is  ffmpeg screen capture -> libx264 zerolatency ->
-#     mpegts on stdout -> a tiny HTTP server that broadcasts every chunk to
-#     every connected client. The TV pulls http://<this machine>:<port>/screen.ts
-#     and simply keeps reading;
+#   * the pipeline is  ffmpeg screen capture -> H.264 (libx264 or
+#     VideoToolbox) -> a muxer chosen by the output target -> a tiny HTTP
+#     server that broadcasts every chunk to every connected client. The
+#     Chromecast LOADs http://<this machine>:<port>/stream/<id>.ts; a browser
+#     opens /browser?token=<page token> and feeds the same bytes from
+#     the matching .m4s URL into MSE, falling back to a progressive <video>;
+#   * both public addresses carry a per-session secret: the stream URL is
+#     built from a random id, and /browser requires the matching token --
+#     a live mirror is not something to hand to "any host that can reach
+#     this port" (see the note on _StreamHandler and AGENTS.md 4.7);
 #   * capture is platform dispatched: avfoundation (macOS), gdigrab
 #     (Windows), x11grab (Linux/X11). System audio rides along where a tap
 #     exists: macOS needs a BlackHole device (no released FFmpeg can see
@@ -28,6 +34,10 @@
 #   * slow consumers drop whole chunks rather than blocking the reader --
 #     for a live stream a stale frame is worse than a missing one, and a
 #     blocked stdout pipe would stall the encoder;
+#   * for the browser target a late joiner is replayed the fMP4 init segment
+#     plus a rolling tail, so it can attach mid-stream; the MPEG-TS target is
+#     deliberately *not* replayed, because a TV would then have a backlog to
+#     drain and would sit seconds behind for the rest of the session;
 #   * the Cast sequence is the sender-side one: deviceauth CHALLENGE ->
 #     CONNECT receiver-0 -> LAUNCH(CC1AD845) -> CONNECT <transportId> ->
 #     LOAD with streamType LIVE. Framing is reused from
@@ -43,6 +53,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -51,6 +62,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue, Empty
@@ -69,19 +81,40 @@ logger.setLevel(logging.INFO)
 CAST_PORT = 8009
 SERVICE_TYPE = "_googlecast._tcp.local."
 DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
-STREAM_PATH = "/screen.ts"
+STREAM_PREFIX = "/stream/"
 CHUNK = 4096
 #: How long ffmpeg may survive before its death is blamed on the
 #: Screen Recording permission instead of a genuine mid-stream failure.
 EARLY_DEATH_SECONDS = 5.0
+#: Rolling tail replayed to a late-joining browser viewer. Enough for a
+#: second of 1080p plus the next keyframe, small enough to not matter.
+REPLAY_BYTES = 8 << 20
 
-#: height -> (label, video bitrate)
-QUALITIES = {'720': (720, 5000000), '1080': (1080, 10000000)}
+#: height -> (label, video bitrate). height 0 means "do not scale".
+QUALITIES = {'360': (360, 2500000),
+             '720': (720, 5000000),
+             '1080': (1080, 10000000),
+             'source': (0, 12000000)}
+#: keyframe / fragment cadence in seconds. One per second keeps the browser's
+#: MSE join latency and the TV's seek behaviour both honest.
 FPS = 24
+
+#: output kind -> (menu label, HTTP suffix, Content-Type, muxer args)
+OUTPUTS = {
+    'cast': ('Chromecast / Google TV', 'ts', 'video/mp2t',
+             ['-f', 'mpegts', 'pipe:1']),
+    'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
+                ['-f', 'mp4', '-movflags',
+                 'frag_keyframe+empty_moov+default_base_moof', 'pipe:1']),
+}
+DEFAULT_OUTPUT = 'cast'
+BROWSER_PATH = '/browser'
 
 _devices = []
 _searching = False
 _search_lock = threading.Lock()
+#: cached result of `ffmpeg -encoders`, because the menu must never spawn it
+_hw_encoder_cache = {}
 
 
 def discover(timeout=3.0):
@@ -159,6 +192,14 @@ class SettingProperty(Enum):
     Mirror_Audio_Aggregate = 4
     #: CoreAudio id of the user's real speakers, so「恢复原声音输出」can go back.
     Mirror_Audio_Original = 5
+    #: 'cast' | 'browser' -- see OUTPUTS
+    Mirror_Output = 6
+    #: avfoundation video device index to capture; '' means "first screen".
+    Mirror_Screen = 7
+    #: draw the pointer. On by default; JustStream calls it「显示鼠标指针」.
+    Mirror_Cursor = 8
+    #: 'software' | 'hardware' (h264_videotoolbox, macOS only)
+    Mirror_Encoder = 9
 
 
 # -- ffmpeg ----------------------------------------------------------------
@@ -185,35 +226,69 @@ class _Capture(object):
     """What one probe decided: how to grab this machine's screen, and system
     audio too if a sink for it exists."""
 
-    def __init__(self, label, inputs, audio_map=None):
+    def __init__(self, label, inputs, audio_map=None, screens=None):
         self.label = label        # for the menu / logs
         self.inputs = inputs      # one list of input args per ffmpeg -i
         self.audio_map = audio_map  # '0:a:0' / '1:a:0' / None
+        #: [(avfoundation index, device name)] for the display picker, empty
+        #: where the platform has no list to offer (Windows/Linux).
+        self.screens = screens or []
 
 
 #: probe results are cached per (ffmpeg, platform): probing spawns ffmpeg, and
-#: the menu must never block on it.
+#: the menu must never block on it. The cursor and screen choices live in
+#: `Setting`, so changing one has to clear this cache -- see
+#: invalidate_capture_cache().
 _capture_cache = {}
 
 
-def probe_capture(ffmpeg, platform=None):
-    """Figure out the capture pipeline for this platform; None if impossible.
+def invalidate_capture_cache():
+    _capture_cache.clear()
 
-    `platform` is a test seam; production always means sys.platform.
+
+def cursor_enabled():
+    """Whether to draw the pointer. Default on -- and because Setting.get has
+    side effects, "off" is the only value ever stored for this key."""
+    return Setting.get(SettingProperty.Mirror_Cursor, True) is not False
+
+
+def output_kind():
+    """'cast' | 'browser', validated against OUTPUTS."""
+    kind = str(Setting.get(SettingProperty.Mirror_Output, DEFAULT_OUTPUT)
+               or DEFAULT_OUTPUT)
+    return kind if kind in OUTPUTS else DEFAULT_OUTPUT
+
+
+def encoder_kind():
+    """'software' | 'hardware'; hardware only means anything on macOS."""
+    kind = str(Setting.get(SettingProperty.Mirror_Encoder, 'software')
+               or 'software')
+    if kind != 'hardware' or sys.platform != 'darwin':
+        return 'software'
+    return 'hardware'
+
+
+def probe_capture(ffmpeg, platform=None, cursor=None):
+    """Figure out the capture pipeline for this machine; None if impossible.
+
+    `platform` and `cursor` are test seams; production always means
+    sys.platform and the stored cursor preference.
     """
     platform = platform or sys.platform
-    key = (ffmpeg, platform)
+    if cursor is None:
+        cursor = cursor_enabled()
+    key = (ffmpeg, platform, cursor)
     if key in _capture_cache:
         return _capture_cache[key]
     if platform == 'win32':
         capture = _Capture(
             'Desktop (GDI)',
             [['-f', 'gdigrab', '-framerate', str(FPS),
-              '-draw_mouse', '1', '-i', 'desktop']])
+              '-draw_mouse', '1' if cursor else '0', '-i', 'desktop']])
     elif platform == 'darwin':
-        capture = _probe_avfoundation(ffmpeg)
+        capture = _probe_avfoundation(ffmpeg, cursor=cursor)
     else:
-        capture = _probe_linux(ffmpeg)
+        capture = _probe_linux(ffmpeg, cursor=cursor)
     if capture is not None:
         _capture_cache[key] = capture
     return capture
@@ -247,17 +322,24 @@ def _avfoundation_lists(ffmpeg):
     return _section('Video devices:'), _section('Audio devices:')
 
 
-def _probe_avfoundation(ffmpeg):
+def _probe_avfoundation(ffmpeg, cursor=True):
     videos, audios = _avfoundation_lists(ffmpeg)
-    screen = None
-    for index, name in enumerate(videos):
-        if 'capture screen' in name.lower():
-            screen = index
-            break
-    if screen is None and videos:
-        screen = 0
-    if screen is None:
+    screens = [(index, name) for index, name in enumerate(videos)
+               if 'capture screen' in name.lower()]
+    if not screens and videos:
+        screens = [(0, videos[0])]
+    if not screens:
         return None
+    wanted = str(Setting.get(SettingProperty.Mirror_Screen, '') or '')
+    screen = screens[0][0]
+    if wanted.isdigit():
+        for index, _name in screens:
+            if str(index) == wanted:
+                screen = index
+                break
+        else:
+            logger.warning("screen %s is gone, falling back to %s",
+                           wanted, screen)
     # macOS exposes no system-audio sink to avfoundation (FFmpeg's proposed
     # screencapturekit demuxer was never released); BlackHole is the open
     # source way to make one appear. Absent it, we mirror video only.
@@ -267,13 +349,14 @@ def _probe_avfoundation(ffmpeg):
             blackhole = index
             break
     base = ['-f', 'avfoundation', '-framerate', str(FPS),
-            '-capture_cursor', '1']
+            '-capture_cursor', '1' if cursor else '0']
     if blackhole is None:
         return _Capture('屏幕 (avfoundation)',
-                        [base + ['-i', '{}:none'.format(screen)]])
+                        [base + ['-i', '{}:none'.format(screen)]],
+                        screens=screens)
     return _Capture('屏幕 + 系统声音 (BlackHole)',
                     [base + ['-i', '{}:{}'.format(screen, blackhole)]],
-                    audio_map='0:a:0')
+                    audio_map='0:a:0', screens=screens)
 
 
 def _default_pulse_monitor():
@@ -288,14 +371,15 @@ def _default_pulse_monitor():
     return sink + '.monitor' if sink else None
 
 
-def _probe_linux(ffmpeg):
+def _probe_linux(ffmpeg, cursor=True):
     display = os.environ.get('DISPLAY')
     if not display:
         # x11grab cannot see a Wayland session; there is no ffmpeg-native
         # Wayland capture to fall back to.
         return None
     inputs = [['-f', 'x11grab', '-framerate', str(FPS),
-               '-draw_mouse', '1', '-i', '{}+0,0'.format(display)]]
+               '-draw_mouse', '1' if cursor else '0', '-i',
+               '{}+0,0'.format(display)]]
     monitor = _default_pulse_monitor()
     if monitor:
         inputs.append(['-f', 'pulse', '-i', monitor])
@@ -304,7 +388,44 @@ def _probe_linux(ffmpeg):
     return _Capture('屏幕 (X11)', inputs)
 
 
-def build_ffmpeg_command(ffmpeg, capture, height, bitrate):
+def encoder_args(kind, platform=None):
+    """Video encoder flags. Hardware encoding is opt-in and macOS-only:
+    ffmpeg's h264_videotoolbox is the one tap Apple actually ships, and unlike
+    the Castify reference (which never probes for it and always lands on CPU
+    x264 on a Mac) we ask first -- see has_hardware_encoder()."""
+    if kind == 'hardware' and (platform or sys.platform) == 'darwin':
+        return ['-c:v', 'h264_videotoolbox', '-profile:v', 'high',
+                '-level', '42', '-realtime', '1']
+    return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+            '-profile:v', 'high']
+
+
+def has_hardware_encoder(ffmpeg, platform=None):
+    """Whether this ffmpeg really offers h264_videotoolbox.
+
+    Cached because it spawns ffmpeg, and the answer is only ever consulted
+    from a background thread or the menu's status line. The platform is part
+    of the key: the same binary answers differently under a different OS, and
+    the caller may name one explicitly (tests, and any future cross-check).
+    """
+    key = (ffmpeg, platform or sys.platform)
+    if key in _hw_encoder_cache:
+        return _hw_encoder_cache[key]
+    verdict = False
+    if key[1] == 'darwin':
+        try:
+            proc = subprocess.run([ffmpeg, '-hide_banner', '-encoders'],
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, timeout=10)
+            verdict = b'h264_videotoolbox' in proc.stdout
+        except Exception as e:
+            logger.info("cannot probe the encoders: %s", e)
+    _hw_encoder_cache[key] = verdict
+    return verdict
+
+
+def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
+                         encoder='software'):
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
     for one_input in capture.inputs:
         cmd += one_input
@@ -314,11 +435,12 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate):
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
     else:
         cmd += ['-an']
-    cmd += ['-vf', 'scale=-2:{}'.format(height),
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-            '-profile:v', 'high', '-pix_fmt', 'yuv420p',
-            '-g', str(FPS * 2), '-b:v', str(bitrate),
-            '-f', 'mpegts', 'pipe:1']
+    if height:
+        # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
+        cmd += ['-vf', 'scale=-2:{}'.format(height)]
+    cmd += encoder_args(encoder)
+    cmd += ['-pix_fmt', 'yuv420p', '-g', str(FPS), '-b:v', str(bitrate)]
+    cmd += OUTPUTS[kind][3]
     return cmd
 
 
@@ -711,18 +833,52 @@ def restore_system_audio(report=lambda message: None):
     return False
 
 
-# -- live MPEG-TS HTTP server -----------------------------------------------
+# -- live stream HTTP server ------------------------------------------------
+#
+# One server, one encoder pipe, two consumers:
+#   * a Chromecast LOADs the MPEG-TS URL we hand it;
+#   * a browser opens /browser and feeds the fragmented-MP4 URL into MSE.
+# Both URLs carry a per-session random id. That is deliberate: this port is
+# reachable by every host on the LAN, a live mirror of someone's desktop is
+# not something to hand to "anything that can open a socket", and a TV cannot
+# present a token -- but it can be given a URL it invented nothing about.
 
 class _Broadcaster(object):
     """Fan out encoder output to every connected client; drop for the slow."""
 
-    def __init__(self, maxsize=256):
+    def __init__(self, maxsize=256, ring_bytes=REPLAY_BYTES, init_marker=None):
         self._maxsize = maxsize
+        self._ring_limit = ring_bytes
+        #: bytes of the container header (fMP4: everything before the first
+        #: `moof`). A late joiner needs it or MSE cannot start at all.
+        self._init_marker = init_marker
+        self._init = b''
+        self._init_done = init_marker is None
+        self._ring = deque()
+        self._ring_bytes = 0
         self._subs = set()
         self._lock = threading.Lock()
+        self.chunks = 0
+        self.bytes = 0
+        self.drops = 0
 
-    def subscribe(self):
+    @property
+    def init_segment(self):
+        with self._lock:
+            return self._init if self._init_done else b''
+
+    def subscribe(self, replay=False):
         q = Queue(maxsize=self._maxsize)
+        if replay:
+            if self._init_marker is not None:
+                init = self.init_segment
+                if init:
+                    q.put_nowait(init)      # fresh subscriber, cannot be full
+            for chunk in self.tail():
+                try:
+                    q.put_nowait(chunk)
+                except Exception:
+                    break
         with self._lock:
             self._subs.add(q)
         return q
@@ -731,8 +887,15 @@ class _Broadcaster(object):
         with self._lock:
             self._subs.discard(q)
 
+    def tail(self):
+        with self._lock:
+            return list(self._ring)
+
     def feed(self, chunk):
         with self._lock:
+            self.chunks += 1
+            self.bytes += len(chunk)
+            self._retain(chunk)
             subs = list(self._subs)
         for q in subs:
             try:
@@ -741,8 +904,33 @@ class _Broadcaster(object):
                 try:
                     q.get_nowait()      # live beats lossless: drop the oldest
                     q.put_nowait(chunk)
+                    self.drops += 1
                 except Exception:
                     pass
+
+    def _retain(self, chunk):
+        """Keep the header, then a bounded tail. Called under the lock."""
+        if not self._init_done:
+            self._init += chunk
+            cut = self._init.find(self._init_marker)
+            if cut < 0:
+                if len(self._init) > 1 << 21:
+                    # No marker in 2 MB: not the container we expect. Stop
+                    # hoarding, and let bytes be treated as media from here.
+                    self._init, self._init_done = b'', True
+                # Everything held so far is the header, which replay serves
+                # from `init_segment` -- ringing it too would hand a late joiner
+                # the first fragment twice.
+                return
+            chunk = self._init[cut:]
+            self._init = self._init[:cut]
+            self._init_done = True
+        if not self._ring_limit:
+            return
+        self._ring.append(chunk)
+        self._ring_bytes += len(chunk)
+        while self._ring_bytes > self._ring_limit and len(self._ring) > 1:
+            self._ring_bytes -= len(self._ring.popleft())
 
     def clients(self):
         with self._lock:
@@ -755,14 +943,53 @@ class _StreamHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         logger.debug("stream http: " + fmt % args)
 
-    def do_GET(self):
+    @property
+    def session(self):
+        return self.server.session
+
+    def _not_found(self):
+        self.send_response(404)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def _authorized(self, suffix):
+        """The stream id is the whole credential, so compare it in constant
+        time -- a timing oracle on an 8-byte hex id is not worth the risk."""
+        name = self.path.partition('?')[0].rsplit('/', 1)[-1]
+        try:
+            import hmac
+            return hmac.compare_digest(name, self.session.stream_name(suffix))
+        except Exception:
+            return name == self.session.stream_name(suffix)
+
+    def do_HEAD(self):
+        if self.path.partition('?')[0].startswith(STREAM_PREFIX):
+            self.do_GET(head_only=True)
+        else:
+            self._not_found()
+
+    def do_GET(self, head_only=False):
+        path = self.path.partition('?')[0]
+        if path == BROWSER_PATH:
+            return self._serve_page(head_only)
+        if path.startswith(STREAM_PREFIX):
+            if not self._authorized(self.session.suffix):
+                return self._not_found()
+            return self._serve_stream(head_only)
+        return self._not_found()
+
+    def _serve_stream(self, head_only=False):
         broadcaster = self.server.broadcaster
-        queue = broadcaster.subscribe()
+        queue = broadcaster.subscribe(replay=self.session.replay)
         try:
             self.send_response(200)
-            self.send_header('Content-Type', 'video/mp2t')
+            self.send_header('Content-Type', self.session.content_type)
             self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Accept-Ranges', 'none')
             self.end_headers()
+            if head_only:
+                return
             while True:
                 try:
                     chunk = queue.get(timeout=5.0)
@@ -775,10 +1002,60 @@ class _StreamHandler(BaseHTTPRequestHandler):
         finally:
             broadcaster.unsubscribe(queue)
 
+    def _serve_page(self, head_only=False):
+        import hmac
+        import urllib.parse
+        query = urllib.parse.parse_qs(self.path.partition('?')[2] or '')
+        token = (query.get('token') or [''])[0]
+        if not token or not hmac.compare_digest(token, self.session.page_token):
+            self.send_error(403, 'a token is required')
+            return
+        body = PLAYER_PAGE.replace('@STREAM@', self.session.stream_path()) \
+                          .replace('@CODECS@', self.session.codecs) \
+                          .replace('@TITLE@', self.session.page_title).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
 
-def start_stream_server():
+
+class _Session(object):
+    """What this mirror session looks like to the HTTP server."""
+
+    def __init__(self, kind, has_audio=False, title='Macast'):
+        self.kind = kind if kind in OUTPUTS else DEFAULT_OUTPUT
+        self.label, self.suffix, self.content_type, _args = OUTPUTS[self.kind]
+        #: A browser can only attach to a live fragmented stream at a
+        #: keyframe, so replaying the header plus a short tail is what makes
+        #: "open the URL a second time" work. A TV is never replayed: it would
+        #: inherit a backlog and sit seconds behind for the rest of the session.
+        self.replay = self.kind == 'browser'
+        self.init_marker = b'moof' if self.kind == 'browser' else None
+        self.stream_id = secrets.token_hex(8)
+        #: Both credentials are per-session secrets and both die with the
+        #: mirror. Deliberately *not* the app's stable management token: that
+        #: one also opens the whole management API (AGENTS.md 4.7), so pasting
+        #: a viewing URL would leak a credential that stays valid afterwards.
+        self.page_token = secrets.token_hex(8)
+        self.codecs = 'avc1.640028,mp4a.40.2' if has_audio else 'avc1.640028'
+        self.page_title = title
+
+    def stream_name(self, suffix=None):
+        return '{}.{}'.format(self.stream_id, suffix or self.suffix)
+
+    def stream_path(self):
+        return '{}{}'.format(STREAM_PREFIX, self.stream_name())
+
+
+def start_stream_server(session, broadcaster=None):
     server = ThreadingHTTPServer(('0.0.0.0', 0), _StreamHandler)
-    server.broadcaster = _Broadcaster()
+    server.session = session
+    server.broadcaster = broadcaster or _Broadcaster(
+        init_marker=session.init_marker)
     server.daemon_threads = True
     # A client that vanished mid-stream stays in queue.get for seconds;
     # server_close must not wait for it.
@@ -786,6 +1063,102 @@ def start_stream_server():
     threading.Thread(target=server.serve_forever, daemon=True,
                      name="SCREEN_MIRROR_HTTP").start()
     return server
+
+
+def stream_url(server):
+    return 'http://{}:{}{}'.format(advertise_host(), server.server_address[1],
+                                   server.session.stream_path())
+
+
+def page_url(server):
+    return 'http://{}:{}{}?token={}'.format(
+        advertise_host(), server.server_address[1], BROWSER_PATH,
+        server.session.page_token)
+
+
+# -- the browser player page ------------------------------------------------
+#
+# Served by us, so the only substitutions are our own strings: a path, a codec
+# label and a title. Nothing a sender controls reaches it (unlike the log
+# panel's story in AGENTS.md 4.10), and it is textContent-only anyway.
+
+PLAYER_PAGE = """<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>@TITLE@ 屏幕镜像</title>
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#ccc;
+   font:14px/1.5 -apple-system,system-ui,sans-serif}
+ video{width:100%;height:100%;object-fit:contain;background:#000}
+ #bar{position:fixed;left:0;right:0;top:0;display:flex;gap:8px;
+   align-items:center;padding:6px 10px;background:#0008;color:#ddd;
+   font-size:12px;opacity:.25;transition:opacity .3s}
+ body:hover #bar{opacity:1}
+ button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
+   padding:4px 10px;font:inherit}
+ #err{color:#f88;display:none}
+</style></head><body>
+<div id="bar"><span id="st">连接中…</span><span id="err"></span>
+ <span style="flex:1"></span>
+ <button id="snd">开声音</button><button id="full">全屏</button></div>
+<video id="v" autoplay playsinline muted></video>
+<script>
+var STREAM='@STREAM@',CODECS='@CODECS@',LIVE_EDGE=3,STALL_MS=8000;
+var v=document.getElementById('v'),st=document.getElementById('st'),
+    err=document.getElementById('err');
+function say(t){st.textContent=t}
+function fail(t){err.style.display='inline';err.textContent=' · '+t}
+function lock(){if(navigator.wakeLock)navigator.wakeLock.request('screen')
+  .catch(function(){})}
+function unmute(){v.muted=false;document.getElementById('snd').style.display=
+  'none'}
+document.getElementById('snd').onclick=unmute;
+document.getElementById('full').onclick=function(){
+  (v.requestFullscreen||v.webkitRequestFullscreen||function(){}).call(v)};
+// Autoplay policy: start muted, then any real gesture is consent to unmute.
+['pointerdown','keydown','touchstart'].forEach(function(e){
+  addEventListener(e,unmute,{once:true})});
+function tail(){ // keep the buffer trimmed to the live edge
+  try{var b=v.buffered;if(b.length&&v.duration){
+    var end=b.end(b.length-1);
+    if(end-v.currentTime>LIVE_EDGE)v.currentTime=end-LIVE_EDGE}}catch(x){}}
+function progressive(){ // MSE missing or wedged: let the element stream it
+  say('回退到渐进式播放');v.src=STREAM+'#t=0.001';v.play().catch(function(){});
+  v.ontimeout=function(){location.reload()}}
+function mse(){
+  if(!window.MediaSource||!MediaSource.isTypeSupported){return progressive()}
+  var ms=new MediaSource();
+  ms.addEventListener('sourceopen',run,{once:true});
+  v.src=URL.createObjectURL(ms);
+  var timer=setTimeout(function(){ // sourceopen sometimes never fires on
+    if(ms.readyState!=='open')progressive()},1500);
+  function run(){
+    clearTimeout(timer);var sb;
+    try{sb=ms.addSourceBuffer(CODECS)}catch(e){return progressive()}
+    sb.mode='sequence';var queue=[],last=Date.now();
+    say('正在镜像');lock();
+    fetch(STREAM).then(function(r){
+      if(!r.ok||!r.body)throw new Error('http '+r.status);
+      var rd=r.body.getReader();
+      function pull(){return rd.read().then(function(x){
+        if(!x.done){last=Date.now();
+          if(sb.updating)queue.push(x.value);else sb.appendBuffer(x.value);
+          return pull()}
+        try{if(ms.readyState==='open')ms.endOfStream()}catch(e){}})}
+        return pull()}).catch(function(e){fail('断开：'+e.message);
+        setTimeout(function(){location.reload()},2000)});
+    sb.addEventListener('updateend',function(){
+      last=Date.now();
+      if(queue.length)sb.appendBuffer(queue.shift());else tail()});
+    setInterval(function(){ // watchdogs: stall, or a decoder that ate everything
+      if(Date.now()-last>STALL_MS){fail('画面卡住，重连');location.reload()}
+    },2000);
+    v.play().catch(function(){})
+  }
+}
+mse();
+</script></body></html>
+"""
 
 
 def advertise_host():
@@ -938,6 +1311,7 @@ class ScreenMirrorRenderer(Renderer):
         self._sender = None
         self._proc = None
         self._server = None
+        self._awake = None
         self._generation = 0
         self._mirroring = False
         self._started_at = 0.0
@@ -968,6 +1342,36 @@ class ScreenMirrorRenderer(Renderer):
     def playing_url(self):
         return self._url
 
+    def viewer_url(self):
+        """The /browser address for the running session, or ''."""
+        with self._lock:
+            server = self._server
+        if server is None or server.session.kind != 'browser':
+            return ''
+        return page_url(server)
+
+    def stats(self):
+        """What the mirror is doing right now, for the menu and status page.
+
+        The pump is the only thing that counts, so this costs nothing to ask --
+        but it also means the numbers are only as fresh as the last chunk.
+        """
+        with self._lock:
+            server = self._server
+        if server is None:
+            return {}
+        bc = server.broadcaster
+        seconds = max(1.0, time.time() - self._started_at) \
+            if self._started_at else 1.0
+        return {'kind': server.session.kind,
+                'clients': bc.clients(),
+                'chunks': bc.chunks,
+                'bytes': bc.bytes,
+                'drops': bc.drops,
+                'mbps': round(bc.bytes * 8 / 1000000.0 / seconds, 2),
+                'seconds': int(time.time() - self._started_at)
+                if self._started_at else 0}
+
     # -- Renderer API ----------------------------------------------------------
 
     def start(self):
@@ -981,6 +1385,20 @@ class ScreenMirrorRenderer(Renderer):
         phone deserves the same bridge behaviour cast_bridge gives.
         """
         if not url:
+            return
+        if url == self._url:
+            # The same address pushed twice is a client retry, not a request to
+            # tear the stream down and start it again.
+            logger.info('ignoring a repeat push of %s', url)
+            return
+        if output_kind() != 'cast' and self.target()[0] is None:
+            # Nothing to bridge to: a browser-only user has no Chromecast, and
+            # mpv is not ours to drive here. Say so instead of silently
+            # swallowing the push (or killing a running mirror for it).
+            cherrypy.engine.publish(
+                'app_notify', 'Macast',
+                'Screen Mirror 无法播放推送的网址：把「输出目标」切到 '
+                'Chromecast 做中继，或换回默认渲染器播放', sound=False)
             return
         self._url = url
         with self._lock:
@@ -1040,11 +1458,15 @@ class ScreenMirrorRenderer(Renderer):
     # -- internals ---------------------------------------------------------------
 
     def _mirror(self, generation):
-        host, port, name = self.target()
-        if host is None:
-            self._fail('还没有选择投屏目标：在菜单栏的「Target」里选一台 Chromecast',
-                       generation)
-            return
+        kind = output_kind()
+        host = port = None
+        name = ''
+        if kind == 'cast':
+            host, port, name = self.target()
+            if host is None:
+                self._fail('还没有选择投屏目标：在菜单栏的「输出目标 → Chromecast」'
+                           '里选一台设备，或改用「浏览器」目标', generation)
+                return
         ffmpeg = find_ffmpeg()
         if ffmpeg is None:
             self._fail('找不到 ffmpeg：{}后重试'.format(
@@ -1057,11 +1479,19 @@ class ScreenMirrorRenderer(Renderer):
             self._fail(capture_unavailable_hint(), generation)
             return
         height, bitrate = self.quality()
+        encoder = encoder_kind()
+        if encoder == 'hardware' and not has_hardware_encoder(ffmpeg):
+            logger.warning('h264_videotoolbox is unavailable; using libx264')
+            encoder = 'software'
         first_bytes = threading.Event()
+        tail = deque(maxlen=20)
+        session = _Session(kind, has_audio=bool(capture.audio_map),
+                           title=socket.gethostname() or 'Macast')
         try:
-            server = start_stream_server()
+            server = start_stream_server(session)
             proc = subprocess.Popen(
-                build_ffmpeg_command(ffmpeg, capture, height, bitrate),
+                build_ffmpeg_command(ffmpeg, capture, height, bitrate,
+                                     kind=kind, encoder=encoder),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 env=_clean_env())
@@ -1075,45 +1505,59 @@ class ScreenMirrorRenderer(Renderer):
             threading.Thread(target=_pump, args=(proc, server.broadcaster,
                                                  self, generation, first_bytes),
                              daemon=True, name="SCREEN_MIRROR_PUMP").start()
-            url = 'http://{}:{}{}'.format(advertise_host(),
-                                          server.server_address[1], STREAM_PATH)
+            threading.Thread(target=_drain_stderr, args=(proc, tail),
+                             daemon=True, name="SCREEN_MIRROR_LOG").start()
+            url = stream_url(server)
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
             first_bytes.wait(timeout=3.0)
             if proc.poll() is not None or generation != self._generation:
                 raise _Aborted()
-            sender = _CastSender(host, port)
-            sender.connect()
-            sender.launch()
-            sender.load(url, content_type='video/mp2t', live=True)
+            sender = None
+            if kind == 'cast':
+                sender = _CastSender(host, port)
+                sender.connect()
+                sender.launch()
+                sender.load(url, content_type=session.content_type, live=True)
         except _Aborted:
             self._teardown()
             return
         except Exception as e:
             self._teardown()
-            self._fail('镜像到 {}（{}:{}）启动失败：{}'.format(name, host, port, e),
+            detail = str(e).strip() or ' '.join(list(tail)[-3:])
+            target_label = name if kind == 'cast' else '浏览器'
+            self._fail('镜像到 {} 启动失败：{}'.format(target_label, detail),
                        generation)
             return
+        # Spawned outside the lock: a menu click that aborts this session must
+        # not queue behind an OS call.
+        awake = _keep_awake()
         with self._lock:
             if generation != self._generation:
                 self._teardown()
+                _stop_awake(awake)
                 return
             self._sender = sender
+            self._awake = awake
             self._mirroring = True
             self._started_at = time.time()
             self._url = url
         self.set_state_transport('PLAYING')
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '已开始镜像到 {}'.format(name))
-        logger.info('mirroring screen to %s via %s', name, url)
+        if kind == 'browser':
+            message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
+        else:
+            message = '已开始镜像到 {}'.format(name)
+        cherrypy.engine.publish('app_notify', 'Macast', message)
+        logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
+                    url)
 
     def _cast_url(self, url, generation):
         """Bridge path: play a finished URL on the device, no capture."""
         host, port, name = self.target()
         if host is None:
-            self._fail('还没有选择投屏目标：在菜单栏的「Target」里选一台 Chromecast',
-                       generation)
+            self._fail('还没有选择投屏目标：在菜单栏的「输出目标 → Chromecast」'
+                       '里选一台设备', generation)
             return
         try:
             sender = _CastSender(host, port)
@@ -1163,9 +1607,12 @@ class ScreenMirrorRenderer(Renderer):
     def _teardown(self):
         with self._lock:
             sender, proc, server = self._sender, self._proc, self._server
+            awake = self._awake
             self._sender = self._proc = self._server = None
+            self._awake = None
             self._mirroring = False
         _cleanup(sender, proc, server)
+        _stop_awake(awake)
 
 
 def _cleanup(sender, proc, server):
@@ -1213,6 +1660,64 @@ def _clean_env():
     return env
 
 
+def _keep_awake(platform=None):
+    """Return a handle on a sleep assertion, or None where we have no way.
+
+    JustStream's most common complaint is the stream dying when the Mac falls
+    asleep mid-presentation; `caffeinate -dimsu` is the stock answer (display,
+    idle, system and disk assertions) and needs no entitlement. The handle is
+    handed back so teardown can drop the assertion instead of leaving the
+    machine awake forever.
+    """
+    if (platform or sys.platform) != 'darwin':
+        return None
+    try:
+        return subprocess.Popen(['caffeinate', '-dimsu'],
+                               stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    except Exception as e:
+        # Not having caffeinate is no reason to refuse the mirror.
+        logger.info('cannot keep the machine awake: %s', e)
+        return None
+
+
+def _stop_awake(handle):
+    if handle is None:
+        return
+    try:
+        if handle.poll() is None:
+            handle.terminate()
+            handle.wait(timeout=3)
+    except Exception:
+        pass
+
+
+def _drain_stderr(proc, tail):
+    """Move ffmpeg's stderr into a bounded buffer, forever.
+
+    An unread stderr pipe fills up and ffmpeg blocks inside the encoder -- which
+    looks exactly like a dead mirror, with a healthy process and a stalled
+    stream. The last few lines are kept because they are the only explanation a
+    startup failure ever gives.
+    """
+    try:
+        for raw in iter(proc.stderr.readline, b''):
+            line = raw.decode('utf-8', 'replace').rstrip()
+            if not line:
+                continue
+            tail.append(line)
+            logger.debug('ffmpeg: %s', line)
+    except Exception as e:
+        logger.debug('stderr drain ended: %s', e)
+    finally:
+        try:
+            proc.stderr.close()
+        except Exception:
+            pass
+
+
+
 class ScreenMirrorSetting(RendererSetting):
 
     def _renderer(self):
@@ -1221,38 +1726,35 @@ class ScreenMirrorSetting(RendererSetting):
         return renderer if isinstance(renderer, ScreenMirrorRenderer) else None
 
     def build_menu(self):
-        if not _devices:
+        kind = output_kind()
+        if kind == 'cast' and not _devices:
             start_search()
-        current = Setting.get(SettingProperty.Mirror_Target, '') or ''
-        children = []
-        for name, host, port in list(_devices):
-            target = '{}:{}'.format(host, port)
-            children.append(MenuItem('{} · {}'.format(name, host),
-                                     self.on_target_clicked,
-                                     checked=(target == current),
-                                     data=(name, target)))
-        if not children:
-            children.append(MenuItem('搜索中…再展开一次菜单' if _searching
-                                     else '没有发现 Chromecast', enabled=False))
-        children.append(MenuItem('重新搜索', self.on_refresh))
-
         renderer = self._renderer()
         mirroring = bool(renderer and renderer.is_mirroring())
-        quality = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
-        quality_children = [
-            MenuItem('720p（默认）', self.on_quality_clicked,
-                     checked=(quality == '720'), data='720'),
-            MenuItem('1080p（更吃带宽）', self.on_quality_clicked,
-                     checked=(quality == '1080'), data='1080'),
-        ]
+
         items = [
-            MenuItem('Screen Mirror v0.3', enabled=False),
+            MenuItem('Screen Mirror v0.4', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
-            MenuItem('Target', children=children),
-            MenuItem('画质', children=quality_children),
+            MenuItem('输出目标', children=self._output_children(kind)),
         ]
+        if kind == 'browser' and mirroring:
+            items.append(MenuItem('复制观看地址', self.on_copy_url_clicked))
+            items.append(MenuItem(renderer.viewer_url(), enabled=False))
+        items.append(MenuItem('画质', children=self._quality_children()))
+        screen_children = self._screen_children()
+        if screen_children:
+            items.append(MenuItem('采集屏幕', children=screen_children))
+        #: The pointer flag reaches ffmpeg through the capture probe, so the
+        #: menu shows the stored wish, not what the running stream does --
+        #: changing it restarts the mirror (see on_cursor_clicked).
+        items.append(MenuItem('显示鼠标指针', self.on_cursor_clicked,
+                              checked=cursor_enabled()))
         if sys.platform == 'darwin':
+            items.append(MenuItem(
+                '硬件编码（VideoToolbox）', self.on_encoder_clicked,
+                checked=str(Setting.get(SettingProperty.Mirror_Encoder,
+                                        'software')) == 'hardware'))
             audio_children = [MenuItem(self._audio_line(), enabled=False)]
             if audio_setup_needed():
                 audio_children.append(
@@ -1265,7 +1767,74 @@ class ScreenMirrorSetting(RendererSetting):
             items.append(MenuItem('系统声音', children=audio_children))
         else:
             items.append(MenuItem(self._audio_line()))
+        if mirroring:
+            items.append(MenuItem(self._status_line(renderer), enabled=False))
         return items
+
+    def _output_children(self, kind):
+        children = [MenuItem(OUTPUTS[key][0], self.on_output_clicked,
+                             checked=(kind == key), data=key)
+                    for key in ('cast', 'browser')]
+        if kind == 'cast':
+            children.append(MenuItem('— — —', enabled=False))
+            children.extend(self._device_children())
+        return children
+
+    def _device_children(self):
+        """The discovered Chromecasts, as the v0.3 menu had them."""
+        current = Setting.get(SettingProperty.Mirror_Target, '') or ''
+        children = []
+        for name, host, port in list(_devices):
+            target = '{}:{}'.format(host, port)
+            children.append(MenuItem('{} · {}'.format(name, host),
+                                     self.on_target_clicked,
+                                     checked=(target == current),
+                                     data=(name, target)))
+        if not children:
+            children.append(MenuItem('搜索中…再展开一次菜单' if _searching
+                                     else '没有发现 Chromecast', enabled=False))
+        children.append(MenuItem('重新搜索', self.on_refresh))
+        return children
+
+    def _quality_children(self):
+        quality = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
+        labels = {'360': '360p · 2.5 Mbps（省带宽）',
+                  '720': '720p · 5 Mbps（默认）',
+                  '1080': '1080p · 10 Mbps（更吃带宽）',
+                  'source': '原始分辨率 · 12 Mbps（不缩放）'}
+        return [MenuItem(labels[key], self.on_quality_clicked,
+                         checked=(quality == key), data=key)
+                for key in ('360', '720', '1080', 'source')]
+
+    def _screen_children(self):
+        """One entry per display the last probe saw; empty when it has no list.
+
+        The list comes from the cache instead of a fresh probe because
+        build_menu runs on the UI thread and probing spawns ffmpeg.
+        """
+        capture = next(iter(_capture_cache.values()), None)
+        if capture is None or not capture.screens:
+            return []
+        wanted = str(Setting.get(SettingProperty.Mirror_Screen, '') or '')
+        children = [MenuItem('第一块屏幕（默认）', self.on_screen_clicked,
+                             checked=(wanted == ''), data='')]
+        for index, name in capture.screens:
+            children.append(MenuItem('{} · {}'.format(index, name),
+                                     self.on_screen_clicked,
+                                     checked=(wanted == str(index)),
+                                     data=str(index)))
+        return children
+
+    @staticmethod
+    def _status_line(renderer):
+        """Live throughput, so 'it is fine, it is just 200 kbps' is visible."""
+        stats = renderer.stats()
+        if not stats:
+            return '状态：正在启动…'
+        minutes, seconds = divmod(stats['seconds'], 60)
+        return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
+            minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
+
 
     @staticmethod
     def _audio_line():
@@ -1317,6 +1886,66 @@ class ScreenMirrorSetting(RendererSetting):
         Setting.set(SettingProperty.Mirror_Target_Name, name)
         cherrypy.engine.publish('app_notify', 'Macast',
                                 '镜像目标：{}'.format(name), sound=False)
+        self._restart()
+
+    def on_output_clicked(self, item):
+        """Switching target switches the muxer too, so the running pipeline is
+        already wrong the moment the setting changes -- restart it."""
+        if item.data == output_kind():
+            return
+        Setting.set(SettingProperty.Mirror_Output, item.data)
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                '输出目标：{}'.format(OUTPUTS[item.data][0]),
+                                sound=False)
+        self._restart()
+
+    def on_screen_clicked(self, item):
+        if item.data:
+            Setting.set(SettingProperty.Mirror_Screen, item.data)
+        else:
+            Setting.unset(SettingProperty.Mirror_Screen)
+        # The choice is baked into the probe result, not read per frame.
+        invalidate_capture_cache()
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                '采集屏幕：{}（下次镜像生效）'.format(item.text),
+                                sound=False)
+
+    def on_cursor_clicked(self, item):
+        want = not cursor_enabled()
+        Setting.set(SettingProperty.Mirror_Cursor, want)
+        invalidate_capture_cache()
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                '鼠标指针：{}（下次镜像生效）'.format(
+                                    '显示' if want else '不显示'), sound=False)
+
+    def on_encoder_clicked(self, item):
+        """Only store the wish. Probing `ffmpeg -encoders` here would spawn a
+        process on the UI thread; _mirror() falls back to libx264, with a
+        warning, when the tap is not actually there."""
+        want = 'software' if encoder_kind() == 'hardware' else 'hardware'
+        Setting.set(SettingProperty.Mirror_Encoder, want)
+        cherrypy.engine.publish('app_notify', 'Macast',
+                                '编码器：{}（下次镜像生效）'.format(
+                                    'VideoToolbox 硬件编码' if want == 'hardware'
+                                    else '软件编码'), sound=False)
+
+    def on_copy_url_clicked(self, item):
+        renderer = self._renderer()
+        url = renderer.viewer_url() if renderer is not None else ''
+        if not url:
+            cherrypy.engine.publish('app_notify', 'Macast',
+                                    '现在没有镜像到浏览器', sound=False)
+            return
+        try:
+            import pyperclip
+            pyperclip.copy(url)
+            message = '观看地址已复制：{}'.format(url)
+        except Exception as e:
+            logger.info('cannot reach the clipboard: %s', e)
+            message = '观看地址：{}'.format(url)
+        cherrypy.engine.publish('app_notify', 'Macast', message, sound=False)
+
+    def _restart(self):
         renderer = self._renderer()
         if renderer is not None and renderer.is_mirroring():
             renderer.stop_mirror()

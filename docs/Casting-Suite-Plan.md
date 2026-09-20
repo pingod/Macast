@@ -238,7 +238,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | 阶段 | 交付 | 关键技术点 | 新增用例 | 风险 |
 |---|---|---|---|---|
 | **P0** | 本文档 + 台账 | 取证与许可判定 | — | 无 |
-| **P1** | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质预设（Auto/720/1080/4K）；光标开关；`caffeinate` 防休眠；菜单/状态页显示 fps·码率·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + 令牌门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22** | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
+| **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
 | **P2** | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的 MPEG-PS HTTP（<2³¹、精确有界探测、PS padding）、64 KiB 绝对偏移环形缓冲+阻塞式按字节重连、stdlib SSDP/SOAP、`GetTransportInfo` 看门狗、5 档 profile、`transferMode/contentFeatures` 头 | **Part 23** | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端 + Kodi/upmpdcli 当替身；真实兼容矩阵必须标注「未验证」 |
 | **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**纯 Python AES-128-CTR**（无新依赖）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/在途 12 帧；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
 | **P4** | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗 | **Part 25** | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有 |
@@ -264,8 +264,8 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 
 | 阶段 | 状态 | commit | 验证 |
 |---|---|---|---|
-| P0 规划 | ✅ 文档落地 | 待填 | 文档型改动 |
-| P1 浏览器目标 + 采集预设 | ⏳ | | |
+| P0 规划 | ✅ 文档落地 | `ed429fe` | 文档型改动 |
+| P1 浏览器目标 + 采集预设 | ✅ 已交付 | 本次提交 | `pyflakes` 干净；`verify_cast_airplay.py` **582 条全绿**（Part 21 修到 v0.4 契约、新增 Part 22 62 条）。A/B 举证：把 `screen_mirror.py` 换回 HEAD 版重跑 → 套件 510/514，Part 22 立刻 `TypeError: build_ffmpeg_command() got an unexpected keyword argument 'kind'` |
 | P2 DLNA 电视目标 | ⏳ | | |
 | P3 Cast Streaming | ⏳ | | |
 | P4 本地文件/播放列表 | ⏳ | | |
