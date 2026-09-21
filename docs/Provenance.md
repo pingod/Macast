@@ -6,7 +6,7 @@
 > `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
 > 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
 
-<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=30745 -->
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=30751 -->
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
@@ -66,19 +66,19 @@
 
 | 域 | 上游行 | 本 fork 行 | 文件数 | ours 占比 |
 |---|---:|---:|---:|---:|
-| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5493 | 17 | 64.1% |
+| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5496 | 17 | 64.1% |
 | 内置插件 `macast/plugins/**`（vendored） | 2885 | 0 | 9 | 0.0% |
 | mpv 渲染器 `macast_renderer/**` | 573 | 102 | 2 | 15.1% |
-| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 212 | 4 | 64.6% |
+| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 215 | 4 | 64.9% |
 | 在线插件 `plugins/*.py` | 0 | 9881 | 9 | 100.0% |
 | 工具与验证 `scripts/*.py` | 0 | 15057 | 11 | 100.0% |
-| **合计** | **6650** | **30745** | **52** | **82.2%** |
+| **合计** | **6650** | **30751** | **52** | **82.2%** |
 
 两个读数要点：
 
-- **占比 82.1% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10685 行
+- **占比 82.2% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10685 行
   （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 70.0%；只看**运行时真正加载的**代码
-  （核心接收端 + mpv 渲染器）是 **60.5%**，也就是说应用本体还有约 3649 行是上游的。
+  （核心接收端 + mpv 渲染器）是 60.5%，也就是说应用本体还有约 3649 行是上游的。
 - **"看声明头"会把这件事估反**：按文件头里有没有 `by xfangfang` 数，会得出"21623 行是上游的"
   ——因为上游的头贴在了一堆**代码早被我们重写干净**的文件上（`macast/discovery.py`、
   `protocol_cast.py`、`protocol_group.py`、`protocol_airplay.py`、`scripts/verify_cast_airplay.py`
@@ -92,10 +92,8 @@
 
 | 文件 | 状态 | 上游行 | 我们的行 | 备注 |
 |---|---|---:|---:|---|
-| 文件 | 状态 | 上游行 | 我们的行 | 备注 |
-|---|---|---:|---:|---|
 | `macast/protocol.py` | mixed | 1001 | 974 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
-| `macast/macast.py` | mixed | 454 | 906 | 菜单栏与插件热插拔 |
+| `macast/macast.py` | mixed | 454 | 909 | 菜单栏与插件热插拔 |
 | `macast/utils.py` | mixed | 401 | 289 | `Setting` 与环境准备 |
 | `macast/gui.py` | mixed | 363 | 23 | 几乎全是上游的跨平台菜单层 |
 | `macast/ssdp.py` | mixed | 278 | 138 | **三层归属**，见 §4 |
@@ -111,9 +109,9 @@
 | `macast/plugins/renderer/pi_fm.py` | vendored | 159 | 0 | 同上 |
 | `macast/renderer.py` | upstream | 212 | 0 | 一行都没动过 ⇒ 队列第 1 位 |
 | `macast/__init__.py` | upstream | 8 | 0 | |
-| `setup.py` | mixed | 42 | 34 | 署名已按量测补齐 |
-| `setup_py2app.py` | mixed | 7 | 17 | 署名已按量测补齐 |
-| `hook-pystray.py` | mixed | 14 | 1 | 署名已按量测补齐 |
+| `setup.py` | mixed | 42 | 35 | 署名已按量测补齐 |
+| `setup_py2app.py` | mixed | 7 | 18 | 署名已按量测补齐 |
+| `hook-pystray.py` | mixed | 14 | 2 | 署名已按量测补齐 |
 | `macast_renderer/__init__.py` | upstream | 0 | 0 | 空文件：没有任何表达作者身份的代码，两种声明都不需要 |
 
 ## 4. 第三层：`macast/ssdp.py` 里的 MIT 血统
