@@ -36,6 +36,8 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
   指回上游旧文件的「可更新」角标）。地址只写在 `macast/plugin_repo.py` 一处，由 `/api?query=plugin-info`
   下发；浏览器按 `raw.githubusercontent.com` → `ghproxy` 代理 → `cdn.jsdelivr.net` 顺序回退，
   全都不通时只显示本机插件。插件安装地址**固定到 commit SHA**，所以 CDN 缓存多旧都不会给错文件。
+  **注意**：仓库保持私有，所以这份索引对匿名用户拉不到 —— 设置页的「可安装」卡片在别的机器上
+  只是展示，安装要走手动（见下方「普通用户」）。
 - **9 个在线插件**（设置页 → 插件 → 可安装，装完即生效）：yt-dlp 下载/边下边播、外部播放器
   （VLC / MPC-BE / mpv.net）、角落置顶小窗（含实验性壁纸模式）、自动化钩子（投屏/暂停/停止时
   执行你的命令）、Chromecast 中继（把收到的投屏转投给电视）、**屏幕镜像**（把这台机器的画面
@@ -120,12 +122,15 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
      **一次只能选一个**（菜单栏切换）。
      yt-dlp / ffmpeg / shairport-sync / uxplay / 外部播放器都要你自己先装；设置页拉不到索引时只会显示
      本机插件，不影响使用。
-     > ⚠ **在线「安装」目前对别人不可用**：本仓库是**私有**的，而 jsDelivr / raw 读不到私有仓库，
-     > Macast 下载插件时也不带凭据 —— 卡片能显示、点安装会失败（少数条目还在回 200，那是 CDN
-     > 在仓库还可读时缓存的副本，会逐条过期）。在把仓库改成公开（或把 `plugins/` 发布到公开仓库）
-     > 之前，请把它当**源码目录**：拿 `.py` 用设置页的「从网址安装」贴一个可达的地址，
-     > 或直接放进 `~/Library/Application Support/Macast/renderer/`。
-     > 想知道自己这台机器上到底通不通：`python3 scripts/check_index_reachability.py`。
+     > ⚠ **在线「安装」对别人不可用，这是已定的产品状态不是待修的 bug**：本仓库**保持私有**
+     > （所有者决定，2026-09-21），而 jsDelivr / raw 读不到私有仓库，Macast 下载插件时也不带
+     > 凭据 —— 卡片能显示、点安装会失败（少数条目还在回 200，那是 CDN 在仓库还可读时缓存的
+     > 副本，会逐条过期）。所以 `plugins/` 请当作**源码目录**，官方承诺只有手动安装这一条路：
+     > 拿 `.py` 用设置页的「从网址安装」贴一个可达的地址，
+     > 或直接放进 `~/Library/Application Support/Macast/renderer/`（协议插件放 `protocol/`），
+     > 放好即生效、无需重启。
+     > 想知道自己这台机器上到底通不通：`python3 scripts/check_index_reachability.py`
+     > （私有状态下稳定报 `INDEX_PRIVATE` = 预期结果）。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **程序员**  

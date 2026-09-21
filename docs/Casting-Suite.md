@@ -25,13 +25,16 @@
 在菜单栏「选择播放器」里切换。`AirPlay Audio (RAOP)` 与 `AirPlay Screen Mirror`
 是协议类插件，可与任意渲染器共存。
 
-**装插件**：菜单栏 → 设置（打开 <http://127.0.0.1:58880/>）→「插件」页 → 点卡片上的「安装」。
-⚠ **在线索引目前只对仓库所有者可用**：`pingod/Macast` 现在是**私有仓库**，
-别人（以及未登录的浏览器）打不开那 9 条安装链接。查证与三条出路见
-[`../plugins/README.md`](../plugins/README.md) 顶部，或跑
-`python scripts/check_index_reachability.py`。在此之前请走「从网址安装」
-（粘贴一个能访问到的 `.py` 直链）或直接把 `.py` 放进
-`~/Library/Application Support/Macast/renderer/`（协议类放 `protocol/`），**放完即热生效，不用重启**。
+**装插件**：**只有手动安装这一条路**（2026-09-21 所有者已定：`pingod/Macast` 继续私有，
+不再讨论"改公开 / 另立公开仓库"）。未登录的浏览器和 Macast 的匿名下载都读不到私有仓库，
+所以设置页「插件」页里的「可安装」卡片对别人只是展示，点下去会失败。走这两条：
+
+1. 设置页（<http://127.0.0.1:58880/>）→「插件」→ 在输入框里贴一个**你这边可达的** `.py` 直链 →「从网址安装」；
+2. 或直接把 `.py` 放进 `~/Library/Application Support/Macast/renderer/`（协议类放 `protocol/`）——
+   **放完即热生效，不用重启**（手工放进的目录需要有个 `__init__.py`，装过任一插件就有了）。
+
+想确认自己这台机器上到底通不通：`python scripts/check_index_reachability.py`，
+私有状态下稳定报 `INDEX_PRIVATE`（退出码 2）**是预期信号，不是待修的 bug**。
 
 ---
 

@@ -4,29 +4,36 @@
 它是设置页「插件 → 可安装」分组的数据源：一个静态的 `info.json`，由设置页在
 浏览器里直接拉取；提供安装的插件 `.py` 也放这里。
 
-## ⚠ 前提：这个仓库必须是**公开**的，否则别人装不上
+## ⚠ 这个目录是**源码**，不是安装源：仓库保持私有（所有者已定）
 
 索引与安装 URL 都指向本仓库（`pingod/Macast`），而 jsDelivr 和 raw **都读不到私有仓库**，
-Macast 下载插件时又不带任何凭据 —— 于是卡片区照常渲染、点「安装」才失败，
-症状长得像网络问题。**当前 `pingod/Macast` 是私有的**（`gh api repos/pingod/Macast --jq .private`
-→ `true`；匿名打 `api.github.com/repos/pingod/Macast` 回 404，而同一请求打公开的上游
-`xfangfang/Macast` 回 200）。实测（2026-09-21）：9 条固定链接里只有 5 条还回 200，
-那是 CDN 在仓库还可读时缓存下来的副本，会**逐条**过期；v0.8 的 Screen Mirror、RAOP 0.2、
-AirPlay Screen Mirror 三条已经拉不到了。
+Macast 下载插件时又不带任何凭据 —— 于是设置页的卡片区照常渲染、点「安装」才失败，
+症状长得像网络问题。实测（2026-09-21）：`gh api repos/pingod/Macast --jq .private` → `true`；
+匿名打 `api.github.com/repos/pingod/Macast` 回 404，而同一请求打公开的上游
+`xfangfang/Macast` 回 200；9 条固定链接里只有 5 条还回 200，那是 CDN 在仓库还可读时
+缓存下来的副本，会**逐条**过期 —— v0.8 的 Screen Mirror、RAOP 0.2、AirPlay Screen Mirror
+三条已经拉不到了。
 
-本地验证套件对此**完全看不见**：Part 5c 用 `git show <sha>:plugins/<file>` 只证明
-「条目 == 它所固定的内容」，这件事在本地永远成立、也永远是真的。可达性要问外面：
+**2026-09-21 的所有者决定：仓库继续私有，官方承诺只有「手动安装」这一条路。**
+（另两条出路 —— 把仓库改公开、或把 `plugins/` 挪到一个公开仓库 —— **都不做**，见本节末。）
+
+- **手动安装的两条路**：① 设置页 →「插件」→「从网址安装」，贴一个**你这边可达**的 `.py`
+  地址（自己有仓库读权限的人可以直接用 GitHub 的 raw 链接）；② 把 `.py` 直接放进
+  `~/Library/Application Support/Macast/renderer/`（协议插件放 `protocol/`），
+  菜单重载插件或重启即生效。两条都是热生效、不需要重装 Macast。
+- **因此这个 README 与下面所有条目都要按「源码在这里」来读**：`info.json` 仍然是
+  索引格式的唯一样板，Part 5c 仍然逐字校验条目与 `.py` 顶部清单一致 —— 它证明的是
+  「条目 == 它所固定的内容」，**不证明任何人拉得到**。可达性另有一个脚本问外面：
 
 ```shell
 env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/3
 ```
 
-三条出路，按代价排：**① 把仓库改成公开**（一行设置，代价是这个 fork 的全部历史对外可见 ——
-**这是所有者的决定，别代做**）；**② 把 `plugins/` 发布到一个公开仓库**，
-只改 `macast/plugin_repo.py::REPO` 一处（索引地址的唯一来源，见 AGENTS.md §4.6）；
-**③ 保持私有并明说只能手动安装** —— 设置页「从网址安装」贴一个可达的 URL，
-或者把 `.py` 直接放进 `~/Library/Application Support/Macast/renderer/`（重启或
-在菜单里重载插件即生效）。下面所有条目在 ①/② 落实之前都应理解为「源码在这里，安装另有其路」。
+它在私有状态下会稳定报 `INDEX_PRIVATE`（**故意不算成功**：CDN 缓存还剩几条时不能让人
+误读成"索引好了"），退出码 2 是给 cron/CI 用的信号，不是待修的 bug。
+
+- **不要为了"让安装能用"去改仓库可见性或另立公开仓库**：那是所有者已经回答过的问题
+  （AGENTS.md §4.6 / §5）。要改只能由用户提出。
 
 ## 为什么不放上游那 6 个插件
 

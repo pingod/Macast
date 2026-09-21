@@ -10071,6 +10071,164 @@ except Exception as _e32:
 
 
 # --------------------------------------------------------------------------
+# Part 33: the end-to-end smoke test stays isolated and stays truthful
+#
+# `scripts/e2e_smoke.py` is the only check that runs the *real* app, which
+# makes it the only check that can hurt the user: it starts a second Macast on
+# this machine. Everything that keeps it harmless is a string in that file --
+# the settings keys that put it on another port, the appdirs patch that keeps
+# its files out of the real config dir, the protocol list that keeps it off
+# 8009. A rename on the app side (SettingProperty, a proxy variable, an `/api`
+# query name) turns one of those into a no-op **silently**, and the smoke test
+# still prints all green because the app happily falls back to defaults. So
+# each of those couplings gets asserted here, against the app's own source.
+# The script is never imported -- these are text checks, exactly like Part 32.
+# --------------------------------------------------------------------------
+print("\n=== Part 33: the end-to-end smoke test's couplings to the app ===")
+try:
+    import re as _re33
+
+    def _read33(*parts):
+        with open(os.path.join(REPO, *parts), encoding="utf-8") as _fh33:
+            return _fh33.read()
+
+    _smoke33 = _read33("scripts", "e2e_smoke.py")
+    _utils33 = _read33("macast", "utils.py")
+    _proto33 = _read33("macast", "protocol.py")
+    _mgr33 = _read33("macast", "macast.py")
+
+    def _between(source, start, end):
+        """The text after `start` up to the next `end`; '' when `start` is gone.
+
+        Deliberately returns '' rather than the tail when `end` is missing: a
+        moved function should make the check below fail loudly, not read the
+        rest of the file as its body.
+        """
+        at = source.find(start)
+        if at < 0:
+            return ''
+        rest = source[at + len(start):]
+        stop = rest.find(end)
+        return rest if stop < 0 else rest[:stop]
+
+    _seed33 = _between(_smoke33, 'def seed_settings(', '\ndef ')
+    _boot33 = _between(_smoke33, "BOOTSTRAP = '''", "'''")
+
+    # -- 1. the settings it seeds are settings the app still reads ----------
+    _keys33 = set(_re33.findall(r"'([A-Za-z_][A-Za-z0-9_]*)':", _seed33))
+    _props33 = set(_re33.findall(
+        r"^    ([A-Za-z_][A-Za-z0-9_]*) = \d+$",
+        _between(_utils33, 'class SettingProperty(Enum):', '\n\n\n'),
+        _re33.M))
+    check("the smoke test seeds keys that really are settings",
+          bool(_keys33) and _keys33 <= _props33,
+          "seeded=%s unknown=%s" % (sorted(_keys33), sorted(_keys33 - _props33)))
+    # ApplicationPort is the one that matters most: if the app stopped reading
+    # it, the child falls back to 58880 and fights the user's own instance --
+    # and the smoke test still passes, because whatever is on 58880 answers.
+    check("and it pins the port through the key the app actually reads",
+          "'ApplicationPort': PORT" in _seed33
+          and _re33.search(r"ApplicationPort = \d+", _utils33) is not None
+          and _re33.search(r"ApplicationPort, DEFAULT_PORT", _utils33) is not None,
+          "a renamed or unread ApplicationPort puts the smoke instance on the "
+          "user's port")
+    check("the smoke port is not a port the app owns",
+          'PORT = 58999' in _smoke33
+          and '58999' not in _utils33 and '58999' not in _proto33,
+          "app DEFAULT_PORT=%s" % _re33.findall(r"DEFAULT_PORT = (\d+)", _utils33))
+    _enabled33 = _between(_seed33, "'Macast_Protocols': [", "]")
+    check("it enables DLNA only, so it cannot take 8009 or the HTTPS channel",
+          'DLNA Protocol' in _enabled33
+          and 'Chromecast' not in _enabled33 and 'AirPlay' not in _enabled33
+          and 'Https_Enabled' not in _keys33,
+          "Macast_Protocols=[%s]" % _enabled33.strip())
+    check("the friendly name it asserts on is the one it seeds",
+          "'DLNA_FriendlyName': FRIENDLY" in _seed33
+          and "FRIENDLY = 'Macast E2E Smoke'" in _smoke33
+          and _smoke33.count('FRIENDLY') >= 4,
+          "a literal in one place and a constant in the other would prove nothing")
+
+    # -- 2. the isolation patch has to run before the app imports -----------
+    check("the child patches appdirs before it imports macast",
+          0 < _boot33.find('appdirs.user_config_dir') < _boot33.find('runpy')
+          and "run_name='__main__'" in _boot33,
+          "SETTING_DIR is computed at import time (AGENTS.md 4.9); patching "
+          "later would write into the user's real config dir")
+    check("the smoke test itself never imports macast",
+          _re33.search(r"^\s*(?:import macast\b|from macast)", _smoke33, _re33.M)
+          is None,
+          "an in-process import resolves SETTING_DIR to the real one before the "
+          "child is even started")
+    check("nothing in it writes settings",
+          'Setting.set(' not in _smoke33 and 'Setting.save(' not in _smoke33,
+          "AGENTS.md 10: verification must not change real configuration")
+
+    # -- 3. the proxy list has to keep up with the app ----------------------
+    _strip33 = set(_re33.findall(r"'([A-Za-z_]+)'",
+                                 _between(_smoke33, 'PROXY_VARS = (', ')')))
+    _app_proxy33 = set(_re33.findall(
+        r"'([A-Za-z_]+)'",
+        _between(_utils33, 'PROXY_ENV_VARS = (', ')')))
+    check("it strips every proxy variable the app strips from the player",
+          bool(_app_proxy33) and _app_proxy33 <= _strip33,
+          "app=%s smoke=%s" % (sorted(_app_proxy33), sorted(_strip33)))
+
+    # -- 4. the /api surface it depends on still exists ---------------------
+    _asked33 = set(_re33.findall(r"api\('([a-z-]+)'", _smoke33))
+    _asked33 |= set(_re33.findall(r"[?&]query=([a-z-]+)", _smoke33))
+    _served33 = set(_re33.findall(r"query == '([a-z-]+)'", _proto33))
+    check("every /api query it asks is one the server answers",
+          bool(_asked33) and _asked33 <= _served33,
+          "asks=%s unanswered=%s" % (sorted(_asked33),
+                                     sorted(_asked33 - _served33)))
+    _status_body33 = _between(_proto33, 'def get_status(self):',
+                              "return {'server'")
+    _read33 = set(_re33.findall(r"server\.get\('([a-z_]+)'\)", _smoke33))
+    _built33 = set(_re33.findall(r"'([a-z_]+)':", _status_body33))
+    check("the status fields it reads are the ones get_status builds",
+          bool(_read33) and bool(_built33) and _read33 <= _built33,
+          "reads=%s missing=%s" % (sorted(_read33), sorted(_read33 - _built33)))
+    check("the GET cast entry point it exercises still demands the token",
+          "if not self._token_present()" in _proto33
+          and "token=%s" in _smoke33,
+          "AGENTS.md 4.7: a drive-by page must not be able to start playback, "
+          "even from loopback")
+
+    # -- 5. how it installs plugins mirrors how the app does ----------------
+    # Matched inside the copy function, not anywhere in the file: the word
+    # __init__.py also appears in the comment that explains why it is needed,
+    # and a mutant that deletes the call must not keep passing on that.
+    _place33 = _between(_smoke33, 'def install_online_plugins(', '\ndef ')
+    check("it recreates the plugin directories the loader expects",
+          _re33.search(r"open\(os\.path\.join\(\w+, '__init__\.py'\)", _place33)
+          is not None
+          and "os.path.join(temp_dir, kind)" in _place33
+          and "'__init__.py'" in _mgr33,
+          "MacastPluginManager.create_plugin_dir writes an __init__.py, so a "
+          "hand-copied plugin without one is not importable")
+
+    # -- 6. it reports honestly ---------------------------------------------
+    check("it keeps the conformance script's PASS/FAIL/SKIP/INFO convention",
+          all(word in _smoke33 for word in ("'PASS'", "'FAIL'", "'SKIP'",
+                                            "'INFO'")),
+          "a check this machine cannot do is SKIPPED, never silently passed "
+          "(scripts/cast_conformance.py)")
+    check("its playback check is opt-in and skipped otherwise",
+          "def playback_round(" in _smoke33 and "--play" in _smoke33
+          and "skip('playback" in _smoke33,
+          "it opens a window and needs ffmpeg, so the default run must say so "
+          "rather than pass")
+    check("and its exit code is driven by failures, not by having finished",
+          _re33.search(r"return 1 if failed else 0", _smoke33) is not None,
+          "otherwise cron/CI could never tell")
+except Exception as _e33:
+    import traceback
+    traceback.print_exc()
+    check("the smoke test's couplings are checkable", False,
+          "{}: {}".format(type(_e33).__name__, _e33))
+
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 

@@ -28,13 +28,15 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 1090/1090；个别用例按时间门控，总数会 ±2）
+# 2) 回归验证（当前 1106/1106；个别用例按时间门控，总数会 ±2）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
 > 加新功能/修 bug 时**同时补用例**。这个仓库的验证脚本是唯一能防回退的东西。
 > 验证套件把网络全部打桩，所以它**抓不到"真实发送端栈不认账"这类问题**——
 > 那类问题要跑 `scripts/cast_conformance.py`（见 §6）。
+> 同理它抓不到"应用根本起不来"：套件从不启动 `Macast.py`。跑真应用的是
+> `scripts/e2e_smoke.py`（见 §6），它会在本机拉起**第二个** Macast 约 30 秒。
 
 ## 3. 代码地图
 
@@ -121,6 +123,14 @@ docs/                     见 §7
 - **CherryPy 工作线程改 AppKit 菜单不安全**：走 `App.call_on_main_thread()`。
 - **多实例会把端口写歪**：旧实例占着 58880 时起新实例，端口回退会把 `ApplicationPort`
   改成随机值并重置 USN。起新实例前先杀干净（`lsof -nP -iTCP:8009 -sTCP:LISTEN -t`）。
+- **SIGINT 杀得掉菜单栏 Macast，SIGTERM 杀不掉**（2026-09-21 实测，三次跑里三次一致）。
+  Cocoa 事件循环不理会 `SIGTERM`，`kill <pid>` 之后进程照常监听 58880/8009。所以 §4.2 上面那条
+  "起新实例前先杀干净"**必须是 `kill -2`**（或走菜单），`scripts/e2e_smoke.py` 的信号升级顺序
+  也因此是 SIGINT → SIGTERM → SIGKILL 而不是 SIGTERM 优先。附带一条更烦的：**信号退出跳过
+  `MPVRenderer.stop()` 的收尾**，空闲的 mpv 会留在场上（三次跑里两次如此，本机另有 5 个
+  `ppid=1`、活了 1–3 天的 mpv 佐证）——被反复重启的 Macast 会**攒播放器**。清理用
+  `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` + `pgrep -f <ipc socket path>`，`ps` 在这台机器的
+  CLI 沙箱里不可用（见 §5）。
 - **`mpv --http-proxy=` 不能替代摘环境变量**，ffmpeg 的 HTTP 层仍然读 `http_proxy`。
 - **假命令行工具的输出，必须是真工具在这台机器上的逐字输出**。`screen_mirror` 的采集探测要问
   `ffmpeg -f avfoundation -list_devices true -i ""` 有哪些设备，而那段解析是按一个**从未存在过的
@@ -227,13 +237,19 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - 仓库坐标与索引地址只在 **`macast/plugin_repo.py`**（`pingod/Macast` →
   `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
-- **前提：`plugin_repo.REPO` 必须是一个公开仓库，否则整个索引只对别人是坏的。**
+- **前提：本仓库是**私有**的，所以在线索引对别人是坏的 —— 而这件事已经是决定，不是待办。**
   jsDelivr 与 raw 都读不到私有仓库，而下载插件时 Macast 不带凭据 —— 卡片照常渲染、
-  「安装」才失败。本 fork 目前是**私有**的（判据与逐条实测结果见 §5 相应条目：
-  9 条固定链接已有 4 条 404，剩下 5 条是 CDN 在仓库还可读时缓存的副本，会逐个掉光）。
+  「安装」才失败。判据与逐条实测结果见 §5 相应条目（9 条固定链接已有 4 条 404，
+  剩下 5 条是 CDN 在仓库还可读时缓存的副本，会逐个掉光）。
   Part 5c 的 `git show <sha>:plugins/<file>` 只证明「条目 == 所指内容」，**不证明可达**，
-  两者不要混。想让别人装得上：仓库改公开 / 把 `plugins/` 发布到公开仓库并改 `REPO` /
-  或者在文档里明说只能手动安装。**改可见性要用户决定。**
+  两者不要混。
+  **2026-09-21 用户选定：保持私有，官方只承诺手动安装**（设置页「从网址安装」/
+  把 `.py` 放进配置目录的 `renderer/`、`protocol/`）。所以：
+  ① **不要再提"改公开 / 另立公开仓库"**，那是已经回答过的问题；
+  ② 索引、`plugins/README.md`、`docs/Casting-Suite.md`、设置页文案都必须把「这里只有源码」
+  说在前面，别让人把安装失败当网络问题排半天；
+  ③ `scripts/check_index_reachability.py` 在私有状态下稳定报 `INDEX_PRIVATE`
+  （退出码 2）—— **这是预期信号，不是待修的 bug**，也正因为如此它不能被当成"成功"。
   `scripts/selfcheck.py` 的「online plugin index」段把这三问都替用户跑一遍
   （GitHub 匿名 + 公开上游对照组 + jsDelivr 元数据 API + 逐条固定链接）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
@@ -534,9 +550,10 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
   `raw.githubusercontent.com` 在这台机器上是 `000`（只有这个 host 被挡），**这正是当初把
   404 读成"沙箱不通"的原因** —— 判 Reachability 要用上面那三条带**公开对照组**的探针，
   或者直接跑 `scripts/selfcheck.py` 的「=== online plugin index ===」段。
-  要恢复安装能力只有三条路：把仓库改成公开 / 把 `plugins/` 发布到一个公开仓库并把
-  `macast/plugin_repo.py::REPO` 指过去 / 明说只能手动安装（「从网址安装」或把 .py 放进
-  `~/Library/Application Support/Macast/renderer/`）。**改仓库可见性是用户的决定，不要代做。**
+  **已经定了（2026-09-21）：保持私有，官方只承诺手动安装** —— 「从网址安装」贴一个你那边
+  可达的 `.py`，或者把 `.py` 放进 `~/Library/Application Support/Macast/renderer/`
+  （协议插件放 `protocol/`），热生效。**不要再提"改公开 / 另立公开仓库"**，那是已经回答
+  过的两个选项；要改只能用户提出（详见 §4.6 末）。
   推送仍然走 `git push git@github.com:pingod/Macast.git main`，推完
   `git update-ref refs/remotes/origin/main <sha>` 让本地 origin 对上。
 - **WorkBuddy/CLI 沙箱**：`PYTHONPATH` 被注入 shim，`mkdir(exist_ok=True)` 会抛
@@ -547,8 +564,9 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（1083 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）|
+| `verify_cast_airplay.py` | **主验证套件**（1106 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）+ **端到端冒烟脚本与应用的耦合**（Part 33：`e2e_smoke.py` 是唯一跑真应用的检查，而它的隔离性全靠**字符串**——端口的设置键名、appdirs 打桩、只开 DLNA 的协议表、代理变量名单、它问的 `/api?query=` 键名、`get_status` 的 server 键名。应用侧改个名就会让这些**静默失效**，冒烟照样全绿。所以逐条拿应用源码比对这些字符串，并守住" BOOTSTRAP 里 `import macast` 之前先打桩""不出现 `Setting.set(`""退出码由失败数决定"。这一 Part 是纯文本检查，从不 import 那个脚本）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
+| `e2e_smoke.py` | **唯一跑真应用的检查**（33 条）：用临时配置目录 + 错开的端口（58999，只开 DLNA）在**本机拉起第二个 Macast**，走完发现→设置页→API→SSDP，可选走播放。**代价要明说：那 ~30 秒里局域网内的 DLNA 电视会短暂看到第二个设备**（`Macast E2E Smoke`）。隔离手法是 `appdirs.user_config_dir` 在 `import macast` **之前**打桩（§4.9 那条），种子设置直接写 JSON（绝不 `Setting.set`），所以它不动用户配置、不杀他的实例；跑完自己验一遍"真实配置目录的摘要前后一致"。它导不了 `macast`（自己就是启动者），因此对应用的耦合全是字符串——那些字符串由 Part 33 守着。`--play` 才做真正的播放回环（自己找 ffmpeg、生成 12 秒测试片、起一个支持 Range 的小 HTTP 服务、经带令牌的 GET 入口投出去、要求进度真的在动 + 日志里有 `video-reconfig`）；`--keep` 保留临时目录。**它是端到端冒烟，不是套件的替代**：跑套件仍然不需要它，跑它之前要确认用户不在演示 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装。**发送端插件那一半（§「sender plugins」段）**：ffprobe 在不在、`-encoders` 里有没有 libx264 / h264_videotoolbox / mpeg2video / ac3（**这四个各自对应一条会静默失效的链路**）、有没有 libass（没有 ⇒ 字幕只能走 WebVTT）、avfoundation 到底列没列出屏幕（**这一条就是 v0.1–v0.7 那个解析 bug 想骗过去的问题**）、系统音频采集口（mac 看 HAL 里的 BlackHole 驱动、Linux 问 `pactl` 要 sink monitor）、转码临时目录剩余空间、以及**局域网里到底有没有东西可投**（mDNS browse `_googlecast._tcp` + 一次 SSDP `MediaRenderer` 探测）。它**只读**设置（直接读 JSON 文本，不碰 `Setting`），所以跑它不会改用户配置。Part 32 守着它和插件的一致性 |
 | `check_index_reachability.py` | 把 selfcheck「online plugin index」那段**离仓**跑一遍：不带 GitHub 凭据问三件事（本仓库是否匿名可见 + 公开上游对照组 + jsDelivr 元数据 API），再逐条问 `plugins/info.json` 的固定链接到底服不服务，输出 `INDEX_PRIVATE` / `INDEX_OK` / `INCONCLUSIVE` 之一 + 逐条状态表 + 退出码（0 全部可装，2 有死链，3 判不出）。`--json` 给 CI 用，`--url-only` 只回答单个 URL。为什么单独一个脚本：这是**发版后必做的那一步**（§8）——本地套件全绿只证明条目 == 所指内容，不证明别人拉得到，而私有仓库上的 CDN 缓存会**逐条过期**，没人碰它也会坏 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
@@ -640,7 +658,8 @@ CI 会用同名文件**替换** release 里的产物。用 digest 对比确认�
 | AirPlay 屏幕镜像（这台 Mac 当接收端） | 核心未实现，但在线插件 `plugins/airplay_mirror.py` 可监督 **uxplay** 接收 iPhone / 另一台 Mac 的镜像（见 §4.8）。**旧结论「需要 FairPlay 解密，不打算做」是过时的**：AirPlay 2 Legacy 的镜像流是 **AES-128-CTR**，密钥从 pair-setup/verify 协商出的材料推出，uxplay 已实现配对（`/pair-setup` ed25519，密钥落 `~/.uxplay.pem`），**没有任何需要破解的东西**。真正的代价是 macOS 既没有 Homebrew formula 也没有官方二进制，得用户自己编译；Apple 哪天砍掉 Legacy 会**静默失效**。一期让 uxplay 自己开窗渲染，`-vrtp → mpv` 统一渲染留在二期 |
 | DRM 内容 | **不可能支持**（受保护 app 镜像出来本来就是黑屏） |
 | 插件 | 支持启用/停用/卸载/安装（**热生效，不重启**）；卸载进 `.trash/` 可恢复 |
-| 在线插件目录 | `plugins/` 下 9 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）、屏幕镜像（三平台 → Chromecast、**没有 Google 栈的老电视（DLNA，伪装成文件，五档兼容档位 + 档位自动回退）**、**或任意浏览器打开一个网址**；Chromecast 有**两条通道**：兼容的 LOAD/mpegts 与**实验性 Cast Streaming 低延迟**（不走 HTTP/LOAD，设备拒绝就自动回落；纯 Python 加密 ⇒ 上限 4.5 Mbps、暂无声音、**未经真电视验证**）；画质四档 + 多显示器 + 指针开关 + macOS VideoToolbox；系统音频 mac 有**一键辅助安装 BlackHole**（v0.7：进度页 + 指名失败步骤 + 残留记录/未重载 coreaudiod 两类根因）、Linux 走 pulse monitor、Windows 仅画面）、**本地文件投屏（磁盘上的文件/文件夹/播放列表 → Chromecast 或 DLNA 电视：能原生解码就按字节直供（Range/206，远端自己暂停拖动），否则 ffmpeg 边播边转（会增长的临时文件）；音轨选择 + 音画同步偏移 + 字幕（Cast 走 WebVTT、转码走 libass 烧制）；自动连播、被抢占后看门狗重投（最多 3 次）、停止发 QUIT_APP、只投系统声音的音频档）**、**AirPlay 镜像接收（监督 uxplay，让 iPhone 把屏幕镜像到这台 Mac；uxplay 要用户自己编译）** |
+| 在线插件目录 | `plugins/` 下 9 个：yt-dlp 下载/边下边播、外部播放器、小窗+壁纸、自动化钩子、Chromecast 中继、AirPlay 音频（RAOP）、屏幕镜像（三平台 → Chromecast、**没有 Google 栈的老电视（DLNA，伪装成文件，五档兼容档位 + 档位自动回退）**、**或任意浏览器打开一个网址**；Chromecast 有**两条通道**：兼容的 LOAD/mpegts 与**实验性 Cast Streaming 低延迟**（不走 HTTP/LOAD，设备拒绝就自动回落；纯 Python 加密 ⇒ 上限 4.5 Mbps、暂无声音、**未经真电视验证**）；画质四档 + 多显示器 + 指针开关 + macOS VideoToolbox；系统音频 mac 有**一键辅助安装 BlackHole**（v0.7：进度页 + 指名失败步骤 + 残留记录/未重载 coreaudiod 两类根因）、Linux 走 pulse monitor、Windows 仅画面）、**本地文件投屏（磁盘上的文件/文件夹/播放列表 → Chromecast 或 DLNA 电视：能原生解码就按字节直供（Range/206，远端自己暂停拖动），否则 ffmpeg 边播边转（会增长的临时文件）；音轨选择 + 音画同步偏移 + 字幕（Cast 走 WebVTT、转码走 libass 烧制）；自动连播、被抢占后看门狗重投（最多 3 次）、停止发 QUIT_APP、只投系统声音的音频档）**、**AirPlay 镜像接收（监督 uxplay，让 iPhone 把屏幕镜像到这台 Mac；uxplay 要用户自己编译）**。**安装只有手动这一条路**（§4.6：仓库保持私有，设置页的「可安装」卡片在别人机器上拉不到索引）|
+| 端到端回归 | `scripts/e2e_smoke.py`（33 条，唯一跑真应用的检查）—— 但它会在本机起第二个 Macast 约 30 秒，局域网电视会短暂看到 `Macast E2E Smoke`，**所以不进套件、只在发版前手动跑** |
 | 网页投屏入口 | `GET /api?query=cast&url=<绝对地址>&token=<令牌>`（脚本 / 快捷指令 / 书签，绕开 DLNA 发现）；令牌常驻并显示在设置页 |
 
 ## 10. 与用户协作的约定（这个仓库的历史教训）

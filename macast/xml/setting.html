@@ -233,10 +233,18 @@
                 </div>
             </div>
             <p v-if="loading" class="plugin-loading">正在读取插件列表…</p>
-            <!-- 本仓库的 plugins/ 目录当前是空的（插件都内置了），"索引为空"是
-                 正常状态，不该当错误报；只有真的拉不到索引才提示。 -->
+            <!-- 「索引为空」是合法状态（本目录早期就是这样），只有**真的拉不到**才提示。
+                 措辞要老实：插件源码在这个仓库的 plugins/ 目录里，而仓库不是公开的，
+                 所以没有凭据的下载注定拿不到 —— 与其让人以为是网络问题，
+                 不如直接把两条手动安装的路写在脸上（AGENTS.md §4.6 末）。
+                 这里不许出现任何仓库/镜像 URL（Part 5c 守着），地址一律由后端下发。 -->
             <p v-else-if="repo_failed" class="plugin-loading">
-                在线插件索引暂时不可达，下面只列出本机已有的插件。
+                在线插件索引拉不到：插件源码所在的仓库不是公开仓库，匿名下载拿不到它
+                （CDN 里剩下的旧缓存也会逐条过期）。下面只列出本机已有的插件。
+                <br>安装请走手动的两条路：① 在上方输入框里贴一个你这边可达的
+                <span class="uri">.py</span> 地址；② 或把 <span class="uri">.py</span>
+                直接放进配置目录的 <span class="uri">renderer/</span>
+                （协议插件放 <span class="uri">protocol/</span>），放好即生效，无需重启。
             </p>
             <div class="mirror-row">
                 <el-switch v-model="github_mirror" :disabled="mirror_saving"

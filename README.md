@@ -67,11 +67,20 @@ After opening this app, a small icon will appear in the **menubar** / **taskbar*
 - **For advanced users**  
   1. The renderers that used to need a download — **IINA, Web, Live, PotPlayer, PIFMRDS**, plus the **NVA** protocol — now ship **inside** the app. Enable, disable or uninstall them on the settings page, no restart needed.  
   Anything still offered as an installable plugin lives in [plugins/](plugins/) — currently
-  eight of them: an yt-dlp downloader, an external-player renderer, a floating-window renderer,
+  nine of them: an yt-dlp downloader, an external-player renderer, a floating-window renderer,
   automation hooks, a Chromecast bridge, RAOP (AirPlay audio) supervision, a three-platform
-  **Screen Mirror** (Chromecast / DLNA television / any browser) and a **Local File Caster**
+  **Screen Mirror** (Chromecast / DLNA television / any browser), a **Local File Caster**
   (play a file or playlist from this disk on the TV: byte-exact serving when the set can decode
-  it, ffmpeg transcoding when it cannot).
+  it, ffmpeg transcoding when it cannot) and an **AirPlay Screen Mirror** receiver (supervises
+  uxplay, so an iPhone can mirror onto this Mac; uxplay is yours to build).
+  **Read that directory as source, not as an install feed**: this repository is private (a
+  standing decision, 2026-09-21), while jsDelivr and raw cannot serve a private repo and Macast
+  downloads plugins without any credentials — so the cards render fine and "Install" fails,
+  which looks like a network problem but isn't. Install manually instead: paste a `.py` URL you
+  can actually reach into "Install from URL", or drop the file into
+  `~/Library/Application Support/Macast/renderer/` (protocol plugins go in `protocol/`). Both
+  take effect without a restart. `python3 scripts/check_index_reachability.py` reporting
+  `INDEX_PRIVATE` on this repo is the expected answer, not something to fix.
   2. You can modify the shortcut keys or configuration of the default mpv player by yourself, see: [#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **For developer**  
