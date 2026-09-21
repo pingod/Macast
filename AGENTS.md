@@ -494,6 +494,12 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
   `accept()`。要区分就真的做一次 TLS 握手。
 - **环境里有代理会让本地网络测试假失败**：
   `env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY <cmd>`。
+- **GitHub 的 HTTPS 出口在这台机器的 CLI 沙箱里不通，SSH 才通**：摘掉代理之后
+  `api.github.com`、`cdn.jsdelivr.net` 仍然回 **404**（连已经在用的旧固定 SHA 链接也 404），
+  `raw.githubusercontent.com` 是 `000`。所以"验证插件索引条目"只能靠 Part 5c 的
+  `git show <sha>:plugins/<file>`（本地、真绿）；**别把那个 404 读成"URL 指错了提交"**，
+  也别据此判断"用户拉不到"——推送本身走 `git push git@github.com:pingod/Macast.git main`，
+  推完 `git update-ref refs/remotes/origin/main <sha>` 让本地 origin 对上。
 - **WorkBuddy/CLI 沙箱**：`PYTHONPATH` 被注入 shim，`mkdir(exist_ok=True)` 会抛
   `PermissionError: EEXIST`；`ps` 不可用。一律 `env -u PYTHONPATH`，用 `lsof`/`pgrep` 代替 `ps`。
 
