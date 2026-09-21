@@ -15,6 +15,7 @@ import gettext
 import importlib
 
 from .utils import SettingProperty, SETTING_DIR, notify_error, format_class_name
+from . import logsplit
 from . import plugin_repo
 # This fork is distributed from pingod/Macast; the "check for updates" feature
 # must query that repo, not the upstream xfangfang/Macast.
@@ -308,14 +309,21 @@ class MacastPlugin:
             module = _import_plugin_module(f'{RENDERER_DIR}.{base_name}')
             logger.debug("Loaded renderer %s from %s", self.renderer, base_name)
             self.plugin_class = getattr(module, self.renderer, None)
+            # The 模块设置 panel asks the module for its SettingProperty enum;
+            # without this the card was always empty for file plugins.
+            self.module = module
         elif hasattr(self, 'protocol'):
             self.plugin_type = 'protocol'
             module = _import_plugin_module(f'{PROTOCOL_DIR}.{base_name}')
             logger.debug("Loaded protocol %s from %s", self.protocol, base_name)
             self.plugin_class = getattr(module, self.protocol, None)
+            self.module = module
         else:
             logger.error(f"Cannot find any plugin in {base_name}")
             return
+        # A plugin's own log goes to logs/<Logger>.log, not into macast.log --
+        # a 30 fps mirror would bury the core lines (see macast/logsplit.py).
+        logsplit.claim_from_module(module)
 
 
 class MacastPluginManager:
@@ -766,6 +774,7 @@ class MacastPluginManager:
                     logger.error("Bundled %s plugin %s exports no plugin class",
                                  kind, entry)
                     continue
+                logsplit.claim_from_module(module)
             plugins.append(MacastPlugin(
                 None, title,
                 platform=platform,

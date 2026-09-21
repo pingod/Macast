@@ -4,7 +4,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.6</macast.version>
+# <macast.version>0.7</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
@@ -951,35 +951,138 @@ def _has_blackhole(ffmpeg):
     return any('blackhole' in name.lower() for name in _device_uids(ffmpeg))
 
 
-def _download_blackhole():
-    """Official pkg to a temp file, sha256-verified. Returns the path."""
-    import hashlib
-    import tempfile
+def blackhole_pkg_pair():
+    """(url, sha256, source) — the cask API first, the pinned pair as fallback.
 
+    The source string belongs on the progress page: "为什么下的是这个版本"
+    deserves an answer when the answer is "拉不到 Homebrew 的公告，用了内置的".
+    """
     import requests
-    url, expected = BLACKHOLE_PKG_URL, BLACKHOLE_PKG_SHA256
     try:
         meta = requests.get(BLACKHOLE_CASK_API, timeout=10).content
-        url, expected = blackhole_pkg_source(meta)
     except Exception as e:
         logger.info('cask API unavailable (%s), using the pinned pkg', e)
-    path = os.path.join(tempfile.mkdtemp(prefix='macast-blackhole-'),
-                        'BlackHole2ch.pkg')
-    digest = hashlib.sha256()
+        return BLACKHOLE_PKG_URL, BLACKHOLE_PKG_SHA256, '内置钉住版本（cask API 不可达）'
+    url, sha = blackhole_pkg_source(meta)
+    if (url, sha) == (BLACKHOLE_PKG_URL, BLACKHOLE_PKG_SHA256):
+        return url, sha, 'Homebrew cask API（与钉住版本一致）'
+    return url, sha, 'Homebrew cask API'
+
+
+def _pkg_tmpdir():
+    """A writable temp dir. The plain mkdtemp fails with ENOENT when the app
+    inherited a TMPDIR pointing at a since-deleted CLI-sandbox directory
+    (launching the .app binary from a tool shell does exactly that)."""
+    import tempfile
     try:
-        with requests.get(url, stream=True, timeout=60) as response:
+        return tempfile.mkdtemp(prefix='macast-blackhole-')
+    except OSError:
+        fallback = os.path.join(os.path.expanduser('~/Library/Caches/Macast'),
+                                'blackhole-tmp')
+        os.makedirs(fallback, exist_ok=True)
+        return tempfile.mkdtemp(prefix='macast-blackhole-', dir=fallback)
+
+
+#: existential.audio answers 406 Not Acceptable to the default python-requests
+#: User-Agent (verified: same URL, browser UA -> 200). The pkg itself is a
+#: public download; presenting as a browser is the only way in.
+PKG_USER_AGENT = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 '
+                  'Safari/537.36')
+
+
+def _fetch_blackhole_pkg(url, on_bytes=None):
+    """Stream the official pkg to a temp file; return its path.
+
+    `on_bytes(done, total)` exists for the progress page -- a several-MB
+    download over a slow link looked identical to a hang without it.
+    """
+    import requests
+    path = os.path.join(_pkg_tmpdir(), 'BlackHole2ch.pkg')
+    try:
+        with requests.get(url, stream=True, timeout=60,
+                          headers={'User-Agent': PKG_USER_AGENT}) as response:
             response.raise_for_status()
+            total = int(response.headers.get('Content-Length') or 0)
+            done = 0
             with open(path, 'wb') as handle:
                 for chunk in response.iter_content(65536):
                     handle.write(chunk)
-                    digest.update(chunk)
+                    done += len(chunk)
+                    if on_bytes is not None:
+                        on_bytes(done, total)
     except Exception:
         _remove_quietly(path)
         raise
-    if digest.hexdigest() != expected:
-        _remove_quietly(path)
-        raise RuntimeError('BlackHole 安装包校验失败（sha256 不匹配）')
     return path
+
+
+def verify_blackhole_pkg(path, expected_sha):
+    """True when the file hashes to what Homebrew publishes for it.
+
+    A mismatch deletes the file (the caller treats False as fatal): an
+    unverified audio driver must never reach `open`.
+    """
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for block in iter(lambda: handle.read(65536), b''):
+            digest.update(block)
+    if digest.hexdigest() != expected_sha:
+        _remove_quietly(path)
+        return False
+    return True
+
+
+HAL_DRIVER_GLOBS = ('/Library/Audio/Plug-Ins/HAL/BlackHole*.driver',)
+BLACKHOLE_PKG_IDS = ('audio.existential.BlackHole2ch',
+                     'audio.existential.BlackHole16ch')
+
+
+def _blackhole_driver_installed():
+    """Driver *files* on disk -- weaker than "the device exists", and that
+    gap is the whole story of one real failure mode: pkgutil keeps a receipt
+    after the files are gone (so a reinstall is needed), and the official pkg
+    does not restart coreaudiod after installing (so files can sit there
+    forever without the daemon ever loading them)."""
+    import glob
+    return any(glob.glob(pattern) for pattern in HAL_DRIVER_GLOBS)
+
+
+def _blackhole_receipt_present():
+    try:
+        res = subprocess.run(['pkgutil', '--pkgs'], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, timeout=15)
+    except Exception:
+        return False
+    installed = set(res.stdout.split())
+    return any(pkg in installed for pkg in BLACKHOLE_PKG_IDS)
+
+
+def _reload_coreaudiod():
+    """(ok, why). Restart the audio daemon with an admin prompt so an
+    installed-but-unloaded HAL driver gets picked up.
+
+    Deliberately its own password round-trip rather than silent sabotage:
+    killing coreaudiod drops everyone's audio for a second, and macOS gives
+    no way to do it without authorization. The pkg installer already asked
+    for a password minutes earlier, so this prompt is expected, not a surprise.
+    """
+    script = ('do shell script "/bin/kill -TERM $(/usr/bin/pgrep -x coreaudiod)" '
+              'with administrator privileges '
+              'with prompt "Macast 需要重载音频服务，让刚安装的 BlackHole 驱动生效"')
+    try:
+        res = subprocess.run(['osascript', '-e', script],
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True, timeout=180)
+    except Exception as e:
+        return False, '无法执行重载：{}'.format(e)
+    if res.returncode == 0:
+        return True, '音频服务已重载'
+    err = (res.stderr or '').strip()
+    if '-128' in err:
+        return False, '你取消了密码框'
+    return False, err or '重载失败'
 
 
 def _remove_quietly(path):
@@ -989,29 +1092,46 @@ def _remove_quietly(path):
         pass
 
 
-def _wait_for_blackhole(ffmpeg, timeout=300.0):
-    """Poll until ffmpeg lists the device (the installer needs a password)."""
+def _wait_for_blackhole(ffmpeg, timeout=300.0, progress=None, interval=5.0):
+    """Poll until ffmpeg lists the device (the installer needs a password).
+
+    The ticking message matters: this is the step where the user is supposed
+    to be clicking through installer.app, and a silent 5 minutes reads exactly
+    like a hang.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _has_blackhole(ffmpeg):
             return True
-        time.sleep(5.0)
+        time.sleep(min(interval, max(deadline - time.time(), 0.1)))
+        if progress is not None:
+            waited = timeout - max(deadline - time.time(), 0.0)
+            progress.sub('wait', min(waited / timeout, 0.99),
+                         '已等 {:.0f} 秒：请在安装器里点「安装」并输入密码'.format(
+                             waited))
     return _has_blackhole(ffmpeg)
 
 
-def _route_audio_through_blackhole(ffmpeg):
+def _route_audio_through_blackhole(ffmpeg, progress=None):
     """Create/reuse the multi-output aggregate and make it the default output.
 
     Without it, installing BlackHole and selecting it as the output means the
     user hears nothing; the aggregate feeds BlackHole *and* the speakers.
     Returns True on success, False if the caller should show manual steps.
+    Each False path fails the exact step that gave up, so the page never says
+    "创建设备失败" when the device was created and the switch is what broke.
     """
+    if progress is None:
+        progress = _NullProgress()
+    progress.enter('aggregate')
     try:
         devices = _audio_devices()
     except Exception as e:
         logger.error('CoreAudio query failed: %s', e)
+        progress.fail('aggregate', 'CoreAudio 查询失败：{}'.format(e))
         return False
     if not devices:
+        progress.fail('aggregate', 'CoreAudio 没有返回任何设备')
         return False
     blackhole = _find_blackhole(ffmpeg)
     aggregate_id = Setting.get(SettingProperty.Mirror_Audio_Aggregate, '') or ''
@@ -1022,20 +1142,33 @@ def _route_audio_through_blackhole(ffmpeg):
     if aggregate_id:
         for device_id, _uid in devices:
             if device_id == int(aggregate_id):
-                return _set_default_output_and_remember(device_id)
+                progress.leave('aggregate', '复用已有聚合设备')
+                progress.enter('output')
+                if not _set_default_output_and_remember(device_id):
+                    progress.fail('output', '切换到默认输出失败')
+                    return False
+                return True
     if blackhole is None:
         # Installed but CoreAudio has not surfaced it by UID yet.
+        progress.fail('aggregate', 'BlackHole 尚未在 CoreAudio 设备表中出现')
         return False
     speakers = _default_output()
     if speakers is None:
         speakers = next((device_id for device_id, uid in devices
                          if 'blackhole' not in uid.lower()), None)
     if speakers is None or speakers == blackhole[0]:
+        progress.fail('aggregate', '找不到可配对的扬声器输出')
         return False
     created = _create_aggregate([blackhole[1], dict(devices)[speakers]])
     if created is None:
+        progress.fail('aggregate', '系统拒绝创建多输出聚合设备')
         return False
-    return _set_default_output_and_remember(created)
+    progress.leave('aggregate', '已创建多输出设备')
+    progress.enter('output')
+    if not _set_default_output_and_remember(created):
+        progress.fail('output', '切换到默认输出失败')
+        return False
+    return True
 
 
 def _set_default_output_and_remember(device_id):
@@ -1059,54 +1192,457 @@ def _open_audio_midi_setup(report):
         pass
 
 
-def setup_system_audio(report=lambda message: None):
+#: The assisted-install run plan, in order. 'reload' only runs when the driver
+#: files landed but coreaudiod never picked them up -- the pkg's own
+#: postinstall only chmods, and a driver installed into a running session can
+#: stay invisible to every enumeration until the daemon restarts.
+AUDIO_STEPS = (
+    ('env', '环境自检'),
+    ('probe', '检测 BlackHole 状态'),
+    ('meta', '获取官方安装包信息'),
+    ('download', '下载安装包'),
+    ('verify', '校验 sha256'),
+    ('install', '打开安装器'),
+    ('wait', '等待设备安装完成'),
+    ('reload', '重载音频服务'),
+    ('aggregate', '创建/复用多输出设备'),
+    ('output', '切换默认输出'),
+)
+
+
+class _NullProgress(object):
+    """The no-op twin of _SetupProgress, for callers without a page.
+
+    Same surface, so setup_system_audio never has to ask which one it got --
+    including the except-path sweep over snapshot()['steps']."""
+
+    def enter(self, step_id, note=''):
+        pass
+
+    def sub(self, step_id, frac, note=None):
+        pass
+
+    def leave(self, step_id, note=''):
+        pass
+
+    def skip(self, step_id, note=''):
+        pass
+
+    def fail(self, step_id, note=''):
+        pass
+
+    def finish(self, ok):
+        pass
+
+    def snapshot(self):
+        return {'pct': 0.0, 'message': '', 'done': False, 'ok': None,
+                'steps': []}
+
+
+class _SetupProgress(object):
+    """Step states + overall percent for the assisted install.
+
+    One object, read from the HTTP handler thread and written from the worker;
+    a plain lock around the dict copy keeps snapshots coherent without dragging
+    in a framework. Steps already finished refuse re-entry -- a flow that
+    re-opened a done step would make the bar run backwards.
+    """
+
+    def __init__(self, steps=AUDIO_STEPS):
+        self._lock = threading.Lock()
+        self._steps = [{'id': sid, 'label': label, 'state': 'pending',
+                        'pct': None, 'note': ''} for sid, label in steps]
+        self.message = ''
+        self.done = False
+        self.ok = None
+
+    def _get(self, step_id):
+        for st in self._steps:
+            if st['id'] == step_id:
+                return st
+        return None
+
+    def enter(self, step_id, note=''):
+        with self._lock:
+            st = self._get(step_id)
+            if st is None or st['state'] in ('done', 'fail', 'skipped'):
+                return
+            st['state'] = 'running'
+            st['note'] = note
+            self.message = '{}：{}'.format(st['label'], note) if note else st['label']
+
+    def sub(self, step_id, frac, note=None):
+        with self._lock:
+            st = self._get(step_id)
+            if st is None or st['state'] != 'running':
+                return
+            st['pct'] = frac
+            if note is not None:
+                st['note'] = note
+                self.message = '{}：{}'.format(st['label'], note)
+
+    def leave(self, step_id, note=''):
+        with self._lock:
+            st = self._get(step_id)
+            if st is None or st['state'] == 'fail':
+                return
+            st['state'] = 'done'
+            st['pct'] = 1.0
+            if note:
+                st['note'] = note
+
+    def skip(self, step_id, note=''):
+        with self._lock:
+            st = self._get(step_id)
+            if st is None or st['state'] in ('done', 'fail'):
+                return
+            st['state'] = 'skipped'
+            st['pct'] = 1.0
+            if note:
+                st['note'] = note
+
+    def fail(self, step_id, note=''):
+        with self._lock:
+            st = self._get(step_id)
+            if st is None:
+                return
+            st['state'] = 'fail'
+            if note:
+                st['note'] = note
+                self.message = '{}失败：{}'.format(st['label'], note)
+
+    def overall(self):
+        weighted = {'done': 1.0, 'skipped': 1.0, 'fail': 1.0,
+                    'running': None, 'pending': 0.0}
+        total = 0.0
+        count = 0
+        for st in self._steps:
+            if st['state'] == 'skipped':
+                continue
+            count += 1
+            frac = weighted[st['state']]
+            if frac is None:
+                frac = st['pct'] if st['pct'] is not None else 0.15
+            total += frac
+        return total / count if count else 0.0
+
+    def finish(self, ok):
+        with self._lock:
+            self.done = True
+            self.ok = bool(ok)
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                'pct': self.overall(),
+                'message': self.message,
+                'done': self.done,
+                'ok': self.ok,
+                'steps': [dict(st) for st in self._steps],
+            }
+
+
+AUDIO_PROGRESS_PAGE = """<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Macast · 系统声音一键设置进度</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;background:#141821;color:#e8ecf3;
+      margin:0;padding:28px 20px;}
+ .wrap{max-width:640px;margin:0 auto;}
+ h1{font-size:18px;font-weight:600;margin:0 0 14px;}
+ .bar{height:10px;background:#232a38;border-radius:6px;overflow:hidden;margin:0 0 6px;}
+ .fill{height:100%;width:0;background:#3b82f6;transition:width .5s;}
+ #pct{font-size:12px;color:#93a0b5;margin:0 0 4px;}
+ #msg{font-size:13px;color:#c8d2e0;min-height:20px;margin:8px 0 18px;}
+ ul{list-style:none;padding:0;margin:0;}
+ li{display:flex;gap:10px;align-items:baseline;padding:7px 0;
+    border-bottom:1px solid #1d2431;font-size:14px;}
+ li .sym{width:1.2em;flex:none;text-align:center;}
+ li.run .sym{color:#3b82f6;} li.ok .sym{color:#22c55e;}
+ li.bad .sym{color:#ef4444;} li.off .sym,li.pend{color:#5b6779;}
+ li .label{font-weight:600;flex:none;}
+ li .note{color:#93a0b5;font-size:12px;}
+ .foot{color:#5b6779;font-size:12px;margin-top:16px;}
+</style></head><body><div class="wrap">
+<h1>系统声音一键设置（BlackHole + 多输出设备）</h1>
+<div class="bar"><div class="fill" id="fill"></div></div>
+<p id="pct">0%</p>
+<p id="msg">正在连接…</p>
+<ul id="steps"></ul>
+<p class="foot">本页面只由 Macast 在本机提供，设置结束后会自动失效；此窗口可以直接关闭。</p>
+</div>
+<script>
+var TOKEN = '@TOKEN@';
+var last = null;
+function sym(st){
+  return {running:'▶', done:'✓', fail:'✗', skipped:'—', pending:'○'}[st] || '?';
+}
+function cls(st){
+  return {running:'run', done:'ok', fail:'bad', skipped:'off pend', pending:'pend'}[st] || '';
+}
+function render(s){
+  document.getElementById('fill').style.width = Math.round(s.pct*100) + '%';
+  document.getElementById('pct').textContent = Math.round(s.pct*100) + '%';
+  document.getElementById('msg').textContent =
+      s.done ? (s.ok ? '全部完成：开始镜像后系统声音会一起投出去。' : '未完成，请见上方红色步骤。')
+             : (s.message || '进行中…');
+  var list = document.getElementById('steps');
+  list.textContent = '';
+  s.steps.forEach(function(st){
+    var li = document.createElement('li');
+    li.className = cls(st.state);
+    var a = document.createElement('span'); a.className = 'sym';
+    a.textContent = sym(st.state);
+    var b = document.createElement('span'); b.className = 'label';
+    b.textContent = st.label;
+    li.appendChild(a); li.appendChild(b);
+    if (st.note){
+      var c = document.createElement('span'); c.className = 'note';
+      c.textContent = st.note;
+      li.appendChild(c);
+    }
+    list.appendChild(li);
+  });
+  last = s;
+}
+function tick(){
+  fetch('/state?token=' + encodeURIComponent(TOKEN))
+    .then(function(r){ return r.json(); })
+    .then(render)
+    .catch(function(){ document.getElementById('msg').textContent = '进度服务已关闭（设置已结束）。'; })
+    .then(function(){ setTimeout(tick, last && last.done ? 5000 : 1000); });
+}
+tick();
+</script></body></html>
+"""
+
+
+class _AudioProgressHandler(BaseHTTPRequestHandler):
+    """Loopback-only viewer for one running assisted install.
+
+    Same credential shape as the mirror pages (AGENTS.md 4.8): a per-run
+    random token in the URL, never the app's stable Api_Token; every value
+    the page shows goes through textContent; the body is ours end to end, so
+    nothing user- or network-controlled is interpolated.
+    """
+
+    def _authorized(self):
+        import hmac
+        import urllib.parse
+        query = urllib.parse.parse_qs(self.path.partition('?')[2] or '')
+        token = (query.get('token') or [''])[0]
+        return bool(token) and hmac.compare_digest(token, self.server.token)
+
+    def do_GET(self):
+        if not self._authorized():
+            self.send_error(403, 'a token is required')
+            return
+        path = self.path.partition('?')[0]
+        if path == '/state':
+            body = json.dumps(self.server.progress.snapshot()).encode('utf-8')
+            ctype = 'application/json'
+        elif path in ('/', '/index.html'):
+            body = AUDIO_PROGRESS_PAGE.replace(
+                '@TOKEN@', self.server.token).encode('utf-8')
+            ctype = 'text/html; charset=utf-8'
+        else:
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self):
+        self.do_GET() if self.path.partition('?')[0] == '/state' \
+            else self.send_error(405)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+#: Kept between runs so a second click can replace the previous page's server
+#: instead of stacking ports.
+_audio_progress = None
+_audio_server = None
+_audio_server_timer = None
+
+
+def _open_audio_progress(progress):
+    """Start the loopback progress page and open it; '' when unavailable.
+
+    A failure here must not fail the install -- the notifications still carry
+    every step, the page is the comfortable view, not the only one.
+    """
+    server = ThreadingHTTPServer(('127.0.0.1', 0), _AudioProgressHandler)
+    server.progress = progress
+    server.token = secrets.token_hex(8)
+    server.daemon_threads = True
+    server.block_on_close = False
+    threading.Thread(target=server.serve_forever, daemon=True,
+                     name='SCREEN_MIRROR_AUDIO_HTTP').start()
+    url = 'http://127.0.0.1:{}{}?token={}'.format(
+        server.server_address[1], '/', server.token)
+    try:
+        subprocess.run(['open', url], timeout=10)
+    except Exception as e:
+        logger.info('cannot open the progress page: %s', e)
+    return url, server
+
+
+def _close_audio_server():
+    global _audio_server, _audio_server_timer
+    if _audio_server_timer is not None:
+        _audio_server_timer.cancel()
+        _audio_server_timer = None
+    server, _audio_server = _audio_server, None
+    if server is not None:
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+
+
+def _schedule_audio_server_close(delay=300.0):
+    """Leave the finished page readable, then stop serving."""
+    global _audio_server_timer
+    if _audio_server_timer is not None:
+        _audio_server_timer.cancel()
+    _audio_server_timer = threading.Timer(delay, _close_audio_server)
+    _audio_server_timer.daemon = True
+    _audio_server_timer.start()
+
+
+def setup_system_audio(report=lambda message: None, progress=None):
     """One-click: install BlackHole if absent, then route audio through it.
 
     Runs in a worker thread -- it spawns ffmpeg, waits on the installer, and
-    must never touch the UI thread.
+    must never touch the UI thread. `progress` (a _SetupProgress) is the
+    step-by-step account; everything still reports one-liners through `report`
+    because the page can be closed and the notifications must stay sufficient.
     """
+    if progress is None:
+        progress = _NullProgress()
+    progress.enter('env')
     if sys.platform != 'darwin':
+        progress.fail('env', '辅助安装仅适用于 macOS')
         report('辅助安装仅适用于 macOS')
         return False
     ffmpeg = find_ffmpeg()
     if ffmpeg is None:
+        progress.fail('env', '找不到 ffmpeg')
         report('找不到 ffmpeg：先 brew install ffmpeg')
         return False
+    progress.leave('env', 'ffmpeg: {}'.format(ffmpeg))
     try:
-        if not _has_blackhole(ffmpeg):
-            report('正在下载 BlackHole 2ch（官方安装包，sha256 校验）…')
-            path = _download_blackhole()
-            report('正在打开安装器：请在弹窗里点「安装」并输入一次密码')
-            subprocess.run(['open', path], timeout=10)
-            report('等待安装完成…（最长 5 分钟）')
-            if not _wait_for_blackhole(ffmpeg):
-                _remove_quietly(path)
-                report('没有检测到 BlackHole 设备：安装被取消了吗？'
-                       '可手动执行 brew install --cask blackhole-2ch')
+        progress.enter('probe')
+        if _has_blackhole(ffmpeg):
+            progress.leave('probe', '设备已在，跳过安装')
+            for _inert in ('meta', 'download', 'verify', 'install', 'wait',
+                           'reload'):
+                progress.skip(_inert)
+        else:
+            notes = []
+            if _blackhole_driver_installed():
+                notes.append('驱动文件在磁盘上但 CoreAudio 没有加载它：'
+                             '安装会被跳过，改为提示重载音频服务')
+            elif _blackhole_receipt_present():
+                notes.append('检测到残留的安装记录，但驱动文件已不在磁盘上：'
+                             '将重新下载官方安装包（这就是上次"装了却没有设备"的原因）')
+            else:
+                notes.append('本机没有 BlackHole，将安装官方 2ch 驱动')
+            progress.leave('probe', '；'.join(notes))
+            progress.enter('meta')
+            url, expected, source = blackhole_pkg_pair()
+            progress.leave('meta', '{}：{}'.format(source, url.rsplit('/', 1)[-1]))
+            progress.enter('download')
+
+            def _on_bytes(done, total):
+                mb = '{} / {} MB'.format(done / 1048576.0, total / 1048576.0) \
+                    if total else '{} KB'.format(done / 1024.0)
+                progress.sub('download', (done / total) if total else None, mb)
+
+            pkg = _fetch_blackhole_pkg(url, on_bytes=_on_bytes)
+            progress.leave('download')
+            progress.enter('verify')
+            if not verify_blackhole_pkg(pkg, expected):
+                progress.fail('verify', '下载到的文件与官方公布的 sha256 不一致，已删除')
+                report('BlackHole 安装包校验失败（sha256 不匹配），已中止')
                 return False
+            progress.leave('verify', '哈希一致')
+            progress.enter('install')
+            subprocess.run(['open', pkg], timeout=10)
+            progress.leave('install', '安装器已打开，请在弹窗里点「安装」并输入一次密码')
+            report('正在打开安装器：请在弹窗里点「安装」并输入一次密码')
+            progress.enter('wait')
+            installed = _wait_for_blackhole(ffmpeg, progress=progress)
+            if not installed and _blackhole_driver_installed():
+                progress.sub('wait', None,
+                             '驱动文件已就位但 CoreAudio 没加载它，尝试重载音频服务')
+                progress.enter('reload', '需要一次管理员密码')
+                reloaded, why = _reload_coreaudiod()
+                if reloaded:
+                    installed = _wait_for_blackhole(ffmpeg, timeout=45.0)
+                    if installed:
+                        progress.leave('reload', why)
+                if not installed:
+                    progress.fail('reload', why)
+            if not installed:
+                progress.fail('wait', '超时仍未在设备列表里看到 BlackHole')
+                report('没有检测到 BlackHole 设备：可能是安装被取消、密码未通过，'
+                       '或系统需要重启一次；也可手动执行 brew install --cask blackhole-2ch')
+                return False
+            progress.leave('wait', '设备已出现')
         report('正在创建多输出设备并切换默认输出…')
-        if not _route_audio_through_blackhole(ffmpeg):
+        if not _route_audio_through_blackhole(ffmpeg, progress=progress):
             _open_audio_midi_setup(report)
             return False
+        progress.leave('output')
         _capture_cache.clear()
         report('系统声音已就绪：开始镜像后声音会一起投出去，本机照常能听到')
         return True
     except Exception as e:
         logger.error('blackhole assisted install failed: %s', e, exc_info=True)
+        for st in progress.snapshot()['steps']:
+            if st['state'] == 'running':
+                progress.fail(st['id'], str(e))
+                break
         report('一键设置失败：{}；可在「音频 MIDI 设置」里手动添加多输出设备'.format(e))
         return False
 
 
 def _audio_setup_worker():
-    """Worker for the menu item: run the assisted setup, then clear the
-    in-progress flag no matter how it ends."""
+    """Worker for the menu item: run the assisted setup against a fresh step
+    machine, serve the progress page on loopback while it runs, then clear the
+    in-progress flag and schedule the page's retirement no matter how it ends.
+    The page is a convenience -- if it cannot start, the install still runs
+    and every step stays in the notifications."""
+    global _audio_progress, _audio_server
 
     def _report(message):
         cherrypy.engine.publish('app_notify', 'Macast', message, sound=False)
 
+    progress = _SetupProgress()
+    _audio_progress = progress
+    _close_audio_server()
     try:
-        setup_system_audio(_report)
+        try:
+            url, _audio_server = _open_audio_progress(progress)
+            _report('已在本机打开详细进度页，可实时查看每一步：{}'.format(url))
+        except Exception as e:
+            logger.info('audio progress page unavailable: %s', e)
+        ok = setup_system_audio(_report, progress=progress)
+    except Exception as e:
+        logger.error('audio setup worker crashed: %s', e, exc_info=True)
+        ok = False
     finally:
+        progress.finish(ok)
+        _schedule_audio_server_close()
         _audio_setup_busy.clear()
 
 
@@ -1994,11 +2530,34 @@ class _CastSender(object):
 
     def close(self):
         if self.sock is not None:
+            self._drain()
             try:
                 self.sock.close()
             except OSError:
                 pass
             self.sock = None
+
+    def _drain(self, budget=0.3):
+        """Empty the receive buffer before hanging up.
+
+        The receiver answers every keepalive and every goodbye, so at teardown
+        there are almost always unread replies sitting in this socket. Closing
+        with unread bytes makes the kernel answer with RST instead of FIN, and
+        that RST discards the final CLOSE that `close_mirroring` just wrote --
+        leaving the mirroring app running and the next session facing the
+        stale-instance OFFER rejection.
+        """
+        deadline = time.monotonic() + budget
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self.sock.settimeout(min(0.2, remaining))
+                if not self.sock.recv(4096):
+                    break
+        except (socket.timeout, ssl.SSLError, OSError, ValueError):
+            pass
 
 
 # -- DLNA control point (the TV is a renderer; we are its remote) -------------
@@ -3807,7 +4366,7 @@ class ScreenMirrorSetting(RendererSetting):
         mirroring = bool(renderer and renderer.is_mirroring())
 
         items = [
-            MenuItem('Screen Mirror v0.6', enabled=False),
+            MenuItem('Screen Mirror v0.7', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
             MenuItem('输出目标', children=self._output_children(kind)),

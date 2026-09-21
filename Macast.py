@@ -135,6 +135,14 @@ def remove_log_files(directory):
 def clear_env():
     # todo clear pyinstaller file on start
     remove_log_files(SETTING_DIR)
+    # Per-module logs (logs/<Name>.log, see macast/logsplit.py) are wiped with
+    # the main file: clearing only macast.log would let the plugin files
+    # accumulate forever.
+    try:
+        from macast import logsplit
+        logsplit.remove_all()
+    except Exception:
+        pass
 
 
 def _force_utf8_ctype():

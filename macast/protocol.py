@@ -20,6 +20,8 @@ from cherrypy import _cpnative_server
 from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish, SETTING_DIR, LOG_FILE_NAME
 from .discovery import advertisable_addresses
 from . import plugin_repo
+from . import logsplit
+from . import module_settings
 
 logger = logging.getLogger("Protocol")
 logger.setLevel(logging.INFO)
@@ -1503,8 +1505,9 @@ class Handler:
                     self._cast_url(kwargs.get('url', ''), kwargs.get('title', '')),
                     indent=4).encode()
             # Sensitive management queries: block unless local or token-bearing.
-            if query in ('status', 'log', 'log-download', 'launch-param',
-                         'interfaces', 'subscribers', 'cast-info') \
+            if query in ('status', 'log', 'log-download', 'log-modules',
+                         'launch-param', 'interfaces', 'subscribers',
+                         'module-settings', 'cast-info') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1515,22 +1518,40 @@ class Handler:
             }
             if query == 'log':
                 res = self._log_payload(kwargs)
+            elif query == 'log-modules':
+                # What the log tab's module picker lists: the global file plus
+                # one entry per plugin that owns a log file.
+                try:
+                    st = os.stat(os.path.join(SETTING_DIR, LOG_FILE_NAME))
+                    main = {'size': st.st_size, 'mtime': int(st.st_mtime)}
+                except OSError:
+                    main = {'size': 0, 'mtime': 0}
+                res = {'main': main, 'modules': logsplit.list_logs()}
             elif query == 'log-download':
                 # Whole file as an attachment. The page itself only ever
                 # renders the tail above; pulling everything down is an
                 # explicit click (or a bug report), so it stays a separate
                 # endpoint instead of an `all=1` the page might default to.
+                path, module = self._log_path(kwargs.get('module'))
+                if path is None:
+                    return b''
                 cherrypy.response.headers['Content-Type'] = \
                     'text/plain; charset=utf-8'
                 cherrypy.response.headers['Content-Disposition'] = \
-                    'attachment; filename="{}"'.format(LOG_FILE_NAME)
+                    'attachment; filename="{}"'.format(
+                        os.path.basename(path))
                 try:
-                    with open(os.path.join(SETTING_DIR, LOG_FILE_NAME), 'rb') as f:
+                    with open(path, 'rb') as f:
                         return f.read()
                 except OSError:
                     return b''
             elif query == 'launch-param':
                 res = Setting.setting
+            elif query == 'module-settings':
+                # Settings grouped by owning module for the 模块设置 tab
+                # (see macast/module_settings.py). Gated above with the other
+                # sensitive queries: it exposes Api_Token's value.
+                res = module_settings.settings_payload()
             elif query == 'plugin-info':
                 info = cherrypy_publish('get_plugin_info', [])
                 res = {
@@ -1629,16 +1650,38 @@ class Handler:
     #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
     _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
                           'plugin-disable', 'plugin-uninstall', 'set-interface',
-                          'set-github-mirror')
+                          'set-github-mirror', 'set-module-setting')
+
+    def _log_path(self, module):
+        """Which file a log query targets: macast.log, or one module's own.
+
+        Returns ``(path, module)``; path is None for a module nobody has
+        written a log for -- an unknown name is a mistake, not a secret, so it
+        gets a plain error rather than the whole list.
+        """
+        module = str(module or '').strip()
+        if not module or module.lower() in ('main', 'macast', '整体'):
+            return os.path.join(SETTING_DIR, LOG_FILE_NAME), ''
+        known = {m['name'] for m in logsplit.list_logs()}
+        known.update(logsplit.claimed_names())
+        if module not in known:
+            return None, module
+        return logsplit.path_for(module), module
 
     def _log_payload(self, kwargs):
         """The log tail the settings page renders (`?query=log`).
 
         `logs` is kept as the response key for older pages; `truncated`/`size`
         let the new one say "only the last N lines of M bytes" instead of
-        silently pretending it shows everything.
+        silently pretending it shows everything. `module` selects which file:
+        empty for macast.log, otherwise a claimed plugin logger's own file
+        (see macast/logsplit.py).
         """
-        path = os.path.join(SETTING_DIR, LOG_FILE_NAME)
+        path, module = self._log_path(kwargs.get('module'))
+        if path is None:
+            return {'code': 1, 'message': 'unknown log module',
+                    'logs': '', 'truncated': False, 'lines': 0, 'size': 0,
+                    'module': module}
         want_all = str(kwargs.get('all', '')).lower() in ('1', 'true', 'yes', 'on')
         try:
             if want_all:
@@ -1650,8 +1693,9 @@ class Handler:
             # No log yet (fresh install, or it was just cleared) is not an
             # error: the page should show an empty box, not a red banner.
             text, truncated, size = '', False, 0
-        return {'logs': text, 'truncated': truncated,
-                'lines': len(text.splitlines()) if text else 0, 'size': size}
+        return {'code': 0, 'logs': text, 'truncated': truncated,
+                'lines': len(text.splitlines()) if text else 0, 'size': size,
+                'module': module}
 
     def _clear_log(self):
         """Truncate macast.log and drop its rotated backups.
@@ -1809,7 +1853,23 @@ class Handler:
                 res['code'] = 403
                 res['message'] = 'Forbidden: management API requires local access or token'
                 return json.dumps(res, indent=4).encode()
-            res = self._clear_log()
+            path, module = self._log_path(kwargs.get('module'))
+            if path is None:
+                res = {'code': 1, 'message': 'unknown log module'}
+            elif module:
+                res = {'code': 0, 'message': 'success',
+                       'removed': logsplit.clear(module)}
+            else:
+                res = self._clear_log()
+        elif kwargs.get('set-module-setting', None) is not None:
+            if not self._management_allowed():
+                res['code'] = 403
+                res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+            res = module_settings.set_value(
+                kwargs.get('key'), kwargs.get('value', ''),
+                remove=str(kwargs.get('remove', '')).lower() in
+                       ('1', 'true', 'yes', 'on'))
         else:
             logger.info(kwargs)
 

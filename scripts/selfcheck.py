@@ -246,6 +246,31 @@ else:
          "only needed to synthesise a test stream locally: "
          "brew install ffmpeg")
 
+# uxplay is what the AirPlay Screen Mirror plugin supervises -- an iPhone
+# mirroring its screen lands there, not in Macast. It is never a *failure*
+# here because the plugin is optional, but a missing binary is the one thing
+# that makes that plugin do nothing at all, and there is no package to name:
+# upstream publishes no Homebrew formula and no macOS binary.
+for _name, _dirs in (("uxplay", ("/opt/homebrew/bin", "/usr/local/bin",
+                                 "/opt/local/bin", "/usr/bin")),
+                     ("shairport-sync", ("/opt/homebrew/bin", "/usr/local/bin",
+                                         "/opt/local/bin", "/usr/bin"))):
+    found = shutil.which(_name) or next(
+        (os.path.join(d, _name) for d in _dirs
+         if os.path.exists(os.path.join(d, _name))), None)
+    if found:
+        ok("{} present ({})".format(_name, found))
+    elif _name == "uxplay":
+        warn("uxplay not found -- iPhone screen mirroring has nowhere to go",
+             "the AirPlay Screen Mirror plugin needs it and there is no package "
+             "for it: build from source (Xcode command line tools, "
+             "brew install cmake libplist openssl@3, the GStreamer runtime + "
+             "-devel .pkg from gstreamer.freedesktop.org, then cmake . && make "
+             "&& sudo make install). The plugin repeats this recipe in the log")
+    else:
+        warn("shairport-sync not found -- AirPlay audio (RAOP) has nowhere to go",
+             "brew install shairport-sync (the AirPlay Audio plugin supervises it)")
+
 
 # ---------------------------------------------------------------------------
 # 5. environment traps from this repo's history

@@ -206,6 +206,33 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   喂 mpv 是更好的形态但风险更高（列为 P5 的两个子任务）。
 - 最大风险：Apple 哪天砍掉 AirPlay 2 Legacy → 静默失效；DRM 应用镜像出来是黑屏（要提前在 UI 说明）。
 
+**P5 落地的偏差**（2026-09-21，全部按上游 master 源码复核，见下）：
+
+- **`$UXPLAYRC` 换成 `-rc <file>`**。`$UXPLAYRC` 在文件不存在时**静默回落到 `~/.uxplayrc`**，
+  于是用户的配置文件会被读进来（我们写的默认值可能被覆盖），更糟的是它还可能被**写**进用户主目录。
+  `-rc` 只读指定的一份、文件缺失时明确报错退出，argv 在 rc 之后解析（argv 赢），
+  rc 内部**后写的行赢** ⇒ 用户附加项放在文件末尾就是覆盖我们的默认值，这个顺序是故意的。
+  rc 格式：一行一个选项、**不写前导 `-`**、`#` 注释、空格分词、值以 `-` 开头会被拒收。
+- **不加 `-p`**。`-p` 是 legacy 固定端口（TCP 7100 / 7000 / 7001），7000 正是 Macast 自己的
+  AirPlay 接收端端口（`AIRPLAY_PORT`）和 macOS 自带接收端的地盘；不带 `-p` 时 uxplay 用**动态端口**
+  并写进自己的 mDNS TXT，发送端按它说的连，所以固定端口对我们没有任何好处，只有撞车。
+- **默认值取 `vsync no`，macOS 再加 `vs osxvideosink`**（README 对镜像的推荐；
+  macOS 侧只有 `glimagesink`/`osxvideosink`/`osxaudiosink`，而 `glimagesink` 有已知问题）。
+- **日志必须挂在 pty 上，不是管道**。uxplay 的 `log()` 是 `printf` 到 stdout，
+  全程序只有一处 `fflush`（音频进度那条）⇒ 管道下 stdout 是**块缓冲**，
+  「谁连上了」这类事件可能永远不出现；`pty.openpty()` 恢复行缓冲后事件才是即时的。
+  Windows 没有 pty，退回管道并如实说明（只有 `audio progress` 那种高频行会先被读掉）。
+- **Homebrew 没有 uxplay formula，官方 release 也不提供 macOS 二进制**（assets 只有
+  `uxplay.spec` / `PKGBUILD`）⇒ 「未证实」现在有答案了：**必须用户自己编译**。
+  所以插件在找不到二进制时打的是完整配方（Xcode CLT + `cmake libplist openssl@3` +
+  GStreamer runtime/-devel `.pkg` + `cmake . && make && sudo make install`），
+  `selfcheck.py` 里同样给这段话，而不是只说「装一下 uxplay」。
+- **一期仍然让它自己开窗**（`-vs osxvideosink`），`-vrtp → mpv` 那条留在二期 ——
+  没做实机证据之前不把「统一渲染」写进承诺。
+- uxplay 是**完整的 AirPlay 接收端**（镜像 + RAOP 音频，看 `lib/dnssdint.h` 的 TXT 键就知道），
+  所以它和 `plugins/raop.py`（shairport-sync）**广播的是同一个名字**：两个都启用时 iPhone 只会看到
+  一个入口，谁抢到算谁。这一点插件不猜，只在启动时提示一次，交给用户关一个。
+
 ### 2.6 mkchromecast：这次只挖到「发送端该抄的 4 件事」
 
 - **它的 macOS `--screenshare` 根本没实现**（只有 x11grab / GStreamer-Wayland），系统音频硬编码
@@ -295,7 +322,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | **P2** ✅ | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的直播 HTTP：对外 `Content-Length` = 按档位码率算出的固定值且 **< 2³¹**（`DLNA_MAX_ADVERTISED_SIZE = 1.9e9`）、探测请求**恰好回 n 字节**（不足补 MPEG-PS 填充包）、`Accept-Ranges` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`、**48 MiB**（`DLNA_RING_BYTES`，计划里的 64 KiB 太小：按 4.5 Mbps 只有 0.1 秒余量）按绝对字节偏移的阻塞式重连 + 20 MiB 预填（`DLNA_PREFILL_BYTES` ⇒ 菜单明说的 ~35 s 延迟）、stdlib SSDP/SOAP（`urllib`，不打第三方）、`GetTransportInfo` 看门狗 + `RelTime` 前进才算活着、**5 档 profile**（ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264，PAL/NTSC 用 AC-3）、连续失败自动换档并在用尽后提示手选 | **Part 23**（93 条） | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端当替身；真实兼容矩阵必须标注「未验证」 |
 | **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**纯 Python AES-128-CTR**（无新依赖）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/在途 12 帧；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
 | **P4** ✅ | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗。**偏差见 §2.6 末**（含"这一阶段动了 `protocol_cast.py` 的会话账本"） | **Part 25**（155 条） | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有；**真机一台没验** |
-| **P5** | `airplay_mirror` v.1（protocol 插件，`uses_ssdp=False`）+ §9 边界改写 | 监督 uxplay（`$UXPLAYRC` 生成 + 无窗口参数 + 日志解析连接/断开），一期让它自己开窗，二期尝试 `-vrtp/-artp → mpv` 统一渲染；`selfcheck` 里检查 uxplay 是否可用并给出安装指引 | **Part 26** | 中：macOS 无现成二进制（Homebrew 未证实）→ 必须**明确标注需要用户自备**，且 Apple 砍 Legacy 会静默失效 |
+| **P5** | `airplay_mirror` v0.1（protocol 插件，`uses_ssdp=False`）+ §9 边界改写 + `selfcheck` uxplay 探测 | 监督 uxplay：**`-rc <file>` 生成在 Macast 自己的配置目录**（不是 `$UXPLAYRC`，它静默回落 `~/.uxplayrc`）、**不带 `-p`**（legacy 7000 与自家 AirPlay 接收端撞车）、默认 `vsync no` + macOS `vs osxvideosink`、**stdout 挂 pty** 才拿得到即时事件（C 侧块缓冲）、日志解析 连接/断开/被拒/mDNS 失败/自行退出、不映射 DLNA 播放状态、与 `raop.py` 同名竞争只提示一次。一期让它自己开窗，二期再试 `-vrtp/-artp → mpv`。**偏差见 §2.5 末** | **Part 26**（43 条）+ Part 24 两条（teardown 先排空再挂断） | 中：macOS **确认**没有现成二进制（无 formula、release 只有 spec/PKGBUILD）→ 必须**明确标注需要用户自备**，且 Apple 砍 Legacy 会静默失效 |
 | **P6** | 文档与发布 | `docs/Casting-Suite.md` 用户指南（含每目标的首次设置流程）、`plugins/README.md` + `info.json` 条目（**两步提交：先插件文件，再指 SHA/version**）、AGENTS.md §4.8/§9 更新、复核 §4.8 里 pyobjc 依赖是否与「只用自带库」矛盾（`_create_aggregate` 用了 `Foundation`，而 `requirements/*.txt` 没有 pyobjc —— 要么去掉，要么按 §4.4 三处同步）、**`scripts/selfcheck.py` 补齐 §3.2 承诺的随行项**（P1-P4 都没动它：现在只报「ffmpeg 在不在」，缺 编码器能力 / ffprobe 在不在 / 系统音频采集口 / DLNA 渲染器与 Chromecast 探测 / 转码临时目录剩余空间）、**复核 `screen_mirror._avfoundation_lists` 的引号解析**（本机真实 `ffmpeg -list_devices` 输出是 `AVFoundation audio devices:` + 不带引号的 `[0] 名称`，P4 已按这份实测重写了 `cast_local_file` 的解析，那条老路径要用同一条实测输出重验）、版本号两处 + tag | 5c 一致性 | 无（但 pyobjc 与 avfoundation 解析这两条是**已知不一致**，必须给结论） |
 
 **每阶段完成后立即 `git push git@github.com:pingod/Macast.git main`**，并在 §6 记录 commit。

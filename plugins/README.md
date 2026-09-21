@@ -33,12 +33,14 @@
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.6** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `screen_mirror.py` | **Screen Mirror v0.7** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `cast_local_file.py` | **Local File Caster v0.1** — 把**这台机器磁盘上的文件**投到电视：菜单里选文件夹、点文件即在 Chromecast / Google TV 或 DLNA 电视上播；能原生解码的文件由内置 Range/206 服务按字节直供（远端的暂停/拖动直接作用在真文件上），其余边播由 ffmpeg 转码；带播放列表自动连播、音轨/字幕选择、音画同步偏移、被抢占后看门狗重投、退出时 QUIT_APP | 依赖用户自己装的 `ffmpeg` / `ffprobe` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
+| `airplay_mirror.py` | **AirPlay Screen Mirror** — 监督 uxplay，让 iPhone / 另一台 Mac 把屏幕**镜像到这台机器**（镜像流是 AES-128-CTR，不需要 FairPlay；uxplay 自己开窗渲染） | 需要用户自己编译 `uxplay`（macOS 既无 Homebrew formula 也无官方二进制，插件日志里有完整配方） |
 
 **Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
-`hooks` / `cast_bridge` / `screen_mirror` / `cast_local_file` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
+`hooks` / `cast_bridge` / `screen_mirror` / `cast_local_file` 是互斥的（菜单栏里切换）；`raop.py` 与
+`airplay_mirror.py` 是协议插件，可以和任意渲染器同时开。
 
 各插件要点：
 
@@ -125,6 +127,20 @@
   提示语会说明「此通道还没有声音」。想自己拿真机验一遍：
   `.venv/bin/python scripts/cast_streaming_probe.py <电视 IP>`（同一份代码，`--live` 采桌面，
   `--dump` 留下码流给 ffprobe）。
+  **v0.7 把上面那条「一键设置」变成了一个看得见的步骤机**（`AUDIO_STEPS` 十步：环境自检 →
+  检测 BlackHole → 取官方包信息 → 下载 → 校验 sha256 → 打开安装器 → 等待装完 → 重载音频服务
+  → 建/复用多输出设备 → 切默认输出）。之前它只在终端里打日志，你点了菜单之后面对的是一个
+  没有任何反馈的等待，失败了也只有一句「降级为手动」。现在进度页在 `127.0.0.1` 上开一个
+  带**本次运行随机 token** 的页面（错的或没有 token 一律 403，`nosniff` + `no-store`，
+  页面里**不出现**管理令牌），每步显示 未开始 / 进行中 / 完成 / 跳过 / 失败，百分比只按
+  「真正需要做的步」算（健康机器上被跳过的装包步骤不进分母）。四条安装分支各自指名它停在哪一步：
+  已经装好的直接跳过、有残留记录的重装、盘上有驱动但 coreaudiod 没加载 → 只重载、
+  你在安装器里取消了密码 → 如实报「安装未授权」。sha256 不匹配**不会**打开安装器；
+  崩溃只把**当时在跑的那一步**判失败，晚到的完成事件压不过它；官方包信息优先走 Homebrew cask
+  API，兜底值会标注来源；「设备装没装好」用两个独立的探针问（`pkgutil` 的收据 vs
+  `/Library/Audio/Plug-Ins/HAL` 里的文件），因为它们在半装状态下会给出不一致的答案；
+  重载 coreaudiod 走 `osascript ... with administrator privileges`，所以它会弹一次授权。
+  **仍然要说清**：.pkg 无法静默安装，那一次密码是省不掉的。
 - **Local File Caster**：JustStream 的另一半能力 ——「文件在这台 Mac 上，想看的屏幕在客厅」。
   菜单选一个文件夹（`File_Folder` / 设置里的 `Folder`），列出其中的媒体文件，点一下就投出去。
   两个塑造整个文件的判断：
@@ -156,6 +172,22 @@
 - **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
   它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
   **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。
+  **v0.2**：音箱名可以用高级设置 `RAOP_Device_Name` 单独指定（留空 = 跟着 Macast 的友好名走）。
+  和「AirPlay Screen Mirror」（uxplay）同时开着会**撞名** —— 两者都广播 `_airplay._tcp`，
+  手机上只会剩一个，给它们起不一样的名字。
+- **AirPlay Screen Mirror**：监督 `uxplay`，把 iPhone / 另一台 Mac 的**屏幕镜像到这台机器**
+  （uxplay 自己开一个窗口渲染，Macast 不碰画面）。要点：选项写在 Macast 自己的配置目录里
+  并用 `-rc` 传入（不用 `$UXPLAYRC` —— 它指向不存在的文件时 uxplay 会静默回落到你的
+  `~/.uxplayrc`，看起来像"我们的设置没生效"）；**绝不传 `-p`**（那是包括 TCP 7000 在内的
+  传统端口组，和 Macast 内置的 AirPlay 以及 macOS 自带的接收端撞车）；日志走 **pty** 而不是管道
+  （uxplay 用 `printf` 且几乎不 `fflush`，管道是块缓冲的，"谁连上了"这条会卡住不说）。
+  **macOS 上没有 Homebrew formula、官方发布也没有二进制**，要自己编译 —— 插件日志和
+  `scripts/selfcheck.py` 都写了完整配方（Xcode 命令行工具、`cmake libplist openssl@3`、
+  GStreamer 的 runtime + `-devel` 两个 .pkg、`cmake . && make && sudo make install`）。
+  高级设置 `Mirror_Uxplay_Options` 是全部的旋钮（每行一个 uxplay 选项，不带前导 `-`，
+  写在生成的文件最后，所以能覆盖上面那几个默认值）。**镜像流不是 FairPlay**：数据通道是
+  AES-128-CTR，密钥来自 RSA/AES 握手，所以接收端不需要破解 DRM —— 但受保护的内容（Apple TV、
+  Netflix）本来就不肯被镜像，投过来就是黑屏，那是设计如此。
 
 ## 什么时候该往这里加东西
 

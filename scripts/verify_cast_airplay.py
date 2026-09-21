@@ -3261,6 +3261,24 @@ try:
               any('shairport-sync' in str(n) for n in _notify9), str(_notify9))
         check("a missing binary leaves no process behind", protocol9b._proc is None)
         raop.find_shairport = _real_find9
+
+        # v0.2 gave RAOP its own persisted speaker name; the default must stay
+        # exactly what v0.1 did (follow the friendly name), including when the
+        # key exists but holds only whitespace.
+        check("without an override the RAOP name follows the device name",
+              raop.service_name() == utils.Setting.get_friendly_name(),
+              repr(raop.service_name()))
+        utils.Setting.setting['RAOP_Device_Name'] = '客厅音箱'
+        check("RAOP_Device_Name overrides the advertised speaker name",
+              raop.service_name() == '客厅音箱', repr(raop.service_name()))
+        utils.Setting.setting['RAOP_Device_Name'] = '  '
+        check("a whitespace-only override falls back to the device name",
+              raop.service_name() == utils.Setting.get_friendly_name(),
+              repr(raop.service_name()))
+        del utils.Setting.setting['RAOP_Device_Name']
+        check("the override lookup never creates the key as a side effect",
+              'RAOP_Device_Name' not in utils.Setting.setting,
+              str(sorted(utils.Setting.setting)))
     finally:
         try:
             cherrypy.engine.unsubscribe('app_notify', _notify9_rec)
@@ -4186,15 +4204,51 @@ done
         _stub21 = {}
         _audio_saved = {}
         _real_route21 = mirror._route_audio_through_blackhole
+        import types as _types21
+
+        class _Sub21(object):
+            """Stands in for mirror.subprocess while the assisted install is
+            stubbed: a test must never `open` a real installer, and never
+            shell out to pkgutil/osascript either."""
+
+            def __init__(self):
+                self.calls = []
+
+            def run(self, cmd, **kwargs):
+                self.calls.append(list(cmd))
+                return _types21.SimpleNamespace(returncode=0, stdout='',
+                                                stderr='')
+
+        _sub21 = _Sub21()
+
+        def _fetch21(url, on_bytes=None):
+            _stub21['fetched'] = url
+            if on_bytes is not None:
+                on_bytes(1024, 2048)
+            return '/tmp/bh.pkg'
+
+        def _verify21(path, expected):
+            _stub21['verified'] = (path, expected)
+            return True
 
         def _stub_audio21(**over):
             for _name, _fn in [('find_ffmpeg', lambda: 'ffmpeg'),
                                ('_has_blackhole', lambda f: False),
-                               ('_download_blackhole',
-                                lambda: _stub21.setdefault('pkg', '/tmp/bh.pkg')),
-                               ('_wait_for_blackhole', lambda f, timeout=0: True),
-                               ('_route_audio_through_blackhole', lambda f: True),
+                               ('blackhole_pkg_pair',
+                                lambda: ('https://x/BlackHole2ch-0.8.0.pkg',
+                                         'a' * 64, 'stub-meta')),
+                               ('_fetch_blackhole_pkg', _fetch21),
+                               ('verify_blackhole_pkg', _verify21),
+                               ('_wait_for_blackhole',
+                                lambda f, timeout=0.0, progress=None,
+                                       interval=5.0: True),
+                               ('_route_audio_through_blackhole',
+                                lambda f, progress=None: True),
                                ('_open_audio_midi_setup', lambda rep: None),
+                               ('_blackhole_driver_installed', lambda: False),
+                               ('_blackhole_receipt_present', lambda: False),
+                               ('_reload_coreaudiod', lambda: (False, 'stub')),
+                               ('subprocess', _sub21),
                                ('_audio_devices', lambda: []),
                                ('_find_blackhole', lambda f: None),
                                ('_default_output', lambda: None),
@@ -4211,18 +4265,23 @@ done
 
         try:
             _stub21.clear()
+            del _sub21.calls[:]
             _stub_audio21()
             mirror._capture_cache[('ffmpeg', 'darwin', True)] = object()
             _msgs21 = []
             _ok21 = mirror.setup_system_audio(_msgs21.append)
-            check("the assisted setup installs, waits, routes and reports",
-                  _ok21 and 'downloading' not in _stub21
+            check("the assisted setup fetches, verifies, opens the installer, "
+                  "routes and clears the capture cache",
+                  _ok21
+                  and _stub21.get('fetched', '').endswith('.pkg')
+                  and _stub21.get('verified') == ('/tmp/bh.pkg', 'a' * 64)
+                  and ['open', '/tmp/bh.pkg'] in _sub21.calls
                   and mirror._capture_cache == {},
-                  str(_msgs21))
+                  "{} / {}".format(_stub21, _sub21.calls))
             _stub21.clear()
             _msgs21 = []
 
-            def _route_fail21(f):
+            def _route_fail21(f, progress=None):
                 _msgs21.append('routing')
                 return False
 
@@ -6440,6 +6499,78 @@ try:
               _wait_until(lambda: mir24._sink is None and not mir24.is_mirroring()
                           and mir24.stats() == {}, timeout=10))
 
+        # -- why close() drains before it hangs up ---------------------------
+        # A receiver answers every keepalive and every goodbye, so at teardown
+        # the control socket always holds replies nobody read. Closing with a
+        # non-empty receive buffer makes the kernel answer with RST instead of
+        # FIN, and an RST drops whatever of ours is still in flight -- which is
+        # how the final CLOSE went missing under load. A real receiver that
+        # never saw it keeps the mirroring app running, and the next session
+        # then pays for that with the stale-instance OFFER rejection.
+        _l24 = socket.socket()
+        _l24.bind(('127.0.0.1', 0))
+        _l24.listen(1)
+        _l24.settimeout(15)
+        _sctx24 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        _sctx24.load_cert_chain(certfile=_cert24, keyfile=_key24)
+        _seen24, _reset24 = [], []
+
+        def _peer24():
+            try:
+                raw, _addr = _l24.accept()
+                conn = _sctx24.wrap_socket(raw, server_side=True)
+            except OSError as e:
+                _reset24.append('accept: %s' % e)
+                return
+            with conn:
+                conn.settimeout(15)
+
+                def _answer():
+                    blob = cast.encode_cast_message(
+                        'receiver-0', 'sender-0', mirror.NS_RECEIVER,
+                        json.dumps({'type': 'RECEIVER_STATUS'}))
+                    conn.sendall(struct.pack('>I', len(blob)) + blob)
+
+                try:
+                    while True:
+                        head = _FakeCastDevice24._read(conn, 4)
+                        if head is None:
+                            return
+                        body = _FakeCastDevice24._read(
+                            conn, struct.unpack('>I', head)[0])
+                        if body is None:
+                            return
+                        _seen24.append(json.loads(
+                            cast.parse_cast_message(body)['payload_utf8']
+                        )['type'])
+                        # Every receiver answers what it was told, and nobody
+                        # on our side reads those answers at teardown -- that
+                        # unread pile is what turns the FIN into an RST.
+                        _answer()
+                except OSError as e:
+                    _reset24.append(type(e).__name__)
+
+        _peer_thread24 = threading.Thread(target=_peer24, daemon=True)
+        _peer_thread24.start()
+        _cctx24 = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        _cctx24.check_hostname = False
+        _cctx24.verify_mode = ssl.CERT_NONE
+        _ctl24 = mirror._CastSender('127.0.0.1', _l24.getsockname()[1])
+        _ctl24.sock = _cctx24.wrap_socket(
+            socket.create_connection(_l24.getsockname(), timeout=15))
+        _ctl24.poll(0.0)                  # the mode the media loop leaves it in
+        _ctl24.transport_id = 'v2-mirror'
+        _ctl24.mirror_session_id = 'session-1'
+        _ctl24.close_mirroring()
+        _ctl24.close()
+        _peer_thread24.join(20)
+        _l24.close()
+        check("the whole goodbye sequence reaches a receiver that has replies "
+              "pending", _seen24 == ['CLOSE', 'STOP', 'CLOSE'],
+              'seen={} err={}'.format(_seen24, _reset24))
+        check("and it is a clean hangup, not a reset that eats the last write",
+              not _reset24, str(_reset24))
+
         # -- the device that has no mirroring app -----------------------------
         device2b = _FakeCastDevice24(mirror, _cert24, _key24, refuse=True)
         _devices24.append(device2b)
@@ -8044,6 +8175,1358 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     check("the local file caster loads", False,
+          "{}: {}".format(type(e).__name__, e))
+
+
+# --------------------------------------------------------------------------
+# Part 26: the AirPlay screen mirror supervisor
+#
+# plugins/airplay_mirror.py does not implement AirPlay mirroring; it keeps
+# uxplay running with an option file that carries the Macast name. Everything
+# worth testing is therefore either the option file (uxplay's config format has
+# no escaping rules that a friendly name with a space satisfies by accident) or
+# the supervision (which fd the log comes out of, what happens when the binary
+# is missing, and what must *not* be reported).
+#
+# The log lines below are copied from uxplay's own source strings, including
+# the two spellings of the disconnection message -- the parser matches on
+# substrings precisely because those prefixes are not part of any contract.
+# --------------------------------------------------------------------------
+print("\n=== Part 26: AirPlay screen mirror supervisor ===")
+try:
+    _saved_setting26 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir26 = utils.SETTING_DIR
+    _saved_path26 = os.environ.get('PATH', '')
+    _tmp26 = _tempfile.mkdtemp(prefix="macast-airplay-mirror-")
+    _notify26 = []
+    _notify26_rec = lambda *a, **k: _notify26.append(a)      # noqa: E731
+    try:
+        utils.SETTING_DIR = _tmp26
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp26, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify26_rec)
+
+        am = _load_plugin("airplay_mirror_plugin", "airplay_mirror.py")
+
+        check("uxplay does not force the SSDP server on",
+              am.AirPlayMirrorProtocol.uses_ssdp is False)
+        # The built-in AirPlay receiver owns the transport state; a mirror
+        # session has no media url and no position to report.
+        _proto26 = am.AirPlayMirrorProtocol()
+        check("no DLNA transport state is claimed by the mirror supervisor",
+              sorted(_proto26.methods()) == sorted(protocol.Protocol().methods()),
+              str(_proto26.methods()))
+
+        # -- the option file ------------------------------------------------
+        _body26 = am.rc_body('无常的 Mac "Pro" -x')
+        check("a friendly name with a space stays a single option",
+              'n "无常的 Mac Pro -x"' in _body26, _body26)
+        check("quotes and backslashes cannot escape out of the name",
+              all(c not in am.safe_name('a"b\\c\rd\ne') for c in '"\\\r\n'),
+              repr(am.safe_name('a"b\\c\rd\ne')))
+        check("a name that is empty after cleaning still names the server",
+              am.safe_name('  ""  ') == 'Macast', repr(am.safe_name('  ""  ')))
+        # uxplay reads "-n <value>" as "no argument" when the value starts with
+        # a dash, and then refuses to start at all.
+        check("a name beginning with a dash cannot look like another option",
+              not am.safe_name('-weird').startswith('-'), am.safe_name('-weird'))
+        check("no option line carries the dash the file format forbids",
+              all(not line.startswith('-') for line in _body26.splitlines()
+                  if line and not line.startswith('#')), _body26)
+        check("mirroring uses the timestamp-free sync uxplay recommends for it",
+              '\nvsync no\n' in _body26, _body26)
+        check("macOS picks the videosink the official GStreamer build has",
+              ('\nvs osxvideosink\n' in _body26) == (sys.platform == 'darwin'),
+              _body26)
+        check("user options are appended after the defaults so they win",
+              am.rc_body('X', ['vs glimagesink']).index('vsync no')
+              < am.rc_body('X', ['vs glimagesink']).index('vs glimagesink'))
+        check("options typed with a leading dash still reach uxplay",
+              am.extra_rc_lines('-pin 1234\n\n  \nrestrict yes\n')
+              == ['pin 1234', 'restrict yes'], str(am.extra_rc_lines('-pin 1234\n\n  \nrestrict yes\n')))
+
+        # -- what the log means --------------------------------------------
+        _ev26 = am.log_event('connection request from Anna (iPhone14,3)'
+                             ' with deviceID = a1:b2:c3:d4:e5:f6')
+        check("a client connecting names the device it came from",
+              _ev26[0] == 'connected' and 'Anna' in _ev26[1]
+              and 'iPhone14,3' in _ev26[1], str(_ev26))
+        check("a client with no model string still reports",
+              am.log_event('connection request from MacBook () with deviceID = x')
+              [0] == 'connected',
+              str(am.log_event('connection request from MacBook () with deviceID = x')))
+        check("the disconnection is reported in both of uxplay's spellings",
+              am.log_event('*** ERROR lost connection with client (network problem?)')[0]
+              == 'disconnected'
+              and am.log_event('***ERROR lost connection with client (network problem?)')[0]
+              == 'disconnected')
+        check("a rejected client is not silently dropped",
+              am.log_event('*** attempt to connect by blocked client (clientID x): DENIED')
+              [0] == 'blocked')
+        # Without this the symptom is "my Mac is not in the list" and the cause
+        # is another receiver holding the name.
+        check("a failed mDNS registration is told to the user",
+              am.log_event('*** ERROR: dnssd_register_airplay failed with error code -65537')
+              [0] == 'mdns-failed')
+        check("the server coming up is not a user-facing event",
+              am.log_event('Initialized server socket(s)')[0] == 'ready')
+        check("uxplay's chatter is not mistaken for an event",
+              all(am.log_event(line) == (None, None) for line in (
+                  'UxPlay 1.73.7: An Open-Source AirPlay mirroring and audio-streaming server.',
+                  'using network ports UDP 52000 52001 52002 TCP 53000 53001 53002',
+                  'UxPlay on macOS is using -nc option as workaround for GStreamer problem')))
+
+        # uxplay prints with printf(); against a pipe that is block-buffered,
+        # so the events above would arrive whenever 4 KiB happened to pile up
+        # behind them. A pty keeps stdout line-buffered.
+        _child26, _read26 = am._open_stdout()
+        try:
+            if sys.platform == 'win32':
+                check("the log reaches us as it happens (pty, or Windows pipe)",
+                      not os.isatty(_read26), 'windows fallback')
+            else:
+                check("the log reaches us as it happens",
+                      os.isatty(_read26), 'not a tty: stdout would be block-buffered')
+        finally:
+            os.close(_child26)
+            os.close(_read26)
+
+        # -- supervising a real process ------------------------------------
+        _bin26 = os.path.join(_tmp26, "bin")
+        _argv26 = os.path.join(_tmp26, "argv.txt")
+        _env26 = os.path.join(_tmp26, "env.txt")
+        _fake_uxplay = _write_fake(
+            _bin26, "uxplay",
+            "#!/bin/sh\nprintf '%s\\n' \"$0\" \"$@\" > {}\n"
+            "printf 'UXPLAYRC=[%s]\\n' \"${{UXPLAYRC-}}\" > {}\n"
+            "echo 'UxPlay 1.73.7: An Open-Source AirPlay mirroring and audio-streaming server.'\n"
+            "echo 'Initialized server socket(s)'\n"
+            "echo 'connection request from Anna (iPhone14,3) with deviceID = a1:b2:c3:d4:e5:f6'\n"
+            "echo 'audio progress (min:sec):  1:23; remaining:  0:10; track length 1:33'\n"
+            "echo 'lost connection with client (network problem?)'\n"
+            "exec sleep 30\n".format(_argv26, _env26))
+
+        def _argv26_raw():
+            try:
+                return open(_argv26, encoding='utf-8').read()
+            except OSError:
+                return 'no argv'
+
+        def _argv26_list():
+            return [a for a in _argv26_raw().splitlines() if a]
+
+        os.environ['PATH'] = _bin26 + os.pathsep + _saved_path26
+        check("uxplay is found on PATH", am.find_uxplay() == _fake_uxplay,
+              str(am.find_uxplay()))
+
+        _notify26[:] = []
+        _user_rc26 = os.path.expanduser('~/.uxplayrc')
+        _had_user_rc26 = os.path.exists(_user_rc26)
+        proto26 = am.AirPlayMirrorProtocol()
+        proto26.start()
+        check("the supervisor starts uxplay", proto26.running())
+        _rc26 = os.path.join(_tmp26, am.RC_NAME)
+        # Macast's own config directory, never ~/.uxplayrc: that file may hold
+        # options the user wrote by hand (AGENTS.md §10).
+        check("the option file is written inside Macast's own directory",
+              os.path.exists(_rc26) and os.path.dirname(
+                  os.path.realpath(_rc26)) == os.path.realpath(_tmp26), _rc26)
+        _body26 = open(_rc26, encoding='utf-8').read()
+        check("the name uxplay advertises is Macast's friendly name",
+              'n "{}"'.format(utils.Setting.get_friendly_name()) in _body26, _body26)
+        _wait_until(lambda: len(_argv26_list()) == 3)
+        _argv_list26 = _argv26_list()
+        check("uxplay was pointed at the file we wrote",
+              _argv_list26 == [_fake_uxplay, '-rc', _rc26], _argv26_raw())
+        # `-p` is the legacy port set, and its TCP 7000 is what Macast's own
+        # AirPlay receiver binds (and macOS's built-in one holds). uxplay
+        # advertises whatever it picked over mDNS, so dynamic ports cost
+        # nothing and a collision costs everything.
+        check("no fixed port set is requested, so nothing collides on 7000",
+              '-p' not in _argv_list26, str(_argv_list26))
+        # $UXPLAYRC pointing at a file that is not there makes uxplay read the
+        # user's ~/.uxplayrc instead -- a silent betrayal of the settings page.
+        check("the user's own uxplay configuration is neither read nor written",
+              _wait_until(lambda: os.path.exists(_env26))
+              and 'UXPLAYRC=[]' in open(_env26, encoding='utf-8').read()
+              and os.path.exists(_user_rc26) == _had_user_rc26,
+              open(_env26, encoding='utf-8').read() if os.path.exists(_env26) else 'no env')
+        check("an AirPlay client connecting is surfaced to the user",
+              _wait_until(lambda: any('Anna' in str(n) for n in _notify26),
+                          timeout=10), str(_notify26))
+        check("the session ending is surfaced to the user",
+              _wait_until(lambda: any('已断开' in str(n) for n in _notify26),
+                          timeout=10), str(_notify26))
+        check("uxplay's chatter stays out of the notifications",
+              not any('UxPlay' in str(n) or 'network ports' in str(n)
+                      or 'audio progress' in str(n) for n in _notify26),
+              str(_notify26))
+
+        _notify26[:] = []
+        _pid26 = proto26._proc.pid
+        proto26.stop()
+        check("stopping the plugin stops uxplay", not proto26.running())
+        check("an intentional stop is not reported as a crash",
+              not any('已退出' in str(n) for n in _notify26), str(_notify26))
+
+        proto26.reload()
+        check("reload replaces the uxplay that was running",
+              proto26.running() and proto26._proc.pid != _pid26,
+              '{} vs {}'.format(_pid26, proto26._proc.pid))
+        check("the reloaded instance is not reported as a crash",
+              not any('已退出' in str(n) for n in _notify26), str(_notify26))
+        proto26.stop()
+
+        _real_find26 = am.find_uxplay
+        am.find_uxplay = lambda: None
+        _notify26[:] = []
+        proto26b = am.AirPlayMirrorProtocol()
+        proto26b.start()
+        check("a missing uxplay is reported with what to do about it",
+              any('uxplay' in str(n) and '编译' in str(n) for n in _notify26),
+              str(_notify26))
+        check("the build recipe names the dependencies, not just the project",
+              all(word in am.INSTALL_GUIDE for word in
+                  ('cmake', 'libplist', 'openssl', 'GStreamer', 'make install')))
+        check("a missing binary leaves no process behind", proto26b._proc is None)
+        am.find_uxplay = _real_find26
+
+        # -- dying on its own ----------------------------------------------
+        class _DeadProc26(object):
+            def __init__(self, code):
+                self.returncode = code
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        import io as _io26
+        _dead26 = _DeadProc26(1)
+        proto26._proc = _dead26
+        _notify26[:] = []
+        proto26._read_output(_dead26, _io26.StringIO(
+            'using network ports UDP 1 2 3 TCP 4 5 6\n'
+            '*** ERROR: Could not find videosink "glimagesink"\n'))
+        check("a uxplay that dies by itself says so",
+              any('已退出' in str(n) for n in _notify26), str(_notify26))
+        check("the last error line is what the user sees",
+              any('videosink' in str(n) for n in _notify26), str(_notify26))
+        check("a dead process is not left in the running state",
+              proto26._proc is None and not proto26.running())
+        _notify26[:] = []
+        proto26._read_output(_DeadProc26(0), _io26.StringIO('whatever\n'))
+        check("the reader of a replaced instance stays quiet",
+              not _notify26, str(_notify26))
+
+        # -- two receivers, one phone ---------------------------------------
+        _notify26[:] = []
+        utils.Setting.setting[utils.SettingProperty.Macast_Protocols.name] = \
+            ['DLNA', 'AirPlay', 'Chromecast']
+        am.AirPlayMirrorProtocol()._warn_duplicate_receiver()
+        check("the built-in AirPlay receiver being on is mentioned once",
+              len([n for n in _notify26 if '接收端' in str(n)]) == 1, str(_notify26))
+        _notify26[:] = []
+        # This plugin's own title, and the RAOP supervisor's, sit in the same
+        # list; neither is a second video-URL receiver.
+        utils.Setting.setting[utils.SettingProperty.Macast_Protocols.name] = \
+            ['DLNA', 'AirPlay Screen Mirror', 'AirPlay Audio (RAOP)']
+        am.AirPlayMirrorProtocol()._warn_duplicate_receiver()
+        check("this plugin is not itself a competing receiver",
+              not _notify26, str(_notify26))
+        _notify26[:] = []
+        utils.Setting.setting.pop(
+            utils.SettingProperty.Macast_Protocols.name, None)
+        am.AirPlayMirrorProtocol()._warn_duplicate_receiver()
+        check("a settings file that predates the protocol list warns nobody",
+              not _notify26, str(_notify26))
+    finally:
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify26_rec)
+        except Exception:
+            pass
+        for _p26 in ('proto26', 'proto26b'):
+            _obj26 = locals().get(_p26)
+            if _obj26 is not None:
+                _obj26.stop()
+        os.environ['PATH'] = _saved_path26
+        utils.SETTING_DIR = _saved_dir26
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting26
+        _shutil.rmtree(_tmp26, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the AirPlay screen mirror supervisor behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+
+# --------------------------------------------------------------------------
+# Part 27: per-module log files (macast/logsplit.py)
+#
+# A plugin that logs at frame rate would bury the core protocol lines in
+# macast.log. `claim()` gives a logger its own file under logs/ and turns
+# propagation off, so the record lands in exactly one place -- the module
+# file -- and the settings page can show either one on its own.
+# --------------------------------------------------------------------------
+print("\n=== Part 27: module log splitting ===")
+try:
+    import logging as _lg27
+    logsplit = sys.modules.get("macast.logsplit") or _load("logsplit", "logsplit.py")
+
+    _tmp27 = _tempfile.mkdtemp(prefix="macast-logsplit-")
+    _saved_dir27_utils = utils.SETTING_DIR
+    _saved_dir27_proto = protocol.SETTING_DIR
+    _saved_setting27 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_running27 = utils.Setting.is_service_running
+    _root27 = _lg27.getLogger()
+    _saved_root_level27 = _root27.level
+    _saved_root_handlers27 = list(_root27.handlers)
+    _probe_seen27 = []
+    _probe27 = _lg27.Handler()
+    _probe27.emit = lambda rec: _probe_seen27.append(rec.name)
+    _file27 = _lg27.FileHandler(
+        os.path.join(_tmp27, utils.LOG_FILE_NAME), encoding='utf-8')
+    _added27 = [_probe27, _file27]
+    _logs_dir27 = os.path.join(_tmp27, 'logs')
+    _log_path27 = os.path.join(_tmp27, utils.LOG_FILE_NAME)
+    try:
+        utils.SETTING_DIR = _tmp27
+        protocol.SETTING_DIR = _tmp27
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp27, "macast_setting.json")
+        _root27.addHandler(_probe27)
+        _root27.addHandler(_file27)
+        _root27.setLevel(_lg27.INFO)
+
+        # -- claim() routing ---------------------------------------------
+        _mod27 = _lg27.getLogger("MirrorProbe")
+        _p27 = logsplit.claim("MirrorProbe")
+        check("a claimed logger owns a file under logs/",
+              _p27.endswith(os.path.join("logs", "MirrorProbe.log"))
+              and os.path.isfile(_p27), _p27)
+        check("claiming turns propagation off (that is the whole point)",
+              _mod27.propagate is False)
+        check("claim is idempotent: same path, one handler",
+              logsplit.claim("MirrorProbe") == _p27
+              and sum(1 for h in _mod27.handlers
+                      if getattr(h, "_macast_module_log", False)) == 1,
+              str(_mod27.handlers))
+        _probe_seen27[:] = []
+        _mod27.info("frame 1")
+        _lg27.getLogger("SomeCore").info("core side line")
+        _file27.flush()
+        check("module records never reach the root handler",
+              "MirrorProbe" not in _probe_seen27, str(_probe_seen27))
+        check("module records never reach macast.log",
+              "frame 1" in open(_p27, encoding="utf-8").read()
+              and "frame 1" not in open(_log_path27, encoding="utf-8").read(),
+              open(_log_path27, encoding="utf-8").read())
+        check("unclaimed loggers keep flowing into macast.log",
+              "core side line" in open(_log_path27, encoding="utf-8").read(),
+              open(_log_path27, encoding="utf-8").read()[-120:])
+
+        _with_logger = types.SimpleNamespace(logger=_lg27.getLogger("HookProbe"))
+        _without = types.SimpleNamespace()
+        check("claim_from_module picks up a plugin module's logger",
+              logsplit.claim_from_module(_with_logger)
+              == os.path.join(_logs_dir27, "HookProbe.log")
+              and logsplit.claim_from_module(_without) == '',
+              str(logsplit.claimed_names()))
+
+        # -- file names, listing, clearing --------------------------------
+        _evil = logsplit.file_name("../evil name/中文")
+        check("a logger name can only ever become one plain file name",
+              "/" not in _evil and "\\" not in _evil and ".." not in _evil
+              and _evil.endswith(".log"), _evil)
+        with open(os.path.join(_logs_dir27, "Other.log.1"), "w",
+                  encoding="utf-8") as _f:
+            _f.write("rotated\n")
+        with open(os.path.join(_logs_dir27, "notes.txt"), "w",
+                  encoding="utf-8") as _f:
+            _f.write("not a log\n")
+        _listing = logsplit.list_logs()
+        _names = [m["name"] for m in _listing]
+        check("list_logs shows each module once, rotated backups excluded",
+              _names.count("MirrorProbe") == 1 and "Other" in _names
+              and "notes" not in _names, str(_names))
+        check("list_logs carries what the picker needs",
+              all({"name", "file", "size", "mtime"} <= set(m) for m in _listing),
+              str(_listing[:1]))
+        with open(_p27 + ".1", "w", encoding="utf-8") as _f:
+            _f.write("stale backup\n")
+        _removed = logsplit.clear("MirrorProbe")
+        check("clear truncates the module log and drops its backups",
+              _removed >= 2 and os.path.getsize(_p27) == 0
+              and not os.path.exists(_p27 + ".1"), str(_removed))
+
+        # -- the HTTP surface the log tab uses ----------------------------
+        utils.Setting.is_service_running = staticmethod(lambda: True)
+
+        class _LogHandler27(protocol.Handler):
+            """Skips the real __init__ (it reads the settings page off disk)."""
+
+            def __init__(self):
+                pass
+
+            @property
+            def protocol(self):
+                return types.SimpleNamespace()
+
+        handler27 = _LogHandler27()
+        from cherrypy import serving as _serving27
+        request27 = _serving27.request
+        _saved_params27 = request27.params
+        _saved_remote27 = getattr(request27, "remote", None)
+        _saved_scheme27 = request27.scheme
+        _saved_headers27 = dict(request27.headers)
+        try:
+            def _reset27(ip="127.0.0.1"):
+                request27.headers.clear()
+                for _k, _v in _saved_headers27.items():
+                    request27.headers[_k] = _v
+                request27.params = {}
+                request27.remote = types.SimpleNamespace(ip=ip)
+                request27.scheme = "http"
+
+            def _get27(**kw):
+                return json.loads(handler27.GET(param="api", **kw).decode())
+
+            # The module has to have something to show after the clear above.
+            _mod27.info("frame 2")
+            for _h in _mod27.handlers:
+                _h.flush()
+
+            _reset27()
+            _mods = _get27(query="log-modules")
+            check("log-modules lists the global file and one row per module",
+                  _mods["main"]["size"] > 0
+                  and "MirrorProbe" in [m["name"] for m in _mods["modules"]],
+                  str(_mods))
+            _res = _get27(query="log", module="MirrorProbe")
+            check("query=log?module= reads that module's own file",
+                  _res.get("code") == 0 and _res.get("module") == "MirrorProbe"
+                  and "frame 2" in _res.get("logs", "")
+                  and "core side line" not in _res.get("logs", ""),
+                  str(_res).replace("\n", " ")[:160])
+            _res = _get27(query="log")
+            check("the global view keeps showing macast.log only",
+                  _res.get("code") == 0 and _res.get("module") == ""
+                  and "core side line" in _res.get("logs", "")
+                  and "frame 2" not in _res.get("logs", ""),
+                  str(_res).replace("\n", " ")[:160])
+            _res = _get27(query="log", module="整体")
+            check("「整体」 is an accepted alias for the global file",
+                  _res.get("code") == 0 and _res.get("module") == "", str(_res))
+            _res = _get27(query="log", module="NoSuchModule")
+            check("an unknown module is an explicit error, never a fallback",
+                  _res.get("code") == 1 and _res.get("logs") == "", str(_res))
+
+            _reset27(ip="192.168.1.9")
+            check("log-modules is gated with the other management queries",
+                  _get27(query="log-modules").get("code") == 403)
+            check("a module log is not readable from the LAN without the token",
+                  _get27(query="log", module="MirrorProbe").get("code") == 403)
+            _reset27()
+            _blob = handler27.GET(param="api", query="log-download",
+                                  module="MirrorProbe")
+            check("log-download follows the module too",
+                  isinstance(_blob, bytes) and b"frame 2" in _blob
+                  and "MirrorProbe.log" in str(
+                      _serving27.response.headers.get("Content-Disposition", "")),
+                  str(dict(_serving27.response.headers)))
+            _res = json.loads(handler27.POST(**{"clear-log": "1",
+                                                "module": "MirrorProbe"}).decode())
+            check("clear-log?module= clears just that module",
+                  _res.get("code") == 0 and os.path.getsize(_p27) == 0
+                  and os.path.getsize(_log_path27) > 0,
+                  "{} / {}".format(_res, os.path.getsize(_log_path27)))
+            _mod27.info("frame 3")
+            for _h in _mod27.handlers:
+                _h.flush()
+            _res = json.loads(handler27.POST(**{"clear-log": "1"}).decode())
+            check("clearing the global log leaves module files alone",
+                  _res.get("code") == 0 and os.path.getsize(_log_path27) == 0
+                  and "frame 3" in open(_p27, encoding="utf-8").read(),
+                  str(_res))
+            _res = json.loads(handler27.POST(**{"clear-log": "1",
+                                                "module": "NoSuchModule"}).decode())
+            check("clear-log refuses an unknown module",
+                  _res.get("code") == 1, str(_res))
+        finally:
+            request27.params = _saved_params27
+            request27.remote = _saved_remote27
+            request27.scheme = _saved_scheme27
+            request27.headers.clear()
+            for _k, _v in _saved_headers27.items():
+                request27.headers[_k] = _v
+
+        # -- startup wipe: module logs are cleared with macast.log ---------
+        check("remove_all clears the logs directory of every log file",
+              logsplit.remove_all() >= 1
+              and not [f for f in os.listdir(_logs_dir27) if ".log" in f]
+              and os.path.exists(os.path.join(_logs_dir27, "notes.txt")),
+              str(sorted(os.listdir(_logs_dir27))))
+
+        # -- the wiring this part cannot exercise end-to-end ---------------
+        with open(os.path.join(MACAST, "macast.py"), "r", encoding="utf-8") as _f:
+            _macast_src27 = _f.read()
+        check("both plugin load paths claim the module's logger",
+              _macast_src27.count("logsplit.claim_from_module(module)") == 2,
+              str(_macast_src27.count("logsplit.claim_from_module(module)")))
+        with open(os.path.join(REPO, "Macast.py"), "r", encoding="utf-8") as _f:
+            _entry_src27 = _f.read()
+        check("clear_env wipes module logs with the main one",
+              "logsplit.remove_all()" in _entry_src27)
+        with open(os.path.join(MACAST, "xml", "setting.html"), "r",
+                  encoding="utf-8") as _f:
+            _html27 = _f.read()
+        check("the log tab offers the module picker and threads it through",
+              "query=log-modules" in _html27
+              and _html27.count("&module=") >= 2
+              and "fd.append('module', this.log_module)" in _html27)
+    finally:
+        for _n27 in logsplit.claimed_names():
+            _lgone = _lg27.getLogger(_n27)
+            for _h in list(_lgone.handlers):
+                if getattr(_h, "_macast_module_log", False):
+                    _lgone.removeHandler(_h)
+                    try:
+                        _h.close()
+                    except Exception:
+                        pass
+            _lgone.propagate = True
+        logsplit._claimed.clear()
+        for _h in _added27:
+            _root27.removeHandler(_h)
+            try:
+                _h.close()
+            except Exception:
+                pass
+        _root27.setLevel(_saved_root_level27)
+        utils.SETTING_DIR = _saved_dir27_utils
+        protocol.SETTING_DIR = _saved_dir27_proto
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting27
+        utils.Setting.is_service_running = staticmethod(_saved_running27)
+        _shutil.rmtree(_tmp27, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("module log splitting behaves", False,
+          "{}: {}".format(type(e).__name__, e))
+
+# --------------------------------------------------------------------------
+# Part 28: settings grouped by owning module (macast/module_settings.py)
+#
+# The 高级设置 tab answers "what is stored"; this answers "who owns it". Two
+# failure modes matter: a key silently missing from every group (the user
+# cannot find where a setting lives), and the label map drifting from what
+# the modules actually persist -- which is why the map is checked against
+# every SettingProperty in the repo, not just against fixtures.
+# --------------------------------------------------------------------------
+print("\n=== Part 28: module settings ===")
+try:
+    import re as _re28
+    from enum import Enum as _Enum28
+    module_settings = (sys.modules.get("macast.module_settings")
+                       or _load("module_settings", "module_settings.py"))
+
+    _tmp28 = _tempfile.mkdtemp(prefix="macast-modsettings-")
+    _saved_setting28 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_running28 = utils.Setting.is_service_running
+    try:
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp28, "macast_setting.json")
+        utils.Setting.is_service_running = staticmethod(lambda: True)
+
+        # -- build_groups --------------------------------------------------
+        _sm_mod = types.ModuleType("alias_x")
+        _sm_mod.__file__ = os.path.join(REPO, "plugins", "screen_mirror.py")
+        _sm_mod.SettingProperty = _Enum28(
+            "SettingProperty", {"Mirror_Quality": 1, "Mirror_Target": 2})
+        _raop_old = types.ModuleType("alias_y")
+        _raop_old.__file__ = os.path.join(REPO, "plugins", "raop.py")  # v0.1: no enum
+        _weird = types.ModuleType("alias_z")
+        _weird.__file__ = "/somewhere/weird_thing.py"
+        _weird.SettingProperty = _Enum28("SettingProperty", {"Third_Party_Key": 1})
+        _plug_sm = types.SimpleNamespace(title="Screen Mirror", version="0.6",
+                                         module=_sm_mod)
+        _plug_raop = types.SimpleNamespace(title="AirPlay Audio (RAOP)",
+                                           version="0.1", module=_raop_old)
+        _plug_wd = types.SimpleNamespace(title="Weird", version="1", module=_weird)
+        _stored28 = {"Mirror_Quality": "1080p", "Blocked_Interfaces": ["en9"],
+                     "Made_Up_Key": "x"}
+        _groups = module_settings.build_groups(
+            [_plug_sm, _plug_raop, _plug_wd], _stored28)
+        _ids = [g["id"] for g in _groups]
+        check("core and player lead the groups; leftovers close them",
+              _ids[0] == "core" and _ids[1] == "player"
+              and _ids[-1] == "other", str(_ids))
+        _g_sm = next(g for g in _groups if g["id"] == "plugin:screen_mirror")
+        _k_q = next(i for i in _g_sm["keys"] if i["key"] == "Mirror_Quality")
+        check("a known plugin's keys get their Chinese labels and hints",
+              _k_q["label"] == module_settings.PLUGIN_LABELS[
+                  "screen_mirror"]["Mirror_Quality"][0]
+              and _k_q["hint"] and _k_q["present"] is True
+              and _k_q["value"] == "1080p" and _k_q["editable"] is True,
+              str(_k_q))
+        _k_t = next(i for i in _g_sm["keys"] if i["key"] == "Mirror_Target")
+        check("a declared key that was never persisted shows as 未设置, still writable",
+              _k_t["present"] is False and _k_t["editable"] is True)
+        _g_raop = next(g for g in _groups if g["id"] == "plugin:raop")
+        check("a plugin without persisted settings still gets a card (empty, not hidden)",
+              _g_raop["keys"] == [], str(_g_raop))
+        _g_wd = next(g for g in _groups if g["id"] == "plugin:weird_thing")
+        check("an unknown plugin's own enum is listed verbatim",
+              [i["key"] for i in _g_wd["keys"]] == ["Third_Party_Key"]
+              and _g_wd["keys"][0]["label"] == "Third_Party_Key", str(_g_wd))
+        _g_other = next(g for g in _groups if g["id"] == "other")
+        check("a key nobody owns lands in 其他（未归类）",
+              [i["key"] for i in _g_other["keys"]] == ["Made_Up_Key"],
+              str(_g_other))
+        _g_core = _groups[0]
+        _k_bi = next(i for i in _g_core["keys"] if i["key"] == "Blocked_Interfaces")
+        check("list/dict values are marked not editable here (JSON tab owns them)",
+              _k_bi["editable"] is False and _k_bi["present"] is True)
+        _all_keys = [i["key"] for g in _groups for i in g["keys"]]
+        check("no key is claimed by two groups",
+              len(_all_keys) == len(set(_all_keys)),
+              str([k for k in set(_all_keys) if _all_keys.count(k) > 1]))
+
+        # -- set_value ------------------------------------------------------
+        _r = module_settings.set_value("Not_Owned_At_All", "1")
+        check("writing an unowned key is refused", _r["code"] == 1, str(_r))
+        _r = module_settings.set_value("Blocked_Interfaces", '["en0"]')
+        check("a JSON container is refused (structure belongs to the JSON tab)",
+              _r["code"] == 1, str(_r))
+        _r = module_settings.set_value("PlayerSize", "2")
+        check("a scalar saves, with JSON types honoured, and persists to disk",
+              _r["code"] == 0 and utils.Setting.setting.get("PlayerSize") == 2
+              and json.load(open(utils.Setting.setting_path,
+                                 encoding="utf-8"))["PlayerSize"] == 2, str(_r))
+        _r = module_settings.set_value("DLNA_FriendlyName", "客厅的小屏")
+        check("unquoted text stays a plain string",
+              _r["code"] == 0
+              and utils.Setting.setting.get("DLNA_FriendlyName") == "客厅的小屏",
+              str(_r))
+        _r = module_settings.set_value("PlayerSize", "", remove=True)
+        _r2 = module_settings.set_value("PlayerSize", "", remove=True)
+        check("remove deletes the key and tolerates an absent one",
+              _r["code"] == 0 and _r["removed"] is True
+              and "PlayerSize" not in utils.Setting.setting
+              and _r2["code"] == 0 and _r2["removed"] is False,
+              "{} {}".format(_r, _r2))
+        # A plugin key is only owned while a manager actually has that plugin
+        # loaded -- prove the bus path, not just the static maps.
+        _mgr28 = types.SimpleNamespace(renderer_all=[_plug_sm], protocol_list=[])
+        _get_mgr28 = lambda: _mgr28                                  # noqa: E731
+        cherrypy.engine.subscribe("get_plugin_manager", _get_mgr28)
+        try:
+            _r = module_settings.set_value("Mirror_Target", '"192.168.1.40:8009"')
+            check("a loaded plugin's key is writable through the manager",
+                  _r["code"] == 0
+                  and utils.Setting.setting.get("Mirror_Target")
+                  == "192.168.1.40:8009", str(_r))
+        finally:
+            try:
+                cherrypy.engine.unsubscribe("get_plugin_manager", _get_mgr28)
+            except Exception:
+                pass
+
+        # -- the HTTP surface ----------------------------------------------
+        class _MsHandler28(protocol.Handler):
+            def __init__(self):
+                pass
+
+            @property
+            def protocol(self):
+                return types.SimpleNamespace()
+
+        handler28 = _MsHandler28()
+        from cherrypy import serving as _serving28
+        request28 = _serving28.request
+        _saved28 = (request28.params, getattr(request28, "remote", None),
+                    request28.scheme, dict(request28.headers))
+        try:
+            def _reset28(ip="127.0.0.1"):
+                request28.headers.clear()
+                for _k, _v in _saved28[3].items():
+                    request28.headers[_k] = _v
+                request28.params = {}
+                request28.remote = types.SimpleNamespace(ip=ip)
+                request28.scheme = "http"
+
+            def _get28(**kw):
+                return json.loads(handler28.GET(param="api", **kw).decode())
+
+            def _post28(**kw):
+                return json.loads(handler28.POST(**kw).decode())
+
+            _reset28(ip="192.168.1.9")
+            check("module-settings is a management query: loopback or token",
+                  _get28(query="module-settings").get("code") == 403
+                  and _post28(**{"set-module-setting": "1",
+                                 "key": "PlayerSize", "value": "1"}).get("code") == 403)
+            _reset28()
+            _res = _get28(query="module-settings")
+            check("the page gets groups with labels from one call",
+                  _res.get("code") == 0
+                  and {g["id"] for g in _res.get("groups", [])} >= {"core", "player"},
+                  str(_res)[:140])
+            _res = _post28(**{"set-module-setting": "1",
+                              "key": "PlayerOntop", "value": "0"})
+            check("set-module-setting persists through the API",
+                  _res.get("code") == 0
+                  and utils.Setting.setting.get("PlayerOntop") == 0, str(_res))
+            _res = _post28(**{"set-module-setting": "1",
+                              "key": "Nope", "value": "1"})
+            check("the API refuses unowned keys too", _res.get("code") == 1,
+                  str(_res))
+        finally:
+            (request28.params, request28.remote, request28.scheme, _) = _saved28
+            request28.headers.clear()
+            for _k, _v in _saved28[3].items():
+                request28.headers[_k] = _v
+
+        # -- the label map against the repo's real modules -------------------
+        def _enum_block_names(src):
+            marker = "class SettingProperty(Enum):"
+            if marker not in src:
+                return None
+            names = []
+            for ln in src.split(marker, 1)[1].splitlines():
+                if ln.strip() == "":
+                    continue
+                if not (ln.startswith(" ") or ln.startswith("\t")):
+                    break
+                if ln.strip().startswith("#"):
+                    continue
+                m = _re28.match(r"([A-Za-z_]\w*)\s*=\s*", ln.strip())
+                if m:
+                    names.append(m.group(1))
+            return names
+
+        def _setting_keys_used(src):
+            # `.name` is the persisted key, and the only thing that persists a
+            # key is the first argument of Setting.get/set/has/unset. Bare
+            # references elsewhere are value comparisons (mpv.py compares
+            # `setting_player_hw != SettingProperty.PlayerHW_Disable`), not
+            # keys; and constants always appear with `.value` appended.
+            return {m.group(1) for m in _re28.finditer(
+                r"Setting\.(?:get|set|has|unset)\(\s*"
+                r"SettingProperty\.([A-Za-z_]\w*)(\s*\.value)?", src)
+                if not m.group(2)}
+
+        _allowed28 = set(module_settings.CORE_LABELS) | set(
+            module_settings.PLAYER_LABELS)
+        for _m28 in module_settings.PLUGIN_LABELS.values():
+            _allowed28 |= set(_m28)
+        _scan28 = ([("macast/utils.py", "core"), ("macast_renderer/mpv.py", "player")]
+                   + [("plugins/" + _f, _f[:-3]) for _f in sorted(
+                      os.listdir(os.path.join(REPO, "plugins")))
+                      if _f.endswith(".py") and _f != "__init__.py"]
+                   + [("macast/plugins/" + _k + "/" + _f, _f[:-3])
+                      for _k in ("renderer", "protocol")
+                      for _f in sorted(os.listdir(
+                          os.path.join(MACAST, "plugins", _k)))
+                      if _f.endswith(".py") and not _f.startswith("__")])
+        _drift28 = []
+        for _rel, _base in _scan28:
+            with open(os.path.join(REPO, _rel), "r", encoding="utf-8") as _f:
+                _src28 = _f.read()
+            if "SettingProperty." not in _src28:
+                continue
+            _missing = _setting_keys_used(_src28) - _allowed28
+            if _missing:
+                _drift28.append("{}: {}".format(_rel, sorted(_missing)))
+        check("every persisted setting key in the repo has a label",
+              not _drift28, "; ".join(_drift28))
+        _ghost28 = []
+        for _base, _labels in module_settings.PLUGIN_LABELS.items():
+            _files = [os.path.join(REPO, "plugins", _base + ".py")]
+            for _k in ("renderer", "protocol"):
+                _files.append(os.path.join(MACAST, "plugins", _k, _base + ".py"))
+            _hit = [p for p in _files if os.path.isfile(p)]
+            if not _hit:
+                _ghost28.append("{}: no plugin file".format(_base))
+                continue
+            for _p in _hit:
+                with open(_p, "r", encoding="utf-8") as _f:
+                    _names28 = set(_enum_block_names(_f.read()) or [])
+                _bad = set(_labels) - _names28
+                if _bad:
+                    _ghost28.append("{}: {}".format(_base, sorted(_bad)))
+        check("no label points at a key its plugin does not declare",
+              not _ghost28, "; ".join(_ghost28))
+        with open(os.path.join(MACAST, "utils.py"), "r", encoding="utf-8") as _f:
+            _core_names28 = set(_enum_block_names(_f.read()) or [])
+        check("the core label map covers exactly the core enum",
+              _core_names28 == set(module_settings.CORE_LABELS),
+              str(sorted(_core_names28 ^ set(module_settings.CORE_LABELS))))
+        with open(os.path.join(REPO, "macast_renderer", "mpv.py"), "r",
+                  encoding="utf-8") as _f:
+            _mpv_names28 = set(_enum_block_names(_f.read()) or [])
+        check("the player label map is a subset of mpv's enum (constants excluded)",
+              set(module_settings.PLAYER_LABELS) <= _mpv_names28,
+              str(set(module_settings.PLAYER_LABELS) - _mpv_names28))
+
+        # -- wiring -----------------------------------------------------------
+        with open(os.path.join(MACAST, "protocol.py"), "r", encoding="utf-8") as _f:
+            _proto_src28 = _f.read()
+        _gate_at28 = _proto_src28.index("Sensitive management queries")
+        _gate_txt28 = _proto_src28[_gate_at28:_proto_src28.index(
+            "_management_allowed()", _gate_at28)]
+        check("module-settings sits in the gated query list",
+              "'module-settings'" in _gate_txt28, _gate_txt28)
+        _mp28 = _proto_src28[_proto_src28.index("_MANAGEMENT_PARAMS = ("):]
+        _mp28 = _mp28[:_mp28.index(")")]
+        check("set-module-setting sits in the gated POST params",
+              "set-module-setting" in _mp28, _mp28)
+        with open(os.path.join(MACAST, "xml", "setting.html"), "r",
+                  encoding="utf-8") as _f:
+            _html28 = _f.read()
+        check("the page carries the 模块设置 tab wired to both endpoints",
+              'label="模块设置"' in _html28
+              and "query=module-settings" in _html28
+              and "set-module-setting" in _html28)
+        check("module values render as text, never v-html",
+              'v-html="' not in _html28)
+        # The fake plugins above all carry `.module`, so only a source check
+        # catches the real wiring gap: load_from_file must store the imported
+        # module on the MacastPlugin, or every file-loaded plugin's card is
+        # empty and its keys fall into 其他（未归类）.
+        with open(os.path.join(MACAST, "macast.py"), "r", encoding="utf-8") as _f:
+            _mgr_src28 = _f.read()
+        check("load_from_file hands the imported module to the plugin",
+              _mgr_src28.count("self.module = module") >= 3,
+              str(_mgr_src28.count("self.module = module")))
+        with open(os.path.join(MACAST, "module_settings.py"), "r",
+                  encoding="utf-8") as _f:
+            _ms_src28 = _f.read()
+        check("the mpv plugin defers to the 播放器 group instead of doubling it",
+              "'mpv'" in _ms_src28 and "plugin_module_name(module) == 'mpv'"
+              in _ms_src28)
+    finally:
+        (utils.Setting.setting, utils.Setting.setting_path) = _saved_setting28
+        utils.Setting.is_service_running = staticmethod(_saved_running28)
+        _shutil.rmtree(_tmp28, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("module settings behave", False,
+          "{}: {}".format(type(e).__name__, e))
+
+
+# --------------------------------------------------------------------------
+# Part 29: screen mirror v0.7 -- the assisted install tells the truth
+#
+# The user-visible failure this version exists for: 一键设置 says "安装被取消了
+# 吗？" when the real story is a stale pkgutil receipt (files gone, receipt
+# kept, reinstall silently skipped by the old flow) or a pkg whose postinstall
+# never restarts coreaudiod (driver on disk, device invisible forever). The
+# step machine is the only place those two branches become *named* outcomes,
+# so the tests here walk every branch with stubs -- and the loopback progress
+# page gets real HTTP checks, because its credential rules are §4.8's.
+# --------------------------------------------------------------------------
+print("\n=== Part 29: screen mirror v0.7 (one-click repair + progress page) ===")
+try:
+    import json as _json29
+    import urllib.error as _urlerr29
+    import urllib.request as _urlreq29
+
+    _saved_setting29 = (utils.Setting.setting, utils.Setting.setting_path)
+    _tmp29 = _tempfile.mkdtemp(prefix="macast-mirror29-")
+    _opener29 = _urlreq29.build_opener(_urlreq29.ProxyHandler({}))
+    mirror29 = _load_plugin("screen_mirror_plugin_v07", "screen_mirror.py")
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp29, "macast_setting.json")
+    try:
+        # -- the step machine itself ------------------------------------------
+        _ids29 = [s[0] for s in mirror29.AUDIO_STEPS]
+        check("the run plan names every branch of the repair, reload included",
+              len(set(_ids29)) == len(_ids29) and
+              set(('probe', 'download', 'verify', 'install', 'wait',
+                   'reload', 'aggregate', 'output')) <= set(_ids29),
+              str(_ids29))
+        p29 = mirror29._SetupProgress()
+        p29.enter('download')
+        p29.sub('download', 0.5, '1 / 2 MB')
+        p29.leave('download')
+        p29.enter('download')  # a done step refuses re-entry
+        _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+        check("a finished step never runs backwards",
+              _d29['download']['state'] == 'done'
+              and _d29['download']['pct'] == 1.0, str(_d29['download']))
+        p29.skip('meta')
+        p29.enter('verify')
+        _snap29 = p29.snapshot()
+        _w = (1.0 + 0.15) / 9  # 10 steps, 1 skipped out of the denominator
+        check("skipped steps leave the denominator",
+              _snap29['steps'][_ids29.index('meta')]['state'] == 'skipped'
+              and abs(_snap29['pct'] - _w) < 1e-9, str(_snap29['pct']))
+        p29.fail('verify', 'bad sha')
+        p29.leave('verify', 'too late')
+        _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+        check("fail wins over a late leave",
+              _d29['verify']['state'] == 'fail', str(_d29['verify']))
+        _null29 = mirror29._NullProgress()
+        _null29.enter('x'); _null29.sub('x', 0.5); _null29.leave('x')
+        _null29.skip('x'); _null29.fail('x'); _null29.finish(True)
+        check("the no-op twin answers the whole surface, snapshot included",
+              _null29.snapshot()['steps'] == [])
+
+        # -- stubbed plumbing shared by the setup walk-throughs ---------------
+        import types as _types29
+        _types29_ns = _types29.SimpleNamespace
+
+        class _Sub29(object):
+            DEVNULL = -3
+            PIPE = -1
+
+            def __init__(self, results=None):
+                self.calls = []
+                self.results = results or []
+
+            def run(self, cmd, **kwargs):
+                self.calls.append(list(cmd))
+                r = self.results.pop(0) if self.results else (0, '', '')
+                return _types29_ns(returncode=r[0], stdout=r[1], stderr=r[2])
+
+        def _rec_progress29():
+            return mirror29._SetupProgress()
+
+        _saved29 = {}
+
+        def _stub29(overrides=None, **over):
+            merged = dict(overrides or {})
+            merged.update(over)
+            for _name, _fn in merged.items():
+                if _name not in _saved29:
+                    _saved29[_name] = getattr(mirror29, _name)
+                setattr(mirror29, _name, _fn)
+
+        def _unstub29():
+            for _name, _fn in _saved29.items():
+                setattr(mirror29, _name, _fn)
+            _saved29.clear()
+
+        def _route_ok29(f, progress=None):
+            # The real route marks these two steps itself; the stub has to,
+            # or the "everything finished" percentage checks test the stub.
+            progress.leave('aggregate', 'stub')
+            progress.leave('output', 'stub')
+            return True
+
+        _base_stubs = dict(
+            find_ffmpeg=lambda: 'ffmpeg',
+            _has_blackhole=lambda f: False,
+            blackhole_pkg_pair=lambda: ('https://x/BH.pkg', 'a' * 64, 'stub'),
+            _fetch_blackhole_pkg=lambda url, on_bytes=None: '/tmp/bh29.pkg',
+            verify_blackhole_pkg=lambda path, sha: True,
+            _wait_for_blackhole=lambda f, timeout=300.0, progress=None,
+                                  interval=5.0: True,
+            _route_audio_through_blackhole=_route_ok29,
+            _open_audio_midi_setup=lambda rep: None,
+            _blackhole_driver_installed=lambda: False,
+            _blackhole_receipt_present=lambda: False,
+            _reload_coreaudiod=lambda: (False, 'stub'),
+            subprocess=_Sub29())
+
+        # -- branch: device already there -> install steps skipped ------------
+        _stub29(dict(_base_stubs, _has_blackhole=lambda f: True))
+        try:
+            p29 = _rec_progress29()
+            _ok29 = mirror29.setup_system_audio(lambda m: None, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("a healthy machine skips straight to routing",
+                  _ok29 and _d29['download']['state'] == 'skipped'
+                  and _d29['reload']['state'] == 'skipped'
+                  and _d29['output']['state'] == 'done'
+                  and p29.snapshot()['pct'] == 1.0,
+                  str(_d29))
+        finally:
+            _unstub29()
+
+        # -- branch: stale pkgutil receipt -> names the real cause ------------
+        _fetched29 = []
+        _sub29 = _Sub29()
+        _stub29(dict(_base_stubs,
+                     _blackhole_receipt_present=lambda: True,
+                     _fetch_blackhole_pkg=(
+                         lambda url, on_bytes=None:
+                         _fetched29.append(url) or '/tmp/bh29.pkg'),
+                     subprocess=_sub29))
+        try:
+            p29 = _rec_progress29()
+            _ok29 = mirror29.setup_system_audio(lambda m: None, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("the stale-receipt machine is told it will reinstall",
+                  _ok29 and '残留' in _d29['probe']['note']
+                  and _fetched29 == ['https://x/BH.pkg']
+                  and ['open', '/tmp/bh29.pkg'] in _sub29.calls,
+                  "{} / {}".format(_d29['probe']['note'], _sub29.calls))
+        finally:
+            _unstub29()
+
+        # -- branch: files on disk, coreaudiod never loaded them -> reload ----
+        _waits29 = []
+
+        def _wait_once_then29(f, timeout=300.0, progress=None, interval=5.0):
+            _waits29.append(timeout)
+            return len(_waits29) > 1  # first poll: still invisible
+
+        _stub29(dict(_base_stubs,
+                     _blackhole_driver_installed=lambda: True,
+                     _wait_for_blackhole=_wait_once_then29,
+                     _reload_coreaudiod=lambda: (True, '音频服务已重载')))
+        try:
+            p29 = _rec_progress29()
+            _msgs29 = []
+            _ok29 = mirror29.setup_system_audio(_msgs29.append, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("an installed-but-unloaded driver gets the daemon reloaded",
+                  _ok29 and _d29['reload']['state'] == 'done'
+                  and len(_waits29) == 2 and _waits29[1] == 45.0
+                  and '没有加载' in _d29['probe']['note'],
+                  str(_d29))
+        finally:
+            _unstub29()
+
+        # -- branch: reload refused (password cancelled) -> honest stop -------
+        _stub29(dict(_base_stubs,
+                     _blackhole_driver_installed=lambda: True,
+                     _wait_for_blackhole=lambda f, timeout=300.0,
+                                           progress=None, interval=5.0: False,
+                     _reload_coreaudiod=lambda: (False, '你取消了密码框')))
+        try:
+            p29 = _rec_progress29()
+            _msgs29 = []
+            _ok29 = mirror29.setup_system_audio(_msgs29.append, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("a cancelled reload fails reload, not a bogus timeout",
+                  not _ok29 and _d29['reload']['state'] == 'fail'
+                  and '密码框' in _d29['reload']['note']
+                  and _d29['wait']['state'] == 'fail',
+                  str(_msgs29))
+        finally:
+            _unstub29()
+
+        # -- branch: sha mismatch -> the pkg never reaches `open` -------------
+        _sub29 = _Sub29()
+        _stub29(dict(_base_stubs, verify_blackhole_pkg=lambda path, sha: False,
+                     subprocess=_sub29))
+        try:
+            p29 = _rec_progress29()
+            _ok29 = mirror29.setup_system_audio(lambda m: None, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("an unverifiable pkg aborts before the installer",
+                  not _ok29 and _d29['verify']['state'] == 'fail'
+                  and not [c for c in _sub29.calls if c[0] == 'open'],
+                  str(_sub29.calls))
+        finally:
+            _unstub29()
+
+        # -- branch: a crash fails exactly the step that was running ----------
+        def _boom29(url, on_bytes=None):
+            raise OSError('disk on fire')
+
+        _stub29(dict(_base_stubs, _fetch_blackhole_pkg=_boom29))
+        try:
+            p29 = _rec_progress29()
+            _msgs29 = []
+            _ok29 = mirror29.setup_system_audio(_msgs29.append, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("an unexpected error lands on the running step, not all of them",
+                  not _ok29 and _d29['download']['state'] == 'fail'
+                  and _d29['probe']['state'] == 'done'
+                  and any('disk on fire' in m for m in _msgs29),
+                  str(_msgs29))
+        finally:
+            _unstub29()
+
+        # -- the download tick reaches the page -------------------------------
+        def _fetch_tick29(url, on_bytes=None):
+            if on_bytes:
+                on_bytes(1024 * 1024, 4 * 1024 * 1024)
+            return '/tmp/bh29.pkg'
+
+        _stub29(dict(_base_stubs, _fetch_blackhole_pkg=_fetch_tick29))
+        try:
+            p29 = _rec_progress29()
+            _ok29 = mirror29.setup_system_audio(lambda m: None, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("byte callbacks land while the download runs, then it closes",
+                  _ok29 and _d29['download']['state'] == 'done', str(_d29))
+        finally:
+            _unstub29()
+
+        # -- _pkg_tmpdir survives a vanished CLI-sandbox TMPDIR ----------------
+        _real_mkdtemp29 = _tempfile.mkdtemp
+        _mkcalls29 = []
+
+        def _mkdtemp29(*a, **k):
+            _mkcalls29.append(k.get('dir'))
+            if k.get('dir') is None:
+                raise OSError(2, 'No such file or directory')
+            return _real_mkdtemp29(*a, **k)
+
+        _saved_home29 = os.environ.get('HOME')
+        _tempfile.mkdtemp = _mkdtemp29
+        os.environ['HOME'] = _tmp29
+        try:
+            _dir29 = mirror29._pkg_tmpdir()
+            check("a vanished sandbox TMPDIR falls back to the user cache dir",
+                  _mkcalls29[0] is None and len(_mkcalls29) == 2
+                  and _dir29.startswith(os.path.join(_tmp29, 'Library'))
+                  and os.path.isdir(_dir29), str(_mkcalls29))
+        finally:
+            _tempfile.mkdtemp = _real_mkdtemp29
+            os.environ['HOME'] = _saved_home29
+
+        # -- _wait_for_blackhole ticks its own step ----------------------------
+        _stub29(_has_blackhole=lambda f: False)
+        try:
+            p29 = _rec_progress29()
+            p29.enter('wait')
+            _hit29 = mirror29._wait_for_blackhole('ffmpeg', timeout=0.05,
+                                                  progress=p29, interval=0.01)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("the wait step says how long it has been waiting",
+                  not _hit29 and '已等' in _d29['wait']['note']
+                  and 0.0 < (_d29['wait']['pct'] or 0) <= 0.99,
+                  str(_d29['wait']))
+        finally:
+            _unstub29()
+
+        # -- blackhole_pkg_pair: the cask API stays the authority --------------
+        import requests as _req29
+        _real_get29 = _req29.get
+        try:
+            def _raise29(*a, **k):
+                raise RuntimeError('unreachable')
+
+            _req29.get = _raise29
+            _u29, _s29, _src29 = mirror29.blackhole_pkg_pair()
+            check("an unreachable cask API falls back to the pinned pair, labelled",
+                  (_u29, _s29) == (mirror29.BLACKHOLE_PKG_URL,
+                                   mirror29.BLACKHOLE_PKG_SHA256)
+                  and '不可达' in _src29, _src29)
+
+            _req29.get = lambda *a, **k: _types29.SimpleNamespace(
+                content=b'{"url":"https://x/BH-0.9.0.pkg",'
+                        b'"sha256":"' + b'c' * 64 + b'"}')
+            _u29, _s29, _src29 = mirror29.blackhole_pkg_pair()
+            check("a usable cask API wins, and the page says so",
+                  _u29.endswith('0.9.0.pkg') and _s29 == 'c' * 64
+                  and 'Homebrew' in _src29, _src29)
+        finally:
+            _req29.get = _real_get29
+
+        # -- existential.audio answers 406 to the bare python-requests UA -----
+        class _Resp29(object):
+            headers = {'Content-Length': '3'}
+
+            def raise_for_status(self):
+                pass
+
+            def iter_content(self, n):
+                yield b'pkg'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        _dl_hdrs29 = {}
+        try:
+            _req29.get = lambda url, **k: (_dl_hdrs29.update(k.get('headers')
+                                                             or {}),
+                                           _Resp29())[1]
+            _pkgpath29 = mirror29._fetch_blackhole_pkg('https://x/BH.pkg')
+            check("the pkg download presents a browser UA (existential.audio 406s the default)",
+                  _dl_hdrs29.get('User-Agent', '').startswith('Mozilla/5.0')
+                  and os.path.getsize(_pkgpath29) == 3, str(_dl_hdrs29))
+            mirror29._remove_quietly(_pkgpath29)
+        finally:
+            _req29.get = _real_get29
+
+        # -- driver-file and receipt probes read reality, not assumptions ------
+        _probe_dir29 = _tempfile.mkdtemp(prefix="macast-hal29-", dir=_tmp29)
+        _real_globs29 = mirror29.HAL_DRIVER_GLOBS
+        try:
+            mirror29.HAL_DRIVER_GLOBS = (
+                os.path.join(_probe_dir29, 'BlackHole*.driver'),)
+            check("no driver directory means not installed",
+                  mirror29._blackhole_driver_installed() is False)
+            os.makedirs(os.path.join(_probe_dir29, 'BlackHole2ch.driver'))
+            check("the driver directory is what 'files on disk' means",
+                  mirror29._blackhole_driver_installed() is True)
+        finally:
+            mirror29.HAL_DRIVER_GLOBS = _real_globs29
+        _sub29 = _Sub29(results=[(0, '\n'.join(
+            ['com.apple.coreaudio', 'audio.existential.BlackHole2ch']), '')])
+        _stub29(subprocess=_sub29)
+        try:
+            check("pkgutil's list is read by exact package id",
+                  mirror29._blackhole_receipt_present() is True)
+        finally:
+            _unstub29()
+        _sub29 = _Sub29(results=[(127, '', 'User canceled (-128)')])
+        _stub29(subprocess=_sub29)
+        try:
+            _ok29, _why29 = mirror29._reload_coreaudiod()
+            check("a dismissed admin prompt is reported as a cancellation",
+                  _ok29 is False and '取消' in _why29, _why29)
+        finally:
+            _unstub29()
+        _sub29 = _Sub29(results=[(0, '', '')])
+        _stub29(subprocess=_sub29)
+        try:
+            _ok29, _why29 = mirror29._reload_coreaudiod()
+            check("the reload asks for authorization instead of faking silence",
+                  _ok29 is True and _sub29.calls
+                  and _sub29.calls[0][0] == 'osascript'
+                  and 'with administrator privileges' in _sub29.calls[0][2]
+                  and 'coreaudiod' in _sub29.calls[0][2],
+                  str(_sub29.calls))
+        finally:
+            _unstub29()
+
+        # -- route failures name the step that actually broke ------------------
+        _stub29(_audio_devices=lambda: [],
+                _find_blackhole=lambda f: None,
+                _default_output=lambda: None,
+                _set_default_output=lambda d: True,
+                _create_aggregate=lambda uids: None)
+        try:
+            p29 = _rec_progress29()
+            check("no CoreAudio devices fails the aggregate step itself",
+                  mirror29._route_audio_through_blackhole('ffmpeg',
+                                                          progress=p29) is False
+                  and {s['id']: s['state']
+                       for s in p29.snapshot()['steps']}['aggregate'] == 'fail')
+        finally:
+            _unstub29()
+        utils.Setting.set(mirror29.SettingProperty.Mirror_Audio_Aggregate, 99)
+        _stub29(_audio_devices=lambda: [(99, 'macast-agg'), (8, 'bh-uid')],
+                _find_blackhole=lambda f: (8, 'bh-uid'),
+                _default_output=lambda: 7,
+                _set_default_output=lambda d: False,
+                _create_aggregate=lambda uids: None)
+        try:
+            p29 = _rec_progress29()
+            _ok29 = mirror29._route_audio_through_blackhole('ffmpeg',
+                                                            progress=p29)
+            _d29 = {s['id']: s['state'] for s in p29.snapshot()['steps']}
+            check("a failed default-output switch is blamed on output, not aggregate",
+                  not _ok29 and _d29['aggregate'] == 'done'
+                  and _d29['output'] == 'fail', str(_d29))
+        finally:
+            _unstub29()
+            utils.Setting.unset(mirror29.SettingProperty.Mirror_Audio_Aggregate)
+            utils.Setting.unset(mirror29.SettingProperty.Mirror_Audio_Original)
+
+        # -- the progress page: real HTTP, real credential rules ---------------
+        _sub29 = _Sub29()
+        _stub29(subprocess=_sub29)
+        p29 = _rec_progress29()
+        p29.enter('download')
+        p29.sub('download', 0.25, '1 / 4 MB')
+        _url29, _srv29 = None, None
+        try:
+            _url29, _srv29 = mirror29._open_audio_progress(p29)
+            mirror29._audio_server = _srv29  # _close_audio_server works off the global
+            _token29 = _url29.split('token=')[1]
+
+            def _get29(path):
+                try:
+                    with _opener29.open(_url29.rsplit('/', 1)[0] + path,
+                                        timeout=5) as _r29:
+                        return _r29.getcode(), dict(_r29.headers), _r29.read()
+                except _urlerr29.HTTPError as _e29:
+                    return _e29.code, dict(_e29.headers), _e29.read()
+
+            _code29, _hdr29, _body29 = _get29('/?token=' + _token29)
+            _page29 = _body29.decode('utf-8')
+            check("the page opens only with the run token",
+                  _code29 == 200 and '一键设置进度' in _page29
+                  and _hdr29.get('X-Content-Type-Options') == 'nosniff'
+                  and _hdr29.get('Cache-Control') == 'no-store', str(_code29))
+            _code29, _hdr29, _body29 = _get29('/state?token=' + _token29)
+            _st29 = _json29.loads(_body29.decode('utf-8'))
+            check("/state mirrors the live step machine",
+                  _code29 == 200 and len(_st29['steps']) == len(mirror29.AUDIO_STEPS)
+                  and abs(_st29['pct'] - p29.snapshot()['pct']) < 1e-9,
+                  str(_st29['pct']))
+            _code29b, _, _ = _get29('/state?token=deadbeef')
+            _code29c, _, _ = _get29('/state')
+            check("wrong or missing tokens get 403 on both endpoints",
+                  _code29b == 403 and _code29c == 403,
+                  "{} / {}".format(_code29b, _code29c))
+            check("the page is self-contained and never carries the management token",
+                  '<script src' not in _page29
+                  and 'Api_Token' not in _page29
+                  and _token29 != utils.Setting.setting.get('Api_Token', ''),
+                  '')
+            mirror29._close_audio_server()
+            try:
+                _get29('/state?token=' + _token29)
+                _closed29 = False
+            except (_urlerr29.HTTPError, OSError):
+                _closed29 = True
+            check("the page stops being served once retired", _closed29)
+        finally:
+            mirror29._close_audio_server()
+            _unstub29()
+
+        # -- the worker: page first, then the run, then retirement ------------
+        _setup_calls29 = []
+
+        def _fake_setup29(report, progress=None):
+            _setup_calls29.append(progress)
+            report('stubbed setup ran')
+            return True
+
+        mirror29._audio_setup_busy.set()
+        _stub29(subprocess=_Sub29(), setup_system_audio=_fake_setup29)
+        try:
+            mirror29._audio_setup_worker()
+            _wp29 = mirror29._audio_progress
+            check("the worker finishes the machine, clears busy and keeps the "
+                  "page readable for a while",
+                  len(_setup_calls29) == 1 and _setup_calls29[0] is _wp29
+                  and _wp29.snapshot()['done'] and _wp29.snapshot()['ok'] is True
+                  and not mirror29._audio_setup_busy.is_set()
+                  and mirror29._audio_server is not None
+                  and mirror29._audio_server_timer is not None,
+                  str(_wp29.snapshot()))
+        finally:
+            mirror29._close_audio_server()
+            mirror29._audio_setup_busy.clear()
+            _unstub29()
+
+        # -- wiring: the menu and manifest moved to v0.7 -----------------------
+        with open(os.path.join(REPO, "plugins", "screen_mirror.py"), "r",
+                  encoding="utf-8") as _f:
+            _src29 = _f.read()
+        check("the plugin announces v0.7 everywhere the user reads it",
+              '<macast.version>0.7</macast.version>' in _src29
+              and "Screen Mirror v0.7" in _src29
+              and "Screen Mirror v0.6" not in _src29)
+        check("the setup hands its progress object down the whole chain",
+              "_route_audio_through_blackhole(ffmpeg, progress=progress)"
+              in _src29 and "_wait_for_blackhole(ffmpeg, progress=progress)"
+              in _src29 and "setup_system_audio(_report, progress=progress)"
+              in _src29)
+    finally:
+        mirror29._capture_cache.clear()
+        (utils.Setting.setting, utils.Setting.setting_path) = _saved_setting29
+        _shutil.rmtree(_tmp29, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the v0.7 assisted install behaves", False,
           "{}: {}".format(type(e).__name__, e))
 
 

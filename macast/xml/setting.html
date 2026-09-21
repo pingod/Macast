@@ -120,6 +120,21 @@
         }
         .log-bar .hint { color: var(--text-soft); font-size: 12px; }
         .log-bar .log-actions { margin-left: auto; display: flex; gap: 8px; }
+        /* 模块设置：每个模块一张卡，行 = 配置项 / 值 / 操作。 */
+        .module-card { margin-bottom: 14px; }
+        .module-table { width: 100%; border-collapse: collapse; }
+        .module-table td {
+            padding: 6px 10px; vertical-align: top;
+            border-top: 1px solid var(--border);
+            font-size: 13px;
+        }
+        .module-table tr:first-child td { border-top: none; }
+        .module-table .mt-label { width: 220px; }
+        .module-table .mt-actions { width: 140px; text-align: right; white-space: nowrap; }
+        .module-table code, .hint code {
+            background: rgba(127,127,127,.12); padding: 1px 5px;
+            border-radius: 4px; font-size: 12px;
+        }
         .macast-log {
             max-height: 55vh; overflow: auto; margin: 0; padding: 10px 12px;
             background: var(--panel-2, rgba(127,127,127,.10));
@@ -443,9 +458,67 @@
                 </div>
             </div>
         </el-tab-pane>
+        <el-tab-pane label="模块设置" name="12">
+            <div class="status-card" v-if="!module_groups.length">
+                <div class="hint">{{ module_groups_loaded ? '暂无模块设置数据。' : '加载中…' }}</div>
+            </div>
+            <div class="status-card module-card" v-for="g in module_groups" :key="g.id">
+                <h3 style="margin:0 0 10px;">
+                    {{ g.title }}
+                    <span class="hint" v-if="g.version">v{{ g.version }}</span>
+                </h3>
+                <div class="hint" v-if="!g.keys.length">
+                    该模块没有自己的持久化配置；相关开关在菜单栏里。
+                </div>
+                <table class="module-table" v-else>
+                    <tr v-for="row in g.keys" :key="row.key">
+                        <td class="mt-label">
+                            {{ row.label }}
+                            <div class="hint"><code>{{ row.key }}</code></div>
+                        </td>
+                        <td class="mt-value">
+                            <span v-if="!row.present" class="hint">（未设置）</span>
+                            <code v-else-if="typeof row.value === 'string'">{{ row.value === '' ? '""（空串）' : row.value }}</code>
+                            <code v-else>{{ JSON.stringify(row.value) }}</code>
+                            <div class="hint" v-if="row.hint">{{ row.hint }}</div>
+                        </td>
+                        <td class="mt-actions">
+                            <template v-if="row.editable">
+                                <el-button size="mini" @click="edit_module_setting(g, row)">编辑</el-button>
+                                <el-button size="mini" type="danger" v-if="row.present"
+                                           @click="remove_module_setting(g, row)">删除</el-button>
+                            </template>
+                            <span v-else class="hint">列表/对象值请在「高级设置」里编辑</span>
+                        </td>
+                    </tr>
+                </table>
+            </div>
+            <el-dialog :title="module_edit.label" :visible.sync="module_edit.visible" width="480px">
+                <div class="hint" style="margin-bottom:6px;">
+                    <code>{{ module_edit.key }}</code>（{{ module_edit.group }}）
+                </div>
+                <div class="hint" v-if="module_edit.hint" style="margin-bottom:6px;">
+                    {{ module_edit.hint }}
+                </div>
+                <el-input type="textarea" :autosize="{minRows: 2, maxRows: 6}"
+                          v-model="module_edit.value"
+                          placeholder="标量值：字符串直接写；数字 / true / false / null 按 JSON 写"></el-input>
+                <span slot="footer">
+                    <el-button size="small" @click="module_edit.visible = false">取消</el-button>
+                    <el-button size="small" type="primary" @click="save_module_setting">保存</el-button>
+                </span>
+            </el-dialog>
+        </el-tab-pane>
         <el-tab-pane label="日志" name="3">
             <div class="status-card">
                 <div class="log-bar">
+                    <el-select v-model="log_module" size="small" style="width:198px;"
+                               @change="get_log">
+                        <el-option label="整体日志（macast.log）" value=""></el-option>
+                        <el-option v-for="m in log_modules" :key="m.name"
+                                   :label="m.name + '（' + fmt_size(m.size) + '）'"
+                                   :value="m.name"></el-option>
+                    </el-select>
                     <el-select v-model="log_tail" size="small" style="width:158px;"
                                @change="get_log">
                         <el-option label="末尾 500 行" :value="500"></el-option>
@@ -468,6 +541,7 @@
                 <pre class="macast-log" ref="logbox" v-if="macast_log">{{ macast_log }}</pre>
                 <div class="hint" v-else>暂无日志。</div>
                 <div class="hint" style="margin-top:8px;">
+                    插件的日志各自独立成文件（不会混进整体日志），用左侧下拉框单独查看。
                     日志按纯文本渲染，默认只加载末尾若干行（文件随运行时间增长，
                     整份塞进页面会越来越卡）；要看全部请用「下载完整日志」。
                 </div>
@@ -825,6 +899,15 @@
             log_info: '',
             log_auto: false,
             log_timer: 0,
+            // 空串 = 整体日志（macast.log）；否则为某个插件自己的日志名。
+            log_module: '',
+            log_modules: [],
+
+            //模块设置
+            module_groups: [],
+            module_groups_loaded: false,
+            module_edit: {visible: false, group: '', key: '', label: '',
+                          hint: '', value: ''},
 
             //status
             status: {server: {}, media: {}, clients: []},
@@ -1029,18 +1112,44 @@
                 if (r != null) return unescape(r[2]);
                 return null;
             },
+            fmt_size(size) {
+                size = size || 0
+                return size >= 1024 * 1024
+                    ? (size / 1024 / 1024).toFixed(2) + ' MB'
+                    : (size / 1024).toFixed(1) + ' KB'
+            },
+            async load_log_modules() {
+                try {
+                    let res = await this.$http.get('/api?query=log-modules')
+                    let data = res.data || {}
+                    this.log_modules = data.modules || []
+                    // 选中的模块日志可能已随重启被清掉：回落到整体日志，
+                    // 免得 get_log 一直报 unknown module。
+                    if (this.log_module &&
+                        !this.log_modules.some(m => m.name === this.log_module)) {
+                        this.log_module = ''
+                    }
+                } catch (err) {
+                    this.log_modules = []
+                }
+            },
             async get_log() {
                 // 只有日志面板可见时才请求；切走时会清掉定时器。
                 if (this.activeIndex !== '3') return;
                 let query = this.log_tail === 0 ? 'all=1' : `tail=${this.log_tail}`
+                if (this.log_module) query += `&module=${encodeURIComponent(this.log_module)}`
                 try {
                     let res = await this.$http.get(`/api?query=log&${query}`)
                     let data = res.data || {}
+                    if (data.code !== 0) {
+                        this.macast_log = ''
+                        this.log_info = ''
+                        this.$message.error(data.message || '读取日志失败')
+                        this.load_log_modules()
+                        return
+                    }
                     this.macast_log = data.logs || ''
-                    let size = data.size || 0
-                    let size_h = size >= 1024 * 1024
-                        ? (size / 1024 / 1024).toFixed(2) + ' MB'
-                        : (size / 1024).toFixed(1) + ' KB'
+                    let size_h = this.fmt_size(data.size)
                     this.log_info = data.truncated
                         ? `仅末尾 ${data.lines || 0} 行 / 共 ${size_h}`
                         : `${data.lines || 0} 行 / ${size_h}`
@@ -1066,6 +1175,7 @@
                 if (!window.confirm('清空当前日志？已轮转的历史日志也会一并删除。')) return
                 let fd = new window.FormData()
                 fd.append('clear-log', '1')
+                if (this.log_module) fd.append('module', this.log_module)
                 try {
                     let res = await this.$http.post('/api', fd)
                     if (res.data && res.data.code === 0) {
@@ -1076,10 +1186,71 @@
                 } catch (err) {
                     this.$message.error('Error connecting to Macast');
                 }
+                this.load_log_modules()
                 this.get_log()
             },
             download_log() {
-                window.open('/api?query=log-download', '_blank')
+                let query = '/api?query=log-download'
+                if (this.log_module) query += '&module=' + encodeURIComponent(this.log_module)
+                window.open(query, '_blank')
+            },
+            async load_module_settings() {
+                try {
+                    let res = await this.$http.get('/api?query=module-settings')
+                    let data = res.data || {}
+                    if (data.code === 0) {
+                        this.module_groups = data.groups || []
+                    } else if (data.message) {
+                        this.$message.error(data.message)
+                    }
+                } catch (err) {
+                    this.$message.error('Error connecting to Macast');
+                }
+                this.module_groups_loaded = true
+            },
+            edit_module_setting(g, row) {
+                this.module_edit = {
+                    visible: true,
+                    group: g.title,
+                    key: row.key,
+                    label: row.label || row.key,
+                    hint: row.hint || '',
+                    // 预填成 JSON 文本；未设置的键留空，空输入框保存为字符串 ""。
+                    value: row.present ? JSON.stringify(row.value) : '',
+                }
+            },
+            async post_module_setting(fd, ok_title) {
+                try {
+                    let res = await this.$http.post('/api', fd)
+                    if (res.data && res.data.code === 0) {
+                        this.$notify({title: ok_title,
+                                      message: res.data.message || '',
+                                      duration: 2000})
+                        await this.load_module_settings()
+                        return true
+                    }
+                    this.$message.error((res.data && res.data.message) || '保存失败')
+                } catch (err) {
+                    this.$message.error('Error connecting to Macast');
+                }
+                return false
+            },
+            async save_module_setting() {
+                let fd = new window.FormData()
+                fd.append('set-module-setting', '1')
+                fd.append('key', this.module_edit.key)
+                fd.append('value', this.module_edit.value)
+                if (await this.post_module_setting(fd, '已保存 ' + this.module_edit.key)) {
+                    this.module_edit.visible = false
+                }
+            },
+            async remove_module_setting(g, row) {
+                if (!window.confirm(`删除设置项 ${row.key}？插件会退回它自己的默认值。`)) return
+                let fd = new window.FormData()
+                fd.append('set-module-setting', '1')
+                fd.append('key', row.key)
+                fd.append('remove', '1')
+                await this.post_module_setting(fd, '已删除 ' + row.key)
             },
             async load_interfaces() {
                 return this.$http.get('/api?query=interfaces').then(res => {
@@ -1303,7 +1474,7 @@
                         break;
                     case '3':
                         this.set_history(page_name);
-                        this.get_log();
+                        this.load_log_modules().then(() => this.get_log());
                         break;
                     case '4':
                         this.set_history(page_name);
@@ -1316,6 +1487,10 @@
                         break;
                     case '11':
                         this.set_history(page_name);
+                        break;
+                    case '12':
+                        this.set_history(page_name);
+                        this.load_module_settings();
                         break;
                 }
             },

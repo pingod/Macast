@@ -4,7 +4,7 @@
 # <macast.title>AirPlay Audio (RAOP)</macast.title>
 # <macast.protocol>AirPlayAudioProtocol</macast.protocol>
 # <macast.platform>darwin,linux</macast.platform>
-# <macast.version>0.1</macast.version>
+# <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.desc>Receive AirPlay audio from an iPhone / iPad / Mac and play it on this machine's speakers. Macast itself only implements the video half of AirPlay; this plugin supervises shairport-sync, which you install yourself.</macast.desc>
@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import threading
 import logging
+from enum import Enum
 
 import cherrypy
 
@@ -47,10 +48,27 @@ logger.setLevel(logging.INFO)
 
 CONFIG_NAME = 'shairport-sync.conf'
 
+
+class SettingProperty(Enum):
+    #: Speaker name shown to AirPlay senders. Unset (or empty) means "follow
+    #: Macast's DLNA friendly name", which is what v0.1 always did.
+    RAOP_Device_Name = 1
+
 #: PATH first, then the usual install spots: a GUI app started from Finder or
 #: the Dock does not inherit the shell's PATH.
 EXTRA_BIN_DIRS = ('/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin',
                   '/usr/bin')
+
+
+def service_name():
+    """The name shairport-sync advertises: the plugin's own override when the
+    user set one, else Macast's friendly name. `has` before `get` because
+    Setting.get() with a default *creates* the key (AGENTS §4.2)."""
+    if Setting.has(SettingProperty.RAOP_Device_Name):
+        name = str(Setting.get(SettingProperty.RAOP_Device_Name) or '').strip()
+        if name:
+            return name
+    return Setting.get_friendly_name()
 
 
 def find_shairport():
@@ -125,7 +143,7 @@ class AirPlayAudioProtocol(Protocol):
             cherrypy.engine.publish('app_notify', 'Macast', message)
             return
         try:
-            config = write_config(Setting.get_friendly_name())
+            config = write_config(service_name())
         except OSError as e:
             message = '无法写入 shairport-sync 配置：{}'.format(e)
             logger.error(message)
