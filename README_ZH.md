@@ -36,10 +36,13 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
   指回上游旧文件的「可更新」角标）。地址只写在 `macast/plugin_repo.py` 一处，由 `/api?query=plugin-info`
   下发；浏览器按 `raw.githubusercontent.com` → `ghproxy` 代理 → `cdn.jsdelivr.net` 顺序回退，
   全都不通时只显示本机插件。插件安装地址**固定到 commit SHA**，所以 CDN 缓存多旧都不会给错文件。
-- **6 个在线插件**（设置页 → 插件 → 可安装，装完即生效）：yt-dlp 下载/边下边播、外部播放器
+- **8 个在线插件**（设置页 → 插件 → 可安装，装完即生效）：yt-dlp 下载/边下边播、外部播放器
   （VLC / MPC-BE / mpv.net）、角落置顶小窗（含实验性壁纸模式）、自动化钩子（投屏/暂停/停止时
-  执行你的命令）、Chromecast 中继（把收到的投屏转投给电视）、AirPlay 音频（RAOP，
-  监督 shairport-sync）。除 RAOP 是协议插件外，其余 5 个是渲染器插件，一次只能选一个。
+  执行你的命令）、Chromecast 中继（把收到的投屏转投给电视）、**屏幕镜像**（把这台机器的画面
+  实时投给 Chromecast / 只认 DLNA 的老电视 / 任意浏览器，三平台，macOS 可一键装好系统声音）、
+  **本地文件投屏**（磁盘上的文件/播放列表投给电视：能原生解码就按字节直供、远端自己暂停拖动，
+  否则 ffmpeg 边播边转，含音轨/字幕选择、自动连播与被抢占后重投）、AirPlay 音频（RAOP，
+  监督 shairport-sync）。除 RAOP 是协议插件外，其余 7 个是渲染器插件，一次只能选一个。
 - **网页投屏入口**：`GET /api?query=cast&url=<绝对地址>&token=<令牌>`，给 iOS 快捷指令、
   书签、`curl`、脚本用，绕开 DLNA 发现也能投屏；`POST cast-uri` 继续服务设置页的重投。
   令牌是**常驻**的（存在 `macast_setting.json` 的 `Api_Token`），在「状态 → 网页投屏入口」
@@ -96,14 +99,19 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 - **进阶用户**  
   1. 以前要手动下载的插件（IINA、Web、Live、PotPlayer、PIFMRDS、NVA 协议）现在**都已内置**，
      在设置页 → 插件里直接启用 / 停用 / 卸载即可，即时生效、不用重启。
-  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录，目前可选装 6 个插件，装完即生效：
+  2. 插件索引来自本仓库的 [plugins/](plugins/) 目录，目前可选装 8 个插件，装完即生效：
      **yt-dlp Downloader**（投屏 = 下载到本地，或边下边播）、**External Player**
      （用你自己的 VLC / MPC-BE / mpv.net 播放）、**Floating Player**（角落置顶小窗，
      含实验性壁纸模式）、**Automation Hooks**（投屏 / 暂停 / 停止时执行你的命令）、
      **Chromecast Bridge**（把收到的投屏转投给另一台 Chromecast）、
+     **Screen Mirror**（把这台机器的屏幕实时镜像到 Chromecast / 只认 DLNA 的老电视 /
+     任意浏览器打开一个网址；三平台，macOS 可一键装好系统声音）、
+     **Local File Caster**（把磁盘上的文件 / 播放列表投给电视：能原生解码就按字节直供、
+     遥控器上的暂停拖动直接生效，否则 ffmpeg 边播边转，含音轨与字幕选择、自动连播、
+     被别人抢占后自动重投、停止时把电视还给机顶盒）、
      **AirPlay Audio (RAOP)**（监督 shairport-sync，接收 iPhone 的 AirPlay 音频）。
-     除 RAOP 是协议插件外，其余 5 个是渲染器插件，**一次只能选一个**（菜单栏切换）。
-     yt-dlp / shairport-sync / 外部播放器都要你自己先装；设置页拉不到索引时只会显示
+     除 RAOP 是协议插件外，其余 7 个是渲染器插件，**一次只能选一个**（菜单栏切换）。
+     yt-dlp / ffmpeg / shairport-sync / 外部播放器都要你自己先装；设置页拉不到索引时只会显示
      本机插件，不影响使用。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 

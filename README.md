@@ -66,7 +66,12 @@ After opening this app, a small icon will appear in the **menubar** / **taskbar*
 
 - **For advanced users**  
   1. The renderers that used to need a download — **IINA, Web, Live, PotPlayer, PIFMRDS**, plus the **NVA** protocol — now ship **inside** the app. Enable, disable or uninstall them on the settings page, no restart needed.  
-  Anything still offered as an installable plugin lives in [plugins/](plugins/) (empty for now).
+  Anything still offered as an installable plugin lives in [plugins/](plugins/) — currently
+  eight of them: an yt-dlp downloader, an external-player renderer, a floating-window renderer,
+  automation hooks, a Chromecast bridge, RAOP (AirPlay audio) supervision, a three-platform
+  **Screen Mirror** (Chromecast / DLNA television / any browser) and a **Local File Caster**
+  (play a file or playlist from this disk on the TV: byte-exact serving when the set can decode
+  it, ffmpeg transcoding when it cannot).
   2. You can modify the shortcut keys or configuration of the default mpv player by yourself, see: [#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **For developer**  

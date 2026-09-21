@@ -58,9 +58,9 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 | R6 | 光标显示/隐藏、鼠标高亮、缩放适配 | ✅ | **已交付（P1）**：`显示鼠标指针`（`-capture_cursor`）；高亮不做；「缩放适配」= 低延迟通道的信箱化 |
 | R7 | 画质 Auto/720p/1080p、码率、编码器 | 有档位（4K 仅文件模式）⚠️ 具体 UI 未证实 | **已交付（P1）**：四档画质 + macOS VideoToolbox 开关；4K 与区域捕获不做 |
 | R8 | 系统声音，且「不想再装驱动」 | 需要装音频驱动 + 重启（评论吐槽点） | 我们已有 BlackHole 一键辅助 + 多输出聚合（**优于它**）；P0 复核 pyobjc 依赖 |
-| R9 | 投本地文件（AVI/MKV/MOV/MP4/MP3…）+ 边转边投 | ✅ 且带播放列表 | ❌ **空白 → P4 新增 `cast_local_file.py`** |
-| R10 | 字幕/音轨选择、音画同步延迟、字体样式 | ✅（2026 年评论：字幕坏） | P4 做「选轨 + 同步偏移」，样式不做 |
-| R11 | 暂停/继续/拖动进度 | ✅ | P4（Cast MEDIA 命令已有底层） |
+| R9 | 投本地文件（AVI/MKV/MOV/MP4/MP3…）+ 边转边投 | ✅ 且带播放列表 | **已交付（`cast_local_file.py` v0.1，P4）**：ffprobe 逐文件判直通/转码 + 播放列表自动连播；真机未验证 |
+| R10 | 字幕/音轨选择、音画同步延迟、字体样式 | ✅（2026 年评论：字幕坏） | **已交付（P4）**：选轨 + `AudioDelay` + 字幕三条路（Cast 侧 WebVTT / 转码侧 libass 烧制 / DLNA 无）；样式不做 |
+| R11 | 暂停/继续/拖动进度 | ✅ | **已交付（P4）**：直通路径由设备对真文件操作；转码路径 seek = 重启编码器。DLNA 音量故意不做（属设备侧 RenderingControl） |
 | R12 | 菜单栏启停、防休眠 | ✅（2.14 加了 keep-awake） | **已交付（P1）**：`caffeinate -dimsu` 持有断言，停止镜像即释放 |
 | R13 | 延迟 | 评论抱怨 ~5-10 s | **P3 已交付代码路径**（`caststream`，目标 <500 ms）；**数字没人量过**，量它 = `scripts/cast_streaming_probe.py` + 秒表 |
 | R14 | 麦克风直通、HDR、窗口级捕获、Miracast | 未文档化/无 | 不做（avfoundation 无窗口源，见 §2.4） |
@@ -220,6 +220,31 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 - 音频真机约束（它文档实测）：Chromecast 上限 24-bit/96 kHz，**只有 wav/flac 是真 HD**，
   mp3/ogg 会被限到 48 kHz，向上重采样「不是好主意」。
 
+**P4 落地的偏差**（2026-09-21）：
+
+- **这一阶段动了核心**，虽然是「在线插件」阶段：`macast/protocol_cast.py` 的 STOP / QUIT_APP
+  现在会清掉会话账本（`_session_id` / `_media` / `_observed_transport` / `_idle_reason` 置空 +
+  `generation` 递增）。因为「停止投屏电视还挂着最后一帧」有两半：设备侧要 QUIT_APP（插件发），
+  **我们自己的接收端**也不能继续声称还在播那部片子（核心记账）。Part 25 的 A/B 就是打在这 11 行上：
+  把 `protocol_cast.py` 换回 HEAD 版重跑 → 910/911，红的那条正是
+  「…and the receiver stops claiming a media it no longer holds」。
+- **`MAX_ADVERTISED_SIZE` 取 1.9e9 而不是 `2**31-1`**：同一族「老固件在有符号 32 位里做长度运算」
+  的约束（§2.1 里 MirrorCast 那条），留出 HTTP/DIDL 开销余量；被这个上限卡住时
+  **降码率来适配**（`bitrate_for_convert`）而不是谎报长度。
+- **转码路径的「拖动」= 从新时间点重启编码器**（`seek_to` 里 `mode == 'convert'` 分支），
+  因为边播边转的东西没有索引可跳；直通路径的暂停/拖动/音量都真的作用在设备上。R11 因此是
+  「两条路径都成立，但语义不同」，菜单与文档都按这个措辞。
+- **DLNA 目标的音量故意不做**：音量在设备自己的 `RenderingControl` 服务上（第二个控制 URL，
+  我们不去解析）—— 远端比这个菜单更靠近功放。Cast 目标才走 `SET_VOLUME`。
+- **avfoundation 的设备表按真机输出重写了解析**：本机 `ffmpeg -list_devices` 实际打的是
+  `AVFoundation audio devices:` + **不带引号**的 `[0] 名称`，而按 `"名称"` 解析的版本在这里
+  **一条都读不到**（症状是「系统声音档位永远说没有采集口」，不报错）。现在两种拼写都认。
+  顺带记下：`screen_mirror._avfoundation_lists` 是同一套引号解析，对今天这份真实输出同样值得复核
+  → 排进 P6。
+- **未验证**：真实 Chromecast 与真实 DLNA 电视**一台都没有接触过**。Part 25 用的是自家假 Cast 设备
+  （真 TLS + 真 Cast v2 帧）+ 真 HTTP 服务 + **自家 DLNA 接收端**校验我们发出的 SOAP/DIDL。
+  §4.9 那一族「我们没崩、只是设备不认账」的问题只能等真机。
+
 ---
 
 ## 3. 架构决定
@@ -269,9 +294,9 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
 | **P2** ✅ | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的直播 HTTP：对外 `Content-Length` = 按档位码率算出的固定值且 **< 2³¹**（`DLNA_MAX_ADVERTISED_SIZE = 1.9e9`）、探测请求**恰好回 n 字节**（不足补 MPEG-PS 填充包）、`Accept-Ranges` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`、**48 MiB**（`DLNA_RING_BYTES`，计划里的 64 KiB 太小：按 4.5 Mbps 只有 0.1 秒余量）按绝对字节偏移的阻塞式重连 + 20 MiB 预填（`DLNA_PREFILL_BYTES` ⇒ 菜单明说的 ~35 s 延迟）、stdlib SSDP/SOAP（`urllib`，不打第三方）、`GetTransportInfo` 看门狗 + `RelTime` 前进才算活着、**5 档 profile**（ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264，PAL/NTSC 用 AC-3）、连续失败自动换档并在用尽后提示手选 | **Part 23**（93 条） | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端当替身；真实兼容矩阵必须标注「未验证」 |
 | **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**纯 Python AES-128-CTR**（无新依赖）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/在途 12 帧；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
-| **P4** | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗 | **Part 25** | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有 |
+| **P4** ✅ | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗。**偏差见 §2.6 末**（含"这一阶段动了 `protocol_cast.py` 的会话账本"） | **Part 25**（155 条） | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有；**真机一台没验** |
 | **P5** | `airplay_mirror` v.1（protocol 插件，`uses_ssdp=False`）+ §9 边界改写 | 监督 uxplay（`$UXPLAYRC` 生成 + 无窗口参数 + 日志解析连接/断开），一期让它自己开窗，二期尝试 `-vrtp/-artp → mpv` 统一渲染；`selfcheck` 里检查 uxplay 是否可用并给出安装指引 | **Part 26** | 中：macOS 无现成二进制（Homebrew 未证实）→ 必须**明确标注需要用户自备**，且 Apple 砍 Legacy 会静默失效 |
-| **P6** | 文档与发布 | `docs/Casting-Suite.md` 用户指南（含每目标的首次设置流程）、`plugins/README.md` + `info.json` 条目（**两步提交：先插件文件，再指 SHA/version**）、AGENTS.md §4.8/§9 更新、复核 §4.8 里 pyobjc 依赖是否与「只用自带库」矛盾（`_create_aggregate` 用了 `Foundation`，而 `requirements/*.txt` 没有 pyobjc —— 要么去掉，要么按 §4.4 三处同步）、版本号两处 + tag | 5c 一致性 | 无（但 pyobjc 那条是**已知不一致**，必须给结论） |
+| **P6** | 文档与发布 | `docs/Casting-Suite.md` 用户指南（含每目标的首次设置流程）、`plugins/README.md` + `info.json` 条目（**两步提交：先插件文件，再指 SHA/version**）、AGENTS.md §4.8/§9 更新、复核 §4.8 里 pyobjc 依赖是否与「只用自带库」矛盾（`_create_aggregate` 用了 `Foundation`，而 `requirements/*.txt` 没有 pyobjc —— 要么去掉，要么按 §4.4 三处同步）、**`scripts/selfcheck.py` 补齐 §3.2 承诺的随行项**（P1-P4 都没动它：现在只报「ffmpeg 在不在」，缺 编码器能力 / ffprobe 在不在 / 系统音频采集口 / DLNA 渲染器与 Chromecast 探测 / 转码临时目录剩余空间）、**复核 `screen_mirror._avfoundation_lists` 的引号解析**（本机真实 `ffmpeg -list_devices` 输出是 `AVFoundation audio devices:` + 不带引号的 `[0] 名称`，P4 已按这份实测重写了 `cast_local_file` 的解析，那条老路径要用同一条实测输出重验）、版本号两处 + tag | 5c 一致性 | 无（但 pyobjc 与 avfoundation 解析这两条是**已知不一致**，必须给结论） |
 
 **每阶段完成后立即 `git push git@github.com:pingod/Macast.git main`**，并在 §6 记录 commit。
 

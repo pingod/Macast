@@ -6392,19 +6392,25 @@ try:
         check("and the playout delay the TV reports is kept for the menu",
               mir24.stats()['delay'] == 12, str(mir24.stats()))
         _dropped24 = mir24._sink.drops
-        _keys_before24 = {fid for fid, (is_key, _unit) in
-                          _decode24(device24.rtp, device24.keys[0],
-                                    device24.keys[1], mirror).items() if is_key}
+        _keys24_seen = lambda: {
+            fid for fid, (is_key, _unit) in
+            _decode24(device24.rtp, device24.keys[0], device24.keys[1],
+                      mirror).items() if is_key}
+        _keys_before24 = _keys24_seen()
         device24.nack_picture()
         check("a picture loss stops deltas until the next redraw",
               _wait_until(lambda: mir24._sink.drops > _dropped24, timeout=10),
               'drops {} -> {}'.format(_dropped24, mir24._sink.drops))
+        def _key_gets_through24():
+            # This fake device only ever acknowledges when the test tells it to,
+            # and a full window is allowed to hold back even a key frame -- so
+            # watching for the redraw without reopening the credit would race
+            # the 12-frame window rather than test the picture-loss path.
+            device24.ack((mir24._sink._frame_id - 1) & 0xFF)
+            return _keys24_seen() - _keys_before24 \
+                and mir24._sink._awaiting_key is False
         check("the next key frame gets through regardless",
-              _wait_until(lambda: {
-                  fid for fid, (is_key, _unit) in
-                  _decode24(device24.rtp, device24.keys[0], device24.keys[1],
-                            mirror).items() if is_key} - _keys_before24
-                  and mir24._sink._awaiting_key is False, timeout=20),
+              _wait_until(_key_gets_through24, timeout=20),
               str(mir24._sink._awaiting_key))
 
         _line24 = mirror.ScreenMirrorSetting._status_line(mir24)
@@ -6524,8 +6530,1527 @@ except Exception as e:
     check("screen mirror v0.6 loads", False, "{}: {}".format(type(e).__name__, e))
 
 # --------------------------------------------------------------------------
+# Part 25: the local file caster
+#
+# plugins/cast_local_file.py is the sender half of this plugin family: it serves
+# the user's own files over HTTP and orders a Chromecast or a DLNA television to
+# fetch them. Two things make this part worth its length.
+#
+#   * The decision table. Whether a file travels as it is, or has to be
+#     re-encoded while it streams, *is* the product: a wrong "yes" is a black
+#     screen the user blames us for, a wrong "no" is a few CPU seconds.
+#   * Both faces are protocol code, so both are driven for real -- the HTTP
+#     face over a socket, the Cast face against Macast's own Chromecast
+#     receiver, the SOAP face against a fake TV that answers the way firmware
+#     does, whose envelopes are then re-read by our own DLNA parser.
+#
+# The encoder is a fake ffmpeg on PATH that appends bytes to whatever file it is
+# told to write, which is precisely what serving a growing file needs.
+# --------------------------------------------------------------------------
+print("\n=== Part 25: local file caster ===")
+try:
+    import http.client as _hc25
+    import http.server as _httpd25
+    import urllib.error as _ue25
+    import urllib.parse as _up25
+    import xml.etree.ElementTree as _ET25
+    _saved_setting25 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir25 = utils.SETTING_DIR
+    _saved_path25 = os.environ.get('PATH', '')
+    _tmp25 = _tempfile.mkdtemp(prefix="macast-castfile-")
+    _notify25 = []
+    _notify25_rec = lambda *a, **k: _notify25.append(a)      # noqa: E731
+    _receiver25 = None
+    _tv25 = None
+    _caster25 = None
+    _caster25b = None
+    _caster25g = None
+    _caster25h = None
+    _server25 = None
+    _taps25 = {}
+    _taps_back25 = {}
+    try:
+        utils.SETTING_DIR = _tmp25
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp25, "macast_setting.json")
+        cherrypy.engine.subscribe('app_notify', _notify25_rec)
+
+        clf = _load_plugin("cast_local_file_plugin", "cast_local_file.py")
+        # Every tap this part installs is snapshotted once, here, so the
+        # restore below cannot be tricked into writing back a stub.
+        for _name25 in ('probe_media', '_keep_awake', '_stop_awake',
+                        'WATCHDOG_SECONDS', 'find_tool', 'free_space',
+                        'system_audio_input', '_ssdp_search',
+                        'describe_renderer', 'start_search',
+                        'start_renderer_search', '_devices', '_dlna_devices'):
+            _taps_back25[_name25] = getattr(clf, _name25)
+        _taps_back25['advertisable'] = utils.Setting.__dict__.get(
+            'get_advertisable_ip')
+        _probe_snapshot25 = dict(clf._probe_cache)
+
+        # -- the two tools this plugin lives by --------------------------------
+        _bin25 = os.path.join(_tmp25, "bin")
+        _write_fake(_bin25, "ffprobe", r"""#!/bin/sh
+# One report per file name, so a test asks about a file by naming it.
+mp4='{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"%s","size":"%s"},"streams":[%s]}'
+case "$*" in
+  *clean.mp4*)
+    printf '%s' '{"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2","duration":"120.0","size":"24000000","bit_rate":"1600000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"eng"},"disposition":{"default":1}}]}'
+    ;;
+  *twin.mp4*)
+    printf '%s' '{"format":{"format_name":"mov","duration":"60.0","size":"12000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac","tags":{"language":"eng"},"disposition":{"default":1}},{"index":2,"codec_type":"audio","codec_name":"ac3","tags":{"language":"chi"}},{"index":3,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"chi"}},{"index":4,"codec_type":"subtitle","codec_name":"mov_text","tags":{"title":"Forced English"}}]}'
+    ;;
+  *silent.mp4*)
+    printf '%s' '{"format":{"format_name":"mp4","duration":"30.0","size":"3000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}]}'
+    ;;
+  *subs.mp4*)
+    printf '%s' '{"format":{"format_name":"mp4","duration":"60.0","size":"12000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"},{"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"chi"}}]}'
+    ;;
+  *movie.mkv*)
+    printf '%s' '{"format":{"format_name":"matroska,webm","duration":"240.0","size":"96000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"}]}'
+    ;;
+  *hevc.mp4*)
+    printf '%s' '{"format":{"format_name":"mp4","duration":"240.0","size":"96000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"hevc"},{"index":1,"codec_type":"audio","codec_name":"aac"}]}'
+    ;;
+  *song.mp3*)
+    printf '%s' '{"format":{"format_name":"mp3","duration":"180.0","size":"2160000"},"streams":[{"index":0,"codec_type":"audio","codec_name":"mp3"}]}'
+    ;;
+  *live.opus*)
+    printf '%s' '{"format":{"format_name":"ogg","duration":"180.0","size":"2160000"},"streams":[{"index":0,"codec_type":"audio","codec_name":"opus"}]}'
+    ;;
+  *long.mkv*)
+    printf '%s' '{"format":{"format_name":"matroska","duration":"5400.0","size":"4000000000"},"streams":[{"index":0,"codec_type":"video","codec_name":"hevc"},{"index":1,"codec_type":"audio","codec_name":"aac"}]}'
+    ;;
+  *broken.mp4*)
+    printf '%s' 'not json at all'
+    ;;
+esac
+exit 0
+""")
+        _write_fake(_bin25, "ffmpeg", r"""#!/bin/sh
+case "$*" in
+  *-encoders*|*-filters*)
+    printf '%s\n' 'V..... libx264' 'A..... aac' 'A..... ac3' ' .. subtitles'
+    if [ "$MACAST_FAKE_HW" = yes ]; then printf '%s\n' 'V..... h264_videotoolbox'; fi
+    exit 0
+    ;;
+  *-list_devices*)
+    printf '%s\n' 'AVFoundation input device list has 2 items:' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] FaceTime高清相机' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro麦克风' \
+      '[AVFoundation indev @ 0x1] [1] BlackHole 2ch'
+    exit 0
+    ;;
+esac
+out=''
+for a in "$@"; do out="$a"; done
+case "$out" in
+  *.srt|*.vtt)
+    printf '%s\n' 'WEBVTT' '' '00:00:01.000 --> 00:00:02.000' 'hi' > "$out"
+    exit 0
+    ;;
+  *nope.ts)
+    printf '%s\n' 'Impossible to open' >&2
+    exit 1
+    ;;
+esac
+i=0
+while [ $i -lt 400 ]; do
+  head -c 4096 /dev/zero | tr '\0' 'C' >> "$out"
+  i=$((i+1))
+  sleep 0.02
+done
+""")
+        os.environ['PATH'] = _bin25 + os.pathsep + _saved_path25
+        clf.invalidate_tool_cache()
+        _fake_ffmpeg25 = clf.find_tool('ffmpeg')
+        _fake_ffprobe25 = clf.find_tool('ffprobe')
+        check("ffmpeg and ffprobe are found on PATH",
+              _fake_ffmpeg25 and _fake_ffprobe25
+              and os.path.dirname(_fake_ffmpeg25) == _bin25,
+              '{} {}'.format(_fake_ffmpeg25, _fake_ffprobe25))
+
+        _media_dir25 = os.path.join(_tmp25, "media")
+        os.makedirs(_media_dir25, exist_ok=True)
+
+        def _file25(name, blob=None, size=4096):
+            path = os.path.join(_media_dir25, name)
+            with open(path, 'wb') as handle:
+                if blob is not None:
+                    handle.write(blob)
+                else:
+                    handle.truncate(size)
+            return path
+
+        def _fixture25(name, size=4096):
+            """A name the fake ffprobe answers about also has to be a real
+            file, because the delivery path refuses what it cannot open."""
+            path = os.path.join(_media_dir25, name)
+            return path if os.path.isfile(path) else _file25(name, size=size)
+
+        # --------------------------------------------------------------------
+        # A. what a file contains, and what we may therefore do with it
+        # --------------------------------------------------------------------
+        _report25 = json.dumps({
+            "format": {"format_name": "matroska,webm", "duration": "10.5",
+                       "size": "1000000"},
+            "streams": [{"index": 0, "codec_type": "video",
+                         "codec_name": "h264"},
+                        {"index": 1, "codec_type": "audio",
+                         "codec_name": "vorbis", "tags": {"language": "jpn"},
+                         "disposition": {"default": 1}},
+                        {"index": 2, "codec_type": "data"},
+                        {"index": "bad"}]}
+        )
+        _parsed25 = clf.parse_probe(_report25)
+        check("an ffprobe report becomes tracks, container and duration",
+              _parsed25.ok and _parsed25.container == 'matroska'
+              and _parsed25.duration == 10.5
+              and [t.index for t in _parsed25.tracks] == [0, 1]
+              and _parsed25.audio[0].label() == '#1 vorbis · jpn · 默认',
+              str(_parsed25.tracks))
+        check("a stream with no codec_type and a stream with no index are both skipped",
+              len(_parsed25.tracks) == 2, str(_parsed25.tracks))
+        check("bit_rate is derived from size and duration when ffprobe has none",
+              _parsed25.bitrate == int(1000000 * 8 / 10.5), str(_parsed25.bitrate))
+        check("MP4 is reported as mov by ffprobe and sorted as mp4",
+              clf._container('mov,mp4,m4a,3gp,3g2,mj2') == 'mp4'
+              and clf._container('avi') == 'avi', '')
+        check("garbage from ffprobe is not a report",
+              clf.parse_probe('not json').ok is False
+              and clf.parse_probe('[1,2]').ok is False
+              and clf.parse_probe(None).ok is False, '')
+        _clean25 = clf.probe_media(_file25('clean.mp4', size=24000000))
+        check("the fake ffprobe really answers per file name",
+              _clean25.ok and _clean25.container == 'mp4'
+              and _clean25.duration == 120.0 and _clean25.bitrate == 1600000
+              and _clean25.content_type() == 'video/mp4', str(_clean25.tracks))
+        _twin25 = clf.probe_media(_file25('twin.mp4'))
+        check("a second audio track is chosen by its position, not its index",
+              _twin25.stream_position(2) == 1 and _twin25.stream_position(1) == 0
+              and _twin25.subtitle_position(4) == 1
+              and _twin25.subtitle_position(3) == 0, '')
+        _probe_path25 = []
+        _saved_probe25 = clf.probe_media
+
+        def _counting_probe(path, timeout=25):
+            _probe_path25.append(path)
+            return _saved_probe25(path, timeout)
+
+        clf.probe_media = _counting_probe
+        check("an unprobeable file is converted, and says why",
+              clf.plan(clf.probe_media(_file25('broken.mp4')), 'cast')
+              == ('convert', '读不出文件信息，按转码处理'), '')
+
+        _decide25 = lambda p, kind, **kw: clf.plan(   # noqa: E731
+            clf.probe_media(_fixture25(p)), kind, **kw)
+        check("h264 in MP4 with AAC goes out as it is, to either target",
+              _decide25('clean.mp4', 'cast')[0] == 'copy'
+              and _decide25('clean.mp4', 'dlna')[0] == 'copy', '')
+        check("one AC-3 track converts the whole file",
+              _decide25('twin.mp4', 'cast')[0] == 'convert'
+              and '声音编码 aac/ac3' in _decide25('twin.mp4', 'cast')[1],
+              _decide25('twin.mp4', 'cast')[1])
+        check("Matroska is fine for a Chromecast and not for a television",
+              _decide25('movie.mkv', 'cast')[0] == 'copy'
+              and '容器 matroska' in _decide25('movie.mkv', 'dlna')[1], '')
+        check("a codec no TV is trusted with converts for both",
+              '画面编码 hevc' in _decide25('hevc.mp4', 'cast')[1]
+              and _decide25('hevc.mp4', 'dlna')[0] == 'convert', '')
+        check("a silent video is not converted for want of an audio track",
+              _decide25('silent.mp4', 'cast')[0] == 'copy'
+              and _decide25('silent.mp4', 'dlna')[0] == 'copy', '')
+        check("music rides the tolerant audio path",
+              _decide25('song.mp3', 'cast')[0] == 'copy'
+              and _decide25('song.mp3', 'dlna')[0] == 'copy', '')
+        check("and that path still has a floor: Opus on a DLNA TV converts",
+              _decide25('live.opus', 'cast')[0] == 'copy'
+              and _decide25('live.opus', 'dlna')[0] == 'convert'
+              and clf.probe_media(_fixture25('live.opus')).upnp_class
+              == 'object.item.audioItem.musicTrack', '')
+        check("picking a different audio track means re-muxing",
+              '选音轨' in _decide25('twin.mp4', 'cast', audio_index=2)[1], '')
+        check("a subtitle is a sidecar on Chromecast, so it never costs a transcode",
+              _decide25('twin.mp4', 'cast', subtitle_index=3)
+              == _decide25('twin.mp4', 'cast')
+              and '字幕' not in _decide25('twin.mp4', 'cast')[1],
+              _decide25('twin.mp4', 'cast', subtitle_index=3)[1])
+        check("…but it is burned into the picture on a DLNA TV",
+              '字幕烧录' in _decide25('twin.mp4', 'dlna',
+                                     subtitle_index=3, libass=False)[1]
+              and _decide25('clean.mp4', 'dlna', audio_index=1,
+                            mode='direct')[0] == 'copy', '')
+        check("an A/V offset needs the muxer, so it needs a transcode",
+              '音画同步' in _decide25('clean.mp4', 'cast', delay_ms=250)[1], '')
+        check("the two manual switches beat the table",
+              _decide25('clean.mp4', 'cast', mode='convert')[1] == '手动选择强制转码'
+              and _decide25('hevc.mp4', 'cast', mode='direct')[0] == 'copy', '')
+
+        _br25, _sz25 = clf.bitrate_for_convert(_clean25, 6000000)
+        check("a two-hour file gets a length the device can hold in 31 bits",
+              _br25 == 6000000 and _sz25 == int((6000000 + 192000) * 120 / 8),
+              '{} {}'.format(_br25, _sz25))
+        _long25 = clf.probe_media(_fixture25('long.mkv', size=24000000))
+        _br25b, _sz25b = clf.bitrate_for_convert(_long25, 16000000)
+        check("…so a 90-minute file asks for a lower bitrate instead",
+              _sz25b < clf.MAX_ADVERTISED_SIZE < 2 ** 31 and _br25b < 16000000
+              and _br25b > 600000, '{} {}'.format(_br25b, _sz25b))
+        _br25c, _sz25c = clf.bitrate_for_convert(clf.Media(), 4000000)
+        check("a file with no duration is still budgeted, not left open-ended",
+              clf.MAX_ADVERTISED_SIZE * 0.8 < _sz25c < clf.MAX_ADVERTISED_SIZE
+              and 600000 < _br25c < 4000000, '{} {}'.format(_br25c, _sz25c))
+
+        # --------------------------------------------------------------------
+        # B. the transcode command
+        # --------------------------------------------------------------------
+        _base25 = {'audio_index': None, 'subtitle_index': None, 'delay_ms': 0,
+                   'bitrate': 4000000, 'audio_bitrate': 192000, 'height': 0,
+                   'encoder': 'software', 'hardware_name': 'h264_videotoolbox'}
+
+        def _args25(path, media=None, **over):
+            options = dict(_base25)
+            options.update(over)
+            return clf.convert_args(path, media if media is not None
+                                    else _clean25, options)
+
+        _copy25 = _args25(_media_dir25 + '/clean.mp4')
+
+        def _maps25(args):
+            return [args[i + 1] for i, a in enumerate(args) if a == '-map']
+
+        check("the transcode is MPEG-TS on stdout with the rate control asked for",
+              _copy25[-2:] == ['-f', 'mpegts']
+              and _copy25[_copy25.index('-b:v') + 1] == '4000000'
+              and _copy25[_copy25.index('-maxrate') + 1] == '4000000'
+              and _copy25[_copy25.index('-bufsize') + 1] == '8000000', '')
+        check("audio is pinned to 48 kHz stereo AAC",
+              _copy25[_copy25.index('-c:a') + 1] == 'aac'
+              and _copy25[_copy25.index('-ar') + 1] == '48000'
+              and _copy25[_copy25.index('-ac') + 1] == '2', '')
+        _audio_map25 = _args25('/x/twin.mp4', _twin25, audio_index=2)
+        check("a chosen track is mapped by its position among the audio streams",
+              _maps25(_audio_map25) == ['0:v:0', '0:a:1'],
+              str(_maps25(_audio_map25)))
+        _offset25 = _args25('/x/twin.mp4', _twin25, audio_index=2,
+                            delay_ms=-500)
+        check("…and an A/V offset is a second input, with audio taken from it",
+              _offset25[_offset25.index('-itsoffset') + 1] == '-0.500'
+              and _maps25(_offset25) == ['0:v:0', '1:a:1'],
+              str(_maps25(_offset25)))
+        check("a height cap scales by height only, keeping the aspect",
+              _args25('/x/clean.mp4', height=720)[
+              _args25('/x/clean.mp4', height=720).index('-vf') + 1]
+              == 'scale=-2:720', '')
+        _silent25 = clf.probe_media(_fixture25('silent.mp4'))
+        _song25 = clf.probe_media(_fixture25('song.mp3'))
+        check("a silent video loses the audio half of the command, not the picture",
+              '-vn' not in _args25('/x/silent.mp4', _silent25)
+              and '-c:a' not in _args25('/x/silent.mp4', _silent25)
+              and _maps25(_args25('/x/silent.mp4', _silent25)) == ['0:v:0'],
+              str(_args25('/x/silent.mp4', _silent25)))
+        check("and music loses the picture half",
+              '-vn' in _args25('/x/song.mp3', _song25)
+              and '-b:v' not in _args25('/x/song.mp3', _song25)
+              and _maps25(_args25('/x/song.mp3', _song25)) == ['0:a:0'],
+              str(_args25('/x/song.mp3', _song25)))
+        # `options()` is where the build is asked what it has, so the menu can
+        # tick 硬件编码器 all it likes: without VideoToolbox the command falls
+        # back on libx264 rather than failing to start.
+        utils.Setting.set(clf.SettingProperty.Hardware, True)
+        _nohw25 = _args25('/x/clean.mp4', **clf.options())
+        os.environ['MACAST_FAKE_HW'] = 'yes'
+        clf.invalidate_tool_cache()
+        _hw25 = _args25('/x/clean.mp4', **clf.options())
+        os.environ.pop('MACAST_FAKE_HW', None)
+        clf.invalidate_tool_cache()
+        utils.Setting.unset(clf.SettingProperty.Hardware)
+        check("the hardware encoder is only named when this build has it",
+              clf.ffmpeg_has(_fake_ffmpeg25, 'h264_videotoolbox') is False
+              and 'h264_videotoolbox' not in _nohw25
+              and 'libx264' in _nohw25, str(_nohw25[4:8]))
+        check("…and it is used the moment the build really has it",
+              _hw25[_hw25.index('-c:v') + 1] == 'h264_videotoolbox'
+              and 'libx264' not in _hw25, str(_hw25[4:8]))
+        check("a subtitle path inside a filter survives ffmpeg's two parsers",
+              clf.escape_filter_path("/tmp/a:b's.srt")
+              == "/tmp/a\\:b\\'s.srt"
+              and 'subtitles=/tmp/a\\:b'
+              in ' '.join(_args25('/x/clean.mp4',
+                                  burn_subtitle=True,
+                                  subtitle_path='/tmp/a:b.srt')), '')
+
+        # --------------------------------------------------------------------
+        # C. the HTTP face: Range, 206, and a file that is still growing
+        # --------------------------------------------------------------------
+        _blob25 = bytes(bytearray([i % 251 for i in range(10240)]))
+        _real25 = _file25('range.mp4', blob=_blob25)
+        _store25 = clf.Store()
+        _server25 = clf.start_media_server(_store25)
+        _plain25 = _store25.add(_real25, 'video/mp4', 'mp4', title='range')
+        _dlna25 = _store25.add(_real25, 'video/mp4', 'mp4', title='dlna',
+                               dlna=True)
+        _torn25 = _store25.add(os.path.join(_tmp25, 'gone.mp4'), 'video/mp4',
+                               'mp4', title='gone')
+
+        def _http25(method, entry_or_path, range_header=None, head=False,
+                    port=None):
+            path = (entry_or_path if isinstance(entry_or_path, str)
+                    else clf.MEDIA_PREFIX + entry_or_path.filename)
+            conn = _hc25.HTTPConnection('127.0.0.1', _server25.server_address[1]
+                                         if port is None else port, timeout=10)
+            conn.request(method, path,
+                         headers={} if range_header is None
+                         else {'Range': range_header})
+            resp = conn.getresponse()
+            out = (resp.status, dict(resp.getheaders()), resp.read())
+            conn.close()
+            return out
+
+        _st25, _hd25, _bd25 = _http25('GET', _plain25)
+        check("a whole-file read is a 200 with the exact bytes and no Content-Range",
+              _st25 == 200 and _bd25 == _blob25
+              and _hd25['Content-Length'] == str(len(_blob25))
+              and 'Content-Range' not in _hd25, str(_hd25))
+        check("every answer says no-cache and nosniff",
+              _hd25['Cache-Control'] == 'no-store'
+              and _hd25['X-Content-Type-Options'] == 'nosniff', '')
+        _st25, _hd25, _bd25 = _http25('HEAD', _plain25)
+        check("HEAD promises ranges and carries no body",
+              _st25 == 200 and _hd25['Accept-Ranges'] == 'bytes'
+              and _bd25 == b'' and _hd25['Content-Type'] == 'video/mp4', '')
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=100-199')
+        check("a closed range is answered to the byte, which is what a seek bar needs",
+              _st25 == 206 and _bd25 == _blob25[100:200]
+              and _hd25['Content-Range'] == 'bytes 100-199/10240'
+              and _hd25['Content-Length'] == '100', str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=10000-')
+        check("an open-ended range runs to the end of the file",
+              _st25 == 206 and _bd25 == _blob25[10000:]
+              and _hd25['Content-Range'] == 'bytes 10000-10239/10240', '')
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=-512')
+        check("a suffix range means the last 512 bytes",
+              _st25 == 206 and _bd25 == _blob25[-512:]
+              and _hd25['Content-Range'] == 'bytes 9728-10239/10240', '')
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=200-100')
+        check("a range that ends before it starts is ignored, not answered 416",
+              _st25 == 200 and _bd25 == _blob25 and 'Content-Range' not in _hd25,
+              str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=abc-')
+        check("so is one that is not a range at all: RFC 7233 says ignore it",
+              _st25 == 200 and _bd25 == _blob25 and 'Content-Range' not in _hd25,
+              str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=0-9,20-29')
+        check("a multi-range request is served as one whole file, not half",
+              _st25 == 200 and _bd25 == _blob25, str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', _plain25, 'bytes=10240-10999')
+        check("an offset past the end is the only 416, and it names the size",
+              _st25 == 416 and _hd25['Content-Range'] == 'bytes */10240'
+              and _bd25 == b'', str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', '/elsewhere/file.mp4')
+        check("nothing outside the one random-named prefix is readable",
+              _st25 == 404 and _http25('GET', '/media/deadbeefdeadbeef.mp4')[0]
+              == 404, str(_st25))
+        _st25, _hd25, _bd25 = _http25('GET', _dlna25)
+        check("a renderer gets the two DLNA headers, a browser-side entry does not",
+              _hd25['transferMode.dlna.org'] == 'Streaming'
+              and 'DLNA.ORG_OP=01' in _hd25['contentFeatures.dlna.org']
+              and 'transferMode.dlna.org' not in
+              dict(_http25('GET', _plain25)[1]), str(_hd25))
+        _st25, _hd25, _bd25 = _http25('GET', _torn25)
+        check("a file that vanished while registered answers 404-worth of nothing",
+              _bd25 == b'' and _st25 == 404
+              and _http25('HEAD', _torn25)[0] == 404, str(_hd25))
+
+        _growing25 = clf.Job(_fake_ffmpeg25, ['-i', 'x'], 'ts', 'video/mp2t',
+                             total=65536, label='growing')
+        check("the fake encoder starts and begins writing its output file",
+              _growing25.start()
+              and _wait_until(lambda: _growing25.size_now() > 8192, timeout=10),
+              str(_growing25.size_now()))
+        _job_entry25 = _store25.add(_growing25.path, 'video/mp2t', 'ts',
+                                     job=_growing25, title='growing')
+        check("a growing file advertises the length the encoder will reach",
+              _job_entry25.size() == 65536, str(_job_entry25.size()))
+        _st25, _hd25, _bd25 = _http25('GET', _job_entry25, 'bytes=0-4095')
+        check("the head of a transcode is served as soon as it exists",
+              _st25 == 206 and _bd25 == b'C' * 4096, repr(_bd25[:16]))
+        _st25, _hd25, _bd25 = _http25('GET', _job_entry25, 'bytes=0-4095')
+        check("and the same range twice gives the same bytes, so a retry is safe",
+              _bd25 == _blob25[:0] + b'C' * 4096, repr(_bd25[:8]))
+        _ahead25 = []
+        _slow_thread25 = threading.Thread(
+            target=lambda: _ahead25.append(_http25('GET', _job_entry25,
+                                                   'bytes=8192-16383')),
+            daemon=True)
+        _slow_thread25.start()
+        check("a reader ahead of the encoder waits for it instead of lying",
+              _wait_until(lambda: bool(_ahead25), timeout=20)
+              and _ahead25[0][2] == b'C' * 8192, str(_ahead25 and len(_ahead25[0][2])))
+        _growing25.stop()
+        _t025 = time.time()
+        _st25, _hd25, _bd25 = _http25('GET', _job_entry25, 'bytes=400000-')
+        check("a dead encoder gets an honest short answer, not a hang",
+              _bd25 == b'' and time.time() - _t025 < 6.0,
+              '{} {:d}s'.format(_st25, int(time.time() - _t025)))
+        _growing25.cleanup()
+        _store25.drop(_job_entry25)
+        _live25 = clf.Job(_fake_ffmpeg25, ['-i', 'x'], 'ts', 'video/mp2t',
+                          live=True, label='live')
+        _live25.start()
+        _live_entry25 = _store25.add(_live25.path, 'video/mp2t', 'ts',
+                                      job=_live25, title='live')
+        _conn25 = _hc25.HTTPConnection('127.0.0.1', _server25.server_address[1],
+                                       timeout=20)
+        _conn25.request('GET', clf.MEDIA_PREFIX + _live_entry25.filename)
+        _resp25 = _conn25.getresponse()
+        _first25 = _resp25.read(4096)
+        _second25 = _resp25.read(4096)
+        _conn25.close()
+        check("a live stream is a lengthless 200 that keeps producing",
+              _resp25.status == 200 and 'Content-Length' not in dict(
+                  _resp25.getheaders())
+              and dict(_resp25.getheaders())['Accept-Ranges'] == 'none'
+              and _first25 == b'C' * 4096 and _second25 == b'C' * 4096,
+              repr(_first25[:8]))
+        _live25.stop()
+        _live25.cleanup()
+        _store25.drop(_live_entry25)
+        check("Range parsing itself is the forgiving kind",
+              clf.parse_range('bytes=100-200') == (100, 200)
+              and clf.parse_range('bytes=100-') == (100, None)
+              and clf.parse_range('bytes=-1000') == (None, 1000)
+              and clf.parse_range('bytes=abc-') is None
+              and clf.parse_range('items=0-9') is None
+              and clf.parse_range('bytes=0-1,4-5') is None
+              and clf.parse_range(None) == (0, None), '')
+
+        # --------------------------------------------------------------------
+        # D. the Cast face, driven against Macast's own Chromecast receiver
+        # --------------------------------------------------------------------
+        _saved_keep25 = clf._keep_awake
+        _saved_awake25 = clf._stop_awake
+        _saved_watch25 = clf.WATCHDOG_SECONDS
+        clf.WATCHDOG_SECONDS = 0.2
+
+        def _hold_awake25(platform=None):
+            _taps25['awake'] = _taps25.get('awake', 0) + 1
+            return 'assertion'
+
+        def _release_awake25(handle):
+            # The real one ignores a None handle, so this must too or the two
+            # counters stop meaning "one assertion held, one assertion released".
+            if handle is not None:
+                _taps25['asleep'] = _taps25.get('asleep', 0) + 1
+
+        clf._keep_awake = _hold_awake25
+        clf._stop_awake = _release_awake25
+
+        class _Caster25(clf.LocalFileRenderer):
+            """The renderer, with its state reports caught rather than sent."""
+
+            def __init__(self):
+                super(_Caster25, self).__init__()
+                self.recorder = _StateRec()
+
+            @property
+            def protocol(self):
+                return self.recorder
+
+        _caster25 = _Caster25()
+        _rec25 = _caster25.recorder
+        _CTX.renderer = MockRenderer()
+        _CTX.renderer.transport_state = 'PLAYING'
+        _receiver25 = TestProtocol()
+        _receiver25.start()
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'cast')
+        utils.Setting.set(clf.SettingProperty.Cast_Target,
+                          '127.0.0.1:{}'.format(_receiver25.cast_port))
+        utils.Setting.set(clf.SettingProperty.Cast_Target_Name, '测试用的电视')
+        utils.Setting.set(clf.SettingProperty.Mode, 'auto')
+
+        def _media_url25():
+            return str(_CTX.renderer.last_arg('set_media_url') or '')
+
+        _caster25.play_path(_media_dir25 + '/clean.mp4')
+        check("a local file reaches the receiver as a url it can fetch",
+              _wait_until(lambda: _CTX.renderer.called('set_media_url'),
+                          timeout=25)
+              and _media_url25().startswith('http://127.0.0.1:')
+              and clf.MEDIA_PREFIX in _media_url25()
+              and _media_url25().endswith('.mp4'), str(_CTX.renderer.calls))
+
+        def _split_url25(url):
+            return (int(url.split('/')[2].rsplit(':', 1)[1]),
+                    '/' + url.split('/', 3)[3])
+
+        _st25, _hd25, _bd25 = _http25('GET', _split_url25(_media_url25())[1],
+                                       'bytes=0-15',
+                                       port=_split_url25(_media_url25())[0])
+        check("the receiver range-reads the file it was pointed at",
+              _st25 == 206 and _hd25['Content-Range'] == 'bytes 0-15/24000000'
+              and len(_bd25) == 16, str(_hd25))
+        check("an h264/AAC mp4 travels untouched, and says so in one line",
+              _caster25.mode == 'copy' and _caster25.duration == 120.0
+              and 'clean.mp4 · 直通' in _caster25.status(), _caster25.status())
+        check("the receiver agrees its app is open and playing our item",
+              _wait_until(lambda: _caster25.output is not None
+                          and _caster25.output.media_status()[0] == 'PLAYING',
+                          timeout=20)
+              and _caster25.output.applications() == [clf.DEFAULT_MEDIA_APP_ID],
+              str(_caster25.output.media_status() if _caster25.output else None))
+        _CTX.renderer.calls = []
+        _caster25.set_media_pause()
+        check("pause lands on the device and on the state page",
+              _wait_until(lambda: _CTX.renderer.called('set_media_pause'),
+                          timeout=15) and _caster25.state == 'PAUSED'
+              and ('transport', 'PAUSED_PLAYBACK') in _rec25.rows,
+              str(_CTX.renderer.calls))
+        _caster25.set_media_resume()
+        check("so does resume",
+              _wait_until(lambda: _CTX.renderer.called('set_media_resume'),
+                          timeout=15) and _caster25.state == 'PLAYING',
+              str(_CTX.renderer.calls))
+        _caster25.seek_to(30)
+        check("a seek is a SEEK carrying the absolute time",
+              _wait_until(lambda: _CTX.renderer.last_arg('set_media_position')
+                          == '30.0', timeout=15) and _caster25.position == 30.0,
+              str(_CTX.renderer.calls))
+        _caster25.set_media_volume(40)
+        check("volume is asked of the receiver, in percent",
+              _wait_until(lambda: _CTX.renderer.last_arg('set_media_volume') == 40,
+                          timeout=15), str(_CTX.renderer.calls))
+        _out25 = _caster25.output
+        check("QUIT_APP is answered, so a real stop really ends the session",
+              _out25._receiver_command({'type': 'QUIT_APP',
+                                        'appId': _out25.app_id}) is True, '')
+        check("…and the receiver stops claiming a media it no longer holds",
+              _wait_until(lambda: _out25.media_status()[0] == 'IDLE', timeout=15)
+              and _out25.applications() == [], str(_out25.media_status()))
+
+        utils.Setting.set(clf.SettingProperty.Mode, 'convert')
+        _CTX.renderer.calls = []
+        _caster25.play_path(_media_dir25 + '/hevc.mp4')
+        check("a forced transcode goes out as a live mpeg-ts url",
+              _wait_until(lambda: _CTX.renderer.called('set_media_url'),
+                          timeout=25)
+              and _media_url25().endswith('.ts') and _caster25.mode == 'convert',
+              _caster25.status())
+        _conv_port25, _conv_path25 = _split_url25(_media_url25())
+        _conn25c = _hc25.HTTPConnection('127.0.0.1', _conv_port25, timeout=20)
+        _conn25c.request('GET', _conv_path25,
+                         headers={'Range': 'bytes=0-4095'})
+        _resp25c = _conn25c.getresponse()
+        _head25c = dict(_resp25c.getheaders())
+        _first25c = _resp25c.read(4096)
+        _conn25c.close()
+        check("a live transcode promises no length and ignores the range",
+              _resp25c.status == 200 and 'Content-Length' not in _head25c
+              and _head25c['Accept-Ranges'] == 'none'
+              and _head25c['Content-Type'] == 'video/mp2t'
+              and _first25c == b'C' * 4096, str(_head25c))
+        _conv_job25 = _caster25.job
+        _conv_dir25 = _conv_job25.directory
+        _caster25.set_media_stop()
+        check("stopping takes the encoder down and its file out with it",
+              _conv_job25.proc is None and not os.path.isdir(_conv_dir25)
+              and _caster25.store.entries == {} and _caster25.output is None,
+              _conv_dir25)
+        check("one sleep assertion per session, released by its stop",
+              _taps25.get('awake') == 2 and _taps25.get('asleep') == 2,
+              str(_taps25))
+
+        utils.Setting.set(clf.SettingProperty.Mode, 'auto')
+        utils.Setting.set(clf.SettingProperty.Subtitle_Stream, '2')
+        _CTX.renderer.calls = []
+        _twin_path25 = _media_dir25 + '/twin.mp4'
+        # twin.mp4 is the multi-track file but its second audio is AC-3, which
+        # converts on its own; subs.mp4 is the same shape with all-copyable
+        # audio, so a subtitle choice is the only thing moving here.
+        _subs_path25 = _fixture25('subs.mp4')
+        _caster25.play_path(_subs_path25)
+        check("a chosen subtitle rides along as a sidecar, still no re-encode",
+              _wait_until(lambda: _CTX.renderer.called('set_media_url'),
+                          timeout=25) and _caster25.mode == 'copy'
+              and len(_caster25.store.entries) == 2, _caster25.status())
+        _led25 = dict(_receiver25._media or {})
+        _vtt25 = str(((_led25.get('textTracks') or [{}])[0]).get('contentId'))
+        check("the LOAD declares the track and points it at our own server",
+              _vtt25.endswith('.vtt') and clf.MEDIA_PREFIX in _vtt25,
+              str(_led25))
+        _sidecar25 = _caster25.entries[-1].path
+        _st25, _hd25, _bd25 = _http25('GET', _split_url25(_vtt25)[1],
+                                       port=_split_url25(_vtt25)[0])
+        check("the sidecar is served as WebVTT, the one kind a Chromecast reads",
+              _st25 == 200 and _bd25.startswith(b'WEBVTT')
+              and _hd25['Content-Type'] == 'text/vtt', str(_hd25))
+        _caster25.set_media_stop()
+        check("our sidecar is deleted afterwards; the user's file never is",
+              not os.path.exists(_sidecar25) and os.path.isfile(_subs_path25),
+              _sidecar25)
+        utils.Setting.unset(clf.SettingProperty.Subtitle_Stream)
+
+        # --------------------------------------------------------------------
+        # E. what may be asked for, and what is refused
+        # --------------------------------------------------------------------
+        _caster25.clear_queue()
+        _picked25 = [_media_dir25 + '/clean.mp4', _twin_path25]
+        check("the queue takes real files once and drops the rest",
+              _caster25.enqueue(_picked25 + _picked25
+                                + [_media_dir25 + '/missing.mp4']) == 2
+              and _caster25.queue == _picked25, str(_caster25.queue))
+        check("an index off either end plays nothing and starts no delivery",
+              _caster25.play_index(99) is False
+              and _caster25.play_index(-1) is False and _caster25.index == -1,
+              str(_caster25.index))
+        _played25 = []
+
+        def _listing_play25(index, start='0'):
+            _played25.append((index, start))
+            # The real one stores it, and the two direction checks below read it
+            # back, so the stand-in has to keep the same promise.
+            _caster25.index = index
+            return True
+
+        _caster25.play_index = _listing_play25
+        _notify25.clear()
+        _caster25.index = 0
+        check("walking off the front says so instead of going silent",
+              _caster25.play_previous() is False
+              and _wait_until(lambda: any('已经是列表第一个' in str(n)
+                                          for n in _notify25), timeout=5)
+              and _played25 == [], str(_notify25))
+        _notify25.clear()
+        _caster25.index = 1
+        check("…and so does walking off the back",
+              _caster25.play_next() is False
+              and _wait_until(lambda: any('已经是列表最后一个' in str(n)
+                                          for n in _notify25), timeout=5),
+              str(_notify25))
+        _played25 = []
+        _caster25.index = 0
+        check("from the middle of the list both directions move",
+              _caster25.play_next() is True and _played25 == [(1, '0')]
+              and _caster25.play_previous() is True
+              and _played25 == [(1, '0'), (0, '0')], str(_played25))
+        del _caster25.play_index
+        _notify25.clear()
+        check("an empty push is ignored rather than announced",
+              _caster25.set_media_url('') is None and _notify25 == []
+              and _caster25.queue == [_media_dir25 + '/clean.mp4',
+                                      _twin_path25],
+              str(_caster25.queue))
+        _notify25.clear()
+        _caster25.clear_queue()
+        _caster25.set_media_url('/nope/nothing.mp4')
+        check("a path that does not exist is refused with the rule quoted",
+              _wait_until(lambda: any('只认本机文件路径' in str(n)
+                                      for n in _notify25), timeout=5)
+              and _caster25.queue == [], str(_notify25))
+        _caster25.set_media_url('file://' + _up25.quote(_twin_path25))
+        check("a file:// url is decoded into the same entry as the plain path",
+              _caster25.queue == [_twin_path25] and _caster25.index == 0,
+              str(_caster25.queue))
+        _CTX.renderer.calls = []
+        _caster25.set_media_stop()
+        _CTX.renderer.calls = []
+        _caster25.set_media_url('http://remote.example/movie.mp4')
+        check("a remote url is handed to the device untouched, not proxied",
+              _wait_until(lambda: _CTX.renderer.last_arg('set_media_url')
+                          == 'http://remote.example/movie.mp4', timeout=25)
+              and _caster25.mode == 'remote'
+              and _caster25.store.entries == {}, _caster25.status())
+        _caster25.set_media_stop()
+        utils.Setting.set(clf.SettingProperty.System_Audio, True)
+        _notify25.clear()
+        _CTX.renderer.calls = []
+        _caster25.set_media_url(_twin_path25)
+        check("a pushed file is refused while system sound is on the air",
+              _wait_until(lambda: any('只投系统声音' in str(n)
+                                      for n in _notify25), timeout=5)
+              and not _CTX.renderer.called('set_media_url'), str(_notify25))
+        utils.Setting.set(clf.SettingProperty.System_Audio, False)
+        _saved_input25 = clf.system_audio_input
+        clf.system_audio_input = lambda: None
+        _notify25.clear()
+        check("audio-only mode refuses when this machine has no loopback device",
+              _caster25.set_system_audio(True) is False
+              and any('BlackHole' in str(n) for n in _notify25)
+              and clf.system_audio_wanted() is False, str(_notify25))
+        clf.system_audio_input = lambda: ('BlackHole 2ch',
+                                          ['-f', 'avfoundation', '-i', ':0'])
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'dlna')
+        utils.Setting.set(clf.SettingProperty.Dlna_Control,
+                          'http://127.0.0.1:9/AVTransport')
+        _notify25.clear()
+        check("…and only on a Chromecast, because a DLNA TV takes no live audio",
+              _caster25.set_system_audio(True) is False
+              and any('只支持 Chromecast' in str(n) for n in _notify25)
+              and clf.system_audio_wanted() is False, str(_notify25))
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'cast')
+        _CTX.renderer.calls = []
+        check("with a device to speak of, audio-only mode starts streaming",
+              _caster25.set_system_audio(True) is True
+              and _wait_until(lambda: _CTX.renderer.called('set_media_url'),
+                              timeout=25)
+              and _caster25.mode == 'audio'
+              and '系统声音' in _caster25.status(), _caster25.status())
+        _caster25.set_media_stop()
+        clf.system_audio_input = _saved_input25
+        check("seconds are clock times here, wherever they come from",
+              clf.hms(3725) == '1:02:05' and clf.hms(0) == '0:00:00'
+              and clf.parse_time('1:02:03.5') == 3723.5
+              and clf.parse_time('90') == 90.0
+              and clf.parse_time('nonsense') == 0.0, '')
+        check("a start is mpv's grammar, because the DLNA side sends that",
+              clf.parse_start('0:01:30') == 90.0
+              and clf.parse_start('50%', 200) == 100.0
+              and clf.parse_start('-30') == -30.0
+              and clf.parse_start('') == 0.0, '')
+        check("content types are guessed by extension and the name follows",
+              clf.guess_content('/x/a.mkv') == 'video/x-matroska'
+              and clf.guess_content('/x/a.bin') == 'video/mp4'
+              and clf.suffix_for('video/mp2t') == 'ts'
+              and clf.suffix_for('application/octet-stream', '/x/y.avi') == 'avi',
+              '')
+        # Verbatim shape from `ffmpeg -f avfoundation -list_devices true -i ""`
+        # on the machine running these tests -- the log prefix is part of it.
+        _devices25 = clf._avfoundation_audio_devices(
+            '[AVFoundation indev @ 0x7f] AVFoundation video devices:\n'
+            '[AVFoundation indev @ 0x7f] [0] OBS Virtual Camera\n'
+            '[AVFoundation indev @ 0x7f] [1] Capture screen 0\n'
+            '[AVFoundation indev @ 0x7f] AVFoundation audio devices:\n'
+            '[AVFoundation indev @ 0x7f] [0] MacBook Pro麦克风\n'
+            '[AVFoundation indev @ 0x7f] [1] "BlackHole 2ch"\n'
+            '[in#0 @ 0x7f] Error opening input: Input/output error\n')
+        check("avfoundation's audio block is read without its video block",
+              _devices25 == [('0', 'MacBook Pro麦克风'),
+                             ('1', 'BlackHole 2ch')]
+              and clf._avfoundation_audio_devices(
+                  'List of Audio devices:\n  0) BlackHole 2ch\n')
+              == [('0', 'BlackHole 2ch')]
+              and clf._avfoundation_audio_devices('nothing at all') == [],
+              str(_devices25))
+        _listing25 = clf._ask(_fake_ffmpeg25, ['-hide_banner', '-f',
+                                               'avfoundation', '-list_devices',
+                                               'true', '-i', ''])
+        check("…and the fake ffmpeg on PATH says what the real one says",
+              clf._avfoundation_audio_devices(_listing25)
+              == [('0', 'MacBook Pro麦克风'), ('1', 'BlackHole 2ch')],
+              _listing25)
+        _file25('notes.txt', size=16)
+        _names25, _total25 = clf.list_media(_media_dir25)
+        check("the folder listing takes media files only, and is capped for the menu",
+              'notes.txt' not in _names25 and 'clean.mp4' in _names25
+              and _total25 == len(_names25)
+              and clf.list_media(_media_dir25, limit=3)[0] == _names25[:3]
+              and clf.list_media(_media_dir25, limit=3)[1] == _total25
+              and clf.list_media(_tmp25 + '/nowhere')[0] == [], str(_names25))
+        check("and a file whose name is not decodable stays off the menu",
+              clf.list_media('') == ([], 0) and clf.list_media(None) == ([], 0), '')
+
+        # --------------------------------------------------------------------
+        # F. the DLNA face: a fake TV that answers the way firmware does
+        # --------------------------------------------------------------------
+        class _TV25Handler(_httpd25.BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _reply(self, action, fields):
+                inner = ''.join('<{k}>{v}</{k}>'.format(k=k, v=v)
+                                for k, v in [('InstanceID', '3')] + list(fields))
+                body = (
+                    '<?xml version="1.0"?>'
+                    '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"'
+                    ' s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+                    '<s:Body><u:{a}Response '
+                    'xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+                    '{i}</u:{a}Response></s:Body></s:Envelope>'
+                ).format(a=action, i=inner)
+                raw = body.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/xml; charset="utf-8"')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):
+                n = int(self.headers.get('Content-Length') or 0)
+                raw = self.rfile.read(n).decode('utf-8')
+                action = (self.headers.get('SOAPAction') or '').strip('"')
+                action = action.rsplit('#', 1)[-1]
+                _taps25.setdefault('calls', []).append(
+                    (action, raw, self.headers.get('Content-Length')))
+                state = _taps25.setdefault('state', 'NO_MEDIA_PRESENT')
+                if action == 'SetAVTransportURI':
+                    _taps25['uri'] = raw
+                    _taps25['state'] = 'STOPPED'
+                    self._reply(action, [])
+                elif action in ('Play', 'Pause', 'Seek', 'Stop'):
+                    if action == 'Play':
+                        _taps25['state'] = 'PLAYING'
+                    elif action == 'Pause':
+                        _taps25['state'] = 'PAUSED_PLAYBACK'
+                    self._reply(action, [])
+                elif action == 'GetTransportInfo':
+                    if _taps25.get('status'):
+                        self.send_error(_taps25['status'])
+                        return
+                    self._reply(action, [
+                        ('CurrentTransportState',
+                         _taps25.get('reported', state)),
+                        ('CurrentTransportStatus', 'OK'),
+                        ('CurrentSpeed', '1')])
+                elif action == 'GetPositionInfo':
+                    self._reply(action, [('RelTime', _taps25.get('rel',
+                                                                 '0:00:42')),
+                                         ('TrackDuration',
+                                          _taps25.get('dur', '0:02:30'))])
+                else:
+                    self.send_error(501)
+
+        _tv25 = _httpd25.ThreadingHTTPServer(('127.0.0.1', 0), _TV25Handler)
+        threading.Thread(target=_tv25.serve_forever, daemon=True,
+                         name="FAKE_DLNA_TV").start()
+        _control25 = 'http://127.0.0.1:{}/control'.format(
+            _tv25.server_address[1])
+
+        def _verbs25():
+            return [a for a, _b, _c in _taps25['calls']
+                    if a in ('SetAVTransportURI', 'Play', 'Seek', 'Pause',
+                             'Stop')]
+
+        _taps25['calls'] = []
+        _taps25['state'] = 'NO_MEDIA_PRESENT'
+        _taps25['reported'] = 'PLAYING'
+        _sender25 = clf.DlnaSender(_control25, timeout=5.0)
+        _sender25.set_uri('http://192.0.2.9:8/media/x.mp4', clf.build_didl(
+            'http://192.0.2.9:8/media/x.mp4', '深夜食堂', 'video/mp4', 120.0,
+            24000000))
+        _sender25.play()
+        _sender25.seek(42)
+        _sender25.pause()
+        check("one DLNA hand-off is URI, play, the resume seek, then pause",
+              _verbs25() == ['SetAVTransportURI', 'Play', 'Seek', 'Pause'],
+              str(_verbs25()))
+        check("a renderer that moved off InstanceID 0 is answered in kind",
+              _sender25.instance_id == '3', _sender25.instance_id)
+        check("the seek names the unit and carries the absolute time",
+              '<Unit>REL_TIME</Unit><Target>0:00:42</Target>' in
+              [b for a, b, _c in _taps25['calls'] if a == 'Seek'][0], '')
+        check("the transport state we read is the one the TV reported",
+              _sender25.transport_state() == 'PLAYING'
+              and _sender25.last_state == 'PLAYING', _sender25.last_state)
+        check("a position is (reltime, trackduration) in seconds",
+              _sender25.position() == (42.0, 150.0), str(_sender25.position()))
+        _taps25['status'] = 500
+        try:
+            _sender25.transport_state()
+            _raised25 = None
+        except Exception as e:
+            _raised25 = e
+        del _taps25['status']
+        check("a TV that answers 500 raises, and the last good state survives",
+              isinstance(_raised25, _ue25.HTTPError)
+              and _sender25.last_state == 'PLAYING', repr(_raised25))
+        _uri25 = [c for c in _taps25['calls'] if c[0] == 'SetAVTransportURI'][0]
+        check("Content-Length counts UTF-8 bytes, so a Chinese title is not cut off",
+              int(_uri25[2]) == len(_uri25[1].encode('utf-8'))
+              and int(_uri25[2]) > len(_uri25[1]),
+              '{} vs {} characters'.format(_uri25[2], len(_uri25[1])))
+        _sender25.close()
+
+        # Our own receiver is the strictest parser we can reach without a TV.
+        _pushed25 = []
+
+        class _Dlna25(protocol.DLNAProtocol):
+            @property
+            def renderer(self):
+                return self
+
+            def set_media_url(self, uri, start='0'):
+                _pushed25.append(uri)
+
+            def set_media_title(self, title):
+                _pushed25.append(('title', title))
+
+            def set_media_position(self, position):
+                _pushed25.append(('position', position))
+
+            def set_media_resume(self):
+                _pushed25.append('resume')
+
+            def set_media_pause(self):
+                _pushed25.append('pause')
+
+            def set_media_stop(self):
+                _pushed25.append('stop')
+
+            def release_playback(self):
+                pass
+
+        _dp25 = _Dlna25()
+        _accepted25 = []
+        for _action25, _body25, _cl25 in _taps25['calls']:
+            try:
+                _dp25.call(_body25)
+                _accepted25.append(_action25)
+            except Exception as e:
+                _accepted25.append('{}:{}'.format(_action25, e))
+        check("Macast's own SOAP parser accepts every envelope we send",
+              _accepted25 == [a for a, _b, _c in _taps25['calls']],
+              str(_accepted25))
+        check("and it latches the URI, the DIDL title and the resume position",
+              _pushed25[0] == 'http://192.0.2.9:8/media/x.mp4'
+              and ('title', '深夜食堂') in _pushed25
+              and ('position', '0:00:42') in _pushed25, str(_pushed25))
+
+        # -- the whole hand-off, watchdog included --------------------------
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'dlna')
+        utils.Setting.set(clf.SettingProperty.Dlna_Control, _control25)
+        utils.Setting.set(clf.SettingProperty.Dlna_Target_Name, '假的电视')
+        utils.Setting.set(clf.SettingProperty.Mode, 'auto')
+        utils.Setting.set(clf.SettingProperty.Audio_Stream, '')
+        utils.Setting.set(clf.SettingProperty.Subtitle_Stream, '')
+        utils.Setting.set(clf.SettingProperty.System_Audio, False)
+        _taps25['calls'] = []
+        _taps25['state'] = 'NO_MEDIA_PRESENT'
+        _caster25b = _Caster25()
+        _caster25b.start()                 # this one keeps its watchdog awake
+        _caster25b.play_path(_media_dir25 + '/clean.mp4', '0:00:42')
+        check("a television is handed the URL, a play and the resume seek",
+              _wait_until(lambda: _verbs25() == ['SetAVTransportURI', 'Play',
+                                                 'Seek'], timeout=25),
+              str(_verbs25()))
+
+        def _didl25(envelope):
+            root = _ET25.fromstring(envelope)
+            for node in root.iter():
+                if node.tag.rpartition('}')[2] == 'CurrentURIMetaData':
+                    return _ET25.fromstring(node.text or '<x/>')
+            return None
+
+        _resnode25 = None
+        for _node25 in _didl25([b for a, b, _c in _taps25['calls']
+                                if a == 'SetAVTransportURI'][-1]).iter():
+            if _node25.tag.rpartition('}')[2] == 'res':
+                _resnode25 = _node25
+        check("the DIDL advertises a length and duration the file can honour",
+              _resnode25 is not None
+              and _resnode25.get('duration') == '0:02:00'
+              and _resnode25.get('size') == '24000000'
+              and 'DLNA.ORG_OP=01' in (_resnode25.get('protocolInfo') or ''),
+              str(_resnode25.attrib if _resnode25 is not None else None))
+        _dport25, _dpath25 = _split_url25(_resnode25.text)
+        _st25, _hd25, _bd25 = _http25('GET', _dpath25, 'bytes=0-99',
+                                      port=_dport25)
+        check("the television range-reads the file we advertised to it",
+              _st25 == 206 and _hd25['Content-Range'] == 'bytes 0-99/24000000'
+              and _hd25['transferMode.dlna.org'] == 'Streaming'
+              and len(_bd25) == 100, str(_hd25))
+        check("the state page learns the length the TV claims, not ours",
+              _wait_until(lambda: _caster25b.duration == 150.0
+                          and _caster25b.position == 42.0, timeout=15)
+              and _caster25b.mode == 'copy', _caster25b.status())
+        _before25v = len(_taps25['calls'])
+        _caster25b.set_media_volume(30)
+        check("volume is not asked of a DLNA TV: its remote is nearer the amp",
+              len(_taps25['calls']) == _before25v, str(_verbs25()))
+        _caster25b.set_media_pause()
+        _caster25b.set_media_resume()
+        check("pause and resume are SOAP verbs, never a reload",
+              _wait_until(lambda: _verbs25().count('Pause') == 1
+                          and _verbs25().count('Play') == 2, timeout=15)
+              and _verbs25().count('SetAVTransportURI') == 1, str(_verbs25()))
+        _notify25.clear()
+        _taps25['reported'] = 'NO_MEDIA_PRESENT'
+        check("a takeover is re-pushed, and the re-push keeps the position",
+              _wait_until(lambda: _verbs25().count('SetAVTransportURI') == 2,
+                          timeout=20)
+              and all('<Target>0:00:42</Target>' in b
+                      for a, b, _c in _taps25['calls'] if a == 'Seek')
+              and _caster25b.position == 42.0, str(_verbs25()))
+        check("after MAX_REPUSH takeovers we stop fighting and say so",
+              _wait_until(lambda: any('电视被别的设备占用' in str(n)
+                                      for n in _notify25), timeout=30)
+              and _caster25b.output is None
+              and _verbs25().count('SetAVTransportURI') == clf.MAX_REPUSH + 1,
+              '{} {}'.format(str(_notify25)[:160], _verbs25()))
+        check("giving up hands the panel back instead of polling forever",
+              _verbs25()[-1] == 'Stop'
+              and ('transport', 'STOPPED') in _caster25b.recorder.rows
+              and _caster25b.store.entries == {} and _caster25b.job is None,
+              str(_verbs25()))
+        _caster25b.stop()
+
+        # -- who else is on the network -------------------------------------
+        _desc25 = ('<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+                   '<friendlyName>客厅电视</friendlyName><serviceList><service>'
+                   '<serviceType>urn:schemas-upnp-org:service:'
+                   'AVTransport:1</serviceType><controlURL>%s</controlURL>'
+                   '</service></serviceList></device></root>')
+        check("a relative control URL is made absolute against the description",
+              clf.parse_description(_desc25 % 'dmr/control/2',
+                                    'http://192.0.2.7:49152/d.xml',
+                                    '192.0.2.7')
+              == ('客厅电视', 'http://192.0.2.7:49152/dmr/control/2'),
+              str(clf.parse_description(_desc25 % 'dmr/control/2',
+                                        'http://192.0.2.7:49152/d.xml',
+                                        '192.0.2.7')))
+        check("a device that describes itself on loopback is reached anyway",
+              clf.parse_description(_desc25 % '/c',
+                                    'http://127.0.0.1:49152/d.xml',
+                                    '192.0.2.7')[1] == 'http://192.0.2.7:49152/c',
+              str(clf.parse_description(_desc25 % '/c',
+                                        'http://127.0.0.1:49152/d.xml',
+                                        '192.0.2.7')))
+        check("so is one that names another machine, or a port that is not a port",
+              clf.parse_description(_desc25 % 'http://10.0.0.5:77/x',
+                                    'http://192.0.2.7:49152/d.xml',
+                                    '192.0.2.7')[1]
+              == 'http://192.0.2.7:77/x'
+              and clf.parse_description(_desc25 % 'http://10.0.0.5:foo/x',
+                                        'http://192.0.2.7:49152/d.xml',
+                                        '192.0.2.7')[1]
+              == 'http://192.0.2.7:49152/x', '')
+        check("no AVTransport service, or no XML at all, means no renderer",
+              clf.parse_description(_desc25.replace('AVTransport:1', 'X:1')
+                                    % '/c', 'http://192.0.2.7:49152/d',
+                                    '192.0.2.7') is None
+              and clf.parse_description('<root>', 'http://h/d', '1.2.3.4') is None
+              and clf.parse_description('', 'http://h/d', '1.2.3.4') is None, '')
+        _saved_adv25 = utils.Setting.__dict__['get_advertisable_ip']
+        clf.Setting.get_advertisable_ip = lambda: ['192.0.2.41']
+        _saved_ssdp25 = clf._ssdp_search
+        _saved_rd25 = clf.describe_renderer
+        _asks25 = []
+        _answers25 = [('http://192.0.2.9:49152/d.xml', '192.0.2.9'),
+                      ('http://192.0.2.41:49152/d.xml', '192.0.2.41')]
+
+        def _search25(st, timeout=3.0):
+            _asks25.append(st)
+            return list(_answers25)
+
+        clf._ssdp_search = _search25
+        clf.describe_renderer = lambda url, peer, timeout=3.0: (
+            None if peer == '192.0.2.41'
+            else ('楼上的电视', 'http://{}:49152/c'.format(peer)))
+        _found25 = clf.discover_renderers(timeout=0.1)
+        check("the search asks for a MediaRenderer and drops this machine",
+              _found25 == [('楼上的电视', 'http://192.0.2.9:49152/c',
+                            '192.0.2.9')]
+              and len(_asks25) == len(clf.DLNA_SEARCH_TARGETS),
+              '{} {}'.format(_found25, _asks25))
+        clf._ssdp_search = lambda st, timeout=3.0: list(_answers25[:1])
+        _again25 = clf.discover_renderers(timeout=0.1)
+        check("a renderer that answers both search targets is listed once",
+              _again25 == [('楼上的电视', 'http://192.0.2.9:49152/c',
+                            '192.0.2.9')], str(_again25))
+        _searching25 = []
+        _saved_rsearch_fn25 = clf.start_renderer_search
+        clf.start_renderer_search = lambda: _searching25.append('dlna') or True
+        clf._dlna_devices = []
+        _probe_setting25 = clf.LocalFileSetting()
+        _probe_setting25.build_menu()
+        check("an empty renderer list is refilled by a background search",
+              _searching25 == ['dlna'], str(_searching25))
+        clf.start_renderer_search = _saved_rsearch_fn25
+        clf.Setting.get_advertisable_ip = _saved_adv25
+        clf.describe_renderer = _saved_rd25
+        clf._ssdp_search = _saved_ssdp25
+
+        # --------------------------------------------------------------------
+        # G. the menu bar: what it shows, and what a click costs
+        # --------------------------------------------------------------------
+        _searches25 = []
+        clf._devices = [('客厅的电视', '192.0.2.9', 8009),
+                        ('床头的', '192.0.2.10', 8009)]
+        clf._dlna_devices = [('老电视', 'http://192.0.2.11:49152/x',
+                              '192.0.2.11')]
+        clf.start_search = lambda: _searches25.append('cast') or True
+
+        def _texts25(items, out=None):
+            out = [] if out is None else out
+            for item in items:
+                out.append(item.text)
+                if item.children:
+                    _texts25(item.children, out)
+            return out
+
+        def _item25(items, needle):
+            for item in items:
+                if needle in (item.text or ''):
+                    return item
+                found = _item25(item.children or [], needle)
+                if found is not None:
+                    return found
+            return None
+
+        def _exact25(items, text):
+            """'-750 ms' contains '500 ms', so some labels need an exact match."""
+            for item in items:
+                if (item.text or '') == text:
+                    return item
+                found = _exact25(item.children or [], text)
+                if found is not None:
+                    return found
+            return None
+
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'cast')
+        utils.Setting.set(clf.SettingProperty.Mode, 'auto')
+        utils.Setting.set(clf.SettingProperty.Audio_Delay, 0)
+        utils.Setting.set(clf.SettingProperty.Bitrate, clf.DEFAULT_BITRATE)
+        utils.Setting.set(clf.SettingProperty.Hardware, False)
+        utils.Setting.set(clf.SettingProperty.Folder, _media_dir25)
+        clf._probe_cache.clear()
+        clf.remember_probe(_twin_path25, _twin25)
+        _caster25g = _Caster25()
+        _caster25g.current = _twin_path25
+        _caster25g.mode = 'copy'
+        _caster25g.note = '电视能直接解码'
+        _caster25g.duration = 150.0
+        _caster25g.position = 65.0
+        _caster25g.state = 'PAUSED'
+        _caster25g.queue = [_twin_path25, _media_dir25 + '/clean.mp4']
+        _caster25g.index = 0
+        _restarts25 = []
+        _caster25g.play_path = lambda path, start='0': _restarts25.append(
+            (path, start))
+        setting25 = _caster25g.renderer_setting
+        setting25._renderer = lambda: _caster25g
+        _probes_before25 = len(_probe_path25)
+        _menu25 = setting25.build_menu()
+        _flat25 = _texts25(_menu25)
+        check("the menu must never probe a file: ffprobe on the UI thread hangs it",
+              len(_probe_path25) == _probes_before25, str(_probe_path25[-2:]))
+        check("the running item, its place in the list and its clock are one line",
+              _caster25g.status().startswith('twin.mp4 · 直通 · 1/2')
+              and '0:01:05/0:02:30' in _caster25g.status()
+              and any('twin.mp4 · 直通 · 1/2' in t for t in _flat25),
+              _caster25g.status())
+        check("both kinds of target are offered and the current one is ticked",
+              _item25(_menu25, clf.TARGETS['cast']).checked is True
+              and _item25(_menu25, clf.TARGETS['dlna']).checked is False, '')
+        check("discovered devices are listed under the one in use",
+              '客厅的电视 · 192.0.2.9' in _flat25
+              and '床头的 · 192.0.2.10' in _flat25
+              and any(' · 127.0.0.1:' in t and '测试用的电视' in t
+                      for t in _flat25), str(_flat25[-8:]))
+        check("a paused item is offered 继续, not a second 暂停",
+              _item25(_menu25, '继续') is not None
+              and _item25(_menu25, '暂停') is None
+              and _item25(_menu25, '停止（让电视回主页）') is not None, '')
+        check("the tracks of the playing file are listed by index, codec and language",
+              '#1 aac · eng · 默认' in _flat25 and '#2 ac3 · chi' in _flat25
+              and '#3 subrip · chi' in _flat25
+              and '音频：跟随文件' in _flat25 and '字幕：不投' in _flat25,
+              str([t for t in _flat25 if t.startswith('#')]))
+        check("the folder listing reaches the menu, capped and counted",
+              'clean.mp4' in _flat25 and '全部按顺序播' in _flat25,
+              str(_flat25[:6]))
+        clf._devices = []
+        _searches25 = []
+        setting25.build_menu()
+        check("an empty device list is refilled in the background",
+              _searches25 == ['cast'] and clf._devices == [],
+              str(_searches25))
+        clf._devices = [('客厅的电视', '192.0.2.9', 8009),
+                        ('床头的', '192.0.2.10', 8009)]
+
+        setting25.on_audio_stream_clicked(_item25(_menu25, '#2 ac3 · chi'))
+        check("picking a second audio track stores it and re-casts from here",
+              utils.Setting.get(clf.SettingProperty.Audio_Stream) == '2'
+              and _restarts25 == [(_twin_path25, '0:01:05')], str(_restarts25))
+        _restarts25 = []
+        setting25.on_subtitle_clicked(_item25(_menu25, '#3 subrip · chi'))
+        check("so does picking a subtitle, because the choice is made at the LOAD",
+              utils.Setting.get(clf.SettingProperty.Subtitle_Stream) == '3'
+              and _restarts25 == [(_twin_path25, '0:01:05')], str(_restarts25))
+        _restarts25 = []
+        setting25.on_delay_clicked(_exact25(_menu25, '500 ms'))
+        check("an A/V offset re-casts too: it is baked into the stream",
+              utils.Setting.get(clf.SettingProperty.Audio_Delay) == 500
+              and _restarts25 == [(_twin_path25, '0:01:05')], str(_restarts25))
+        _restarts25 = []
+        setting25.on_bitrate_clicked(_item25(_menu25, '10 Mbps'))
+        setting25.on_hardware_clicked(_item25(_menu25, '硬件编码器'))
+        check("quality choices wait for the next transcode instead of restarting",
+              utils.Setting.get(clf.SettingProperty.Bitrate) == 10000000
+              and utils.Setting.get(clf.SettingProperty.Hardware) is True
+              and _restarts25 == [], str(_restarts25))
+        _restarts25 = []
+        setting25.on_mode_clicked(_item25(_menu25, '强制转码'))
+        check("changing how the file is handled re-casts it that way",
+              utils.Setting.get(clf.SettingProperty.Mode) == 'convert'
+              and _restarts25 == [(_twin_path25, '0:01:05')], str(_restarts25))
+        _restarts25 = []
+        setting25.on_cast_clicked(_item25(_menu25, '床头的 · 192.0.2.10'))
+        check("choosing another Chromecast moves the same file to it",
+              utils.Setting.get(clf.SettingProperty.Cast_Target)
+              == '192.0.2.10:8009'
+              and utils.Setting.get(clf.SettingProperty.Cast_Target_Name)
+              == '床头的' and _restarts25 == [(_twin_path25, '0:01:05')],
+              str(_restarts25))
+        utils.Setting.set(clf.SettingProperty.Cast_Target, '127.0.0.1:1')
+        _notify25.clear()
+        _restarts25 = []
+        setting25.on_kind_clicked(_item25(_menu25, clf.TARGETS['dlna']))
+        check("switching kind is a setting and a note, not a surprise reload",
+              utils.Setting.get(clf.SettingProperty.Target_Kind) == 'dlna'
+              and _restarts25 == []
+              and any('输出目标类型' in str(n) for n in _notify25),
+              str(_notify25))
+        _menu25d = setting25.build_menu()
+        check("the DLNA branch lists the renderers the search found",
+              '老电视 · 192.0.2.11' in _texts25(_menu25d)
+              and '重新搜索 DLNA 电视' in _texts25(_menu25d),
+              str(_texts25(_menu25d)[-6:]))
+        utils.Setting.set(clf.SettingProperty.Target_Kind, 'cast')
+        _footer25 = [t for t in _texts25(setting25.build_menu())
+                     if t.startswith('转码临时目录 ')]
+        check("a forced transcode says in the footer where its file goes",
+              len(_footer25) == 1
+              and clf.temp_root() in _footer25[0]
+              and '{} MB'.format(int(clf.MAX_ADVERTISED_SIZE / 1048576))
+              in _footer25[0], str(_footer25))
+
+        # --------------------------------------------------------------------
+        # H. who owns the process, the socket and the temporary file
+        # --------------------------------------------------------------------
+        class _Out25(clf.CastSender):
+            def __init__(self):
+                self.calls = []
+                self.app_id = clf.DEFAULT_MEDIA_APP_ID
+
+            def stop(self):
+                self.calls.append('stop')
+
+            def quit_app(self):
+                self.calls.append('quit')
+
+            def close(self):
+                self.calls.append('close')
+
+            def connect(self):
+                raise AssertionError('a superseded hand-off must not connect')
+
+            def media_status(self):
+                return _taps25.get('status3', ('IDLE', '', 12.0))
+
+            def applications(self):
+                return ['Other App']
+
+        _caster25h = _Caster25()
+        _rec25h = _caster25h.recorder
+        _caster25h._ensure_server()
+        _out25h = _Out25()
+        _job25h = clf.Job(_fake_ffmpeg25, ['-i', 'x'], 'ts', 'video/mp2t',
+                          total=65536, label='owned')
+        _job25h.start()
+        _entry25h = _caster25h.store.add(_job25h.path, 'video/mp2t', 'ts',
+                                         job=_job25h, title='owned')
+        _caster25h.output = _out25h
+        _caster25h.job = _job25h
+        _caster25h.entries = [_entry25h]
+        _caster25h.repush = 2
+        _dir25h = _job25h.directory
+        _caster25h._begin('/x/next.mp4')
+        check("the next hand-off owns the last one's encoder and connection",
+              _out25h.calls == ['stop', 'close'] and _job25h.proc is None
+              and not os.path.isdir(_dir25h)
+              and _caster25h.store.entries == {} and _caster25h.entries == [],
+              '{} {}'.format(_out25h.calls, _caster25h.store.entries))
+        check("…and a re-push does not buy itself a fresh retry budget",
+              _caster25h.current == '/x/next.mp4' and _caster25h.repush == 0,
+              _caster25h.repush)
+        _caster25h.job = _job25h
+        _caster25h.entries = [_entry25h]
+        check("a superseded worker retires its work instead of casting over it",
+              _caster25h._push(_caster25h.generation - 1, 'cast', 'x',
+                               '127.0.0.1:1', '127.0.0.1', 1, 'u', 'video/mp2t',
+                               False, 't', clf.Media(), 0.0, [], 'convert')
+              is None and _caster25h.job is None
+              and _caster25h.store.entries == {}
+              and _caster25h.recorder.rows == [], str(_rec25h.rows))
+        _out25b = _Out25()
+        _caster25h.output = _out25b
+        _caster25h.set_media_stop(quit_app=False)
+        check("a hand-off stops the app; a real stop quits it",
+              _out25b.calls == ['stop', 'close'], str(_out25b.calls))
+        _out25c = _Out25()
+        _caster25h.output = _out25c
+        _caster25h.set_media_stop()
+        check("…which is why the panel only comes back on a real stop",
+              _out25c.calls == ['stop', 'quit', 'close'], str(_out25c.calls))
+        _out25d = _Out25()
+        _advanced25 = []
+        _caster25h.output = _out25d
+        _caster25h.queue = ['/a.mp4', '/b.mp4']
+        _caster25h.index = 0
+        _caster25h.play_index = lambda i, start='0': _advanced25.append(i) or True
+        utils.Setting.set(clf.SettingProperty.Auto_Next, True)
+        _caster25h._ended(_caster25h.generation)
+        check("finishing an item advances the list without quitting the app",
+              _advanced25 == [1] and _out25d.calls == ['stop', 'close'],
+              '{} {}'.format(_advanced25, _out25d.calls))
+        _out25e = _Out25()
+        _advanced25 = []
+        _caster25h.output = _out25e
+        _caster25h.index = 1
+        _caster25h._ended(_caster25h.generation)
+        check("the last item of the list gives the television back",
+              _advanced25 == [] and _out25e.calls == ['stop', 'quit', 'close'],
+              str(_out25e.calls))
+        _out25f = _Out25()
+        _caster25h.output = _out25f
+        _caster25h.play_index = lambda i, start='0': None
+        _caster25h.generation += 1
+        _caster25h.queue = ['/a.mp4']
+        _caster25h.index = 0
+        utils.Setting.set(clf.SettingProperty.Auto_Next, False)
+        _caster25h._ended(_caster25h.generation)
+        check("with auto-next off, an end is an end",
+              _out25f.calls == ['stop', 'quit', 'close'], str(_out25f.calls))
+        _caster25h.generation += 1
+        _caster25h.output = _Out25()
+        _caster25h.current = '/x/clean.mp4'
+        _caster25h.position = 42.0
+        _caster25h.mode = 'copy'
+        _caster25h.repush = 0
+        _delivers25 = []
+        _caster25h._deliver = lambda path, start, retry=False: _delivers25.append(
+            (path, start, retry))
+        _caster25h._take_back(_caster25h.generation)
+        check("a takeover re-pushes from where the device stopped, as a retry",
+              _delivers25 == [('/x/clean.mp4', '0:00:42', True)]
+              and _caster25h.repush == 1, str(_delivers25))
+        _notify25.clear()
+        _caster25h.repush = clf.MAX_REPUSH
+        _caster25h.generation += 1
+        _out25g = _Out25()
+        _caster25h.output = _out25g
+        _caster25h._take_back(_caster25h.generation)
+        check("the fourth attempt gives up, and says why in one line",
+              _delivers25 == [('/x/clean.mp4', '0:00:42', True)]
+              and _out25g.calls == ['stop', 'quit', 'close']
+              and any('电视被别的设备占用' in str(n) for n in _notify25)
+              and ('error', True) in _rec25h.rows,
+              '{} {}'.format(_delivers25, str(_notify25)[:120]))
+        _notify25.clear()
+        _caster25h.mode = 'audio'
+        _caster25h.repush = 0
+        utils.Setting.set(clf.SettingProperty.System_Audio, True)
+        _caster25h.generation += 1
+        _caster25h._take_back(_caster25h.generation)
+        check("a dropped system-sound stream is reported and switched off",
+          any('系统声音投屏已断开' in str(n) for n in _notify25)
+          and clf.system_audio_wanted() is False
+          and _delivers25 == [('/x/clean.mp4', '0:00:42', True)],
+          str(_notify25)[:160])
+        check("the watchdog reads a squatting app as a takeover, not as idle",
+              _caster25h._poll(_Out25()) == ('SQUATTED', '', 12.0), '')
+        # Back to the real delivery path: the stubs above only existed to keep
+        # the takeover checks from launching an encoder.
+        del _caster25h.play_index
+        del _caster25h._deliver
+        _saved_free25 = clf.free_space
+        clf.free_space = lambda path: 1
+        utils.Setting.set(clf.SettingProperty.Mode, 'convert')
+        _notify25.clear()
+        _rec25h.rows = []
+        _caster25h.play_path(_media_dir25 + '/clean.mp4')
+        check("a transcode that would fill the disk is refused before it starts",
+              _wait_until(lambda: any('临时目录放不下' in str(n)
+                                      for n in _notify25), timeout=15)
+              and ('error', True) in _rec25h.rows
+              and _caster25h.job is None, str(_notify25)[:200])
+        clf.free_space = lambda path: 1 << 40
+        _saved_tool25 = clf.find_tool
+        clf.find_tool = lambda name: None
+        _notify25.clear()
+        _caster25h.play_path(_media_dir25 + '/clean.mp4')
+        check("needing a transcode with no ffmpeg on the machine is its own message",
+              _wait_until(lambda: any('没有 ffmpeg' in str(n)
+                                      for n in _notify25), timeout=15),
+              str(_notify25)[:200])
+        clf.find_tool = lambda name: '/nonexistent/ffmpeg-nope'
+        _notify25.clear()
+        _caster25h.play_path(_media_dir25 + '/clean.mp4')
+        check("an ffmpeg that will not spawn is reported, not left black",
+              _wait_until(lambda: any('没能开始转码' in str(n)
+                                      for n in _notify25), timeout=15)
+              and _caster25h.store.entries == {}, str(_notify25)[:200])
+        clf.find_tool = _saved_tool25
+        clf.free_space = _saved_free25
+        utils.Setting.set(clf.SettingProperty.Mode, 'auto')
+        _caster25h.output = _Out25()
+        _caster25h.stop()
+        check("closing the plugin takes the media server and the store down",
+              _caster25h.server is None and _caster25h.store.entries == {}
+              and _caster25h.running is False, '')
+        _caster25.stop()
+        _caster25g.stop()
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        check("the local file caster behaves", False,
+              "{}: {}".format(type(e).__name__, e))
+    finally:
+        for _c25 in (_caster25, _caster25b, _caster25g, _caster25h):
+            try:
+                if _c25 is not None:
+                    _c25.running = False
+                    _c25.stop()
+            except Exception:
+                pass
+        try:
+            if _receiver25 is not None:
+                _receiver25.stop()
+        except Exception:
+            pass
+        for _http25 in (_tv25, _server25):
+            try:
+                if _http25 is not None:
+                    _http25.serving = False
+                    _http25.shutdown()
+                    _http25.server_close()
+            except Exception:
+                pass
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify25_rec)
+        except Exception:
+            pass
+        os.environ['PATH'] = _saved_path25
+        utils.SETTING_DIR = _saved_dir25
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting25
+        if _taps_back25:
+            for _name25 in ('probe_media', '_keep_awake', '_stop_awake',
+                            'WATCHDOG_SECONDS', 'find_tool', 'free_space',
+                            'system_audio_input', '_ssdp_search',
+                            'describe_renderer', 'start_search',
+                            'start_renderer_search', '_devices',
+                            '_dlna_devices'):
+                setattr(clf, _name25, _taps_back25[_name25])
+            setattr(utils.Setting, 'get_advertisable_ip',
+                    _taps_back25['advertisable'])
+            clf._probe_cache.clear()
+            clf._probe_cache.update(_probe_snapshot25)
+            clf.invalidate_tool_cache()
+        _shutil.rmtree(_tmp25, ignore_errors=True)
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    check("the local file caster loads", False,
+          "{}: {}".format(type(e).__name__, e))
+
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
+
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
 print("\n=== SUMMARY: {}/{} passed ===".format(passed, len(RESULTS)))

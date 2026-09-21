@@ -551,9 +551,18 @@ class ChromecastProtocol(Protocol):
             with self._lock:
                 self._session_id = _random_session()
             self._send_receiver_status(sock, src, data.get("requestId"))
-        elif msg_type == "STOP":
+        elif msg_type in ("STOP", "QUIT_APP"):
+            # Receiver-namespace STOP is what pychromecast's quit_app() sends;
+            # QUIT_APP is what the Google Cast SDK sends. Both mean "close the
+            # app", and the media ledger has to go with the session: answering
+            # GET_STATUS afterwards used to report PLAYING for a cast the sender
+            # had already closed, because only the ``_session_id`` was cleared.
             with self._lock:
                 self._session_id = None
+                self._media = None
+                self._observed_transport = None
+                self._idle_reason = None
+                self._watch_generation += 1
             self.renderer.set_media_stop()
             self._send_receiver_status(sock, src, data.get("requestId"))
         elif msg_type == "GET_APP_AVAILABILITY":

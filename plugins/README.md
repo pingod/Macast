@@ -34,10 +34,11 @@
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
 | `screen_mirror.py` | **Screen Mirror v0.6** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 可一键装好系统声音） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `cast_local_file.py` | **Local File Caster v0.1** — 把**这台机器磁盘上的文件**投到电视：菜单里选文件夹、点文件即在 Chromecast / Google TV 或 DLNA 电视上播；能原生解码的文件由内置 Range/206 服务按字节直供（远端的暂停/拖动直接作用在真文件上），其余边播由 ffmpeg 转码；带播放列表自动连播、音轨/字幕选择、音画同步偏移、被抢占后看门狗重投、退出时 QUIT_APP | 依赖用户自己装的 `ffmpeg` / `ffprobe` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 
 **Macast 一次只能用一种渲染器**，所以 `macast_ytdlp` / `external_player` / `floating` /
-`hooks` / `cast_bridge` / `screen_mirror` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
+`hooks` / `cast_bridge` / `screen_mirror` / `cast_local_file` 是互斥的（菜单栏里切换）；`raop.py` 是协议插件，可以和任意渲染器同时开。
 
 各插件要点：
 
@@ -124,6 +125,34 @@
   提示语会说明「此通道还没有声音」。想自己拿真机验一遍：
   `.venv/bin/python scripts/cast_streaming_probe.py <电视 IP>`（同一份代码，`--live` 采桌面，
   `--dump` 留下码流给 ffprobe）。
+- **Local File Caster**：JustStream 的另一半能力 ——「文件在这台 Mac 上，想看的屏幕在客厅」。
+  菜单选一个文件夹（`File_Folder` / 设置里的 `Folder`），列出其中的媒体文件，点一下就投出去。
+  两个塑造整个文件的判断：
+  ① **直通还是转码按文件判断（ffprobe），不按扩展名猜**：目标能自己解的文件（mp4/mov/m4v/
+  mkv/webm + H.264 + AAC/MP3/FLAC/Vorbis/Opus）由插件内置的 **stdlib Range/206 静态服务**
+  按字节原样供出去，于是遥控器上的暂停、拖动、音量都作用在真文件上，插件什么也不用做；
+  其余（AVI、HEVC、DTS、AC-3、第二条音轨、内嵌字幕）交给 ffmpeg 边播边转。
+  ② **转码路径写的是"会一直变大的文件"，不是管道**：管道没有长度、不能重连、不能拖动，
+  而 DLNA 接收端**根本不肯播一个报不出长度的流**。所以 ffmpeg 追加写一个临时 MPEG-TS，
+  HTTP 服务按字节区间发它；读得比编码快就**等**而不是回一个短答案。对外报的长度是
+  时长 × 码率并压在 **2 GiB 以内**（老固件在那里做有符号 32 位运算），如果是这个上限卡住了
+  长度就**把码率降下来**而不是让长度说谎。拖动 = 从新时间点重启编码器（这是对"转码进行中
+  能做什么"的诚实答案）。
+  **音轨选择与音画同步偏移只存在于转码路径** —— 直通是把原始字节交给设备，它的轨道列表
+  没法从这里重排；选了非默认音轨的文件会被决策表**特意**改判为转码，菜单里就是这个措辞。
+  **字幕分三条路**（目标确实不同）：Chromecast 把内嵌字幕转成 **WebVTT** 再塞进 `LOAD` 的
+  `textTracks`（由接收端渲染）；转码路径在**这个 ffmpeg 编了 libass** 时烧进画面；
+  DLNA 电视两条都没有。
+  **发现（Chromecast 走 mDNS、电视走 SSDP）一律在后台线程**：`build_menu` 跑在 UI 线程上，
+  绝不能为了列菜单去等三秒组播；能力探测（VideoToolbox、libass）同理，问一次缓存一次。
+  **看门狗**就是 `--hijack` 的正面版本：每几秒问一次设备在干什么，我们的 app / URI 不在了
+  就从**设备上报的位置**重投，**最多 3 次**（`MAX_REPUSH`）—— 别人也想用这台电视时，电视归他；
+  设备上报"这条播完了"才推进播放列表（`Auto_Next`）。
+  **停止发的是 QUIT_APP 而不是只有 STOP**：只 STOP 会把接收端 app 停在最后一帧上，
+  那就是"我明明停了投屏电视还挂着画面"这类 bug 报告的来源。
+  另外两档：**直接投一个普通 URL**（不碰任何文件，也不起本地服务），以及**只投系统声音**的
+  音频档（macOS 需要 BlackHole 之类的采集口、Linux 走 `<sink>.monitor`，探测不到就明确说）。
+  转码临时目录默认在系统临时目录下，**结束即删**，菜单页脚会写出它的路径与容量上限。
 - **AirPlay Audio (RAOP)**：`brew install shairport-sync`（Linux 用包管理器）后启用即可，
   它自己会做 mDNS 广播。插件只负责用你的 Macast 名字生成配置、拉起进程、把连接/断开报给你。
   **不**把 RAOP 映射成 DLNA 播放状态（RAOP 没有媒体 URL，硬报 PLAYING 会和 DLNA 的状态账本打架）。
