@@ -624,6 +624,7 @@ $FF -y -i /tmp/cast_test.mp4 -c copy -f mpegts /tmp/cast_test.ts
 | `docs/Casting-Suite-Plan.md` | **发送端插件族的规划书**：JustStream 需求矩阵、六个参考项目（mkchromecast / MirrorCast / omacast / UxPlay / Castify / Mac-Screencast）的代码级取证与许可判定、P1-P6 阶段计划与「明确不做」。动镜像/投文件/投浏览器相关代码前先读它 |
 | `docs/Casting-Suite.md` | **发送端插件的用户指南**（与上一行分工：规划书给改代码的人，这份给用插件的人）。每个目标的**首次设置流程**：Chromecast 兼容通道 / Chromecast 低延迟（含"上限 4.5 Mbps 是软件加密不是网络"）/ DLNA 老电视（含"约 37 秒延迟是设计如此"与五档回退）/ 浏览器（观看地址与 token 的来历）；本地文件投屏的"自动"在判什么、音轨字幕为什么各有边界；uxplay 与 shairport-sync 的自备安装配方；macOS 屏幕录制权限与 BlackHole 一键设置。**每一节都写明"这条路真机验证到什么程度"** —— 全族只在打桩测试与自家假设备上验证过 |
 | `docs/reference-projects-review.md` | 参考项目评估（**接收端**视角）：miraclecast / mkchromecast / AirConnect |
+[该行引用了内部规划文档，已移除]
 | `docs/Development.md` | 三平台开发与打包 |
 | `BUILDING.md` | macOS `.app` 构建（py2app）、产物校验、包体裁剪 |
 | `docs/i18n.md` | 翻译流程 |
