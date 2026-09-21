@@ -66,8 +66,8 @@
             "renderer": "ScreenMirrorRenderer",
             "title": "Screen Mirror",
             "type": "renderer",
-            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@6811496b3e92b91ec6dcb3c8ad4b8a06ce070b32/plugins/screen_mirror.py",
-            "version": "0.7"
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@7028bd42e5fbde110e0f316f6ce009621f98ee8b/plugins/screen_mirror.py",
+            "version": "0.8"
         },
         {
             "author": "pingod",
