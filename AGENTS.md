@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 1055/1055；个别用例按时间门控，总数会 ±2）
+# 2) 回归验证（当前 1064/1064；个别用例按时间门控，总数会 ±2）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
