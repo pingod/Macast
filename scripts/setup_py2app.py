@@ -405,6 +405,17 @@ OPTIONS = {
             'network so phones, TVs, and other devices can cast to it.'
         ),
         'NSBonjourServices': ['_http._tcp', '_dlna._tcp', '_smb._tcp'],
+        # The screen-mirror plugin's system-audio tap (BlackHole) is captured by
+        # an ffmpeg child process, and TCC charges the microphone permission to
+        # the *responsible* process -- this bundle. Without a usage string macOS
+        # never even offers a prompt: avfoundation simply omits the device from
+        # `-list_devices`, so the driver looks installed-and-broken. CoreAudio
+        # enumeration is not gated, which is how the plugin can tell the two
+        # apart (see screen_mirror._blackhole_state).
+        'NSMicrophoneUsageDescription': (
+            'Macast mirrors this screen together with system audio; capturing '
+            'the BlackHole audio device counts as microphone access.'
+        ),
         # LaunchServices starts a .app with a minimal environment: with no
         # locale, Python falls back to ASCII for locale-dependent encodings and
         # CherryPy's log file handlers then blow up (UnicodeEncodeError) on any

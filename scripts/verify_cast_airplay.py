@@ -4243,7 +4243,7 @@ done
                                ('verify_blackhole_pkg', _verify21),
                                ('_wait_for_blackhole',
                                 lambda f, timeout=0.0, progress=None,
-                                       interval=5.0: True),
+                                       interval=5.0, **kw: 'capturable'),
                                ('_route_audio_through_blackhole',
                                 lambda f, progress=None: True),
                                ('_open_audio_midi_setup', lambda rep: None),
@@ -9023,7 +9023,7 @@ except Exception as e:
 
 
 # --------------------------------------------------------------------------
-# Part 29: screen mirror v0.7 -- the assisted install tells the truth
+# Part 29: the assisted BlackHole install tells the truth
 #
 # The user-visible failure this version exists for: 一键设置 says "安装被取消了
 # 吗？" when the real story is a stale pkgutil receipt (files gone, receipt
@@ -9032,8 +9032,16 @@ except Exception as e:
 # step machine is the only place those two branches become *named* outcomes,
 # so the tests here walk every branch with stubs -- and the loopback progress
 # page gets real HTTP checks, because its credential rules are §4.8's.
+#
+# v0.9 adds the third root cause, which is the one the user actually hit
+# ("重启后再点一键安装又要安装一遍，这样安装流程永远装不完"): the probe branch
+# *printed* "安装会被跳过" and then fell through into meta/download/verify/
+# install anyway. A skipped step must be skipped in the machine, not in a
+# sentence -- and the two witnesses (avfoundation vs CoreAudio) have to be
+# reported separately, because "CoreAudio has it, capture does not" is a
+# microphone permission, which no amount of downloading fixes.
 # --------------------------------------------------------------------------
-print("\n=== Part 29: screen mirror v0.7 (one-click repair + progress page) ===")
+print("\n=== Part 29: screen mirror v0.9 (one-click repair + progress page) ===")
 try:
     import json as _json29
     import urllib.error as _urlerr29
@@ -9125,11 +9133,12 @@ try:
         _base_stubs = dict(
             find_ffmpeg=lambda: 'ffmpeg',
             _has_blackhole=lambda f: False,
+            _find_blackhole=lambda f: None,
             blackhole_pkg_pair=lambda: ('https://x/BH.pkg', 'a' * 64, 'stub'),
             _fetch_blackhole_pkg=lambda url, on_bytes=None: '/tmp/bh29.pkg',
             verify_blackhole_pkg=lambda path, sha: True,
             _wait_for_blackhole=lambda f, timeout=300.0, progress=None,
-                                  interval=5.0: True,
+                                  interval=5.0, **kw: 'capturable',
             _route_audio_through_blackhole=_route_ok29,
             _open_audio_midi_setup=lambda rep: None,
             _blackhole_driver_installed=lambda: False,
@@ -9174,35 +9183,67 @@ try:
             _unstub29()
 
         # -- branch: files on disk, coreaudiod never loaded them -> reload ----
+        #
+        # THIS is the case the user's "永远装不完" report is about, and the old
+        # flow passed the old version of this test while doing the opposite of
+        # what its own probe note promised: it announced "安装会被跳过" and then
+        # fell straight through into meta/download/verify/install. So the
+        # assertions here are about what does *not* happen -- no fetch, no
+        # `open`, and the wait step stays skipped.
         _waits29 = []
+        _fetched_on_disk29 = []
+        _sub29 = _Sub29()
 
-        def _wait_once_then29(f, timeout=300.0, progress=None, interval=5.0):
-            _waits29.append(timeout)
-            return len(_waits29) > 1  # first poll: still invisible
+        def _wait_after_reload29(f, timeout=300.0, progress=None, interval=5.0,
+                                 **kw):
+            _waits29.append((timeout, kw.get('step')))
+            return 'capturable'
 
         _stub29(dict(_base_stubs,
                      _blackhole_driver_installed=lambda: True,
-                     _wait_for_blackhole=_wait_once_then29,
-                     _reload_coreaudiod=lambda: (True, '音频服务已重载')))
+                     _wait_for_blackhole=_wait_after_reload29,
+                     _fetch_blackhole_pkg=(
+                         lambda url, on_bytes=None:
+                         _fetched_on_disk29.append(url) or '/tmp/bh29.pkg'),
+                     _reload_coreaudiod=lambda: (True, '音频服务已重载'),
+                     subprocess=_sub29))
         try:
             p29 = _rec_progress29()
             _msgs29 = []
             _ok29 = mirror29.setup_system_audio(_msgs29.append, progress=p29)
             _d29 = {s['id']: s for s in p29.snapshot()['steps']}
-            check("an installed-but-unloaded driver gets the daemon reloaded",
-                  _ok29 and _d29['reload']['state'] == 'done'
-                  and len(_waits29) == 2 and _waits29[1] == 45.0
-                  and '没有加载' in _d29['probe']['note'],
-                  str(_d29))
+            check("a driver that is on disk is never downloaded or opened again",
+                  _ok29 and _fetched_on_disk29 == []
+                  and not [c for c in _sub29.calls if c[0] == 'open']
+                  and all(_d29[s]['state'] == 'skipped'
+                          for s in ('meta', 'download', 'verify', 'install',
+                                    'wait'))
+                  and _d29['reload']['state'] == 'done'
+                  and _d29['output']['state'] == 'done',
+                  str(_d29) + ' / ' + str(_sub29.calls))
+            check("the skipped install is explained by the daemon, not by a reboot",
+                  'postinstall' in _d29['probe']['note']
+                  and '跳过下载与安装' in _d29['probe']['note']
+                  and '重启一次' not in _d29['probe']['note'],
+                  _d29['probe']['note'])
+            check("the one reload wait is the 45 s one and it ticks on 'reload'",
+                  _waits29 == [(45.0, 'reload')], str(_waits29))
         finally:
             _unstub29()
 
         # -- branch: reload refused (password cancelled) -> honest stop -------
+        _fetched_refused29 = []
+        _sub29 = _Sub29()
         _stub29(dict(_base_stubs,
                      _blackhole_driver_installed=lambda: True,
                      _wait_for_blackhole=lambda f, timeout=300.0,
-                                           progress=None, interval=5.0: False,
-                     _reload_coreaudiod=lambda: (False, '你取消了密码框')))
+                                           progress=None, interval=5.0,
+                                           **kw: '',
+                     _fetch_blackhole_pkg=(
+                         lambda url, on_bytes=None:
+                         _fetched_refused29.append(url) or '/tmp/bh29.pkg'),
+                     _reload_coreaudiod=lambda: (False, '你取消了密码框'),
+                     subprocess=_sub29))
         try:
             p29 = _rec_progress29()
             _msgs29 = []
@@ -9211,8 +9252,112 @@ try:
             check("a cancelled reload fails reload, not a bogus timeout",
                   not _ok29 and _d29['reload']['state'] == 'fail'
                   and '密码框' in _d29['reload']['note']
-                  and _d29['wait']['state'] == 'fail',
+                  and _d29['wait']['state'] == 'skipped'
+                  and _d29['aggregate']['state'] == 'pending',
                   str(_msgs29))
+            check("a cancelled reload promises no second download and never "
+                  "opens the installer",
+                  _fetched_refused29 == []
+                  and any('不会重新下载' in m for m in _msgs29)
+                  and not [c for c in _sub29.calls if c[0] == 'open'],
+                  str(_msgs29))
+        finally:
+            _unstub29()
+
+        # -- branch: CoreAudio sees it, the capture side does not -> no install
+        _sub29 = _Sub29()
+        _reloads29 = []
+        _stub29(dict(_base_stubs,
+                     _find_blackhole=lambda f: (8, 'BlackHole2ch-uid'),
+                     _blackhole_driver_installed=lambda: True,
+                     _fetch_blackhole_pkg=(
+                         lambda url, on_bytes=None: '/tmp/never29.pkg'),
+                     _reload_coreaudiod=lambda: _reloads29.append('x') or
+                                                (True, '不该被调用'),
+                     subprocess=_sub29))
+        try:
+            p29 = _rec_progress29()
+            _msgs29 = []
+            _ok29 = mirror29.setup_system_audio(_msgs29.append, progress=p29)
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("a loaded-but-uncapturable device installs nothing and "
+                  "reloads nothing",
+                  not _ok29
+                  and all(_d29[s]['state'] == 'skipped'
+                          for s in ('meta', 'download', 'verify', 'install',
+                                    'wait', 'reload'))
+                  and _reloads29 == []
+                  and not [c for c in _sub29.calls if c[0] in ('open',
+                                                               'osascript')],
+                  str(_d29))
+            check("that run still builds the aggregate and blames the right "
+                  "thing",
+                  _d29['aggregate']['state'] == 'done'
+                  and _d29['output']['state'] == 'done'
+                  and _d29['probe']['state'] == 'fail'
+                  and any('麦克风' in m for m in _msgs29)
+                  and any('不会重新下载安装包' in m for m in _msgs29),
+                  str(_msgs29))
+        finally:
+            _unstub29()
+
+        # -- _blackhole_state: the precedence between the two witnesses -------
+        _stub29(_has_blackhole=lambda f: True,
+                _find_blackhole=lambda f: (8, 'BlackHole2ch-uid'),
+                _blackhole_driver_installed=lambda: True)
+        try:
+            check("capture beats every other witness: it is the only one that "
+                  "means audio will flow",
+                  mirror29._blackhole_state('ffmpeg') == 'capturable')
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: False,
+                _find_blackhole=lambda f: (8, 'BlackHole2ch-uid'),
+                _blackhole_driver_installed=lambda: True,
+                _blackhole_receipt_present=lambda: True)
+        try:
+            check("a device CoreAudio knows about outranks the files on disk",
+                  mirror29._blackhole_state('ffmpeg') == 'loaded')
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: False,
+                _find_blackhole=lambda f: None,
+                _blackhole_driver_installed=lambda: True,
+                _blackhole_receipt_present=lambda: True)
+        try:
+            check("files on disk outrank the receipt that lied about them",
+                  mirror29._blackhole_state('ffmpeg') == 'on-disk')
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: False,
+                _find_blackhole=lambda f: None,
+                _blackhole_driver_installed=lambda: False,
+                _blackhole_receipt_present=lambda: True)
+        try:
+            check("receipt without files is its own answer, not 'absent'",
+                  mirror29._blackhole_state('ffmpeg') == 'stale-receipt')
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: False,
+                _find_blackhole=lambda f: None,
+                _blackhole_driver_installed=lambda: False,
+                _blackhole_receipt_present=lambda: False)
+        try:
+            check("nothing anywhere is 'absent', and the five answers are the "
+                  "five the flow branches on",
+                  mirror29._blackhole_state('ffmpeg') == 'absent'
+                  and set(mirror29.BH_STATES) == set(
+                      ('capturable', 'loaded', 'on-disk', 'stale-receipt',
+                       'absent')))
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: (_ for _ in ()).throw(OSError('tcc')),
+                _find_blackhole=lambda f: (_ for _ in ()).throw(OSError('nope')),
+                _blackhole_driver_installed=lambda: False,
+                _blackhole_receipt_present=lambda: False)
+        try:
+            check("a witness that raises is survived, not propagated",
+                  mirror29._blackhole_state('ffmpeg') == 'absent')
         finally:
             _unstub29()
 
@@ -9289,7 +9434,10 @@ try:
             os.environ['HOME'] = _saved_home29
 
         # -- _wait_for_blackhole ticks its own step ----------------------------
-        _stub29(_has_blackhole=lambda f: False)
+        _stub29(_has_blackhole=lambda f: False,
+                _find_blackhole=lambda f: None,
+                _blackhole_driver_installed=lambda: False,
+                _blackhole_receipt_present=lambda: False)
         try:
             p29 = _rec_progress29()
             p29.enter('wait')
@@ -9300,6 +9448,38 @@ try:
                   not _hit29 and '已等' in _d29['wait']['note']
                   and 0.0 < (_d29['wait']['pct'] or 0) <= 0.99,
                   str(_d29['wait']))
+            # The same waiter drives the reload poll now, so the tick has to
+            # follow whichever step the caller named -- not 'wait' forever.
+            p29 = _rec_progress29()
+            p29.enter('reload')
+            _hit29 = mirror29._wait_for_blackhole('ffmpeg', timeout=0.05,
+                                                  progress=p29, interval=0.01,
+                                                  step='reload')
+            _d29 = {s['id']: s for s in p29.snapshot()['steps']}
+            check("a poll can be pointed at another step, and the timeout "
+                  "answer is empty rather than False-with-a-lie",
+                  _hit29 == '' and '已等' in _d29['reload']['note']
+                  and _d29['wait']['note'] == '', str(_d29))
+        finally:
+            _unstub29()
+
+        # -- the two witnesses stay apart through the poll ---------------------
+        _stub29(_has_blackhole=lambda f: False,
+                _blackhole_driver_installed=lambda: False,
+                _blackhole_receipt_present=lambda: False,
+                _find_blackhole=lambda f: (8, 'BlackHole2ch-uid'))
+        try:
+            check("a device only CoreAudio sees is reported as 'loaded', "
+                  "never as a successful wait",
+                  mirror29._wait_for_blackhole('ffmpeg', timeout=0.05,
+                                               interval=0.01) == 'loaded')
+        finally:
+            _unstub29()
+        _stub29(_has_blackhole=lambda f: True)
+        try:
+            check("the capture witness is the one that answers 'capturable'",
+                  mirror29._wait_for_blackhole('ffmpeg', timeout=0.05,
+                                               interval=0.01) == 'capturable')
         finally:
             _unstub29()
 
@@ -9531,6 +9711,18 @@ try:
               in _src29 and "_wait_for_blackhole(ffmpeg, progress=progress)"
               in _src29 and "setup_system_audio(_report, progress=progress)"
               in _src29)
+        # The other half of "装了却没有设备": a bundle that never declares the
+        # microphone can be denied without ever prompting, and the plugin's
+        # honest answer then reads like a broken driver. Packaging holds the
+        # string, the plugin holds the wording -- so the guard reads both.
+        with open(os.path.join(REPO, "scripts", "setup_py2app.py"), "r",
+                  encoding="utf-8") as _f:
+            _py2app29 = _f.read()
+        check("the .app declares the microphone the system-audio tap needs",
+              "'NSMicrophoneUsageDescription'" in _py2app29
+              and 'NSMicrophoneUsageDescription' in _src29,
+              'plist=%s plugin=%s' % ("'NSMicrophoneUsageDescription'" in _py2app29,
+                                      'NSMicrophoneUsageDescription' in _src29))
     finally:
         mirror29._capture_cache.clear()
         (utils.Setting.setting, utils.Setting.setting_path) = _saved_setting29
@@ -9538,7 +9730,7 @@ try:
 except Exception as e:
     import traceback
     traceback.print_exc()
-    check("the v0.7 assisted install behaves", False,
+    check("the assisted BlackHole install behaves", False,
           "{}: {}".format(type(e).__name__, e))
 
 

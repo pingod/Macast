@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 1106/1106；个别用例按时间门控，总数会 ±2）
+# 2) 回归验证（当前 1121/1121；个别用例按时间门控，总数会 ±2）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -353,14 +353,25 @@ Chromecast 中继 / AirPlay 音频 / 屏幕镜像 / 本地文件投屏 / AirPlay
 | airplay_mirror | 只监督 **uxplay**（iPhone 的「屏幕镜像」列表里那个接收端在这台 Mac 上就是它），`uses_ssdp = False`，**不**映射 DLNA 播放状态 —— 它和 `raop.py` 是同一族形状。红线五条，全部来自上游源码而不是试错：① **配置走 `-rc <file>`，绝不走 `$UXPLAYRC`** —— 后者在文件不存在时**静默回落 `~/.uxplayrc`**，等于读（甚至被诱导写）用户主目录里的配置；文件写在 `utils.SETTING_DIR` 里，用户附加项**放在末尾**所以能覆盖我们的默认值（rc 后写的赢，argv 又在 rc 之后解析）。② **绝不加 `-p`**：`-p` 是 legacy 固定端口 7100/7000/7001，7000 正是自家 `AIRPLAY_PORT` 和 macOS 自带接收端的地盘；不带 `-p` 时 uxplay 用动态端口并写进自己的 mDNS TXT，发送端照它连，固定端口只有坏处。③ **stdout 必须挂在 pty 上**：uxplay 的 `log()` 是 `printf`，全程序只有一处 `fflush`（音频进度），挂管道 ⇒ **块缓冲** ⇒ "谁连上了"永远不出现；POSIX 用 `pty.openpty()`，Windows 退回管道（用例直接问 `os.isatty(read_fd)` 来守这个契约，比测时序稳）。**父进程必须 `os.close(child_fd)`**，否则读线程永远等不到 EOF。④ **退出上报要认身份**（`self._proc is not proc` 就闭嘴）：`reload()` 之后旧 reader 若照常上报，用户看到的是"uxplay 已退出"而它其实活得好好的。⑤ **与 `raop.py` 抢同一个 mDNS 名字**（uxplay 是完整的 AirPlay 接收端：镜像 + RAOP），所以两个都启用时 iPhone 只有一个入口 —— 不猜、不改名，只在启动时按**已启用协议标题**提示一次（判定要归一化 `lower().replace(' protocol','')`，`"AirPlay Protocol"` 才是内置接收端的真标题，见 §4.2）。**找不到二进制是正常状态不是 bug**：macOS 没有 Homebrew formula、官方 release 不含二进制，必须自己编译 ⇒ 提示里给完整配方而不是"装一下 uxplay"（`selfcheck.py` 给同一段）。 |
 | cast_local_file | 直通/转码**按 ffprobe 逐文件判断**，不按扩展名猜（`COPY_CONTAINERS` / `COPY_VIDEO_CODECS` / `COPY_AUDIO_CODECS` 三张表 + `plan()` 的理由字符串会直接出现在菜单里）。转码路径写**会一直变大的临时文件**而不是管道 —— 管道没长度、不能重连、不能拖动，而 DLNA 接收端**根本不播**报不出长度的流；对外长度 = 时长 × 码率并压在 `MAX_ADVERTISED_SIZE = 1.9 GB` 之下（老固件在有符号 32 位里做这件事），被这个上限卡住时**降码率**而不是谎报长度。**HTTP 语义三条红线**：① `parse_range(None)` 回 `(0, None)` 是「从头」= 整文件答案，**不是** partial —— 只有客户端真发了 `Range` 才配 206 + `Content-Range`，否则 200 且不发 `Content-Range`（写成 `spec = parse_range(header)` 的代价就是"整文件读也回 206"，Part 25 三条用例抓住它）；② 注册过但**已经消失**的文件必须拒答（`total == 0 and entry.job is None` → `_refuse()`），回一个没有长度的 200 会让播放器永远等字节；③ 读超过写入速度时**等**而不是回短答案。**音轨/字幕/`AudioDelay` 只在转码路径存在**，选了非默认音轨就**改判**为转码（直通是把原始字节交出去，设备的轨道表没法从这边重排）。字幕分三条路：Cast 转 **WebVTT** 进 `LOAD.textTracks[].contentId`、转码路径在**这个 ffmpeg 有 libass** 时烧进画面、DLNA 两条都没有。**停止发 QUIT_APP 不只是 STOP**：只 STOP 会把接收端 app 停在最后一帧，而且**我们自己的 Cast 接收端**也会继续声称还在播那部片子（Part 25 里那条 A/B 就是打在 `macast/protocol_cast.py` 的会话账本上的）。看门狗重投**有预算**（`MAX_REPUSH = 3`，`_begin(retry)` 不吃重投带来的新预算），第 4 次就认输并说明原因；被抢占后重投要按设备上报位置 `Seek`（DLNA 是 `H:MM:SS` 文本）。发现与能力探测（VideoToolbox / libass / 音频采集口）**一律不在 UI 线程**，`_tool_cache` 按工具分键缓存。**avfoundation 的设备表要同时认两种拼写**：真 ffmpeg 打的是 `AVFoundation audio devices:` + 不带引号的 `[0] 名称`，历史上按 `"名称"` 解析的版本**在这台机器上一条都读不到**（症状是"系统声音档位永远说没有采集口"，而不是报错）。发给设备的 SOAP 与其 UTF-8 `Content-Length` 同 screen_mirror 条 ⑤ 的红线（按字节数算，`len(str)` 会被中文设备名截断）。 |
 | screen_mirror | 实时链路：ffmpeg 截屏（darwin avfoundation / win32 gdigrab / linux x11grab，**Wayland 不支持要明说**；`-list_devices` 的真实形状是 `AVFoundation video devices:` + `[N] name`，**没有引号**，见 §4.2 末条）→ 插件内 HTTP 服务持续吐一条实时流 → **封装由「输出目标」决定**（`cast` → `video/mp2t` + Cast `LOAD streamType=LIVE`；`browser` → 分片 MP4 `frag_keyframe+empty_moov+default_base_moof` + 自带 MSE 播放页；`dlna` → 见下「伪装成文件」）。**编码器不是平台决定的**：默认 CPU x264，macOS 上可切 VideoToolbox（`has_hardware_encoder()` 会 spawn ffmpeg 问一次，缓存**按 ffmpeg + 平台**分键，菜单在 UI 线程上，绝不为它 spawn）。**慢消费者丢整块、绝不阻塞读管道**（阻塞会把编码器冻住）；ffmpeg 进程和 HTTP 服务**一启动就移交 renderer 持有**，终止统一由 pump 线程按 generation 判定上报（否则权限被拒会静默黑屏、或双线程抢清理）。杀掉/让位前先增 generation，让 pump 的死亡上报闭嘴。**重播不对称**（红线）：浏览器会话重播 init segment + 8 MiB 环形尾部，cast（Chromecast）会话永远只拿「接下来」的字节 —— 给电视重播积压 = 它此后一直慢几秒；`dlna` 会话是第三种形状：**按绝对字节偏移**从 48 MiB 环形缓冲里取（电视把它当文件读，会 HEAD、探边界、断线重连同一偏移），见下「伪装成文件」。**`_retain` 里 init 头必须切到第一个 `moof` 才算完**（晚加入的观看端拿双份头 = 花屏，别把它想成"缓存一点前缀"）。观看地址带**每会话随机**的 `stream_id` + `page_token`（`hmac.compare_digest` 常量时间比对），**故意不用应用的常驻 `Api_Token`** —— 那是管理令牌，泄露一次等于永久开放整套管理 API，而镜像页 URL 会被复制/转发/贴进群。页面 JS 只用 `textContent`，响应带 `nosniff` + `no-store`。DLNA 推流来时**让位**并转投该 URL（Bridge 行为）—— **cast 与 dlna 两个电视目标都会**；浏览器目标下推送会被明确拒绝而不是杀镜像（`set_media_url` 的守卫顺序：空 url → 同一 URL 重复推 → 无目标；"无目标"按当前 kind 分别查 `target()` / `dlna_target()`，**别只查一个**，否则浏览器目标会误以为有中继对象）。镜像期间 `caffeinate -dimsu` 持有休眠断言，teardown 释放。**系统声音只在有采集口时开**：macOS 认 BlackHole 设备（FFmpeg 发行版至今抓不了 mac 系统音频）、Linux 认 pulse `<sink>.monitor`、Windows 仅画面；探测结果缓存在 `_capture_cache`（键含 cursor —— 指针开关会改采集命令，改指针/屏幕要 `invalidate_capture_cache()`）。**v0.3 起一键辅助装 BlackHole**（菜单「系统声音 → 一键设置」）：地址与 sha256 以 Homebrew cask API 为准（拉不到用 PINNED 兜底）→ `open` 图形安装器（用户输一次密码，.pkg 无法静默装，**别把它想成全自动**）→ 轮询设备出现 → ctypes 调 CoreAudio 建/复用**多输出聚合设备**并切默认输出（UID `com.macast.screenmirror.output`，原默认存 `Mirror_Audio_Original` 供「恢复原声音输出」）；**任何一步失败降级为打开「音频 MIDI 设置」+ 文字指引**。
-**v0.7 修的是"一键设置安装失败"的两类真实根因**（症状都是「装了却没有设备」，旧流程只会说"安装被取消了吗？"）：
+**v0.7/v0.9 修的是"一键设置安装失败"的三类真实根因**（症状都是「装了却没有设备」，旧流程只会说"安装被取消了吗？"）：
 ① **pkgutil 残留记录但驱动文件已不在磁盘** —— `_blackhole_receipt_present()`（问 pkgutil 记录）与
 `_blackhole_driver_installed()`（glob `/Library/Audio/Plug-Ins/HAL/BlackHole*.driver`）是**两个问题**，
 **别拿记录当安装状态**；检测到"记录在、文件没在"就直接重装并在 probe 步骤里说清楚原因。
 ② **官方 .pkg 的 postinstall 只 chown/chmod，从不重启 coreaudiod** —— 驱动落了盘但守护进程永远不加载；
 等设备安装超时后若发现"文件在盘上但列表里没有"，用 osascript `do shell script … with administrator privileges`
 **征求一次管理员密码**重载 coreaudiod 再等 45 秒（`-128` = 用户取消密码框，要如实报"你取消了密码框"，
-**别伪装成超时**）。整套流程走 `_SetupProgress` 步骤机（env/probe/meta/download/verify/install/wait/reload/aggregate/output；
+**别伪装成超时**）。
+③ **probe 分支"把跳过写成了一个句子"**（v0.9，就是用户报的"重启后再点一键安装又要安装一遍，永远装不完"）——
+旧代码在"驱动文件在磁盘上"时打印 `安装会被跳过`，然后**照样 fall through** 到 meta/download/verify/install，
+于是每次点一键都重新下载一个 pkg、再开一次安装器，而 `reload` 只有等满 300 秒超时才可达。
+修法是把判定收成一个值：**`_blackhole_state(ffmpeg)` 五态**（capturable / loaded / on-disk / stale-receipt / absent），
+**"跳过"必须是步骤机里的 skipped 状态，不是 note 里的话**。两个见证者必须分开报：
+avfoundation（`_has_blackhole`，采集真正会用的那一个）与 CoreAudio（`_find_blackhole`，无权限门槛）不一致时
+是**麦克风权限**问题，重装 pkg 永远修不好 —— 这一支照样建聚合设备、切默认输出，但**结尾不许说"已就绪"**：
+把 `probe` 改标失败（步骤机允许：这一轮的真实结论就是那个否定答案，绿色的页面 + 没有声音 = 原来那个幻觉），
+并点名「系统设置 → 隐私与安全性 → 麦克风」（`.app` 缺 `NSMicrophoneUsageDescription` 时系统连弹窗都不给，
+声明在 `scripts/setup_py2app.py`）。**每一支失败文案都要说出"再点一次不会重新下载"**。
+整套流程走 `_SetupProgress` 步骤机（env/probe/meta/download/verify/install/wait/reload/aggregate/output；
 **done 步骤拒绝重入 = 进度条永不回退**；skipped 不进分母），同时起一个 **127.0.0.1 随机端口**的实时进度页
 （每轮随机 token + `hmac.compare_digest`，同样**绝不用常驻 `Api_Token`**；nosniff+no-store；textContent-only；
 跑完保留 300 秒可读再自动关；**页面起不来不算安装失败**——通知里仍带每一步）。
@@ -412,11 +423,17 @@ checkpoint 解锁、PLI、回落 LOAD、teardown 顺序）**、
 clear-log 的 module= 面与门控、每次启动清空）**、
 **Part 28（模块设置面板：分组与中文标签、无枚举插件的空卡片、set-value 的类型与归属校验、
 以及四条"标签表没有和仓库漂移"的守卫用例）**、
-**Part 29（屏幕镜像 v0.7 一键设置：步骤机不回退/跳过不进分母/fail 压过晚到的 leave、四条安装分支各
-指名其步（健康机跳过、残留记录重装、盘上有但未加载→重载、密码取消如实报）、sha 不匹配不开安装器、
+**Part 29（屏幕镜像 v0.7+v0.9 一键设置：步骤机不回退/跳过不进分母/fail 压过晚到的 leave、五态判定
+逐条排优先级（capturable > loaded > on-disk > stale-receipt > absent，含"见证者抛异常不许往上冒"）、
+四条安装分支各指名其步（健康机跳过、残留记录重装、密码取消如实报），外加 v0.9 那两条**反循环**断言：
+"盘上有驱动"这一支必须**既不下 pkg 也不 `open`**（meta/download/verify/install/wait 全是 skipped，
+note 里不许出现"重启一次"当第一答案），"CoreAudio 有 / ffmpeg 没有"这一支**不重装也不重载**、
+照样建聚合设备、结尾必须说"麦克风"并且 `probe` 是 fail 而不是一个绿色的收尾；
+另有 `_wait_for_blackhole` 必须回答"哪个见证者看见了"（`loaded` 不等于成功）、
+`_SetupProgress` 的进度归属按调用方给的 step 走、sha 不匹配不开安装器、
 崩溃只 fail 在跑的那一步、cask API 兜底带来源标签、pkgutil/HAL glob 两个探针分开问、osascript 重载
 走管理员授权、进度页真 HTTP 凭据（对 token 200、错/缺 403、nosniff/no-store、不含管理令牌）、
-worker 收尾（finish→busy 清→页面限期保留）**、
+worker 收尾（finish→busy 清→页面限期保留）、`.app` 的 plist 必须声明 `NSMicrophoneUsageDescription`）**、
 **Part 26（AirPlay 镜像接收：rc 文件的引号/消毒/「用户附加项排在末尾所以能覆盖」/值不带前导 `-`、
 `log_event` 整张表含两种断开拼写与"chatter 不算事件"、POSIX 上 `os.isatty(read_fd)` 证明挂的是 pty、
 PATH 上放假 uxplay 走完 启动→连接→断开→停止→reload 全生命周期（断言 argv 只有 `-rc`、没有 `-p`、
@@ -564,7 +581,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（1106 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）+ **端到端冒烟脚本与应用的耦合**（Part 33：`e2e_smoke.py` 是唯一跑真应用的检查，而它的隔离性全靠**字符串**——端口的设置键名、appdirs 打桩、只开 DLNA 的协议表、代理变量名单、它问的 `/api?query=` 键名、`get_status` 的 server 键名。应用侧改个名就会让这些**静默失效**，冒烟照样全绿。所以逐条拿应用源码比对这些字符串，并守住" BOOTSTRAP 里 `import macast` 之前先打桩""不出现 `Setting.set(`""退出码由失败数决定"。这一 Part 是纯文本检查，从不 import 那个脚本）|
+| `verify_cast_airplay.py` | **主验证套件**（1121 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页 + v0.9 的五态判定（盘上有驱动就不再下载、不再开安装器；CoreAudio 有而 ffmpeg 没有 ⇒ 麦克风权限而不是重装））+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）+ **端到端冒烟脚本与应用的耦合**（Part 33：`e2e_smoke.py` 是唯一跑真应用的检查，而它的隔离性全靠**字符串**——端口的设置键名、appdirs 打桩、只开 DLNA 的协议表、代理变量名单、它问的 `/api?query=` 键名、`get_status` 的 server 键名。应用侧改个名就会让这些**静默失效**，冒烟照样全绿。所以逐条拿应用源码比对这些字符串，并守住" BOOTSTRAP 里 `import macast` 之前先打桩""不出现 `Setting.set(`""退出码由失败数决定"。这一 Part 是纯文本检查，从不 import 那个脚本）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `e2e_smoke.py` | **唯一跑真应用的检查**（33 条）：用临时配置目录 + 错开的端口（58999，只开 DLNA）在**本机拉起第二个 Macast**，走完发现→设置页→API→SSDP，可选走播放。**代价要明说：那 ~30 秒里局域网内的 DLNA 电视会短暂看到第二个设备**（`Macast E2E Smoke`）。隔离手法是 `appdirs.user_config_dir` 在 `import macast` **之前**打桩（§4.9 那条），种子设置直接写 JSON（绝不 `Setting.set`），所以它不动用户配置、不杀他的实例；跑完自己验一遍"真实配置目录的摘要前后一致"。它导不了 `macast`（自己就是启动者），因此对应用的耦合全是字符串——那些字符串由 Part 33 守着。`--play` 才做真正的播放回环（自己找 ffmpeg、生成 12 秒测试片、起一个支持 Range 的小 HTTP 服务、经带令牌的 GET 入口投出去、要求进度真的在动 + 日志里有 `video-reconfig`）；`--keep` 保留临时目录。**它是端到端冒烟，不是套件的替代**：跑套件仍然不需要它，跑它之前要确认用户不在演示 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装。**发送端插件那一半（§「sender plugins」段）**：ffprobe 在不在、`-encoders` 里有没有 libx264 / h264_videotoolbox / mpeg2video / ac3（**这四个各自对应一条会静默失效的链路**）、有没有 libass（没有 ⇒ 字幕只能走 WebVTT）、avfoundation 到底列没列出屏幕（**这一条就是 v0.1–v0.7 那个解析 bug 想骗过去的问题**）、系统音频采集口（mac 看 HAL 里的 BlackHole 驱动、Linux 问 `pactl` 要 sink monitor）、转码临时目录剩余空间、以及**局域网里到底有没有东西可投**（mDNS browse `_googlecast._tcp` + 一次 SSDP `MediaRenderer` 探测）。它**只读**设置（直接读 JSON 文本，不碰 `Setting`），所以跑它不会改用户配置。Part 32 守着它和插件的一致性 |

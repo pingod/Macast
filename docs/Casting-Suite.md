@@ -43,7 +43,7 @@
 菜单栏切到 `Screen Mirror`，菜单结构：
 
 ```
-Screen Mirror v0.8
+Screen Mirror v0.9
 开始镜像 / 停止镜像
 输出目标 ▸  Chromecast / Google TV | Chromecast 低延迟（实验 · 无声音）
            | DLNA 电视（老电视，MPEG-PS）| 浏览器（打开网址即可看）
@@ -147,9 +147,23 @@ DLNA/Chromecast 投屏推过来时会**让位**并转投该 URL（Bridge 行为�
 
 | 平台 | 状态 | 首次设置 |
 |---|---|---|
-| **macOS** | 需要 BlackHole 虚拟声卡（**FFmpeg 发行版至今抓不到 mac 系统音频**） | 菜单「系统声音 → 一键设置（BlackHole + 多输出设备）」。它会：校验过的官方 `.pkg` → **弹出图形安装器，你输一次密码**（`.pkg` 无法静默安装，别期待全自动）→ 等设备出现 → 建/复用名为 `Macast Screen Mirror` 的多输出聚合设备 → 把默认输出切过去。**任何一步失败就降级**：打开「音频 MIDI 设置」+ 文字指引。装完菜单里会出现「恢复原声音输出」，走它回去 |
+| **macOS** | 需要 BlackHole 虚拟声卡（**FFmpeg 发行版至今抓不到 mac 系统音频**） | 菜单「系统声音 → 一键设置（BlackHole + 多输出设备）」。它**先判断你的机器处在哪一格**（下表），再决定做什么：只有"真的没装"才下载官方 `.pkg` → **弹出图形安装器，你输一次密码**（`.pkg` 无法静默安装，别期待全自动）→ 等设备出现 → 建/复用名为 `Macast Screen Mirror` 的多输出聚合设备 → 把默认输出切过去。**任何一步失败就降级**：打开「音频 MIDI 设置」+ 文字指引。装完菜单里会出现「恢复原声音输出」，走它回去 |
 | **Linux** | PulseAudio 直接有 tap | 采集口是 `<sink>.monitor`，插件自动探测；Wayland 下**没有画面可采**（x11grab  only），会明说 |
 | **Windows** | 仅画面 | 这一版不做 Windows 音频，菜单里写明「Windows 下仅画面」 |
+
+**五种机器状态、五种做法**（v0.9）。之前它把"驱动文件在磁盘上"这种情况**写在提示里说会跳过安装，
+然后照样重新下载一次安装器** —— 于是出现「装了却没有设备 → 再点又装一遍 → 永远装不完」。
+现在"跳过"是流程里真正的跳过，不是文案：
+
+| 你的机器 | 怎么判出来的 | 一键设置做什么 |
+|---|---|---|
+| 能采集系统声音 | ffmpeg 的采集设备表里有 BlackHole | 什么都不装，只把多输出设备建好/复用 |
+| 驱动已加载，但采集看不到 | CoreAudio 有、ffmpeg 没有 | **不重装也不重载**（两者都改变不了这件事）：照样把聚合设备建好，然后指名去「系统设置 → 隐私与安全性 → 麦克风」给 Macast 授权，重启 Macast 再点一次。旧产物（v0.9 之前打包的 `.app`）没声明麦克风用途，系统连授权弹窗都不会给 |
+| 驱动在磁盘上，但音频服务没加载 | `/Library/Audio/Plug-Ins/HAL/BlackHole*.driver` 在、设备表里没有 | **跳过下载与安装**，只要一次管理员密码**重载音频服务**（官方 `.pkg` 的 postinstall 只改权限、从不重启 coreaudiod。**不需要重启电脑**，重启只是等价手段） |
+| 只有残留的安装记录 | pkgutil 有记录、文件不在 | 重新下载官方 `.pkg` —— 这就是"上次装了却没有设备"的原因 |
+| 什么都没装过 | —— | 完整走一遍：下载 → 校验 sha256 → 安装器 → 等设备安装 → 重载 → 建聚合设备 |
+
+**每一格都保证同一件事：再点一次不会重新下载已经装好的东西。**
 
 镜像期间持有 `caffeinate -dimsu` 休眠断言（合盖/息屏会把镜像打断），停止时释放。
 
@@ -287,7 +301,7 @@ env -u PYTHONPATH .venv/bin/python scripts/check_index_reachability.py
 | `-encoders` 里有没有 `libx264` / `h264_videotoolbox` / `mpeg2video` / `ac3` | **各对应一条会静默失效的链路**：前两个是镜像，后两个是老电视的 MPEG-PS 档位 |
 | 有没有 libass（`subtitles` 滤镜） | 没有就只能走 WebVTT 字幕，烧字幕那条路不可用 |
 | avfoundation 列没列出屏幕 | 没列出 = 屏幕录制权限没给。（v0.8 之前这一条**在真机上永远答"没有"** —— 是解析器读不懂 ffmpeg 的输出，不是机器没屏幕） |
-| 系统音频采集口 | macOS 看 `/Library/Audio/Plug-Ins/HAL/BlackHole*.driver`；Linux 问 `pactl` 要 sink monitor；Windows 直接说"仅画面" |
+| 系统音频采集口 | macOS 先 glob `/Library/Audio/Plug-Ins/HAL/BlackHole*.driver`，**再问 ffmpeg 列不列得出它** —— 文件在盘上但 coreaudiod 没加载 = warn（v0.9 之前这里会说 ok，而插件说没有采集口，两边看起来像互相打脸）；Linux 问 `pactl` 要 sink monitor；Windows 直接说"仅画面" |
 | 转码临时目录剩余空间 | 转码写的是"会增长的文件"，空间在半路用尽比开头就报更难查 |
 | 局域网里有没有东西可投 | 真发一次 mDNS browse（`_googlecast._tcp` / `_airplay._tcp`）和一次 SSDP `MediaRenderer` 探测。**没搜到电视的时候，"菜单里设备列表是空的"就不是插件的问题** |
 
@@ -304,6 +318,11 @@ env -u PYTHONPATH .venv/bin/python scripts/check_index_reachability.py
   的真实输出，见 `AGENTS.md` §4.2 末。）
 - **"有声音没画面"**：`grep -aE "video-reconfig|audio-reconfig" ~/Library/Application\ Support/Macast/logs/*.log`
   —— 只有 `audio-reconfig` 说明流里根本没有视频轨（发送端问题）。
+- **系统声音「装了却没有设备 / 每次点一键设置都要重装」**：先跑 `scripts/selfcheck.py` 看它落在
+  §1.5 那张表的哪一格。最常见的是**驱动在磁盘上但音频服务没加载它**（官方 `.pkg` 的 postinstall
+  只改权限，从不重启 coreaudiod），**不需要重启电脑**：再点一次一键设置只会要一次管理员密码去重载，
+  不会再下载。第二常见的是**麦克风权限**（CoreAudio 看得见、ffmpeg 看不见），
+  那条路的终点在「系统设置 → 隐私与安全性 → 麦克风」，装多少个 `.pkg` 都不会改变它。
 - **电视找不到这台电脑**：`dns-sd -B _googlecast._tcp` /
   `curl -s 'http://127.0.0.1:58880/api?query=status'`；虚拟机网桥与 Tailscale
   地址会在 `AGENTS.md` §4.1 那一族里出现（只广播承载默认路由的网卡）。

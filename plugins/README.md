@@ -64,7 +64,7 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.8** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `screen_mirror.py` | **Screen Mirror v0.9** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机，v0.9 起按机器状态判定，**不会重复下载已装好的驱动**） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `cast_local_file.py` | **Local File Caster v0.1** — 把**这台机器磁盘上的文件**投到电视：菜单里选文件夹、点文件即在 Chromecast / Google TV 或 DLNA 电视上播；能原生解码的文件由内置 Range/206 服务按字节直供（远端的暂停/拖动直接作用在真文件上），其余边播由 ffmpeg 转码；带播放列表自动连播、音轨/字幕选择、音画同步偏移、被抢占后看门狗重投、退出时 QUIT_APP | 依赖用户自己装的 `ffmpeg` / `ffprobe` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 | `airplay_mirror.py` | **AirPlay Screen Mirror** — 监督 uxplay，让 iPhone / 另一台 Mac 把屏幕**镜像到这台机器**（镜像流是 AES-128-CTR，不需要 FairPlay；uxplay 自己开窗渲染） | 需要用户自己编译 `uxplay`（macOS 既无 Homebrew formula 也无官方二进制，插件日志里有完整配方） |
@@ -173,6 +173,18 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
   `/Library/Audio/Plug-Ins/HAL` 里的文件），因为它们在半装状态下会给出不一致的答案；
   重载 coreaudiod 走 `osascript ... with administrator privileges`，所以它会弹一次授权。
   **仍然要说清**：.pkg 无法静默安装，那一次密码是省不掉的。
+  **v0.9 修的是「永远装不完」**（用户原话：安装时候需要重启，重启后再点一键安装又要安装一遍）：
+  旧的 probe 分支把"安装会被跳过"**写成了提示语**，然后照样 fall through 到下载 + 打开安装器，
+  而唯一有用的那一步（重载 coreaudiod）要等 300 秒超时之后才可达。现在判定收成一个值
+  （`_blackhole_state`：capturable / loaded / on-disk / stale-receipt / absent），
+  **跳过 = 步骤机里的 skipped 状态**。两个见证者分开用是有原因的：
+  avfoundation（`_has_blackhole`，采集真正会读的那份）与 CoreAudio（`_find_blackhole`，不受权限门槛影响）
+  不一致 ⇒ 那是**麦克风权限**，装多少个 .pkg 都修不好，于是这一支不重装也不重载、照样建好聚合设备，
+  然后把结论点名到「系统设置 → 隐私与安全性 → 麦克风」（`.app` 侧的 `NSMicrophoneUsageDescription`
+  这次补进了 `scripts/setup_py2app.py`；没有它，系统连授权弹窗都不会给）。
+  每一支失败文案都保证同一句话：**再点一次不会重新下载已经装好的东西**。
+  Part 29 的两条反循环断言就是守这个的：「盘上有驱动」那一支必须既没有 `_fetch_blackhole_pkg`
+  调用也没有 `open`，「CoreAudio 有 / ffmpeg 没有」那一支必须连 `osascript` 都不弹。
   **v0.8 修的是从 v0.1 就在的一条坏路：macOS 上镜像根本起不来。** 采集探测要问
   `ffmpeg -f avfoundation -list_devices true -i ""` 这台机器有哪些设备，而那段解析是按一个
   **从未存在过的输出格式**写的 —— 它找 `Video devices:`（大写 V）并且只取双引号里的名字，

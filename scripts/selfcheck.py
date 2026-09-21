@@ -386,8 +386,32 @@ if sys.platform == "darwin":
                   glob.glob(os.path.expanduser(
                       "~/Library/Audio/Plug-Ins/HAL/BlackHole*.driver")))
     if taps:
-        ok("a BlackHole HAL driver is installed, so Screen Mirror can carry "
-           "system audio")
+        # Two questions, not one: the files being on disk does not mean the
+        # audio daemon loaded them (the official .pkg's postinstall only
+        # chmods), and the plugin's capture probe talks to avfoundation.
+        # Reporting "installed, so you're covered" for a driver that never
+        # loaded is how "装了却没有设备" ended up looking like the user's
+        # problem -- and Screen Mirror then re-ran its installer forever.
+        live = True
+        if ffmpeg:
+            try:
+                listing = subprocess.run(
+                    [ffmpeg, "-hide_banner", "-f", "avfoundation",
+                     "-list_devices", "true", "-i", ""],
+                    capture_output=True, text=True, timeout=20)
+                text = (listing.stdout or "") + (listing.stderr or "")
+                live = "blackhole" in text.lower()
+            except Exception:
+                live = False
+        if live:
+            ok("a BlackHole HAL driver is installed and ffmpeg lists it, so "
+               "Screen Mirror can carry system audio")
+        else:
+            warn("a BlackHole HAL driver is on disk but ffmpeg does not list "
+                 "it: coreaudiod has not loaded it",
+                 "Screen Mirror -> 系统声音 -> 一键设置 reloads the audio "
+                 "service with one admin password (it will not re-download "
+                 "the .pkg); rebooting does the same thing")
     else:
         warn("no BlackHole driver, so mirroring will be video-only",
              "Screen Mirror -> 系统声音 -> 一键设置 installs and configures it "

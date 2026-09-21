@@ -4,7 +4,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.8</macast.version>
+# <macast.version>0.9</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
@@ -67,6 +67,12 @@
 #   * capture fails closed: without Screen Recording permission (macOS)
 #     ffmpeg exits within a second, and the plugin turns that into a
 #     message naming the System Settings pane instead of a silent nothing.
+#   * the BlackHole assisted install decides by *witness*, not by "is the
+#     device missing", because five different machine states answer to that one
+#     question and only two of them want an installer: see _blackhole_state.
+#     Running the pkg again on a machine whose driver is merely unloaded is the
+#     loop the user reported ("装不完"), and CoreAudio-yes/ffmpeg-no is a
+#     microphone permission, which no download fixes either.
 
 import json
 import logging
@@ -985,6 +991,41 @@ def _has_blackhole(ffmpeg):
     return any('blackhole' in name.lower() for name in _device_uids(ffmpeg))
 
 
+#: The five answers the assisted install can get, strongest first. Each one
+#: takes a different branch, so the whole flow keys off this one value.
+BH_STATES = ('capturable', 'loaded', 'on-disk', 'stale-receipt', 'absent')
+
+
+def _blackhole_state(ffmpeg):
+    """Where BlackHole is visible right now, as one of ``BH_STATES``.
+
+    Three of these branches exist because the two witnesses disagree, and every
+    one of them used to take the same action (download the pkg again):
+    ``capturable`` -- ffmpeg's own device list, the only one that proves audio
+        will actually be captured;
+    ``loaded`` -- CoreAudio has the device but avfoundation does not, so the
+        driver is alive and the blocker is the microphone permission;
+    ``on-disk`` -- HAL driver files landed but the daemon never loaded them,
+        which is what a reinstall can never fix;
+    ``stale-receipt`` / ``absent`` -- the two cases an installer is for.
+    """
+    try:
+        if _has_blackhole(ffmpeg):
+            return 'capturable'
+    except Exception as e:
+        logger.info('avfoundation blackhole probe failed: %s', e)
+    try:
+        if _find_blackhole(ffmpeg) is not None:
+            return 'loaded'
+    except Exception as e:
+        logger.info('CoreAudio blackhole probe failed: %s', e)
+    if _blackhole_driver_installed():
+        return 'on-disk'
+    if _blackhole_receipt_present():
+        return 'stale-receipt'
+    return 'absent'
+
+
 def blackhole_pkg_pair():
     """(url, sha256, source) — the cask API first, the pinned pair as fallback.
 
@@ -1126,24 +1167,60 @@ def _remove_quietly(path):
         pass
 
 
-def _wait_for_blackhole(ffmpeg, timeout=300.0, progress=None, interval=5.0):
-    """Poll until ffmpeg lists the device (the installer needs a password).
+def _wait_for_blackhole(ffmpeg, timeout=300.0, progress=None, interval=5.0,
+                        step='wait', note='请在安装器里点「安装」并输入密码'):
+    """Poll until a witness sees the device, and report *which* one did.
+
+    'capturable' / 'loaded' / '' (timeout). Keeping the two apart is the whole
+    point: 'loaded' means the daemon picked the driver up but capture still
+    cannot open it, and calling that a success would be a lie of exactly the
+    kind this flow used to tell.
 
     The ticking message matters: this is the step where the user is supposed
     to be clicking through installer.app, and a silent 5 minutes reads exactly
     like a hang.
     """
+    def _seen():
+        state = _blackhole_state(ffmpeg)
+        return state if state in ('capturable', 'loaded') else ''
+
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _has_blackhole(ffmpeg):
-            return True
+        state = _seen()
+        if state:
+            return state
         time.sleep(min(interval, max(deadline - time.time(), 0.1)))
         if progress is not None:
             waited = timeout - max(deadline - time.time(), 0.0)
-            progress.sub('wait', min(waited / timeout, 0.99),
-                         '已等 {:.0f} 秒：请在安装器里点「安装」并输入密码'.format(
-                             waited))
-    return _has_blackhole(ffmpeg)
+            progress.sub(step, min(waited / timeout, 0.99),
+                         '已等 {:.0f} 秒：{}'.format(waited, note))
+    return _seen()
+
+
+def _reload_until_visible(ffmpeg, progress):
+    """One admin password, then wait for the daemon to load the driver.
+
+    Returns ``(state, why)`` with state in ('capturable', 'loaded', ''). The
+    caller only needs the state to decide whether to keep going, but the user
+    needs `why`: "you cancelled the password box" and "it reloaded and the
+    device still isn't there" are different problems with different fixes, and
+    conflating them is how this flow ended up blaming the user's reboot.
+    """
+    progress.enter('reload', '需要一次管理员密码')
+    reloaded, why = _reload_coreaudiod()
+    if not reloaded:
+        progress.fail('reload', why)
+        return '', why
+    state = _wait_for_blackhole(ffmpeg, timeout=45.0, progress=progress,
+                                interval=3.0, step='reload',
+                                note='音频服务正在重启，等它把驱动读进来')
+    if state:
+        progress.leave('reload', '{}，设备已出现'.format(why))
+    else:
+        progress.fail('reload', '重载后仍然看不到 BlackHole 设备')
+        state = ''
+        why = '重载音频服务后仍然看不到 BlackHole 设备'
+    return state, why
 
 
 def _route_audio_through_blackhole(ffmpeg, progress=None):
@@ -1575,22 +1652,35 @@ def setup_system_audio(report=lambda message: None, progress=None):
     progress.leave('env', 'ffmpeg: {}'.format(ffmpeg))
     try:
         progress.enter('probe')
-        if _has_blackhole(ffmpeg):
-            progress.leave('probe', '设备已在，跳过安装')
+        state = _blackhole_state(ffmpeg)
+        capturable = state == 'capturable'
+        if state in ('capturable', 'loaded'):
+            # The driver is loaded. Whatever else is wrong, downloading another
+            # pkg cannot fix it -- that is the loop the user reported.
+            progress.leave('probe', '设备已在，跳过安装' if capturable else
+                           'CoreAudio 里已有 BlackHole，但 ffmpeg 的采集设备表读不到它：'
+                           '不重装（重装改变不了这件事），先把多输出设备接好')
             for _inert in ('meta', 'download', 'verify', 'install', 'wait',
                            'reload'):
                 progress.skip(_inert)
+        elif state == 'on-disk':
+            progress.leave('probe', '驱动文件在磁盘上但音频服务没有加载它（官方 .pkg 的 '
+                                    'postinstall 只改权限、从不重启 coreaudiod）：'
+                                    '跳过下载与安装，只做一次重载')
+            for _inert in ('meta', 'download', 'verify', 'install', 'wait'):
+                progress.skip(_inert)
+            state, why = _reload_until_visible(ffmpeg, progress)
+            if not state:
+                report('一键设置没有完成：{}。驱动已经在磁盘上了，再点一次只会重试重载，'
+                       '不会重新下载安装包；重启一次电脑也能达到同样效果'.format(why))
+                return False
+            capturable = state == 'capturable'
         else:
-            notes = []
-            if _blackhole_driver_installed():
-                notes.append('驱动文件在磁盘上但 CoreAudio 没有加载它：'
-                             '安装会被跳过，改为提示重载音频服务')
-            elif _blackhole_receipt_present():
-                notes.append('检测到残留的安装记录，但驱动文件已不在磁盘上：'
-                             '将重新下载官方安装包（这就是上次"装了却没有设备"的原因）')
-            else:
-                notes.append('本机没有 BlackHole，将安装官方 2ch 驱动')
-            progress.leave('probe', '；'.join(notes))
+            progress.leave('probe', (
+                '检测到残留的安装记录，但驱动文件已不在磁盘上：'
+                '将重新下载官方安装包（这就是上次"装了却没有设备"的原因）'
+                if state == 'stale-receipt' else
+                '本机没有 BlackHole，将安装官方 2ch 驱动'))
             progress.enter('meta')
             url, expected, source = blackhole_pkg_pair()
             progress.leave('meta', '{}：{}'.format(source, url.rsplit('/', 1)[-1]))
@@ -1614,32 +1704,41 @@ def setup_system_audio(report=lambda message: None, progress=None):
             progress.leave('install', '安装器已打开，请在弹窗里点「安装」并输入一次密码')
             report('正在打开安装器：请在弹窗里点「安装」并输入一次密码')
             progress.enter('wait')
-            installed = _wait_for_blackhole(ffmpeg, progress=progress)
-            if not installed and _blackhole_driver_installed():
+            state = _wait_for_blackhole(ffmpeg, progress=progress)
+            if not state and _blackhole_driver_installed():
                 progress.sub('wait', None,
                              '驱动文件已就位但 CoreAudio 没加载它，尝试重载音频服务')
-                progress.enter('reload', '需要一次管理员密码')
-                reloaded, why = _reload_coreaudiod()
-                if reloaded:
-                    installed = _wait_for_blackhole(ffmpeg, timeout=45.0)
-                    if installed:
-                        progress.leave('reload', why)
-                if not installed:
-                    progress.fail('reload', why)
-            if not installed:
+                state, _why = _reload_until_visible(ffmpeg, progress)
+            if not state:
                 progress.fail('wait', '超时仍未在设备列表里看到 BlackHole')
-                report('没有检测到 BlackHole 设备：可能是安装被取消、密码未通过，'
-                       '或系统需要重启一次；也可手动执行 brew install --cask blackhole-2ch')
+                report('没有检测到 BlackHole 设备：可能是安装被取消、密码未通过。'
+                       '若驱动文件已经落盘，再点一次一键设置不会重新下载，'
+                       '而是直接重试重载音频服务（或重启一次电脑）；'
+                       '也可手动执行 brew install --cask blackhole-2ch')
                 return False
             progress.leave('wait', '设备已出现')
+            capturable = state == 'capturable'
         report('正在创建多输出设备并切换默认输出…')
         if not _route_audio_through_blackhole(ffmpeg, progress=progress):
             _open_audio_midi_setup(report)
             return False
         progress.leave('output')
         _capture_cache.clear()
-        report('系统声音已就绪：开始镜像后声音会一起投出去，本机照常能听到')
-        return True
+        if capturable:
+            report('系统声音已就绪：开始镜像后声音会一起投出去，本机照常能听到')
+            return True
+        # The aggregate is built and CoreAudio is happy, but the capture side
+        # still cannot open the device. Re-marking the *finished* check as
+        # failed is deliberate: this run's real outcome is that negative answer,
+        # and a green page that leaves the user with no audio is the exact
+        # "看起来装完了" illusion this whole branch exists to stop.
+        progress.fail('probe', 'CoreAudio 已加载设备，但 ffmpeg 的采集设备表读不到它')
+        report('多输出设备已建好，但采集侧仍然读不到 BlackHole，系统声音还不能用。'
+               '这通常是 macOS 的麦克风权限：产物里的 Macast.app 若没有 '
+               'NSMicrophoneUsageDescription，系统连授权弹窗都不会给。'
+               '请在「系统设置 → 隐私与安全性 → 麦克风」里允许 Macast 并重启 Macast，'
+               '再点一次一键设置（不会重新下载安装包）')
+        return False
     except Exception as e:
         logger.error('blackhole assisted install failed: %s', e, exc_info=True)
         for st in progress.snapshot()['steps']:
@@ -4400,7 +4499,7 @@ class ScreenMirrorSetting(RendererSetting):
         mirroring = bool(renderer and renderer.is_mirroring())
 
         items = [
-            MenuItem('Screen Mirror v0.8', enabled=False),
+            MenuItem('Screen Mirror v0.9', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
             MenuItem('输出目标', children=self._output_children(kind)),
