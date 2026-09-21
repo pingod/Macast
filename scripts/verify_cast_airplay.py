@@ -9977,6 +9977,100 @@ except Exception as _e31:
 
 
 # --------------------------------------------------------------------------
+# Part 32: what the preflight says about the sender plugins
+#
+# `selfcheck.py` is the thing a user runs when a plugin "does nothing", so its
+# answers have to match what the plugins actually ask the machine. Both sides
+# drift: a plugin gains an encoder or an install directory, the preflight keeps
+# its older list, and the report becomes a confident lie ("ffmpeg can encode
+# everything" / "no Chromecast here") that sends the user somewhere else. These
+# checks read the two plugin files and the preflight and require them to agree;
+# they never run the preflight, which probes the network and spawns ffmpeg.
+# --------------------------------------------------------------------------
+print("\n=== Part 32: the preflight's sender-plugin claims ===")
+try:
+    import re as _re32
+    with open(os.path.join(REPO, "scripts", "selfcheck.py"),
+              encoding="utf-8") as _fh32:
+        _pre32 = _fh32.read()
+    _plug32 = ""
+    for _name32 in ("screen_mirror.py", "cast_local_file.py"):
+        with open(os.path.join(REPO, "plugins", _name32),
+                  encoding="utf-8") as _fh32:
+            _plug32 += _fh32.read()
+
+    # -- 1. every codec the plugins hand to ffmpeg gets asked about ----------
+    _used32 = set(_re32.findall(r"'-c:[va]',\s*'([^']+)'", _plug32))
+    # `aac` ships in every ffmpeg build, so probing for it would only produce
+    # noise; anything else has to be named in the preflight.
+    _probe_src32 = (_pre32.split('for flag, why in (')[1]
+                    .split('if flag in out:')[0])
+    _probed32 = set(_re32.findall(r'\(\s*"([a-z0-9_]+)"', _probe_src32))
+    check("the preflight asks about every codec the plugins encode to",
+          _used32 - {'aac'} <= _probed32,
+          "codecs in plugins=%s, probed=%s" % (sorted(_used32), sorted(_probed32)))
+    check("and it does not still ask about a codec no sender plugin uses",
+          not (_probed32 - _used32),
+          "stale probes: %s" % sorted(_probed32 - _used32))
+
+    # -- 2. the same places to look for ffmpeg -------------------------------
+    def _listed_dirs(source, marker):
+        """Directories listed by one tool-lookup block, binaries stripped.
+
+        The plugins list `<dir>/ffmpeg` while the preflight lists directories,
+        so both are compared as directories or the check would be red for a
+        formatting difference.
+        """
+        body = source.split(marker, 1)[1].split('\n\n\n')[0]
+        out = set()
+        for path in _re32.findall(r'"(/[^"]+)"', body):
+            base = os.path.basename(path)
+            out.add(os.path.dirname(path)
+                    if base in ('ffmpeg', 'ffprobe', 'mpv')
+                    or base.endswith('.exe') else path)
+        return out
+
+    _plugin_bin32 = set()
+    for _name32, _marker32 in (("screen_mirror.py", "def find_ffmpeg("),
+                               ("cast_local_file.py", "def find_tool(")):
+        with open(os.path.join(REPO, "plugins", _name32),
+                  encoding="utf-8") as _fh32:
+            _plugin_bin32 |= _listed_dirs(_fh32.read(), _marker32)
+    _pre_bin32 = _listed_dirs(_pre32, "COMMON_BIN_DIRS = ")
+    check("the preflight looks for tools where the plugins look for them",
+          _plugin_bin32 and _plugin_bin32 <= _pre_bin32,
+          "plugins search %s, preflight searches %s" % (
+              sorted(_plugin_bin32), sorted(_pre_bin32)))
+
+    # -- 3. the setting keys it reads are real ------------------------------
+    _read32 = set(_re32.findall(r'\.get\("([A-Z][A-Za-z_]*)"\)', _pre32))
+    check("the preflight reads settings only through keys a plugin writes",
+          all(_re32.search(r'\b%s\s*=' % _key32, _plug32) for _key32 in _read32),
+          "read=%s" % sorted(_read32))
+
+    # -- 4. discovery targets -----------------------------------------------
+    check("the preflight browses the mDNS service type the plugins browse",
+          '"_googlecast._tcp.local."' in _pre32
+          and '"_googlecast._tcp.local."' in _plug32,
+          "the service type string has to be identical on both sides")
+    check("and it probes for the same UPnP device type the DLNA targets use",
+          'urn:schemas-upnp-org:device:MediaRenderer:1' in _pre32
+          and 'urn:schemas-upnp-org:device:MediaRenderer:1' in _plug32,
+          "otherwise the preflight can find a TV no plugin would offer")
+
+    # -- 5. it stays a reader ------------------------------------------------
+    check("the preflight never writes to the user's settings",
+          'Setting.set(' not in _pre32 and 'Setting.save(' not in _pre32
+          and 'Setting.setting[' not in _pre32,
+          "AGENTS.md 10: verification must not change real configuration")
+except Exception as _e32:
+    import traceback
+    traceback.print_exc()
+    check("the preflight's sender claims are checkable", False,
+          "{}: {}".format(type(_e32).__name__, _e32))
+
+
+# --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
 

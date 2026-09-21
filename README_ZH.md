@@ -54,6 +54,9 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
 
 **接手开发 / 排查问题请先读 [`AGENTS.md`](AGENTS.md)**（代码地图、踩坑清单、发版流程），
 真机验证与历史问题复盘见 [`docs/Cast-AirPlay-Testing.md`](docs/Cast-AirPlay-Testing.md)。
+上面那批发送端插件**怎么用**（每个目标的首次设置流程：Chromecast、低延迟通道、老电视、
+浏览器、本地文件、uxplay / shairport-sync）见
+[`docs/Casting-Suite.md`](docs/Casting-Suite.md)。
 
 
 

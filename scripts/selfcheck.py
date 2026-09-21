@@ -14,11 +14,15 @@
 # Exit status is 0 when nothing blocks receiving, 1 otherwise. Warnings (things
 # that only degrade behaviour) do not fail the run.
 
+import glob
+import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
+import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO not in sys.path:
@@ -270,6 +274,233 @@ for _name, _dirs in (("uxplay", ("/opt/homebrew/bin", "/usr/local/bin",
     else:
         warn("shairport-sync not found -- AirPlay audio (RAOP) has nowhere to go",
              "brew install shairport-sync (the AirPlay Audio plugin supervises it)")
+
+
+# ---------------------------------------------------------------------------
+# 4a. what the *sender* plugins need on this machine
+#
+# Everything above asks "can this Mac receive a cast". The Casting Suite plugins
+# (Screen Mirror, Local File Caster) turn the question around, and each of them
+# fails for a different missing piece that used to only surface as "the menu
+# says nothing happened": an ffmpeg without the encoder a given target demands,
+# no ffprobe (so a file cannot be classified as copy or convert), no system
+# audio tap, no television on the LAN to pick, or a transcode that runs the
+# volume out mid-stream.
+#
+# Nothing here reads or writes macast_setting.json -- AGENTS.md 10. The one
+# setting that changes an answer below (the transcode directory) is read
+# straight from the file as text.
+# ---------------------------------------------------------------------------
+print("\n=== sender plugins ===")
+
+COMMON_BIN_DIRS = ("/opt/homebrew/opt/ffmpeg/bin", "/opt/homebrew/bin",
+                   "/usr/local/opt/ffmpeg/bin", "/usr/local/bin",
+                   "/opt/local/bin", "/usr/bin")
+
+
+def _find(name):
+    """PATH first, then the directories a Finder-launched app never sees.
+
+    Same rule the plugins use: a menu-bar app started from the Dock does not
+    inherit the shell's PATH, so `which` alone reports "missing" for a tool
+    that works fine in the plugin.
+    """
+    return shutil.which(name) or next(
+        (os.path.join(d, name) for d in COMMON_BIN_DIRS
+         if os.path.exists(os.path.join(d, name))), None)
+
+
+ffprobe = _find("ffprobe")
+if ffprobe:
+    ok("ffprobe present ({}), so Local File Caster can decide copy-vs-convert "
+       "per file".format(ffprobe))
+else:
+    warn("ffprobe is missing",
+         "brew install ffmpeg -- Local File Caster decides per file whether the "
+         "television can decode it, and without ffprobe it cannot")
+
+if os.path.exists(ffmpeg):
+    # One `-encoders` run answers four questions, because the four targets want
+    # four different codecs and each has its own "why is the menu empty".
+    try:
+        out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
+                             capture_output=True, text=True,
+                             timeout=20).stdout
+    except Exception as e:
+        out = ""
+        warn("could not ask ffmpeg about its encoders ({})".format(e))
+    for flag, why in (("libx264", "every mirror target except the hardware one"),
+                      ("h264_videotoolbox",
+                       "the macOS '硬件编码（VideoToolbox）' switch"),
+                      ("mpeg2video", "the DLNA profiles for an old television"),
+                      ("ac3", "audio on those same MPEG-PS profiles")):
+        if flag in out:
+            ok("ffmpeg can encode {} -- needed for {}".format(flag, why))
+        elif flag == "h264_videotoolbox":
+            warn("this ffmpeg has no h264_videotoolbox, so the hardware "
+                 "encoding switch stays unavailable",
+                 "mirror in software instead; a Homebrew ffmpeg does have it")
+        else:
+            warn("this ffmpeg cannot encode {}, so {} will fail".format(
+                flag, why),
+                 "reinstall ffmpeg from Homebrew -- a stripped build without "
+                 "libx264/mpeg2video/ac3 is not usable for the sender plugins")
+    try:
+        filters = subprocess.run([ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True,
+                                 timeout=20).stdout
+        if "subtitles" in filters:
+            ok("ffmpeg has the subtitles filter, so a burnt-in subtitle track "
+               "is possible on the conversion path")
+        else:
+            warn("this ffmpeg has no libass (no 'subtitles' filter)",
+                 "Chromecast still gets subtitles as WebVTT; only the burnt-in "
+                 "fallback for other targets is unavailable")
+    except Exception as e:
+        warn("could not ask ffmpeg about its filters ({})".format(e))
+
+    # Which screen ffmpeg can see is the question Screen Mirror actually asks,
+    # and it is the one that has been wrong before (AGENTS.md 4.2).
+    if sys.platform == "darwin":
+        try:
+            listing = subprocess.run(
+                [ffmpeg, "-hide_banner", "-f", "avfoundation",
+                 "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=20)
+            text = (listing.stdout or "") + (listing.stderr or "")
+            screens = [line for line in text.splitlines()
+                       if "Capture screen" in line]
+            if screens:
+                ok("avfoundation lists {:d} screen capture device(s), so Screen "
+                   "Mirror has something to grab".format(len(screens)))
+            else:
+                warn("avfoundation answered without any screen capture device",
+                     "grant Screen Recording to Macast under System Settings -> "
+                     "Privacy & Security, then restart it")
+        except Exception as e:
+            warn("could not list avfoundation devices ({})".format(e))
+
+# System audio: where a tap exists at all, and whether it is set up.
+if sys.platform == "darwin":
+    taps = sorted(glob.glob("/Library/Audio/Plug-Ins/HAL/BlackHole*.driver") +
+                  glob.glob(os.path.expanduser(
+                      "~/Library/Audio/Plug-Ins/HAL/BlackHole*.driver")))
+    if taps:
+        ok("a BlackHole HAL driver is installed, so Screen Mirror can carry "
+           "system audio")
+    else:
+        warn("no BlackHole driver, so mirroring will be video-only",
+             "Screen Mirror -> 系统声音 -> 一键设置 installs and configures it "
+             "(the .pkg still asks for your password)")
+elif sys.platform.startswith("linux"):
+    try:
+        sinks = subprocess.run(["pactl", "list", "short", "sinks"],
+                               capture_output=True, text=True,
+                               timeout=10).stdout
+        if ".monitor" in sinks:
+            ok("PulseAudio exposes sink monitors, so Screen Mirror can carry "
+               "system audio")
+        else:
+            warn("no PulseAudio sink monitor found",
+                 "system audio will be dropped from the mirror")
+    except Exception:
+        warn("could not ask PulseAudio about sink monitors (pactl unavailable?)")
+else:
+    ok("Windows: mirroring is video-only by design (no system audio tap)")
+
+# Where the conversion path writes, and whether it will fit.
+transcode_dir = tempfile.gettempdir()
+try:
+    from macast.utils import SETTING_DIR
+except Exception:
+    SETTING_DIR = None
+if SETTING_DIR:
+    try:
+        with open(os.path.join(SETTING_DIR, "macast_setting.json"),
+                  encoding="utf-8") as _fh:
+            transcode_dir = (json.load(_fh).get("Temp_Dir") or "").strip() \
+                or transcode_dir
+    except Exception:
+        pass  # no settings file yet -- the default is the honest answer
+try:
+    usage = shutil.disk_usage(os.path.expanduser(transcode_dir))
+    if usage.free >= 3 << 30:
+        ok("{:d} GiB free in {} (the transcode path writes there)".format(
+            usage.free >> 30, transcode_dir))
+    else:
+        warn("only {:d} MiB free in {}".format(
+            usage.free >> 20, transcode_dir),
+             "a transcode writes a growing file there and stops being able to "
+             "grow; point Temp_Dir at a larger volume from the settings page")
+except Exception as e:
+    warn("could not measure the transcode directory ({})".format(e))
+
+# A television that is not on this LAN cannot be picked from any menu.
+found_casts, found_renderers = [], []
+try:
+    from zeroconf import ServiceBrowser, Zeroconf
+
+    _zc = Zeroconf()
+    try:
+        class _SenderListener:
+            def __init__(self):
+                self.names = []
+
+            def add_service(self, zc, service_type, name):
+                self.names.append(name)
+
+            def remove_service(self, *args):
+                pass
+
+            def update_service(self, *args):
+                pass
+
+        _listener = _SenderListener()
+        _browsers = [ServiceBrowser(_zc, "_googlecast._tcp.local.", _listener)]
+        try:
+            _browsers.append(ServiceBrowser(_zc, "_airplay._tcp.local.",
+                                            _listener))
+        except Exception:
+            pass
+        time.sleep(3.0)
+        found_casts = [n for n in _listener.names if "googlecast" in n.lower()]
+    finally:
+        _zc.close()
+except Exception as e:
+    warn("could not browse mDNS for Chromecasts ({})".format(e))
+
+try:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    probe.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    probe.settimeout(2.0)
+    probe.sendto((
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+        'MAN: "ssdp:discover"\r\nMX: 2\r\n'
+        "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n"
+    ).encode("ascii", "strict"), ("239.255.255.250", 1900))
+    while True:
+        try:
+            data, _peer = probe.recvfrom(4096)
+        except socket.timeout:
+            break
+        if b"LOCATION" in data.upper():
+            found_renderers.append(data)
+    probe.close()
+except Exception as e:
+    warn("could not send the SSDP probe ({})".format(e))
+
+if found_casts:
+    ok("{:d} Chromecast-like device(s) answering mDNS: {}".format(
+        len(found_casts), ", ".join(sorted(set(
+            n.split(".local.")[0] for n in found_casts)))[:200]))
+if found_renderers:
+    ok("{:d} UPnP MediaRenderer(s) answered the SSDP probe".format(
+        len(found_renderers)))
+if not found_casts and not found_renderers:
+    warn("no Chromecast and no DLNA television answered discovery",
+         "the sender plugins have nowhere to send: check the two devices are on "
+         "the same subnet, that the network is not client-isolated, and that no "
+         "firewall is dropping multicast")
 
 
 # ---------------------------------------------------------------------------

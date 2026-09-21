@@ -66,7 +66,8 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 `hooks` / `cast_bridge` / `screen_mirror` / `cast_local_file` 是互斥的（菜单栏里切换）；`raop.py` 与
 `airplay_mirror.py` 是协议插件，可以和任意渲染器同时开。
 
-各插件要点：
+各插件要点（**面向使用者的逐目标首次设置流程在 [`docs/Casting-Suite.md`](../docs/Casting-Suite.md)**，
+这一节讲的是实现要点）：
 
 - **yt-dlp**：模式在菜单里切（下载 / 边下边播）。下载目录默认 `~/Downloads/Macast`，
   可用设置页「高级设置」的 JSON 编辑器改 `YTDLP_Dir`。边下边播走 mpv 自带的 ytdl hook，

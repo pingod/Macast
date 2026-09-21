@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（当前 1083/1083；个别用例按时间门控，总数会 ±2）
+# 2) 回归验证（当前 1090/1090；个别用例按时间门控，总数会 ±2）
 env -u PYTHONPATH .venv/bin/python scripts/verify_cast_airplay.py
 ```
 
@@ -547,9 +547,9 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（1083 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）|
+| `verify_cast_airplay.py` | **主验证套件**（1083 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
-| `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装 |
+| `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装。**发送端插件那一半（§「sender plugins」段）**：ffprobe 在不在、`-encoders` 里有没有 libx264 / h264_videotoolbox / mpeg2video / ac3（**这四个各自对应一条会静默失效的链路**）、有没有 libass（没有 ⇒ 字幕只能走 WebVTT）、avfoundation 到底列没列出屏幕（**这一条就是 v0.1–v0.7 那个解析 bug 想骗过去的问题**）、系统音频采集口（mac 看 HAL 里的 BlackHole 驱动、Linux 问 `pactl` 要 sink monitor）、转码临时目录剩余空间、以及**局域网里到底有没有东西可投**（mDNS browse `_googlecast._tcp` + 一次 SSDP `MediaRenderer` 探测）。它**只读**设置（直接读 JSON 文本，不碰 `Setting`），所以跑它不会改用户配置。Part 32 守着它和插件的一致性 |
 | `check_index_reachability.py` | 把 selfcheck「online plugin index」那段**离仓**跑一遍：不带 GitHub 凭据问三件事（本仓库是否匿名可见 + 公开上游对照组 + jsDelivr 元数据 API），再逐条问 `plugins/info.json` 的固定链接到底服不服务，输出 `INDEX_PRIVATE` / `INDEX_OK` / `INCONCLUSIVE` 之一 + 逐条状态表 + 退出码（0 全部可装，2 有死链，3 判不出）。`--json` 给 CI 用，`--url-only` 只回答单个 URL。为什么单独一个脚本：这是**发版后必做的那一步**（§8）——本地套件全绿只证明条目 == 所指内容，不证明别人拉得到，而私有仓库上的 CDN 缓存会**逐条过期**，没人碰它也会坏 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
@@ -577,6 +577,7 @@ $FF -y -i /tmp/cast_test.mp4 -c copy -f mpegts /tmp/cast_test.ts
 |---|---|
 | `docs/Cast-AirPlay-Testing.md` | **真机验证指南 + 全部已修问题的完整复盘**（三轮："找不到 / 投不上 / 有声音没画面"） |
 | `docs/Casting-Suite-Plan.md` | **发送端插件族的规划书**：JustStream 需求矩阵、六个参考项目（mkchromecast / MirrorCast / omacast / UxPlay / Castify / Mac-Screencast）的代码级取证与许可判定、P1-P6 阶段计划与「明确不做」。动镜像/投文件/投浏览器相关代码前先读它 |
+| `docs/Casting-Suite.md` | **发送端插件的用户指南**（与上一行分工：规划书给改代码的人，这份给用插件的人）。每个目标的**首次设置流程**：Chromecast 兼容通道 / Chromecast 低延迟（含"上限 4.5 Mbps 是软件加密不是网络"）/ DLNA 老电视（含"约 37 秒延迟是设计如此"与五档回退）/ 浏览器（观看地址与 token 的来历）；本地文件投屏的"自动"在判什么、音轨字幕为什么各有边界；uxplay 与 shairport-sync 的自备安装配方；macOS 屏幕录制权限与 BlackHole 一键设置。**每一节都写明"这条路真机验证到什么程度"** —— 全族只在打桩测试与自家假设备上验证过 |
 | `docs/reference-projects-review.md` | 参考项目评估（**接收端**视角）：miraclecast / mkchromecast / AirConnect |
 | `docs/Development.md` | 三平台开发与打包 |
 | `BUILDING.md` | macOS `.app` 构建（py2app）、产物校验、包体裁剪 |
