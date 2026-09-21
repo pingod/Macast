@@ -27,6 +27,17 @@
 #   - push of a v*.* tag               (build + GitHub release)
 #
 # Manual release:   GitHub UI -> Actions -> Build Macast -> Run workflow -> release=true
+#
+# Artefact retention is 2 days, not the action's default: the release job
+# downloads everything from the same run, so retention only serves manual
+# "download that build again" clicks. Four platforms are ~170 MB per run and
+# this repo's free plan caps Actions storage at 500 MB, so a 14-day window
+# lets a busy fortnight wedge every later upload with
+# "Artifact storage quota has been hit" -- which is what happened on
+# 2026-09-21, when 193 artefacts had piled up to 8.2 GB. Note this only
+# slows that drift: it is not a fix if main keeps being pushed many times a
+# day. Release downloads are unaffected either way -- they live under
+# GitHub Releases, which is a different bucket from Actions artefacts.
 
 name: Build Macast
 
@@ -196,7 +207,7 @@ jobs:
           name: macos-arm64
           path: Macast-MacOS-arm64-*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 2
 
   # -----------------------------------------------------------------------
   # macOS x86_64 (Intel Mac) was dropped: the GitHub-hosted macos-13 Intel
@@ -288,7 +299,7 @@ jobs:
           name: linux-x86_64
           path: Macast-Linux-x86_64-*.tar.gz
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 2
 
   # -----------------------------------------------------------------------
   # Linux arm64 — same as x86_64 but for aarch64 boxes
@@ -373,7 +384,7 @@ jobs:
           name: linux-arm64
           path: Macast-Linux-arm64-*.tar.gz
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 2
 
   # -----------------------------------------------------------------------
   # Windows x86_64 — standalone .exe
@@ -483,7 +494,7 @@ jobs:
           name: windows-x86_64
           path: Macast-Windows-x86_64-*.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 2
 
   # -----------------------------------------------------------------------
   # Release — collect artefacts and create a GitHub release.
