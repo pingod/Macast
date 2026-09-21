@@ -177,6 +177,16 @@ find /Applications/Macast.app -iname "*zeroconf*" | head
 **教训：CI 全绿 ≠ 产物能用。** 发版后一定要把下载下来的产物**真正启动一次**并确认
 它监听了 8009/58880、`/api?query=status` 能返回版本号（见 §8）。
 
+**反面的一半也成立：CI 全红 ≠ 代码坏了。** 2026-09-21 发 v0.7.15 时四个平台 job 全红，
+但**只红在 `Upload artefact` 这一步**（构建 / arm64+i18n 校验 / 签名 / 打包 zip 全绿），
+报错 `Failed to CreateArtifact: Artifact storage quota has been hit` ——
+四处 `retention-days: 14` × 每次约 170 MB × 免费方案 500 MB 上限，从 9 月 14/15 那两波密集构建起
+就一直撞（193 份 / 8.2 GB），与本次改动无关。修法是先删旧 artefacts 再把留存改成 **2 天**（`7012268`），
+然后 `gh run rerun --failed` 重跑同一个 run（保留 tag 上下文，不用重推 tag）。
+**Releases 的产物不受影响**：那是另一个桶，删 Actions artefacts 不会动到已发布版本的下载链接。
+所以看 CI 失败时**先定位到哪一步**再判断是谁的锅；这一步红的修法（清存储）和代码红的修法（改代码）
+完全不同，撞错了方向会白改一遍代码。
+
 ### 4.4 `macast/plugins/**` 的"动态导入"打包坑（与 §4.3 同族）
 
 内置插件（IINA / Web / Live / PotPlayer / PIFMRDS / NVA，来自
