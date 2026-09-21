@@ -60,14 +60,14 @@
         },
         {
             "author": "pingod",
-            "desc": "把本机桌面屏幕实时镜像到局域网：投给 Chromecast / Google TV（**两条通道**：兼容的 MPEG-TS LOAD，或实验性的低延迟 Cast Streaming —— 就是 Chrome「投放桌面」那套协议，电视不认就自动回落；那条目前只有画面、且码率被纯 Python 加密限在 4.5 Mbps）、投给没有 Google 栈的老电视（DLNA，五种兼容档位自动回退），或者让任何一台电脑、手机、平板直接用浏览器打开一个网址观看（电视上不用装 App，三平台）。可选项：显示器、鼠标指针、四档画质、macOS 硬件编码；观看网址每次镜像都是新地址。macOS 系统声音可在菜单里一键装好：自动下载并校验官方 BlackHole、弹安装器、自动配好多输出设备 —— 十步进度页会告诉你卡在哪一步，但省不掉安装器那一次密码；Linux 走 PulseAudio，Windows 仅画面。需要自行安装 ffmpeg。",
+            "desc": "把本机桌面屏幕实时镜像到局域网：投给 Chromecast / Google TV（**两条通道**：兼容的 MPEG-TS LOAD，或实验性的低延迟 Cast Streaming —— 就是 Chrome「投放桌面」那套协议，电视不认就自动回落；那条目前只有画面、且码率被纯 Python 加密限在 4.5 Mbps）、投给没有 Google 栈的老电视（DLNA，五种兼容档位自动回退），或者让任何一台电脑、手机、平板直接用浏览器打开一个网址观看（电视上不用装 App，三平台）。可选项：显示器、鼠标指针、四档画质、macOS 硬件编码；观看网址每次镜像都是新地址。macOS 系统声音可在菜单里一键装好：自动下载并校验官方 BlackHole、弹安装器、自动配好多输出设备 —— 十步进度页会告诉你卡在哪一步，但省不掉安装器那一次密码。**v0.9 起它先判断机器处在哪一格**（能采集 / 已加载但采集看不到 / 驱动在盘上但音频服务没加载 / 只有残留记录 / 没装过），所以已经装好的驱动不会被重新下载一遍 —— 那一格只要一次管理员密码去重载音频服务，**不需要重启电脑**；「CoreAudio 看得见、ffmpeg 看不见」那一格是麦克风权限，它会告诉你去哪个面板而不是再装一次；Linux 走 PulseAudio，Windows 仅画面。需要自行安装 ffmpeg。",
             "host_version": "0.7",
             "platform": "darwin,win32,linux",
             "renderer": "ScreenMirrorRenderer",
             "title": "Screen Mirror",
             "type": "renderer",
-            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@7028bd42e5fbde110e0f316f6ce009621f98ee8b/plugins/screen_mirror.py",
-            "version": "0.8"
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@0996789045629e545595dbfd86f43cc46d25fff7/plugins/screen_mirror.py",
+            "version": "0.9"
         },
         {
             "author": "pingod",
