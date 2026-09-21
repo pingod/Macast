@@ -227,6 +227,15 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - 仓库坐标与索引地址只在 **`macast/plugin_repo.py`**（`pingod/Macast` →
   `plugins/info.json`），由 `/api?query=plugin-info` 的 `plugin_repo` 字段下发；
   `setting.html` 里**不允许**再出现任何插件仓库 URL（Part 5c 有用例守着）。
+- **前提：`plugin_repo.REPO` 必须是一个公开仓库，否则整个索引只对别人是坏的。**
+  jsDelivr 与 raw 都读不到私有仓库，而下载插件时 Macast 不带凭据 —— 卡片照常渲染、
+  「安装」才失败。本 fork 目前是**私有**的（判据与逐条实测结果见 §5 相应条目：
+  9 条固定链接已有 4 条 404，剩下 5 条是 CDN 在仓库还可读时缓存的副本，会逐个掉光）。
+  Part 5c 的 `git show <sha>:plugins/<file>` 只证明「条目 == 所指内容」，**不证明可达**，
+  两者不要混。想让别人装得上：仓库改公开 / 把 `plugins/` 发布到公开仓库并改 `REPO` /
+  或者在文档里明说只能手动安装。**改可见性要用户决定。**
+  `scripts/selfcheck.py` 的「online plugin index」段把这三问都替用户跑一遍
+  （GitHub 匿名 + 公开上游对照组 + jsDelivr 元数据 API + 逐条固定链接）。
 - 索引本体在**仓库根目录**的 `plugins/`（不是 `macast/plugins/`，后者是内置插件），
   当前 9 条（见 §4.8）。空索引也是合法状态，页面只显示本机插件，不报错。
 - **索引本身**（唯一一个没法固定 SHA 的文件）走三个地址，按「新鲜度」排序：
@@ -512,12 +521,24 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
   `accept()`。要区分就真的做一次 TLS 握手。
 - **环境里有代理会让本地网络测试假失败**：
   `env -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY <cmd>`。
-- **GitHub 的 HTTPS 出口在这台机器的 CLI 沙箱里不通，SSH 才通**：摘掉代理之后
-  `api.github.com`、`cdn.jsdelivr.net` 仍然回 **404**（连已经在用的旧固定 SHA 链接也 404），
-  `raw.githubusercontent.com` 是 `000`。所以"验证插件索引条目"只能靠 Part 5c 的
-  `git show <sha>:plugins/<file>`（本地、真绿）；**别把那个 404 读成"URL 指错了提交"**，
-  也别据此判断"用户拉不到"——推送本身走 `git push git@github.com:pingod/Macast.git main`，
-  推完 `git update-ref refs/remotes/origin/main <sha>` 让本地 origin 对上。
+- **`pingod/Macast` 是私有仓库 —— 所以在线插件索引对别人是坏的**（本会话先误判成"沙箱不通"，
+  三条互相独立的探针才能定性，别再重复这个错误）：
+  `gh api repos/pingod/Macast --jq .private` → **true**；匿名
+  `https://api.github.com/repos/pingod/Macast` → **404**，而同一请求打公开的上游
+  `xfangfang/Macast` → **200**；`https://data.jsdelivr.com/v1/packages/gh/pingod/Macast`
+  → **404 "Couldn't fetch versions"**（公开上游回 200 带版本表）。
+  jsDelivr / raw 都读不到私有仓库，而 Macast 下载插件时**不带任何凭据**，
+  所以设置页的插件卡片会照常显示、点下去才失败，症状长得像网络问题。
+  实测（2026-09-21，刚推完 v0.8）：**9 个固定链接里只有 5 个还给 200 —— 那是 CDN 在仓库
+  还可读时缓存下来的副本，正在逐个过期；私有状态不变，剩下的就一个一个变成 404，等不来。**
+  `raw.githubusercontent.com` 在这台机器上是 `000`（只有这个 host 被挡），**这正是当初把
+  404 读成"沙箱不通"的原因** —— 判 Reachability 要用上面那三条带**公开对照组**的探针，
+  或者直接跑 `scripts/selfcheck.py` 的「=== online plugin index ===」段。
+  要恢复安装能力只有三条路：把仓库改成公开 / 把 `plugins/` 发布到一个公开仓库并把
+  `macast/plugin_repo.py::REPO` 指过去 / 明说只能手动安装（「从网址安装」或把 .py 放进
+  `~/Library/Application Support/Macast/renderer/`）。**改仓库可见性是用户的决定，不要代做。**
+  推送仍然走 `git push git@github.com:pingod/Macast.git main`，推完
+  `git update-ref refs/remotes/origin/main <sha>` 让本地 origin 对上。
 - **WorkBuddy/CLI 沙箱**：`PYTHONPATH` 被注入 shim，`mkdir(exist_ok=True)` 会抛
   `PermissionError: EEXIST`；`ps` 不可用。一律 `env -u PYTHONPATH`，用 `lsof`/`pgrep` 代替 `ps`。
 
@@ -529,6 +550,7 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | `verify_cast_airplay.py` | **主验证套件**（1083 条）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个在线插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页）+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 在线插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装 |
+| `check_index_reachability.py` | 把 selfcheck「online plugin index」那段**离仓**跑一遍：不带 GitHub 凭据问三件事（本仓库是否匿名可见 + 公开上游对照组 + jsDelivr 元数据 API），再逐条问 `plugins/info.json` 的固定链接到底服不服务，输出 `INDEX_PRIVATE` / `INDEX_OK` / `INCONCLUSIVE` 之一 + 逐条状态表 + 退出码（0 全部可装，2 有死链，3 判不出）。`--json` 给 CI 用，`--url-only` 只回答单个 URL。为什么单独一个脚本：这是**发版后必做的那一步**（§8）——本地套件全绿只证明条目 == 所指内容，不证明别人拉得到，而私有仓库上的 CDN 缓存会**逐条过期**，没人碰它也会坏 |
 | `vlc_sender_sim.py` | **忠实复刻 VLC 状态机**的发送端（含严格 protobuf 语义）。必须等到 `PLAYING` 才算通过 |
 | `cast_probe.py` | 手写 TLS/CASTV2 的最小发送端，打逐步日志 |
 | `cast_streaming_probe.py` | **把 `plugins/screen_mirror.py` 的低延迟通道原样打到真电视上**（镜像接收器 `0F5096E8` + OFFER/ANSWER + UDP RTP）。它 `import` 插件本体而不是复刻协议，所以真机通过 = 菜单栏那条路通过。`--live` 采真桌面、`--source` 用文件、`--dump` 留 Annex-B 给 ffprobe。Part 24 只证明字节自洽，**这一步才证明电视认不认**（§4.9） |

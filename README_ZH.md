@@ -117,6 +117,12 @@ Macast是一个跨平台的 **菜单栏\状态栏** 应用，用户可以使用�
      **一次只能选一个**（菜单栏切换）。
      yt-dlp / ffmpeg / shairport-sync / uxplay / 外部播放器都要你自己先装；设置页拉不到索引时只会显示
      本机插件，不影响使用。
+     > ⚠ **在线「安装」目前对别人不可用**：本仓库是**私有**的，而 jsDelivr / raw 读不到私有仓库，
+     > Macast 下载插件时也不带凭据 —— 卡片能显示、点安装会失败（少数条目还在回 200，那是 CDN
+     > 在仓库还可读时缓存的副本，会逐条过期）。在把仓库改成公开（或把 `plugins/` 发布到公开仓库）
+     > 之前，请把它当**源码目录**：拿 `.py` 用设置页的「从网址安装」贴一个可达的地址，
+     > 或直接放进 `~/Library/Application Support/Macast/renderer/`。
+     > 想知道自己这台机器上到底通不通：`python3 scripts/check_index_reachability.py`。
   3. 支持修改默认播放器的快捷键或其他参数，见：[#how-to-set-personal-configurations-to-mpv](https://github.com/xfangfang/Macast/wiki/FAQ#how-to-set-personal-configurations-to-mpv)
 
 - **程序员**  

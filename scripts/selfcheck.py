@@ -273,6 +273,93 @@ for _name, _dirs in (("uxplay", ("/opt/homebrew/bin", "/usr/local/bin",
 
 
 # ---------------------------------------------------------------------------
+# 4b. can anyone actually install a plugin from the index?
+#
+# The settings page lists what `plugins/info.json` offers and installs it from a
+# jsDelivr URL pinned to a commit. Neither jsDelivr nor raw can read a private
+# repository, and Macast sends no credentials when it downloads -- so the cards
+# render, look installable, and fail minutes later with a download error that
+# reads like a network problem.
+#
+# Three questions, because they have different answers and the failure mode is
+# subtle: does GitHub show the repo to an anonymous caller, does jsDelivr's own
+# metadata API resolve it, and does each pinned URL actually serve. A pin can
+# answer 200 while the repository is private -- the CDN keeps serving copies it
+# cached while the repo was reachable, which says nothing about a cold request
+# for a file nobody has fetched yet. The control request to the known-public
+# upstream is what separates all of that from "this machine has no egress".
+# ---------------------------------------------------------------------------
+print("\n=== online plugin index ===")
+try:
+    import json as _json
+    import requests as _requests
+    from macast import plugin_repo
+
+    _heads = {'User-Agent': 'Macast-selfcheck'}
+
+    def _status(url, timeout=8):
+        """HTTP status for `url`; 0 when the request never got an answer."""
+        try:
+            resp = _requests.get(url, headers=_heads, timeout=timeout,
+                                 stream=True)
+            try:
+                return resp.status_code
+            finally:
+                resp.close()
+        except _requests.exceptions.RequestException:
+            return 0
+
+    _ours = _status('https://api.github.com/repos/{}'.format(plugin_repo.REPO))
+    _theirs = _status('https://api.github.com/repos/xfangfang/Macast')
+    _cdn = _status('https://data.jsdelivr.com/v1/packages/gh/{}'
+                   .format(plugin_repo.REPO))
+    with open(os.path.join(REPO, "plugins", "info.json"), encoding="utf-8") as _fh:
+        _entries = _json.load(_fh).get("plugin_v1") or []
+
+    if _ours == 200 and _cdn == 200:
+        ok("index repo {} is public and jsDelivr resolves it, so {} entries are "
+           "installable by anyone".format(plugin_repo.REPO, len(_entries)))
+    elif _ours == 404 and _theirs == 200:
+        warn("{} is invisible to anonymous callers (GitHub 404 where a public "
+             "repo answers 200, and jsDelivr's own API says {} for it), so no "
+             "fresh install can be served".format(
+                 plugin_repo.REPO,
+                 "the same 404" if _cdn == 404 else "HTTP {}".format(_cdn)),
+             "the repository is private. Either make it public, or publish "
+             "plugins/ from a public repo and point macast/plugin_repo.py::REPO "
+             "at it. Meanwhile install by pasting a reachable URL into the "
+             "settings page's '从网址安装', or by copying the .py into "
+             "~/Library/Application Support/Macast/renderer/")
+    elif _ours == 0 or _theirs == 0:
+        warn("could not reach GitHub to judge the index ({} vs {})".format(
+            _ours, _theirs),
+             "a blocking proxy makes this inconclusive; it says nothing about "
+             "the repository itself")
+    else:
+        warn("unexpected answers while judging the index repo (ours {}, the "
+             "public control {}, jsDelivr metadata {})".format(
+                 _ours, _theirs, _cdn),
+             "check these by hand: `gh api repos/{} --jq .private` and "
+             "`curl -s -o /dev/null -w '%{{http_code}}' "
+             "https://data.jsdelivr.com/v1/packages/gh/{}`".format(
+                 plugin_repo.REPO, plugin_repo.REPO))
+
+    _dead = [_e["title"] for _e in _entries
+             if _status(_e["url"], timeout=8) != 200]
+    if _entries and not _dead:
+        ok("all {} pinned install URLs answer 200".format(len(_entries)))
+    elif _dead:
+        warn("{} of {} pinned install URLs do not serve the file: {}".format(
+            len(_dead), len(_entries), ", ".join(_dead)),
+             "the pins are correct -- Part 5c proves each one against "
+             "`git show <sha>:plugins/<file>`, which is local. Reachability is a "
+             "different thing, and the entries that still answer 200 do so from "
+             "the CDN's cache of a time when the repository was readable")
+except Exception as _e:
+    warn("could not check the plugin index ({})".format(_e))
+
+
+# ---------------------------------------------------------------------------
 # 5. environment traps from this repo's history
 # ---------------------------------------------------------------------------
 print("\n=== environment ===")
