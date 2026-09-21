@@ -71,6 +71,17 @@
         },
         {
             "author": "pingod",
+            "desc": "把这台机器磁盘上的文件投到电视：菜单栏里选一个文件夹、点文件就开始播（Chromecast / Google TV，或只认 DLNA 的老电视）。电视能自己解码的文件由插件内置的 HTTP 服务按字节原样供出，所以遥控器上的暂停、拖动、音量直接作用在真文件上；其余的（AVI / MKV / HEVC / DTS / AC-3 / 第二条音轨 / 内嵌字幕）交给 ffmpeg 边播边转，拖动就从新时间点重启编码器。另有：播放列表在设备上报播完后自动连播、音轨选择与音画同步偏移、内嵌字幕（Chromecast 转成 WebVTT 由接收端渲染；转码路径在这个 ffmpeg 带 libass 时烧进画面）、被别的设备抢占后自动重投（最多三次，之后就把电视让出去）、停止时发 QUIT_APP 让电视回到自己的画面而不是停在最后一帧，以及只投系统声音的音频档。需要自行安装 ffmpeg / ffprobe。",
+            "host_version": "0.7",
+            "platform": "darwin,win32,linux",
+            "renderer": "LocalFileRenderer",
+            "title": "Local File Caster",
+            "type": "renderer",
+            "url": "https://cdn.jsdelivr.net/gh/pingod/Macast@c2ebb9ce7a2f7d8cd167299396f34c578c624030/plugins/cast_local_file.py",
+            "version": "0.1"
+        },
+        {
+            "author": "pingod",
             "desc": "接收 iPhone / iPad 的 AirPlay 音频并放到本机音箱（Macast 只做了视频那一半）。由 shairport-sync 实现，需要自己安装。",
             "host_version": "0.7",
             "platform": "darwin,linux",
