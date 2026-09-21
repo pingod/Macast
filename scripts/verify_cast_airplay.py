@@ -3967,12 +3967,13 @@ try:
 case "$*" in
   *list_devices*)
     printf '%s\n' \
-      '[avfoundation @ 0x1] The following devices were found:' \
-      '[avfoundation @ 0x1] Video devices:' \
-      '[avfoundation @ 0x1]    "FaceTime HD Camera"' \
-      '[avfoundation @ 0x1]    "Capture screen 0"' \
-      '[avfoundation @ 0x1] Audio devices:' \
-      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+      'AVFoundation input device list has 3 items:' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] FaceTime HD Camera' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
 esac
@@ -4009,13 +4010,14 @@ done
 case "$*" in
   *list_devices*)
     printf '%s\n' \
-      '[avfoundation @ 0x1] The following devices were found:' \
-      '[avfoundation @ 0x1] Video devices:' \
-      '[avfoundation @ 0x1]    "FaceTime HD Camera"' \
-      '[avfoundation @ 0x1]    "Capture screen 0"' \
-      '[avfoundation @ 0x1] Audio devices:' \
-      '[avfoundation @ 0x1]    "MacBook Pro Microphone"' \
-      '[avfoundation @ 0x1]    "BlackHole 2ch"'
+      'AVFoundation input device list has 4 items:' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] FaceTime HD Camera' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone' \
+      '[AVFoundation indev @ 0x1] [1] BlackHole 2ch' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
 esac
@@ -4398,13 +4400,14 @@ try:
 case "$*" in
   *list_devices*)
     printf '%s\n' \
-      '[avfoundation @ 0x1] The following devices were found:' \
-      '[avfoundation @ 0x1] Video devices:' \
-      '[avfoundation @ 0x1]    "Capture screen 0"' \
-      '[avfoundation @ 0x1]    "Capture screen 1"' \
-      '[avfoundation @ 0x1]    "Capture screen 2"' \
-      '[avfoundation @ 0x1] Audio devices:' \
-      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+      'AVFoundation input device list has 4 items:' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 1' \
+      '[AVFoundation indev @ 0x1] [2] Capture screen 2' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
 esac
@@ -4912,11 +4915,13 @@ try:
 case "$*" in
   *list_devices*)
     printf '%s\n' \
-      '[avfoundation @ 0x1] The following devices were found:' \
-      '[avfoundation @ 0x1] Video devices:' \
-      '[avfoundation @ 0x1]    "Capture screen 0"' \
-      '[avfoundation @ 0x1] Audio devices:' \
-      '[avfoundation @ 0x1]    "MacBook Pro Microphone"'
+      'AVFoundation input device list has 3 items:' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] FaceTime高清相机' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro麦克风' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
 esac
@@ -9506,14 +9511,21 @@ try:
             mirror29._audio_setup_busy.clear()
             _unstub29()
 
-        # -- wiring: the menu and manifest moved to v0.7 -----------------------
+        # -- wiring: what the menu says must be what the manifest says ----------
+        # Written against one release number at first, which meant every bump
+        # had to remember to edit this file -- and the interesting failure is a
+        # *stale* label, so the check now reads the manifest and demands that no
+        # other version appears in the plugin at all.
         with open(os.path.join(REPO, "plugins", "screen_mirror.py"), "r",
                   encoding="utf-8") as _f:
             _src29 = _f.read()
-        check("the plugin announces v0.7 everywhere the user reads it",
-              '<macast.version>0.7</macast.version>' in _src29
-              and "Screen Mirror v0.7" in _src29
-              and "Screen Mirror v0.6" not in _src29)
+        import re as _re29
+        _manifest29 = _re29.search(r'<macast\.version>([^<]*)</macast\.version>',
+                                   _src29).group(1)
+        _announced29 = set(_re29.findall(r'Screen Mirror v([0-9][.\w]*)', _src29))
+        check("the plugin announces its manifest version everywhere the user reads it",
+              _announced29 == {_manifest29},
+              "manifest=%s, menu says=%s" % (_manifest29, sorted(_announced29)))
         check("the setup hands its progress object down the whole chain",
               "_route_audio_through_blackhole(ffmpeg, progress=progress)"
               in _src29 and "_wait_for_blackhole(ffmpeg, progress=progress)"
@@ -9528,6 +9540,440 @@ except Exception as e:
     traceback.print_exc()
     check("the v0.7 assisted install behaves", False,
           "{}: {}".format(type(e).__name__, e))
+
+
+# --------------------------------------------------------------------------
+# Part 30: what an online plugin is allowed to import
+#
+# `plugins/*.py` are single files the app downloads and execs at runtime, so a
+# third-party import in one of them is a promise nobody is holding: the built
+# artefacts carry exactly what `requirements/` declares (AGENTS.md §4.3/§4.4),
+# and a user who installs a bare .py gets whatever their machine happens to
+# already have. Until now the rule was prose -- and `screen_mirror`'s use of
+# pyobjc's `Foundation` turned that prose into an argument about whether a
+# transitive dependency counts as "Macast 自带的库". It was settled by naming
+# pyobjc in requirements/darwin.txt instead of inheriting it from rumps, which is
+# the first thing these checks hold the two files to.
+# --------------------------------------------------------------------------
+print("\n=== Part 30: online plugin imports ===")
+try:
+    import ast as _ast30
+    import re as _re30
+
+    def _norm30(name):
+        return str(name).lower().replace('_', '-')
+
+    def _dist_from_line(raw):
+        """Distribution name behind one requirements line, or ''.
+
+        Handles the two forms these files actually use: a plain requirement with
+        a specifier, and a `git+https://...` URL (pystray and pyperclip), whose
+        distribution name is the repository's.
+        """
+        line = raw.split('#', 1)[0].strip()
+        if not line or line.startswith('-'):
+            return ''
+        if line.startswith('git+') or '://' in line:
+            tail = line.rstrip('/').rsplit('/', 1)[-1].split('@')[-1]
+            if tail.endswith('.git'):
+                tail = tail[:-4]
+            return _norm30(tail)
+        return _norm30(_re30.split(r'[<>=!;\s]', line, 1)[0])
+
+    def _requirements_dists():
+        """Distribution names requirements/*.txt asks for, normalised."""
+        names = set()
+        req_dir = os.path.join(REPO, "requirements")
+        for fname in sorted(os.listdir(req_dir)):
+            if not fname.endswith(".txt"):
+                continue
+            with open(os.path.join(req_dir, fname), encoding="utf-8") as fh:
+                for line in fh:
+                    name = _dist_from_line(line)
+                    if name:
+                        names.add(name)
+        return names
+
+    def _declared_in(fname):
+        """Distribution names one requirements file asks for."""
+        names = set()
+        with open(os.path.join(REPO, "requirements", fname), encoding="utf-8") as fh:
+            for line in fh:
+                name = _dist_from_line(line)
+                if name:
+                    names.add(name)
+        return names
+
+    def _import_roots(source, top_level_only=False):
+        """Module names an import statement reaches for.
+
+        `top_level_only` keeps out of function and class bodies, so it answers a
+        different question: not "what may be imported here" but "what is
+        imported the moment the file is loaded" -- which is what decides whether
+        the plugin can load at all on another platform.
+        """
+        tree = _ast30.parse(source)
+        out = set()
+
+        def _take(node):
+            if isinstance(node, _ast30.Import):
+                out.update(a.name.split('.')[0] for a in node.names)
+            elif isinstance(node, _ast30.ImportFrom) and node.level == 0 and node.module:
+                out.add(node.module.split('.')[0])
+
+        if not top_level_only:
+            for node in _ast30.walk(tree):
+                _take(node)
+            return out
+        stack = list(_ast30.iter_child_nodes(tree))
+        while stack:
+            node = stack.pop()
+            _take(node)
+            if isinstance(node, (_ast30.FunctionDef, _ast30.AsyncFunctionDef,
+                                 _ast30.ClassDef)):
+                continue
+            stack.extend(_ast30.iter_child_nodes(node))
+        return out
+
+    _declared30 = _requirements_dists()
+    # Modules that exist only on one platform, with the distribution that
+    # provides them and the requirement file that must name it. A table rather
+    # than a guess at what this machine has installed: on Linux, pyobjc is not
+    # importable and `packages_distributions()` therefore cannot report it, so
+    # the platform-conditional names have to be allowed by rule -- and the rule
+    # is only honest because the file it points at really declares them.
+    _PLATFORM_OPTIONAL = {
+        'Foundation': ('pyobjc-framework-Cocoa', 'darwin.txt'),
+        'objc': ('pyobjc-framework-Cocoa', 'darwin.txt'),
+    }
+    for _mod, (_dist, _rfile) in _PLATFORM_OPTIONAL.items():
+        check("{} is allowed in plugins only because {} declares {}"
+              .format(_mod, _rfile, _dist),
+              _norm30(_dist) in _declared_in(_rfile),
+              str(sorted(_declared_in(_rfile))))
+
+    try:
+        from importlib.metadata import packages_distributions as _pdd30
+        _mapped = {m for m, ds in _pdd30().items()
+                   if any(_norm30(d) in _declared30 for d in ds)}
+    except ImportError:  # pragma: no cover - Python < 3.8
+        _mapped = set()
+    _allowed30 = (set(sys.stdlib_module_names) | _mapped | set(_PLATFORM_OPTIONAL)
+                  | {'macast', 'macast_renderer'})
+
+    def _illegal30(source):
+        return sorted(r for r in _import_roots(source) if r not in _allowed30)
+
+    _plugin_dir30 = os.path.join(REPO, "plugins")
+    _bad30 = {}
+    for _fname in sorted(os.listdir(_plugin_dir30)):
+        if not _fname.endswith(".py") or _fname.startswith("__"):
+            continue
+        with open(os.path.join(_plugin_dir30, _fname), encoding="utf-8") as fh:
+            _offenders = _illegal30(fh.read())
+        if _offenders:
+            _bad30[_fname] = _offenders
+    check("no online plugin imports a third-party module Macast does not declare",
+          not _bad30, str(_bad30))
+    # The other way round: prove the rule above is not vacuous, and that it
+    # allows what it should allow. A plugin adding `import aiortc` is exactly
+    # the case AGENTS.md §4.6 sends to the bundled-plugin route, and `cherrypy`
+    # has to stay legal or every protocol plugin here would be reported.
+    check("an undeclared pip import is what this catches, and a declared one is not",
+          _illegal30("import aiortc\nimport pychromecast\n") == ['aiortc', 'pychromecast']
+          and _illegal30("import cherrypy\nimport Foundation\nimport os\n") == [],
+          str(_illegal30("import aiortc\nimport cherrypy\nimport Foundation\n")))
+
+    # pyobjc has to stay a declared dependency, not one inherited from rumps:
+    # macast/utils.py imports AppKit at module level, and the two names above are
+    # the audio bridge's. §4.3 is the record of what silent inheritance does.
+    _darwin30 = _declared_in('darwin.txt')
+    check("darwin declares the framework behind Foundation itself",
+          'pyobjc-framework-cocoa' in _darwin30, str(sorted(_darwin30)))
+
+    # §4.3's lesson, made automatic rather than remembered: the macOS CI job
+    # installs from its own inline list (`build_macos_arm.sh` at least reads
+    # requirements/darwin.txt), and the last time the two disagreed the shipped
+    # .app died at launch with a ModuleNotFoundError while source ran fine.
+    _pip_words = []
+    _gathering = False
+    with open(os.path.join(REPO, ".github", "workflows", "build.yml"),
+              encoding="utf-8") as fh:
+        for _line in fh:
+            if _gathering:
+                _pip_words.append(_line)
+                _gathering = _line.rstrip().endswith('\\')
+            elif 'pip install' in _line:
+                _pip_words.append(_line.split('pip install', 1)[1])
+                _gathering = _line.rstrip().endswith('\\')
+    _ci30 = set()
+    for _tok in _re30.findall(r"['\"]([^'\"]+)['\"]", ''.join(_pip_words)):
+        _ci30.add(_norm30(_re30.split(r'[<>=!~\s]', _tok, 1)[0].split('[', 1)[0]))
+    _absent = sorted(_darwin30 - _ci30)
+    check("the macOS CI job installs everything requirements/darwin.txt names",
+          not _absent, "missing from build.yml: %s" % _absent)
+
+    with open(os.path.join(MACAST, "utils.py"), encoding="utf-8") as fh:
+        _utils_src = fh.read()
+    _tree30 = _ast30.parse(_utils_src)
+    _anchored = []
+    for _node in _ast30.walk(_tree30):
+        if isinstance(_node, _ast30.If) and 'darwin' in _ast30.dump(_node.test).lower():
+            _inner = set()
+            for _child in _ast30.walk(_node):
+                if isinstance(_child, _ast30.Import):
+                    _inner.update(a.name.split('.')[0] for a in _child.names)
+                elif (isinstance(_child, _ast30.ImportFrom) and _child.level == 0
+                      and _child.module):
+                    _inner.add(_child.module.split('.')[0])
+            if 'AppKit' in _inner:
+                _anchored.append('AppKit')
+    check("the core is what anchors pyobjc on macOS (utils.py imports AppKit "
+          "under a darwin guard)", bool(_anchored),
+          'module-level imports: %s' % sorted(_import_roots(_utils_src,
+                                                            top_level_only=True)))
+
+    # ... and the plugin keeps those names out of module scope, so a Windows or
+    # Linux user can still load the file: the import is reached only from the
+    # CoreAudio paths, and `from Foundation import ...` sits in a try/except.
+    with open(os.path.join(_plugin_dir30, "screen_mirror.py"), encoding="utf-8") as fh:
+        _mirror_src30 = fh.read()
+    _hoisted = sorted(r for r in _import_roots(_mirror_src30, top_level_only=True)
+                      if r in _PLATFORM_OPTIONAL)
+    check("screen_mirror loads on every platform: no pyobjc import at module level",
+          not _hoisted, str(_hoisted))
+except Exception as _e30:
+    import traceback
+    traceback.print_exc()
+    check("plugin import rules are checkable", False,
+          "{}: {}".format(type(_e30).__name__, _e30))
+
+
+# --------------------------------------------------------------------------
+# Part 31: what `ffmpeg -list_devices` actually prints
+#
+# `screen_mirror` shipped four releases of a darwin capture probe that could
+# never succeed on a real Mac. The parser split the device listing on
+# 'Video devices:' -- capital V, while ffmpeg prints 'AVFoundation video
+# devices:' -- and then kept only text sitting between double quotes, which
+# ffmpeg never emits. On a real machine both lists came back empty,
+# `_probe_avfoundation` returned None and mirroring refused to start with
+# "no capturable screen". Parts 21/22/23 each fed that parser a fixture written
+# in exactly that invented shape, so 1053 checks were green around a bug that
+# made the feature unreachable on its primary platform. The first check below
+# is this machine's ffmpeg, verbatim; the last one is the old parser, kept
+# executable so the shape of the mistake stays on record; the one before it
+# reads this file and refuses fixtures that repeat it.
+# --------------------------------------------------------------------------
+print("\n=== Part 31: the avfoundation device listing ===")
+try:
+    import re as _re31
+    _saved_setting31 = (utils.Setting.setting, utils.Setting.setting_path)
+    _saved_dir31 = utils.SETTING_DIR
+    _tmp31 = _tempfile.mkdtemp(prefix="macast-mirror31-")
+    _bin31 = os.path.join(_tmp31, "bin")
+    _mirror31 = None
+    os.makedirs(_bin31)
+    try:
+        utils.SETTING_DIR = _tmp31
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp31, "macast_setting.json")
+
+        _mirror31 = _load_plugin("screen_mirror_plugin_v08", "screen_mirror.py")
+        _mirror31.invalidate_capture_cache()
+
+        # Captured with
+        #   ffmpeg -hide_banner -loglevel info -f avfoundation \
+        #          -list_devices true -i ""
+        # on the machine these tests run on. Every line but the last three is
+        # what the parser has to survive: the log prefix, the lower-case block
+        # names, indices in square brackets, names in Chinese, and ffmpeg
+        # failing to open the (empty) input afterwards.
+        _real31 = (
+            '[AVFoundation indev @ 0x7ac1400140] AVFoundation video devices:\n'
+            '[AVFoundation indev @ 0x7ac1400140] [0] OBS Virtual Camera\n'
+            '[AVFoundation indev @ 0x7ac1400140] [1] FaceTime高清相机\n'
+            '[AVFoundation indev @ 0x7ac1400140] [2] Capture screen 0\n'
+            '[AVFoundation indev @ 0x7ac1400140] AVFoundation audio devices:\n'
+            '[AVFoundation indev @ 0x7ac1400140] [0] MacBook Pro麦克风\n'
+            '[AVFoundation indev @ 0x7ac1400140] [1] JustStream Audio Driver\n'
+            '[in#0 @ 0x7ac1400000] Error opening input: Input/output error\n'
+            "Error opening input file .\n"
+            "Error opening input files: Input/output error\n")
+        _vid31 = ['OBS Virtual Camera', 'FaceTime高清相机', 'Capture screen 0']
+        _aud31 = ['MacBook Pro麦克风', 'JustStream Audio Driver']
+        check("the listing this machine's ffmpeg really prints yields devices",
+              _mirror31._parse_avfoundation_lists(_real31) == (_vid31, _aud31),
+              str(_mirror31._parse_avfoundation_lists(_real31)))
+
+        # ffmpeg 4.x spelled the same report differently, and the plugin still
+        # has to read it: an older build on an older Mac is the common case for
+        # anyone whose Homebrew is years stale.
+        check("the older 'List of Video devices:' / '0) name' spelling parses too",
+              _mirror31._parse_avfoundation_lists(
+                  'List of AVFoundation Video devices:\n'
+                  '  0) FaceTime HD Camera\n'
+                  '  1) Capture screen 0\n'
+                  'List of AVFoundation Audio devices:\n'
+                  '  0) MacBook Pro Microphone\n')
+              == (['FaceTime HD Camera', 'Capture screen 0'],
+                  ['MacBook Pro Microphone']),
+              str(_mirror31._parse_avfoundation_lists(
+                  'List of AVFoundation Video devices:\n  0) FaceTime HD Camera\n')))
+
+        # Names are printed as `[N] name`, so a line without an index is not a
+        # device the plugin can address: `-i N:none` needs that number. This is
+        # deliberately what the invented quoted form parses to -- an honest
+        # empty result rather than a guessed index.
+        check("a device line with no index is not a device",
+              _mirror31._parse_avfoundation_lists(
+                  'AVFoundation video devices:\n'
+                  '   "Capture screen 0"\n') == ([], []),
+              str(_mirror31._parse_avfoundation_lists(
+                  'AVFoundation video devices:\n   "Capture screen 0"\n')))
+
+        # -- the same reading, through a real subprocess ---------------------
+        _listing31 = os.path.join(_tmp31, "listing.txt")
+        with open(_listing31, "w", encoding="utf-8") as _fh31:
+            _fh31.write(_real31)
+        _argv31 = os.path.join(_tmp31, "argv.txt")
+        _fake31 = _write_fake(_bin31, "ffmpeg", """#!/bin/sh
+printf '%s\\n' "$@" >> '{argv}'
+case "$*" in
+  *list_devices*)
+    cat '{listing}'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\\0' 'T'
+  sleep 0.05
+done
+""".format(argv=_argv31, listing=_listing31))
+        _asked_list31 = _mirror31._avfoundation_lists(_fake31)
+        check("…and the plugin asks ffmpeg for it with the exact command line",
+              _asked_list31 == (_vid31, _aud31), str(_asked_list31))
+        with open(_argv31, encoding="utf-8") as _fh31:
+            _asked31 = [l.rstrip('\n') for l in _fh31]
+        check("…asking for the device table only, never opening a device",
+              _asked31 == ['-hide_banner', '-loglevel', 'info',
+                           '-f', 'avfoundation', '-list_devices', 'true',
+                           '-i', ''], str(_asked31))
+
+        # Device names on a Chinese-locale Mac are UTF-8, and a webcam name can
+        # be anything the firmware put there. The read is `errors='replace'`,
+        # so the worst case is one mangled name -- not an exception that loses
+        # every device after it.
+        _raw31 = os.path.join(_tmp31, "raw.txt")
+        with open(_raw31, "wb") as _fh31:
+            _fh31.write(
+                b'[AVFoundation indev @ 0x1] AVFoundation video devices:\n'
+                b'[AVFoundation indev @ 0x1] [0] Clear Name\n'
+                b'[AVFoundation indev @ 0x1] [1] Bad\xff\xc3name\n'
+                b'[AVFoundation indev @ 0x1] AVFoundation audio devices:\n'
+                b'[AVFoundation indev @ 0x1] [0] Fine Mic\n')
+        _rawfake31 = _write_fake(_bin31, "ffmpeg-broken", """#!/bin/sh
+case "$*" in
+  *list_devices*) cat '{raw}'; exit 0;;
+esac
+exit 1
+""".format(raw=_raw31))
+        _vidbroken31, _audbroken31 = _mirror31._avfoundation_lists(_rawfake31)
+        check("one undecodable device name costs that name's bytes, not the list",
+              len(_vidbroken31) == 2 and _vidbroken31[0] == 'Clear Name'
+              and '\ufffd' in _vidbroken31[1] and _audbroken31 == ['Fine Mic'],
+              str((_vidbroken31, _audbroken31)))
+
+        # -- what the probe does with a correct list --------------------------
+        # This is the level the user felt the bug at: not "the parse returned
+        # []" but "the menu says this Mac cannot mirror anything".
+        _cap31 = _mirror31.probe_capture(_fake31, 'darwin', True)
+        check("so the darwin probe finds the screen at its real avfoundation index",
+              _cap31 is not None and _cap31.screens == [(2, 'Capture screen 0')]
+              and _cap31.inputs[0][-1] == '2:none'
+              and _cap31.audio_map is None,
+              str(_cap31 and (_cap31.screens, _cap31.inputs, _cap31.audio_map)))
+
+        _bhlisting31 = os.path.join(_tmp31, "bh.txt")
+        with open(_bhlisting31, "w", encoding="utf-8") as _fh31:
+            _fh31.write(_real31.replace(
+                '[1] JustStream Audio Driver',
+                '[1] JustStream Audio Driver\n'
+                '[AVFoundation indev @ 0x7ac1400140] [2] BlackHole 2ch'))
+        _bhfakes1 = _write_fake(_bin31, "ffmpeg-bh", """#!/bin/sh
+case "$*" in
+  *list_devices*) cat '{listing}'; exit 0;;
+esac
+exit 1
+""".format(listing=_bhlisting31))
+        _capbh31 = _mirror31.probe_capture(_bhfakes1, 'darwin', True)
+        check("a BlackHole two indices away from the mic is still the third input",
+              _capbh31 is not None and _capbh31.inputs[0][-1] == '2:2'
+              and _capbh31.audio_map == '0:a:0',
+              str(_capbh31 and (_capbh31.inputs, _capbh31.audio_map)))
+
+        _none31 = os.path.join(_tmp31, "none.txt")
+        with open(_none31, "w", encoding="utf-8") as _fh31:
+            _fh31.write('[AVFoundation indev @ 0x1] AVFoundation video devices:\n'
+                        '[AVFoundation indev @ 0x1] AVFoundation audio devices:\n'
+                        '[in#0 @ 0x1] Error opening input: Input/output error\n')
+        _nofake31 = _write_fake(_bin31, "ffmpeg-none", """#!/bin/sh
+case "$*" in
+  *list_devices*) cat '{listing}'; exit 0;;
+esac
+exit 1
+""".format(listing=_none31))
+        check("and an honest empty listing still means 'nothing to mirror'",
+              _mirror31.probe_capture(_nofake31, 'darwin', True) is None,
+              str(_mirror31.probe_capture(_nofake31, 'darwin', True)))
+
+        # -- the regression, kept executable --------------------------------
+        # The parser v0.1..v0.7 shipped, reproduced here line for line. On the
+        # output above it returns nothing, which is how a four-release-old bug
+        # looked like a working feature in every test.
+        def _old31(text):
+            def _section(marker):
+                tail = text.split(marker)
+                if len(tail) < 2:
+                    return []
+                body = tail[1]
+                for other in ('Video devices:', 'Audio devices:'):
+                    body = body.split(other)[0]
+                return _re31.findall(r'"([^"]*)"', body)
+            return _section('Video devices:'), _section('Audio devices:')
+        check("the parser this replaces read real ffmpeg output as an empty machine",
+              _old31(_real31) == ([], [])
+              and _mirror31._parse_avfoundation_lists(_real31) == (_vid31, _aud31),
+              str(_old31(_real31)))
+
+        # -- and the fixtures that hid it -----------------------------------
+        # A parser bug that its own tests agree with is a fixture bug. The
+        # fictional form had one unmistakable mark: a device name in quotes with
+        # no avfoundation index in front of it. Real ffmpeg does quote some
+        # names, always alongside `[N]`, so the index is what decides.
+        with open(os.path.abspath(__file__), encoding="utf-8") as _fh31:
+            _self31 = _fh31.read()
+        _fictional31 = []
+        for _block31 in _self31.split('*list_devices*)')[1:]:
+            for _line in _block31.split('exit 0')[0].splitlines():
+                if '"' not in _line:
+                    continue
+                if _re31.search(r'\[\s*\d+\s*\]|\d+\s*\)', _line):
+                    continue
+                _fictional31.append(_line.strip())
+        check("no fake ffmpeg in this suite answers -list_devices in the invented shape",
+              not _fictional31, str(_fictional31))
+    finally:
+        utils.SETTING_DIR = _saved_dir31
+        utils.Setting.setting, utils.Setting.setting_path = _saved_setting31
+        if _mirror31 is not None:
+            _mirror31.invalidate_capture_cache()
+        _shutil.rmtree(_tmp31, ignore_errors=True)
+except Exception as _e31:
+    import traceback
+    traceback.print_exc()
+    check("the device listing is checkable", False,
+          "{}: {}".format(type(_e31).__name__, _e31))
 
 
 # --------------------------------------------------------------------------

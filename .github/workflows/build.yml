@@ -86,7 +86,8 @@ jobs:
           # launch with "ModuleNotFoundError: No module named 'zeroconf'".
           pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
-                      'requests' 'pillow' 'zeroconf'
+                      'requests' 'pillow' 'zeroconf' \
+                      'pyobjc-framework-Cocoa'
 
       # No mpv is bundled. Playback uses the mpv already on the machine
       # (`brew install mpv`), which is what the source repo's README asks for

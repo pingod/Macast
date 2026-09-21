@@ -33,7 +33,7 @@
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.7** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机） | 依赖用户自己装的 `ffmpeg` 命令 |
+| `screen_mirror.py` | **Screen Mirror v0.8** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机） | 依赖用户自己装的 `ffmpeg` 命令 |
 | `cast_local_file.py` | **Local File Caster v0.1** — 把**这台机器磁盘上的文件**投到电视：菜单里选文件夹、点文件即在 Chromecast / Google TV 或 DLNA 电视上播；能原生解码的文件由内置 Range/206 服务按字节直供（远端的暂停/拖动直接作用在真文件上），其余边播由 ffmpeg 转码；带播放列表自动连播、音轨/字幕选择、音画同步偏移、被抢占后看门狗重投、退出时 QUIT_APP | 依赖用户自己装的 `ffmpeg` / `ffprobe` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 | `airplay_mirror.py` | **AirPlay Screen Mirror** — 监督 uxplay，让 iPhone / 另一台 Mac 把屏幕**镜像到这台机器**（镜像流是 AES-128-CTR，不需要 FairPlay；uxplay 自己开窗渲染） | 需要用户自己编译 `uxplay`（macOS 既无 Homebrew formula 也无官方二进制，插件日志里有完整配方） |
@@ -141,6 +141,16 @@
   `/Library/Audio/Plug-Ins/HAL` 里的文件），因为它们在半装状态下会给出不一致的答案；
   重载 coreaudiod 走 `osascript ... with administrator privileges`，所以它会弹一次授权。
   **仍然要说清**：.pkg 无法静默安装，那一次密码是省不掉的。
+  **v0.8 修的是从 v0.1 就在的一条坏路：macOS 上镜像根本起不来。** 采集探测要问
+  `ffmpeg -f avfoundation -list_devices true -i ""` 这台机器有哪些设备，而那段解析是按一个
+  **从未存在过的输出格式**写的 —— 它找 `Video devices:`（大写 V）并且只取双引号里的名字，
+  真实输出却是小写的 `AVFoundation video devices:`、设备名**不加引号**（`[0] OBS Virtual Camera`），
+  于是两个列表永远为空，菜单只会说「ffmpeg 没有列出任何屏幕采集设备（avfoundation）」。
+  现在的解析也认旧版 ffmpeg 的 `List of Video devices:` + `0) name` 写法；**没有索引的行不算设备**，
+  因为 `-i N:none` 需要那个数字。为什么四个版本都没被发现：Part 21/22/23 里的假 ffmpeg 输出的
+  正是那个虚构格式 —— 测试和实现共享了同一个错误假设。现在所有假 ffmpeg 一律照抄真机输出，
+  并且验证套件 Part 31 有一条用例**去扫测试文件自己**：任何 `-list_devices` 回答里出现
+  「带引号却没有索引」的设备行，当场变红。
 - **Local File Caster**：JustStream 的另一半能力 ——「文件在这台 Mac 上，想看的屏幕在客厅」。
   菜单选一个文件夹（`File_Folder` / 设置里的 `Folder`），列出其中的媒体文件，点一下就投出去。
   两个塑造整个文件的判断：

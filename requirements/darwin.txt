@@ -15,6 +15,12 @@ netifaces
 # but relying on that transitive dependency is how this list silently drifted
 # from what the code imports in the first place.
 pyperclip
+# Same story one level down: macast/utils.py imports AppKit at module level (on
+# darwin), and plugins/screen_mirror.py imports Foundation and objc for the
+# CoreAudio aggregate-device calls. Both come from this framework, which rumps
+# pulls in as pyobjc-framework-Cocoa -- declared here rather than inherited, so
+# dropping rumps cannot silently take the audio bridge with it.
+pyobjc-framework-Cocoa
 # Required by macast/discovery.py (mDNS advertisement for Chromecast/AirPlay).
 # Missing it is not a graceful degradation: the module import fails and the
 # app does not start at all.

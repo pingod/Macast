@@ -4,7 +4,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.7</macast.version>
+# <macast.version>0.8</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
@@ -539,10 +539,31 @@ def probe_capture(ffmpeg, platform=None, cursor=None):
     return capture
 
 
+#: What `ffmpeg -f avfoundation -list_devices true -i ""` really prints, on the
+#: ffmpeg this plugin runs against (verified against 7.x on macOS 26):
+#:
+#:   [AVFoundation indev @ 0x775701c140] AVFoundation video devices:
+#:   [AVFoundation indev @ 0x775701c140] [0] OBS Virtual Camera
+#:   [AVFoundation indev @ 0x775701c140] AVFoundation audio devices:
+#:   [AVFoundation indev @ 0x775701c140] [0] MacBook Pro麦克风
+#:
+#: Lower-case block names, and no quotes anywhere. Both details were wrong in
+#: the first parser -- it split on 'Video devices:' and then kept only what
+#: appeared between double quotes, so on a real Mac it returned two empty lists
+#: and the whole darwin probe gave up. An older ffmpeg spelled the headers
+#: `List of Video devices:` with `0) name` lines, which is still accepted.
+_AVFOUNDATION_BLOCK = re.compile(r'(?:list of\s+)?(video|audio)\s+devices',
+                                 re.I)
+_AVFOUNDATION_DEVICE = re.compile(r'(?:\[\s*(\d+)\s*\]|(\d+)\s*\))\s*"?(.*?)"?\s*$')
+
+
 def _avfoundation_lists(ffmpeg):
     """(video device names, audio device names) from -list_devices.
 
-    The avfoundation input index is the position inside the respective list.
+    The avfoundation input index is the position inside the respective list:
+    ffmpeg numbers each block from zero with no holes, so the printed number and
+    the position are the same thing -- the printed one is what is kept, so a
+    future gap would show up as a wrong device rather than a wrong assumption.
     """
     try:
         proc = subprocess.run([ffmpeg, '-hide_banner', '-loglevel', 'info',
@@ -554,17 +575,30 @@ def _avfoundation_lists(ffmpeg):
     except Exception as e:
         logger.error("cannot list avfoundation devices: %s", e)
         return [], []
+    return _parse_avfoundation_lists(text)
 
-    def _section(marker):
-        tail = text.split(marker)
-        if len(tail) < 2:
-            return []
-        body = tail[1]
-        for other in ('Video devices:', 'Audio devices:'):
-            body = body.split(other)[0]
-        return re.findall(r'"([^"]*)"', body)
 
-    return _section('Video devices:'), _section('Audio devices:')
+def _parse_avfoundation_lists(text):
+    """The two device lists, read out of ffmpeg's own log lines."""
+    blocks = {'video': {}, 'audio': {}}
+    current = None
+    for line in str(text or '').splitlines():
+        header = _AVFOUNDATION_BLOCK.search(line)
+        if header:
+            current = header.group(1).lower()
+            continue
+        if current is None:
+            continue
+        match = _AVFOUNDATION_DEVICE.search(line.strip())
+        if not match:
+            continue
+        index = int(match.group(1) if match.group(1) is not None
+                    else match.group(2))
+        name = match.group(3).strip()
+        if name:
+            blocks[current][index] = name
+    return ([blocks['video'][i] for i in sorted(blocks['video'])],
+            [blocks['audio'][i] for i in sorted(blocks['audio'])])
 
 
 def _probe_avfoundation(ffmpeg, cursor=True):
@@ -4366,7 +4400,7 @@ class ScreenMirrorSetting(RendererSetting):
         mirroring = bool(renderer and renderer.is_mirroring())
 
         items = [
-            MenuItem('Screen Mirror v0.7', enabled=False),
+            MenuItem('Screen Mirror v0.8', enabled=False),
             MenuItem('停止镜像' if mirroring else '开始镜像',
                      self.on_toggle_clicked),
             MenuItem('输出目标', children=self._output_children(kind)),
