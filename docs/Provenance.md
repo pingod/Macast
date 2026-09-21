@@ -6,7 +6,7 @@
 > `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
 > 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
 
-<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=6 vendored=6 mixed=9 ours=31 upstream_lines=6702 our_lines=30680 -->
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=30745 -->
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
@@ -66,13 +66,13 @@
 
 | 域 | 上游行 | 本 fork 行 | 文件数 | ours 占比 |
 |---|---:|---:|---:|---:|
-| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5483 | 17 | 64.1% |
+| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5493 | 17 | 64.1% |
 | 内置插件 `macast/plugins/**`（vendored） | 2885 | 0 | 9 | 0.0% |
-| mpv 渲染器 `macast_renderer/**` | 573 | 101 | 2 | 15.0% |
-| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 168 | 159 | 4 | 48.6% |
+| mpv 渲染器 `macast_renderer/**` | 573 | 102 | 2 | 15.1% |
+| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 212 | 4 | 64.6% |
 | 在线插件 `plugins/*.py` | 0 | 9881 | 9 | 100.0% |
-| 工具与验证 `scripts/*.py` | 0 | 15056 | 11 | 100.0% |
-| **合计** | **6702** | **30680** | **52** | **82.1%** |
+| 工具与验证 `scripts/*.py` | 0 | 15057 | 11 | 100.0% |
+| **合计** | **6650** | **30745** | **52** | **82.2%** |
 
 两个读数要点：
 
@@ -92,15 +92,17 @@
 
 | 文件 | 状态 | 上游行 | 我们的行 | 备注 |
 |---|---|---:|---:|---|
-| `macast/protocol.py` | mixed | 1001 | 973 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
-| `macast/macast.py` | mixed | 454 | 905 | 菜单栏与插件热插拔 |
-| `macast/utils.py` | mixed | 401 | 288 | `Setting` 与环境准备 |
-| `macast/gui.py` | mixed | 363 | 22 | 几乎全是上游的跨平台菜单层 |
-| `macast/ssdp.py` | mixed | 278 | 136 | **三层归属**，见 §4 |
-| `macast/server.py` | mixed | 184 | 211 | 上游文件本来没有头 ⇒ 补的是 `Derived from` 而不是编造版权行 |
-| `macast/plugin.py` | mixed | 175 | 13 | 渲染器基类：队列里第 1 位 |
-| `macast_renderer/mpv.py` | mixed | 573 | 101 | 与 mpv 的 IPC 契约 |
-| `Macast.py` | mixed | 53 | 159 | 入口 |
+| 文件 | 状态 | 上游行 | 我们的行 | 备注 |
+|---|---|---:|---:|---|
+| `macast/protocol.py` | mixed | 1001 | 974 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
+| `macast/macast.py` | mixed | 454 | 906 | 菜单栏与插件热插拔 |
+| `macast/utils.py` | mixed | 401 | 289 | `Setting` 与环境准备 |
+| `macast/gui.py` | mixed | 363 | 23 | 几乎全是上游的跨平台菜单层 |
+| `macast/ssdp.py` | mixed | 278 | 138 | **三层归属**，见 §4 |
+| `macast/server.py` | mixed | 184 | 213 | 上游文件本来没有头 ⇒ 补的是 `Derived from` 而不是编造版权行 |
+| `macast/plugin.py` | mixed | 175 | 14 | 渲染器基类：队列里第 1 位 |
+| `macast_renderer/mpv.py` | mixed | 573 | 102 | 与 mpv 的 IPC 契约 |
+| `Macast.py` | mixed | 53 | 160 | 入口 |
 | `macast/plugins/protocol/nirvana.py` | vendored | 1822 | 0 | 「哔哩必连」，来自 `Macast-plugins` |
 | `macast/plugins/renderer/iina.py` | vendored | 282 | 0 | 同上 |
 | `macast/plugins/renderer/live.py` | vendored | 250 | 0 | 同上（原先没有任何头 ⇒ 补 `Copied from`） |
@@ -109,9 +111,9 @@
 | `macast/plugins/renderer/pi_fm.py` | vendored | 159 | 0 | 同上 |
 | `macast/renderer.py` | upstream | 212 | 0 | 一行都没动过 ⇒ 队列第 1 位 |
 | `macast/__init__.py` | upstream | 8 | 0 | |
-| `setup.py` | upstream | 76 | 0 | 无头 ⇒ 补 `Derived from` |
-| `setup_py2app.py` | upstream | 24 | 0 | 无头 ⇒ 补 `Derived from` |
-| `hook-pystray.py` | upstream | 15 | 0 | 无头 ⇒ 补 `Derived from` |
+| `setup.py` | mixed | 42 | 34 | 署名已按量测补齐 |
+| `setup_py2app.py` | mixed | 7 | 17 | 署名已按量测补齐 |
+| `hook-pystray.py` | mixed | 14 | 1 | 署名已按量测补齐 |
 | `macast_renderer/__init__.py` | upstream | 0 | 0 | 空文件：没有任何表达作者身份的代码，两种声明都不需要 |
 
 ## 4. 第三层：`macast/ssdp.py` 里的 MIT 血统

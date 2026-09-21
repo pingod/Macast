@@ -1231,19 +1231,21 @@ class Macast(App):
                                     if t in order else len(order))
         self.save_enabled_protocols()
         item.checked = title in self.enabled_protocols
-
-        self._apply_enabled_protocols()
+        # The native menu remains open for this click; only update the checkmark
+        # in place. A full rebuild here closes the macOS menu immediately.
+        self._apply_enabled_protocols(rebuild_menu=False)
         cherrypy.engine.publish(
             'app_notify', _('Info'),
             _('{}.').format('{} {}'.format(
                 _('Enabled'), title) if item.checked else '{} {}'.format(
                 _('Disabled'), title)))
-
-    def _apply_enabled_protocols(self):
+    def _apply_enabled_protocols(self, rebuild_menu=True):
         """Start/stop protocols to match `enabled_protocols` in place.
 
         Deliberately not a full service restart: toggling Chromecast must not
-        interrupt a DLNA stream already playing.
+        interrupt a DLNA stream already playing.  A protocol toggle only changes
+        checkmarks; rebuilding the whole native menu from inside a menu callback
+        dismisses the macOS menu and makes rapid toggles require another click.
         """
         group = self.service.protocol
         running = Setting.is_service_running()
@@ -1280,9 +1282,10 @@ class Macast(App):
         self.service.refresh_protocol()
         self.setting_protocol = (self.enabled_protocols[0]
                                  if self.enabled_protocols else 'DLNA')
-        # May be reached from a CherryPy worker thread (settings page), so the
-        # menu rebuild is marshalled to the UI thread.
-        self.call_on_main_thread(self._rebuild_menu)
+        if rebuild_menu:
+            # May be reached from a CherryPy worker thread (settings page), so
+            # the menu rebuild is marshalled to the UI thread.
+            self.call_on_main_thread(self._rebuild_menu)
 
     def _rebuild_menu(self):
         self.setting_menuitem.children = self.build_setting_menu()

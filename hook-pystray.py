@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Derived from xfangfang/Macast (GPLv3). See docs/Provenance.md.
 import os
 import sys
