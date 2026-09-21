@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Floating player for Macast (plus an experimental wallpaper mode)
 #
 # Macast Metadata

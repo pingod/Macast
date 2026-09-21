@@ -1,3 +1,4 @@
+# Copied from xfangfang/Macast-plugins (GPLv3). See docs/Provenance.md.
 # mpv-based live plugin for macast
 #
 # Macast Metadata

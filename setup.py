@@ -1,3 +1,4 @@
+# Derived from xfangfang/Macast (GPLv3). See docs/Provenance.md.
 """
 Macast — a DLNA Media Renderer using mpv.
 

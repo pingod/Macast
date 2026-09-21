@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # External Player for Macast -- VLC / MPC-BE / MPC-HC / mpv.net
 #
 # Macast Metadata

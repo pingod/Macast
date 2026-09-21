@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Per-module log files, kept out of macast.log.
 
 A screen mirror streaming at 30 fps logs far more than the core protocol

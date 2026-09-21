@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Which settings key belongs to which module — and what to call it.
 
 The 高级设置 tab has always exposed the raw JSON, which answers "what is

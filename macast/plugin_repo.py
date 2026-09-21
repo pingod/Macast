@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Where the settings page looks for installable plugins.
 
 Macast historically read ``info.json`` from the upstream collection repo

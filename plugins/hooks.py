@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Automation hooks for Macast
 #
 # Macast Metadata

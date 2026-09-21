@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Chromecast Bridge for Macast
 #
 # Macast Metadata

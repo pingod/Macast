@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Minimal Chromecast *sender* used to test Macast's Cast receiver.
 
 Mimics the handshake a real sender performs, printing every response so we can

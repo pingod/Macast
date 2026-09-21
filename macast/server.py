@@ -1,3 +1,5 @@
+# Derived from xfangfang/Macast (GPLv3). See docs/Provenance.md.
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 import os
 import random
 import shutil

@@ -1,3 +1,4 @@
+# Derived from xfangfang/Macast (GPLv3). See docs/Provenance.md.
 # Licensed under the MIT license
 # http://opensource.org/licenses/mit-license.php
 
@@ -7,6 +8,7 @@
 # Copyright 2006,2007,2008,2009 Frank Scholz <coherence@beebits.net>
 # Copyright 2016 Erwan Martin <public@fzwte.net>
 # Copyright 2021 FangYuecheng <github.com/xfangfang>
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 #
 # Implementation of a SSDP server.
 #

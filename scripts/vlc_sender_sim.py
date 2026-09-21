@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Simulate VLC's Cast sender, including its *strict* device-auth step.
 
 VLC is the sender that exposes bugs pychromecast cannot, because

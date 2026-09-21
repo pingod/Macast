@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Single source of truth for the package version.
 #
 # Historically Macast stored the version in a dotfile (.version) at the package

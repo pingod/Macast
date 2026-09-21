@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """
 py2app build script for Macast on macOS.
 

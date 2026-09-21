@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # AirPlay audio (RAOP) for Macast, by supervising shairport-sync
 #
 # Macast Metadata

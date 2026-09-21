@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Drive the plugin's real Cast Streaming sender against a real Chromecast.
 
 Why this exists: `scripts/verify_cast_airplay.py` Part 24 builds its far end out

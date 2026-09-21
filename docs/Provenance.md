@@ -1,0 +1,158 @@
+# 来源台账（Provenance）
+
+> 机器可读的账目合计在下面的 `provenance-ledger` 注释行里，由
+> `scripts/verify_cast_airplay.py` **Part 34** 与 `scripts/provenance.py --json` 双向比对。
+> 改完任何 `.py` 的归属之后请三个动作一起做：
+> `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
+> 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
+
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=6 vendored=6 mixed=9 ours=31 upstream_lines=6702 our_lines=30680 -->
+
+## 0. 这份文档存在的理由，以及它不做的两件事
+
+本仓库是 `xfangfang/Macast` 的 fork，并且打算出售解锁档位（见
+[该行引用了内部规划文档，已移除]
+署名就不是格式问题而是**陈述**：
+
+- 上游的代码还在文件里，就把上游的声明删掉 —— 这是对代码来源的虚假陈述；
+- 一行都不是我们写的文件，盖上我们的名字 —— 这是对作者身份的虚假陈述。
+
+所以本仓库的做法是：**度量，然后按度量结果补声明，只加不减**。
+用户提出的"去掉 fork 与所有原项目信息"这一半不做（`AGENTS.md` §4.6、§5 已记录该决定）；
+要做的那一半 —— 把自己的代码逐步重写出来 —— 有队列、有判据，就在下面 §5。
+
+**它也不做的第二件事**：把重写当成换许可证的手段。GPLv3 下，只要产物仍是原始
+作品的衍生作品，重写其中一部分并不改变整体的许可证；真正能脱离的只有**净室实现**
+（不看原代码、只按公开行为规格重写）或**完全独立**的作品。本项目本来就以 GPLv3 发布，
+所以重写队列的目的只有一个：让"我们写了什么"这句话可以被核对。
+
+[该行涉及内部规划，已移除]
+
+## 1. 怎么度量的
+
+`scripts/provenance.py` 回答一个可以机械核对的问题：HEAD 上这个文件的**每一行**，
+最后一次被修改发生在 fork 起点之前还是之后？
+
+- fork 起点 = `19879235ef98a64b813de968306bc91a0d663518`（2026-09-03，本 fork 作者的第一条提交）。
+  它的父提交链 = 上游历史，共 **215** 条提交（`xfangfang` 209 条，其余 6 位贡献者 6 条）。
+- 判定手段是 `git blame --line-porcelain`，把每行的提交 SHA 落进"上游集合"还是"我们的集合"。
+- 两个盲区，脚本显式处理而不是留给读者：
+
+| 盲区 | 为什么 blame 会错 | 怎么补 |
+|---|---|---|
+| 从**另一个仓库**复制进来的文件 | 上游插件合集 `xfangfang/Macast-plugins` 从来不在本仓库历史里，粘贴它的那条提交会被当成作者 | `VENDORED` 常量表显式列出这 6 个内置插件 ⇒ 状态 `vendored`：要求上游归属，且**禁止**出现我们的声明 |
+| 改名 / 挪位置的文件 | blame 不跨重命名，历史被截断在同一行 | 比对 blob SHA：内容若与上游提交过的某个 blob **逐字节相同**，就是上游的，不管现在叫什么名字（少于 5 行的文件不参与，空文件的 blob 全世界都一样） |
+
+四条快速路径（新文件、未改动文件）走 `cat-file` / `diff --quiet`，只对真正动过的老文件跑 blame，
+所以全仓 52 个 `.py` 一遍 1.8 秒。
+
+四个状态就是声明必须对齐的四种事实：
+
+| 状态 | 含义 | 声明要求 |
+|---|---|---|
+| `upstream` | 本 fork 一行都没写 | 只归上游；**不许**出现我们的声明 |
+| `vendored` | 上游的，但来自历史看不见的仓库 | 同上，且必须点名 `Macast-plugins` |
+| `mixed` | 两边都还在 | 两条都要有，**任何一条都不许删** |
+| `ours` | 每一行都是本 fork 写的 | 我们的声明；这也是 §5 队列的终点状态 |
+
+`--check` 把这三条规则当成缺陷报出来（缺上游归属 / 缺我们的归属 / 在不该有的地方署名），
+`--stamp --apply` 只写**加法**：它从不删除任何一行已有声明。插入位置也是有讲究的 ——
+插件的 `<macast.*>` 清单只从**文件顶部连续的注释块**解析（`AGENTS.md` §4.5），
+所以新行必须留在那个块里；以 docstring 开头的文件不能让注释把 docstring 挤成普通表达式。
+
+## 2. 台账总览
+
+按域统计（行数是 blame 行数，不是文件大小；`ours 占比` = 我们写的行数 ÷ 总行数）：
+
+| 域 | 上游行 | 本 fork 行 | 文件数 | ours 占比 |
+|---|---:|---:|---:|---:|
+| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5483 | 17 | 64.1% |
+| 内置插件 `macast/plugins/**`（vendored） | 2885 | 0 | 9 | 0.0% |
+| mpv 渲染器 `macast_renderer/**` | 573 | 101 | 2 | 15.0% |
+| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 168 | 159 | 4 | 48.6% |
+| 在线插件 `plugins/*.py` | 0 | 9881 | 9 | 100.0% |
+| 工具与验证 `scripts/*.py` | 0 | 15056 | 11 | 100.0% |
+| **合计** | **6702** | **30680** | **52** | **82.1%** |
+
+两个读数要点：
+
+- **占比 82.1% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10685 行
+  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 70.0%；只看**运行时真正加载的**代码
+  （核心接收端 + mpv 渲染器）是 **60.5%**，也就是说应用本体还有约 3649 行是上游的。
+- **"看声明头"会把这件事估反**：按文件头里有没有 `by xfangfang` 数，会得出"21623 行是上游的"
+  ——因为上游的头贴在了一堆**代码早被我们重写干净**的文件上（`macast/discovery.py`、
+  `protocol_cast.py`、`protocol_group.py`、`protocol_airplay.py`、`scripts/verify_cast_airplay.py`
+  全是这种：blame 显示 0 上游行）。头标记的是**当初的意图**，blame 标记的是**现在的事实**。
+  这几个文件里上游的头**保留**：删掉它换来的不是自由，只是又一条没法核对的陈述。
+
+## 3. 逐文件台账（只列需要解释的行）
+
+`ours` 的 31 个文件不需要解释（9 个在线插件、11 个脚本 —— 含 `scripts/provenance.py` 自己、
+`macast/` 里 8 个新模块、3 个空 `__init__.py`）。剩下 21 个：
+
+| 文件 | 状态 | 上游行 | 我们的行 | 备注 |
+|---|---|---:|---:|---|
+| `macast/protocol.py` | mixed | 1001 | 973 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
+| `macast/macast.py` | mixed | 454 | 905 | 菜单栏与插件热插拔 |
+| `macast/utils.py` | mixed | 401 | 288 | `Setting` 与环境准备 |
+| `macast/gui.py` | mixed | 363 | 22 | 几乎全是上游的跨平台菜单层 |
+| `macast/ssdp.py` | mixed | 278 | 136 | **三层归属**，见 §4 |
+| `macast/server.py` | mixed | 184 | 211 | 上游文件本来没有头 ⇒ 补的是 `Derived from` 而不是编造版权行 |
+| `macast/plugin.py` | mixed | 175 | 13 | 渲染器基类：队列里第 1 位 |
+| `macast_renderer/mpv.py` | mixed | 573 | 101 | 与 mpv 的 IPC 契约 |
+| `Macast.py` | mixed | 53 | 159 | 入口 |
+| `macast/plugins/protocol/nirvana.py` | vendored | 1822 | 0 | 「哔哩必连」，来自 `Macast-plugins` |
+| `macast/plugins/renderer/iina.py` | vendored | 282 | 0 | 同上 |
+| `macast/plugins/renderer/live.py` | vendored | 250 | 0 | 同上（原先没有任何头 ⇒ 补 `Copied from`） |
+| `macast/plugins/renderer/potplayer.py` | vendored | 199 | 0 | 同上 |
+| `macast/plugins/renderer/web.py` | vendored | 173 | 0 | 同上 |
+| `macast/plugins/renderer/pi_fm.py` | vendored | 159 | 0 | 同上 |
+| `macast/renderer.py` | upstream | 212 | 0 | 一行都没动过 ⇒ 队列第 1 位 |
+| `macast/__init__.py` | upstream | 8 | 0 | |
+| `setup.py` | upstream | 76 | 0 | 无头 ⇒ 补 `Derived from` |
+| `setup_py2app.py` | upstream | 24 | 0 | 无头 ⇒ 补 `Derived from` |
+| `hook-pystray.py` | upstream | 15 | 0 | 无头 ⇒ 补 `Derived from` |
+| `macast_renderer/__init__.py` | upstream | 0 | 0 | 空文件：没有任何表达作者身份的代码，两种声明都不需要 |
+
+## 4. 第三层：`macast/ssdp.py` 里的 MIT 血统
+
+这个文件不属于"上游 vs 我们"两分法。它是 GUPnP/Coherence 那一支的 SSDP 实现，
+头部同时挂着 **Tim Potter、John-Mark Gurney、Fluendo、Frank Scholz、Erwan Martin、
+FangYuecheng** 的版权行和一句 `Licensed under the MIT license`。这些声明的义务主体
+是**那几位作者**，既不是本 fork 也不是 `xfangfang/Macast` —— 所以任何人都没有资格删它，
+包括把整个文件重写一遍之后（重写只消灭上游行，不消灭那几位作者留下的行）。
+
+`provenance.py` 的 `THIRD_PARTY` 表把这句话变成了检查项：那句 MIT 声明不见了就报红。
+
+## 5. 重写队列
+
+判据只有一个，而且是可以机检的：**该文件的 `upstream_lines` 变成 0**。
+在那之前 `mixed` 状态的两条声明都得留着；变成 0 之后，`provenance.py` 会自己把
+"该文件不再需要上游归属"这件事说出来 —— 不需要人来判断，也就不存在判断错。
+
+顺序按"改动频率 × 上游行数"排，先动最挡路的：
+
+| 顺位 | 模块 | 上游行 | 为什么先/后 | 完成后额外要动的地方 |
+|---|---|---:|---|---|
+| 1 | `macast/plugin.py` + `macast/renderer.py` | 387 | 渲染器基类是所有插件的地基，它越薄，后面每一步越安全 | `docs/Development.md` 的插件接口段 |
+| 2 | `macast/ssdp.py` | 278 | DLNA 发现的核心；**注意 §4 的 MIT 行不随上游行归零** | `AGENTS.md` §3、§4.1 |
+| 3 | `macast/protocol.py` | 1001 | 全仓最大的一块上游代码，也是 XML 状态变量的真值来源 | Part 6/12/13 的用例要跟着重写，不能只改实现 |
+| 4 | `macast/utils.py` | 401 | `Setting` 的副作用（§4.2 第一条坑）就住在这里 | `module_settings.py` 的标签表 |
+| 5 | `macast/gui.py` | 363 | rumps/pystray 适配层，接口窄、最好换 | `BUILDING.md` 的 pystray 说明 |
+| 6 | `macast/server.py` | 184 | CherryPy 装配；和 §4.10 的日志红线同一条链 | `logsplit.py` 的注释 |
+| 7 | `macast_renderer/mpv.py` | 573 | mpv IPC 契约（`--input-ipc-server`、事件名）——这一层的行为规格在 mpv 那边，不在我们这边，净室可做 | `AGENTS.md` §5 排障手法 |
+[该行引用了内部规划文档，已移除]
+| — | `macast/plugins/**`（vendored） | 2885 | **不在队列里**：这些是上游插件合集的完整作品，"重写"的正当形式是另写一个插件放进 `plugins/`，而不是原地替换后声称不是抄的 | — |
+
+每一步的收尾动作（顺序错了 Part 34 会红）：改代码 → `provenance.py --check --stamp` →
+更新 §2/§3 的表与 `provenance-ledger` 行 → 跑套件 → 提交并推送。
+
+## 6. 明确不做
+
+- 不删任何已有声明。`--stamp` 只会 `insert`，代码里没有 `remove` 这条路径。
+- 不在 `upstream_lines > 0` 的文件上写我们的声明，也不在 `vendored` 的文件上写 —— 后者是
+  `problems()` 的第三条规则。
+- 不为了"看起来更干净"把 `macast/plugins/**` 原地改名或搬位置：那只会让 blame 更瞎，
+  而内容一个字都没变。
+- 不把重写叙述成摆脱 GPLv3 的路径（§0）。
+[该行涉及内部规划，已移除]

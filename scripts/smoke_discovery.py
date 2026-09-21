@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 """Real-network smoke test for the Chromecast / AirPlay receivers.
 
 Where ``verify_cast_airplay.py`` drives the protocols in-process with mock

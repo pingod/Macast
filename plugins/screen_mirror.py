@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Screen Mirror for Macast
 #
 # Macast Metadata

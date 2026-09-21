@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # Local File Caster for Macast
 #
 # Macast Metadata

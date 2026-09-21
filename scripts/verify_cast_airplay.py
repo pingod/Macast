@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) 2021 by xfangfang. All Rights Reserved.
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 #
 # Verification harness for the Chromecast / AirPlay receiver protocols.
 #
@@ -10418,6 +10419,254 @@ except Exception as _e33:
     traceback.print_exc()
     check("the smoke test's couplings are checkable", False,
           "{}: {}".format(type(_e33).__name__, _e33))
+
+
+# --------------------------------------------------------------------------
+# Part 34: who wrote what, and does the tree say so
+#
+# `scripts/provenance.py` counts, per file, how many lines `git blame`
+# attributes to commits before the fork point. That number is what the two
+# copyright statements in a file's header have to line up with: upstream's
+# notice may not go while its lines are still there, and ours may not appear
+# where we never wrote a line. Both directions matter now that the project
+# sells an unlocked tier -- at that point a provenance claim is a claim made to
+# a paying customer.
+#
+# So this Part checks the ledger three times over: it runs the tool, then
+# re-derives the same rules from the files themselves (a bug in `problems()`
+# must not be able to certify its own absence), then compares the numbers
+# recorded in `docs/Provenance.md` against the ones history actually gives.
+# Finally it checks the tool's own promise -- that stamping only ever *inserts*
+# -- because "we never delete attribution" is the sentence this whole exercise
+# rests on.
+#
+# Unlike the rest of the suite this needs real history, so a shallow clone is
+# reported as a failure with its cause, never as a pass.
+# --------------------------------------------------------------------------
+print("\n=== Part 34: the provenance ledger and the notices that track it ===")
+try:
+    import re as _re34
+    import subprocess as _sub34
+
+    def _read34(*parts):
+        with open(os.path.join(REPO, *parts), encoding="utf-8") as _fh34:
+            return _fh34.read()
+
+    _env34 = dict(os.environ)
+    _env34.pop('PYTHONPATH', None)
+    _run34 = _sub34.run([sys.executable, os.path.join(REPO, 'scripts', 'provenance.py'),
+                         '--json', '--check'], cwd=REPO, env=_env34,
+                       stdout=_sub34.PIPE, stderr=_sub34.PIPE, text=True)
+
+    _shallow34 = 'cannot read history' in _run34.stderr
+    check("the ledger is computable here (a full clone, not a shallow one)",
+          not _shallow34,
+          "git history is missing, so every line count below would be a guess: "
+          "%s" % _run34.stderr.strip().splitlines()[:1])
+
+    _led34 = json.loads(_run34.stdout) if _run34.stdout.strip() else {}
+    _files34 = _led34.get('files', [])
+    _by_path34 = {row['path']: row for row in _files34}
+
+    # -- 1. the tool's own verdict, and its exit code ------------------------
+    check("no file's notices contradict its line counts",
+          _run34.returncode == 0 and not _led34.get('problems'),
+          "; ".join(_led34.get('problems', []))[:400])
+    check("the fork point the ledger measures against is in this history",
+          _led34.get('fork_point') and _sub34.run(
+              ['git', 'cat-file', '-e', _led34['fork_point'] + '^{commit}'],
+              cwd=REPO, stdout=_sub34.DEVNULL,
+              stderr=_sub34.DEVNULL).returncode == 0,
+          "a wrong or absent FORK_POINT would classify the whole repo as ours")
+    check("and upstream really has history behind it",
+          _led34.get('upstream_commits', 0) >= 100,
+          "upstream_commits=%s" % _led34.get('upstream_commits'))
+
+    # -- 2. the same rules, re-derived from the files ------------------------
+    # Independent of problems(): if that function loses a branch, the check
+    # above goes green on its own report and proves nothing.
+    _UPSTREAM_MARKS34 = ('by xfangfang', 'Derived from xfangfang/Macast',
+                         'Copied from xfangfang/Macast-plugins')
+
+    def _head34(path):
+        text = _read34(path)
+        return "\n".join(text.splitlines()[:40])
+
+    _unattributed34 = [r['path'] for r in _files34
+                       if r['upstream_lines']
+                       and not any(m in _head34(r['path']) for m in _UPSTREAM_MARKS34)]
+    check("every file holding upstream lines attributes them to upstream",
+          not _unattributed34, "missing notice: %s" % _unattributed34)
+
+    _unclaimed34 = [r['path'] for r in _files34
+                    if r['our_lines'] and r['state'] in ('ours', 'mixed')
+                    and 'by pingod' not in _head34(r['path'])]
+    check("every file this fork wrote a line of carries our notice",
+          not _unclaimed34, "missing notice: %s" % _unclaimed34)
+
+    _overclaim34 = [r['path'] for r in _files34
+                    if r['state'] in ('upstream', 'vendored')
+                    and 'by pingod' in _head34(r['path'])]
+    check("and no notice of ours sits on lines we never wrote",
+          not _overclaim34, "over-claimed: %s" % _overclaim34)
+
+    check("the MIT layer inside macast/ssdp.py is still stated",
+          'Licensed under the MIT license' in _head34('macast/ssdp.py')
+          and 'Tim Potter' in _read34('macast', 'ssdp.py'),
+          "that block belongs to neither us nor upstream -- nobody may remove it")
+
+    check("every bundled plugin is declared vendored, and nothing else is",
+          sorted(_led34.get('vendored', [])) == sorted(
+              p for p in _by_path34
+              if p.startswith('macast/plugins/') and not p.endswith('__init__.py')),
+          "declared=%s present=%s" % (sorted(_led34.get('vendored', [])),
+                                       sorted(_by_path34)))
+
+    # -- 3. the numbers written down in the docs ----------------------------
+    _doc34 = _read34('docs', 'Provenance.md')
+    _mark34 = _re34.search(r"<!--\s*provenance-ledger:(.*?)-->", _doc34)
+    _said34 = dict(kv.split('=', 1) for kv in
+                   _mark34.group(1).split()) if _mark34 else {}
+    _counted34 = {state: sum(1 for r in _files34 if r['state'] == state)
+                  for state in ('upstream', 'vendored', 'mixed', 'ours')}
+    _tally34 = {
+        'fork': _led34.get('fork_point', ''),
+        'files': str(len(_files34)),
+        'upstream_lines': str(sum(r['upstream_lines'] for r in _files34)),
+        'our_lines': str(sum(r['our_lines'] for r in _files34)),
+    }
+    _tally34.update({k: str(v) for k, v in _counted34.items()})
+    check("docs/Provenance.md's ledger line matches the history",
+          _said34 == _tally34,
+          "doc says %s, history says %s" % (_said34, _tally34))
+
+    _rows34 = _re34.findall(r"^\| (?!域|\*\*|文件)[^|]+\| *([\d,]+) \| *([\d,]+) "
+                            r"\| *(\d+) \|", _doc34, _re34.M)
+
+    def _num34(text):
+        return int(text.replace(',', ''))
+
+    check("its per-area table adds up to the ledger",
+          len(_rows34) >= 6
+          and sum(_num34(r[0]) for r in _rows34) == _num34(_said34.get('upstream_lines', '-1'))
+          and sum(_num34(r[1]) for r in _rows34) == _num34(_said34.get('our_lines', '-1'))
+          and sum(_num34(r[2]) for r in _rows34) == _num34(_said34.get('files', '-1')),
+          "table rows=%d sums=%s/%s/%s vs doc %s/%s/%s"
+          % (len(_rows34),
+             sum(_num34(r[0]) for r in _rows34),
+             sum(_num34(r[1]) for r in _rows34),
+             sum(_num34(r[2]) for r in _rows34),
+             _said34.get('upstream_lines'), _said34.get('our_lines'),
+             _said34.get('files')))
+
+    # The per-file table is the one a reader trusts, so it has to be the ledger
+    # too -- same numbers, one row per non-obvious file.
+    _file34 = {m.group(1): (int(m.group(2)), int(m.group(3)))
+               for m in _re34.finditer(r"^\| `([^`]+\.py)` \| (?:mixed|upstream|vendored) "
+                                       r"\| *(\d+) \| *(\d+) \|", _doc34, _re34.M)}
+    check("and its per-file rows are the ledger's own line counts",
+          _file34 and all(_by_path34.get(p, {}).get('upstream_lines') == u
+                          and _by_path34.get(p, {}).get('our_lines') == o
+                          for p, (u, o) in _file34.items()),
+          "drifted: %s" % [p for p, (u, o) in _file34.items()
+                            if (_by_path34.get(p, {}).get('upstream_lines'),
+                                _by_path34.get(p, {}).get('our_lines')) != (u, o)])
+
+    # -- 4. the promise the whole exercise rests on --------------------------
+    _tool34 = _read34('scripts', 'provenance.py')
+    _stamp34 = _tool34[_tool34.find('def stamp('):_tool34.find('def report(')]
+    check("stamping can only ever insert a notice",
+          '.insert(' in _stamp34 and 'by pingod' in _tool34
+          and not any(word in _stamp34 for word in
+                      ('.pop(', 'del lines', 'lines.remove', 'os.remove',
+                       'shutil', 're.sub', 'truncate')),
+          "if this grows a delete path, docs/Provenance.md 6 is lying")
+
+    # Import the tool as a module -- it is stdlib-only, so this is cheap and it
+    # lets the rules be poked directly instead of trusting their current output.
+    import importlib.util as _ilu34
+    _spec34 = _ilu34.spec_from_file_location('macast_provenance',
+                                             os.path.join(REPO, 'scripts', 'provenance.py'))
+    _prov34 = _ilu34.module_from_spec(_spec34)
+    _spec34.loader.exec_module(_prov34)
+
+    def _row34(**over):
+        row = {'path': 'x/y.py', 'state': 'mixed', 'upstream_lines': 100,
+               'our_lines': 50, 'upstream_attributed': True, 'our_attributed': True}
+        row.update(over)
+        return row
+
+    # `problems()` also sweeps the real third-party table, so each synthetic
+    # case filters to its own row instead of asserting on the whole report --
+    # otherwise an unrelated drift in the tree would look like a rules bug.
+    def _drift34(row):
+        return [text for text in _prov34.problems([row]) if text.startswith('x/y.py')]
+
+    check("the tool reports a stripped upstream notice as drift",
+          len(_drift34(_row34(upstream_attributed=False))) == 1
+          and 'upstream' in _drift34(_row34(upstream_attributed=False))[0],
+          "this is the direction the fork is tempted to get wrong: "
+          "%s" % _drift34(_row34(upstream_attributed=False)))
+    check("and a notice we never earned as drift too",
+          any('claims our copyright' in text for text in
+              _drift34(_row34(state='vendored', our_lines=0, upstream_lines=500))),
+          "vendored files came from Macast-plugins; stamping them would be a lie")
+    check("a file whose last upstream line has been rewritten needs no upstream notice",
+          not _drift34(_row34(state='ours', upstream_lines=0,
+                              upstream_attributed=False)),
+          "this is the rewrite queue's finish line -- it has to be machine-checkable")
+    check("the insert point stays inside a plugin's metadata block",
+          _prov34.notice_index(['# Screen Mirror for Macast\n', '#\n',
+                                '# <macast.title>Screen Mirror</macast.title>\n',
+                                'import os\n']) == 0
+          and _prov34.notice_index(['#!/usr/bin/env python3\n',
+                                    '# -*- coding: utf-8 -*-\n', 'import os\n']) == 2
+          and _prov34.notice_index([
+              '# Copyright (c) 2021 by xfangfang. All Rights Reserved.\n',
+              '\n', 'import os\n']) == 1,
+          "AGENTS.md 4.5: the manifest is parsed only from the *contiguous* comment "
+          "block, so a notice pushed past it silently uninstalls the plugin")
+
+    # That last claim is about the app's own parser, so ask the parser.
+    _stamped34 = "\n".join([
+        _prov34.OUR_NOTICE,
+        '# Screen Mirror for Macast',
+        '#',
+        '# Macast Metadata',
+        '# <macast.title>Stamped Mirror</macast.title>',
+        '# <macast.renderer>StampedRenderer</macast.renderer>',
+        '# <macast.platform>darwin</macast.platform>',
+        '# <macast.version>0.1</macast.version>',
+        '"""Still a docstring, still the first statement."""',
+        'import os'])
+    _tmp34 = _tempfile.mkdtemp(prefix="macast-provenance-")
+    _probe34 = os.path.join(_tmp34, "stamped_plugin.py")
+    with open(_probe34, "w", encoding="utf-8") as _fh34:
+        _fh34.write(_stamped34)
+    try:
+        _read_manifest34 = macast_mod._read_plugin_metadata
+    except NameError:
+        _read_manifest34 = _load("macast", "macast.py")._read_plugin_metadata
+    _meta34 = _read_manifest34(_probe34)
+    check("and a stamped plugin is still recognised by the loader",
+          _meta34.get('title') == 'Stamped Mirror'
+          and _meta34.get('renderer') == 'StampedRenderer',
+          "metadata=%s" % _meta34)
+    check("the tool reads only stdlib, so CI can run it without the app's deps",
+          all('import %s' % m in _tool34 or 'import %s,' % m in _tool34
+              for m in ('json', 'os', 'subprocess', 'sys'))
+          and not _re34.search(r"^\s*(?:import|from) (cherrypy|requests|zeroconf|macast)\b",
+                               _tool34, _re34.M),
+          "it is a history tool, not part of the shipped app")
+    check("it never touches the working tree without --apply",
+          '--apply' in _stamp34 and 'continue' in _stamp34,
+          "the dry-run guard lives inside stamp(); move it and a bulk edit "
+          "becomes an accident")
+except Exception as _e34:
+    import traceback
+    traceback.print_exc()
+    check("the provenance ledger is checkable", False,
+          "{}: {}".format(type(_e34).__name__, _e34))
 
 
 # --------------------------------------------------------------------------

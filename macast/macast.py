@@ -1,4 +1,5 @@
 # Copyright (c) 2021 by xfangfang. All Rights Reserved.
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 
 import os
 import re

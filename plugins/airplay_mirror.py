@@ -1,3 +1,4 @@
+# Copyright (c) 2026 by pingod. All Rights Reserved.
 # AirPlay screen mirroring (iPhone / iPad / Mac -> this machine) for Macast,
 # by supervising uxplay
 #
