@@ -582,82 +582,72 @@
         </el-tab-pane>
         <el-tab-pane label="帮助" name="4">
 
-            <h1>FAQ</h1>
+            <h1>常见问题（FAQ）</h1>
 
             <el-link type="primary"
                      href="https://github.com/xfangfang/Macast/wiki/FAQ"
-                     target="_blank">This document may not be the latest
-                version. Please visit the Macast Wiki for the latest document.
+                     target="_blank">本文档可能不是最新版本，请前往 Macast Wiki 查看最新内容。
             </el-link>
 
-            <p>Macast is still in the early stage of development, so it may not be available on your device. In
-                this case, please try the
-                <el-link type="primary" href='https://github.com/xfangfang/Macast/actions'>beta version</el-link>
-                or
-                submit a
-                <el-link type="primary" href='https://github.com/xfangfang/Macast/issues/new/choose'>issue</el-link>
-                to help us do better.
+            <p>Macast 目前仍处于早期开发阶段，在你的设备上可能无法正常使用。遇到这种情况，请尝试
+                <el-link type="primary" href='https://github.com/pingod/Macast/actions'>测试版</el-link>
+                ，或
+                <el-link type="primary" href='https://github.com/pingod/Macast/issues/new/choose'>提交 issue</el-link>
+                帮助我们做得更好。
             </p>
-            <h2 id='i-dont-know-how-to-use'>I don&#39;t know how to use</h2>
-            <p>Just open this app, and a small icon will appear in the <strong>menubar</strong> /
-                <strong>taskbar</strong> / <strong>desktop panel</strong>, then you can push your media files from a
-                local DLNA client to your computer.<br/>
+            <h2 id='i-dont-know-how-to-use'>不知道怎么用</h2>
+            <p>只需打开本应用，<strong>菜单栏</strong> / <strong>任务栏</strong> / <strong>桌面面板</strong>
+                中就会出现一个小图标，随后你就可以从本地的 DLNA 客户端把媒体文件投送到你的电脑上。<br/>
             </p>
-            <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>How to use third-party player plugin</h2>
+            <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>如何使用第三方播放器插件</h2>
             <ol start=''>
-                <li>The players Macast used to ask you to download -- IINA, Web, Live,
-                    PotPlayer, PIFMRDS and the NVA protocol -- now ship
-                    <strong>inside</strong> the app. They are listed on the
-                    <strong>Plugin</strong> tab and are switched on and off there.
+                <li>Macast 以往需要你自行下载的播放器——IINA、Web、Live、PotPlayer、PIFMRDS 以及
+                    NVA 协议——现在已<strong>内置</strong>在应用中。它们列在<strong>插件</strong>标签页，
+                    可在该页直接启用或停用。
                 </li>
-                <li>To add one of your own: install a <strong>[some plugin].py</strong> on the
-                    <strong>Plugin</strong> tab, or drop the file into the renderer /
-                    protocol directory under <code>Open Config Directory</code>
+                <li>若要添加自己的插件：在<strong>插件</strong>标签页安装一个 <strong>[某插件].py</strong>，
+                    或将文件拖入<code>打开配置目录</code>下的 renderer / protocol 目录。
                 </li>
-                <li>No restart is needed -- a plugin takes effect as soon as it is installed.</li>
+                <li>无需重启——插件安装后即生效。</li>
             </ol>
-            <p> if you can&#39;t find any plugin you want, check
+            <p> 如果找不到想要的插件，可前往
                 <el-link type="primary"
-                         href='https://github.com/xfangfang/Macast/wiki/Custom-Renderer'>here
+                         href='https://github.com/xfangfang/Macast/wiki/Custom-Renderer'>此处
                 </el-link>
-                to learn how to write a
-                custom renderer plug-in, and feel welcome to open a pull requests.
+                了解如何编写自定义渲染器插件，欢迎提交 Pull Request。
             </p>
-            <h2 id='unable-to-find-macast-from-your-dlna-client'>Unable to find Macast from your DLNA client</h2>
+            <h2 id='unable-to-find-macast-from-your-dlna-client'>DLNA 客户端找不到 Macast</h2>
             <ul>
-                <li>Check whether your firewall blocks Macast. <br/>A simple way to check firewall is to access the port
-                    opened by Macast from other devices (the default is 1068, and you can find in the settings menu)
+                <li>检查防火墙是否拦截了 Macast。<br/>一个简单的检测方法是：从其他设备访问 Macast
+                    开放的端口（默认为 58880，可在设置菜单中查看）。
                 </li>
-                <li>Check your router.<br/>You should open UPnP and close AP Isolation.</li>
-                <li>Software problems.<br/>If you are using an iOS device, please make sure that the app&#39;s
-                    permission to <strong>find and connect to devices on your local network</strong> is turned on. <br/>And
-                    on some application, you need to wait more than 30s to find Macast. Please wait patiently.
+                <li>检查路由器。<br/>应开启 UPnP 并关闭 AP 隔离（AP Isolation）。
                 </li>
-                <li>UDP multicast problem.<br/>It is said that Windows and some routers will have adaptation problems,
-                    resulting in the failure of Windows to join multicast. In this case, You need to modify the windows
-                    registry to force IGMP version to v2.
+                <li>软件问题。<br/>若使用 iOS 设备，请确保对应 App 的
+                    <strong>「本地网络」查找与连接权限</strong>已开启。<br/>部分应用需要等待 30 秒以上才能发现
+                    Macast，请耐心等待。
                 </li>
-                <li>Multiple network cards or complex network conditions. <br/>Ensure that Macast can be used under the
-                    condition of single network card and the same LAN with your DLNA client, solutions for more complex
-                    situations are still working in progress.
+                <li>UDP 组播问题。<br/>有反馈称 Windows 与部分路由器存在适配问题，导致 Windows
+                    无法加入组播。此时需修改 Windows 注册表，强制将 IGMP 版本设为 v2。
+                </li>
+                <li>多网卡或复杂网络环境。<br/>请确保在单网卡、且与 DLNA 客户端处于同一局域网的条件下
+                    Macast 可正常使用；更复杂场景的解决方案仍在完善中。
                 </li>
 
             </ul>
-            <h2 id='crash-at-startup'>Crash at startup</h2>
-            <p> Macast opens port 1068 by default. When there is a port conflict on your computer, the application will
-                crash. Please set the application port manually.
-                , then Macast will load the ports you specify from the configuration file.</p>
-            <h2 id='unable-to-close-or-unresponsive'>Unable to close or unresponsive</h2>
-            <p> When a third-party player plug-in is used, the plug-in usually needs to open more threads or processes,
-                resulting in a non response problem when the application exits, which is usually caused by the plug-in
-                itself.</p>
-            <h2 id='where-is-the-configuration-file-located'>where is the configuration file located</h2>
+            <h2 id='crash-at-startup'>启动时崩溃</h2>
+            <p> Macast 默认开放端口 58880。当你的电脑上该端口被占用时，应用会崩溃。请手动设置应用端口，
+                此后 Macast 会从配置文件中读取你指定的端口。</p>
+            <h2 id='unable-to-close-or-unresponsive'>无法关闭或无响应</h2>
+            <p> 使用第三方播放器插件时，插件通常需要开启更多线程或进程，导致应用退出时出现无响应问题，
+                这通常是由插件本身引起的。</p>
+            <h2 id='where-is-the-configuration-file-located'>配置文件在哪里</h2>
             <figure>
                 <table>
                     <thead>
                     <tr>
-                        <th>platform</th>
-                        <th>path</th>
+                        <th>平台</th>
+                        <th>路径</th>
                     </tr>
                     </thead>
                     <tbody>
@@ -676,26 +666,25 @@
                     </tbody>
                 </table>
             </figure>
-            <h2 id='language-support'>Language support</h2>
-            <p>check the shell command in
-                <el-link type="primary" href='https://github.com/xfangfang/Macast/blob/main/docs/i18n.md'>docs/i18n.md
+            <h2 id='language-support'>语言支持</h2>
+            <p>可参考以下文档中的命令了解多语言支持：
+                <el-link type="primary" href='https://github.com/pingod/Macast/blob/main/docs/i18n.md'>docs/i18n.md
                 </el-link>
-                ,
-                feel free to open a pull requests.
+                ，欢迎提交 Pull Request。
             </p>
-            <h2 id='how-to-set-personal-configurations-to-mpv'>How to set personal configurations to mpv</h2>
-            <p> refer to the mpv manual about how to set personal configs:
+            <h2 id='how-to-set-personal-configurations-to-mpv'>如何为 mpv 设置个人配置</h2>
+            <p> 关于如何设置个人配置，请参考 mpv 手册：
                 <el-link type="primary" href='https://mpv.io/manual/stable/#files'
                          target='_blank' class='url'>https://mpv.io/manual/stable/#files
                 </el-link>
             </p>
-            <p> create a configuration file at :</p>
+            <p> 在以下位置创建配置文件：</p>
             <figure>
                 <table>
                     <thead>
                     <tr>
-                        <th>platform</th>
-                        <th>path</th>
+                        <th>平台</th>
+                        <th>路径</th>
                     </tr>
                     </thead>
                     <tbody>
@@ -714,18 +703,18 @@
                     </tbody>
                 </table>
             </figure>
-            <p> and put some mpv command line options into the <strong>configuration file</strong>, like:</p>
+            <p> 并将一些 mpv 命令行选项写入<strong>配置文件</strong>，例如：</p>
             <pre><code>fs-screen==1
 </code></pre>
-            <p><em>this option tells mpv to fullscreen open a new video in desktop 1. more about fs-screen options:
+            <p><em>该选项告诉 mpv 在新视频时全屏到桌面 1。更多 fs-screen 选项详见：
                 <el-link type="primary"
                          href='https://mpv.io/manual/stable/#options-fs-screen' target='_blank' class='url'>
                     https://mpv.io/manual/stable/#options-fs-screen
                 </el-link>
             </em>
             </p>
-            <p> In this way, you can also modify the shortcut keys of the mpv player -- just put
-                <strong>input.conf</strong> to the same directory:
+            <p> 同样地，你也可以修改 mpv 播放器的快捷键——只需将
+                <strong>input.conf</strong> 放到同一目录：
                 <el-link type="primary" href='https://mpv.io/manual/stable/#input-conf'
                          target='_blank' class='url'>https://mpv.io/manual/stable/#input-conf
                 </el-link>
