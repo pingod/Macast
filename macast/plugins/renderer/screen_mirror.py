@@ -304,6 +304,11 @@ _searched_at = 0.0
 #: that would not bind).「没有发现」and「这台机器搜不了」are different things to
 #: read: only one of them is fixed by switching the TV on.
 _search_error = ''
+#: How many answers of the last search were this machine's own services, per
+#: probe. 「没有发现 Chromecast」and「只有这台 Mac 自己（已排除）」are two different
+#: answers: the first sends the reader to check the TV's power cable, the second
+#: already tells them the search ran and the LAN simply has nobody else on it.
+_self_alone = {'cast': 0, 'dlna': 0}
 #: Opening the console again inside this window reuses the cached answer instead
 #: of kicking another multicast search (see `_search_due`).
 SEARCH_REFRESH_SECONDS = 15.0
@@ -387,7 +392,10 @@ def discover(timeout=DISCOVER_TIMEOUT):
         # Failing to name our own addresses must not empty the list: a device
         # list with nothing in it reads as "no TV on the LAN".
         ours = set()
-    return sorted(hit for hit in found.values() if hit[1] not in ours)
+    others = [hit for hit in found.values() if hit[1] not in ours]
+    _self_alone['cast'] = len({hit[1] for hit in found.values()}
+                              - {hit[1] for hit in others})
+    return sorted(others)
 
 
 def start_search():
@@ -2456,7 +2464,14 @@ class _Session(object):
         #: one also opens the whole management API (AGENTS.md 4.7), so pasting
         #: a viewing URL would leak a credential that stays valid afterwards.
         self.page_token = secrets.token_hex(8)
-        self.codecs = 'avc1.640028,mp4a.40.2' if has_audio else 'avc1.640028'
+        #: A MediaSource codec string, in the only form `addSourceBuffer`
+        #: accepts: a MIME type with a quoted codec list. The bare
+        #: `avc1.640028,mp4a.40.2` throws NotSupportedError, which used to
+        #: silently drop every viewer onto the progressive fallback -- and a
+        #: live fragmented MP4 has no playable duration there, so Safari showed
+        #: a black page.
+        self.codecs = ('video/mp4; codecs="avc1.640028,mp4a.40.2"' if has_audio
+                       else 'video/mp4; codecs="avc1.640028"')
         self.page_title = title
 
     def stream_name(self, suffix=None):
@@ -2539,19 +2554,22 @@ function tail(){ // keep the buffer trimmed to the live edge
   try{var b=v.buffered;if(b.length&&v.duration){
     var end=b.end(b.length-1);
     if(end-v.currentTime>LIVE_EDGE)v.currentTime=end-LIVE_EDGE}}catch(x){}}
-function progressive(){ // MSE missing or wedged: let the element stream it
-  say('回退到渐进式播放');v.src=STREAM+'#t=0.001';v.play().catch(function(){});
+function progressive(why){ // MSE missing or wedged: let the element stream it
+  say('回退到渐进式播放');if(why)fail(why);
+  v.src=STREAM+'#t=0.001';v.play().catch(function(){});
   v.ontimeout=function(){location.reload()}}
 function mse(){
-  if(!window.MediaSource||!MediaSource.isTypeSupported){return progressive()}
+  if(!window.MediaSource||!MediaSource.isTypeSupported(CODECS)){
+    return progressive('这个浏览器不支持 MSE')}
   var ms=new MediaSource();
   ms.addEventListener('sourceopen',run,{once:true});
   v.src=URL.createObjectURL(ms);
   var timer=setTimeout(function(){ // sourceopen sometimes never fires on
-    if(ms.readyState!=='open')progressive()},1500);
+    if(ms.readyState!=='open')progressive('MSE 未打开')},1500);
   function run(){
     clearTimeout(timer);var sb;
-    try{sb=ms.addSourceBuffer(CODECS)}catch(e){return progressive()}
+    try{sb=ms.addSourceBuffer(CODECS)}catch(e){
+      return progressive('编码器不认：'+e.message)}
     sb.mode='sequence';var queue=[],last=Date.now();
     say('正在镜像');lock();
     fetch(STREAM).then(function(r){
@@ -3079,8 +3097,10 @@ def discover_renderers(timeout=SSDP_SEARCH_TIMEOUT):
         ours = set(Setting.get_advertisable_ip())
     except Exception:
         ours = set()
-    answers = [answer for answer in _ask_renderers(DLNA_SEARCH_TARGETS, timeout)
-               if answer[1] not in ours]      # do not mirror to ourselves
+    answers = _ask_renderers(DLNA_SEARCH_TARGETS, timeout)
+    others = [answer for answer in answers if answer[1] not in ours]
+    _self_alone['dlna'] = len({answer[1] for answer in answers} & ours)
+    answers = others                            # do not mirror to ourselves
     described = [None] * len(answers)
 
     def read(index, location, peer):
@@ -4865,6 +4885,11 @@ def _probe_answer(probe):
     return [], False, 0.0, ''
 
 
+def _probe_alone(probe):
+    """How many of the last search's answers were this machine's own."""
+    return _self_alone.get(probe, 0)
+
+
 def _probe_items(probe):
     """The device rows for one probe, `selected` from the stored choice."""
     if probe == 'cast':
@@ -4886,13 +4911,17 @@ def _probe_items(probe):
     return []
 
 
-def _search_words(devices, searching, searched_at, error, nothing=''):
+def _search_words(devices, searching, searched_at, error, nothing='', alone=0):
     """One phrase: what the last search of this protocol actually concluded.
 
     「正在搜索」is only ever true of a first look still in flight -- a completed
     empty search is a result, and says when it was taken. A search that could
     not run says that instead, because「没有发现」sends the user to look for a
     TV that is fine when the real problem is this machine.
+
+    `alone` is the third case: the search ran, everything that answered was
+    this Mac's own receiver, and those are dropped. Saying only「没有发现」here is
+    what makes an empty but healthy LAN look like a broken search.
     """
     if devices:
         return '发现 {} 台'.format(len(devices))
@@ -4902,6 +4931,9 @@ def _search_words(devices, searching, searched_at, error, nothing=''):
         return '正在搜索局域网设备…' if not searched_at else '正在重新搜索…'
     if not searched_at:
         return '还没有搜过'
+    if alone:
+        return (nothing + '：局域网里只有这台 Mac 自己的接收端，已排除'
+                + _searched_suffix(searched_at))
     return nothing + _searched_suffix(searched_at)
 
 
@@ -4950,7 +4982,8 @@ def channels_state(current=None):
         #: 「不需要设备」.
         words = '' if not probe else _search_words(
             items, searching, searched_at, error,
-            PROBE_LABELS.get(probe, ('', '没有发现设备'))[1])
+            PROBE_LABELS.get(probe, ('', '没有发现设备'))[1],
+            alone=_probe_alone(probe))
         out.append({'key': key,
                     'label': OUTPUTS[key][0],
                     'hint': OUTPUT_HINTS.get(key, ''),
@@ -4989,7 +5022,8 @@ def target_prompt(kind=None, with_verdict=False):
         if with_verdict:
             devices, searching, searched_at, error = _probe_answer(probe)
             line += '（{}）'.format(_search_words(devices, searching, searched_at,
-                                                 error, nothing))
+                                                 error, nothing,
+                                                 alone=_probe_alone(probe)))
         return line
     return ''
 

@@ -4808,6 +4808,19 @@ done
         check("the page is ours end to end: no template hole, no innerHTML",
               b'@STREAM@' not in _html22 and b'innerHTML' not in _html22
               and b'document.write' not in _html22, str(_html22[:80]))
+        # `addSourceBuffer` only accepts a MIME type: the bare codec list used to
+        # throw NotSupportedError, so *every* viewer fell through to the
+        # progressive path -- fine in Chrome, an empty black page in Safari, and
+        # the failure was invisible because the fallback says nothing about it.
+        check("the page hands MediaSource a MIME type, not a bare codec list",
+              b'addSourceBuffer(CODECS)' in _html22
+              and b'isTypeSupported(CODECS)' in _html22
+              and _sess_b22.codecs.startswith('video/mp4; codecs="')
+              and _sess_b22.codecs.endswith('"'),
+              _sess_b22.codecs)
+        check("and a fallback that reaches the reader says why",
+              _html22.count(b'progressive(') >= 4
+              and b"progressive('" in _html22, str(_html22.count(b'progressive(')))
         _head22 = http.client.HTTPConnection('127.0.0.1', _port22, timeout=5)
         _head22.request('HEAD', _path22)
         _hresp22 = _head22.getresponse()
@@ -6015,6 +6028,12 @@ done
         # The console polls its state once a second, so this guard matters more
         # than it ever did for a menu.
         mirror._dlna_devices = []
+        #: …and nothing was dropped as "ours": the counter describes the same
+        #: search as the list, so a fake search has to state both. Left over
+        #: from Part 23's real search (which only ever met this machine), it
+        #: would otherwise turn the verdict below into a claim about a search
+        #: that never ran.
+        mirror._self_alone['dlna'] = 0
         mirror._dlna_searched_at = time.time()
         _searches23[:] = []
         _empty23 = _channel(setting23.console_state(), 'dlna')
@@ -11359,6 +11378,41 @@ try:
           mirror35._search_words([], False, 1.0, '', '没有发现 Chromecast')
           == '没有发现 Chromecast' + mirror._searched_suffix(1.0),
           "otherwise a list that has always been empty looks alive")
+    check("an empty search that only saw this machine says who it did see",
+          '这台 Mac 自己' in mirror35._search_words(
+              [], False, 1.0, '', '没有发现 DLNA 电视', alone=1)
+          and mirror35._search_words(['x'], False, 1.0, '', '没有发现',
+                                     alone=2) == '发现 1 台',
+          'a TV that is switched off and a search that is broken read the same '
+          'until the page names the answers it dropped')
+
+    # …and the counter behind that phrase really is filled by the filter, or the
+    # wording above is dead code that no LAN can ever trigger.
+    class _SelfOnly35:
+        @staticmethod
+        def get_advertisable_ip():
+            return ['10.0.0.5']
+
+    _keep35 = (mirror35.Setting, mirror35._ask_renderers,
+               mirror35.describe_renderer)
+    mirror35.Setting = _SelfOnly35
+    mirror35._ask_renderers = lambda targets, timeout=None: [
+        ('http://10.0.0.5:58880/d.xml', '10.0.0.5'),
+        ('http://10.0.0.5:58998/d.xml', '10.0.0.5'),
+        ('http://10.0.0.7:58880/d.xml', '10.0.0.7'),
+        ('http://10.0.0.9:58880/d.xml', '10.0.0.9')]
+    mirror35.describe_renderer = lambda location, peer: (
+        'TV', 'http://{}/AVTransport/action'.format(peer))
+    try:
+        _found35 = mirror35.discover_renderers()
+        check("the DLNA search counts the answers it dropped as its own",
+              [host for _, _, host in _found35] == ['10.0.0.7', '10.0.0.9']
+              and mirror35._self_alone['dlna'] == 1,
+              '%s / alone=%s' % (_found35, mirror35._self_alone['dlna']))
+    finally:
+        (mirror35.Setting, mirror35._ask_renderers,
+         mirror35.describe_renderer) = _keep35
+        mirror35._self_alone['dlna'] = 0
     check("a search that could not run says that instead of 没有发现",
           mirror35._search_words([], False, 1.0, '组播被防火墙挡了')
           == '组播被防火墙挡了',
