@@ -927,12 +927,43 @@ def start_media_server(store):
 
 
 def advertise_host():
-    """The address a television on this LAN can reach us on."""
+    """The address a television on this LAN can reach us on.
+
+    `Setting.get_advertisable_ip()` is permissive on purpose -- it keeps every
+    interface with a gateway entry, the `AF_LINK` ones included -- so on a
+    machine running VMs or Tailscale it lists the VM bridges and the tunnel
+    alongside the Wi-Fi address, and its first element is whatever the set
+    happens to yield. Measured on that machine: 192.168.215.0, 192.168.97.0 and
+    192.168.139.3 on three runs, none of which a phone can dial, while the real
+    LAN address is 192.168.1.5. mDNS hit the same problem and answers it in
+    `discovery.advertisable_addresses()` by keeping the interface that carries
+    the IPv4 default route. Asking the core which of these addresses it would
+    publish is what keeps the URL we hand a browser openable instead of merely
+    printable. A peer we already know about is a better answer still, which is
+    what host_for() is for; this one covers the address we announce before
+    anything has been dialled.
+    """
     try:
         addrs = Setting.get_advertisable_ip()
     except Exception:
         addrs = []
-    return addrs[0] if addrs else '127.0.0.1'
+    if not addrs:
+        return '127.0.0.1'
+    reachable = [a for a in addrs if a in set(_reachable_hosts())]
+    return (reachable or addrs)[0]
+
+
+def _reachable_hosts():
+    """What discovery would publish, or [] when the core cannot say.
+
+    A separate function so the choice above is testable without pretending this
+    machine has a second interface.
+    """
+    try:
+        from macast.discovery import advertisable_addresses
+        return list(advertisable_addresses())
+    except Exception:  # pragma: no cover - discovery ships with the app
+        return []
 
 
 def host_for(peer_ip):

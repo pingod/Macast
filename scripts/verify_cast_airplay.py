@@ -4688,6 +4688,37 @@ done
             _vconn22.close()
             check("and it really answers from another connection",
                   _vresp22.status == 200, str(_vresp22.status))
+            # The address handed out has to be one a phone can dial: this one
+            # goes to the viewer (and, for the TV targets, into the stream URL).
+            # `get_advertisable_ip()` is permissive on purpose, so its first
+            # element is set order rather than reachability -- on a machine with
+            # VM bridges it returned 192.168.215.0 / 192.168.97.0 / 192.168.139.3
+            # while the LAN address was 192.168.1.5, i.e. every URL this plugin
+            # printed was undialable. The core narrows it down in
+            # discovery.advertisable_addresses(); the plugin has to agree.
+            _reach22 = mirror._reachable_hosts()
+            check("the address the plugin hands out is one the LAN can reach",
+                  (not _reach22) or (mirror.advertise_host() in _reach22),
+                  "advertise_host=%r core=%r" % (mirror.advertise_host(),
+                                                 _reach22))
+            # ... and the preference itself, independent of this machine's
+            # interfaces: a VM bridge listed first must not win.
+            _saved_hosts22 = mirror._reachable_hosts
+            _saved_gai22 = utils.Setting.__dict__['get_advertisable_ip']
+            try:
+                utils.Setting.get_advertisable_ip = staticmethod(
+                    lambda: ['192.168.97.0', '192.168.1.5'])
+                mirror._reachable_hosts = lambda: ['192.168.1.5']
+                check("a VM bridge listed first does not win the address",
+                      mirror.advertise_host() == '192.168.1.5',
+                      mirror.advertise_host())
+                mirror._reachable_hosts = lambda: []
+                check("with no core answer it keeps the old first-of-list",
+                      mirror.advertise_host() == '192.168.97.0',
+                      mirror.advertise_host())
+            finally:
+                setattr(utils.Setting, 'get_advertisable_ip', _saved_gai22)
+                mirror._reachable_hosts = _saved_hosts22
             _stats22 = mir22.stats()
             check("the pump's numbers are readable without touching it",
                   _stats22.get('kind') == 'browser' and _stats22.get('chunks', 0)
