@@ -92,188 +92,13 @@ class MenuItem:
         self.callback(self)
 
 
-class DesktopWindow:
-    """Native configuration window used instead of a tray/menu-bar host."""
-
-    def __init__(self, name, actions):
-        self.name = name
-        self.actions = actions
-        self.root = None
-        self.status = None
-
-    def run(self):
-        import tkinter as tk
-        from tkinter import ttk
-
-        self.root = tk.Tk()
-        self.root.title(self.name)
-        self.root.minsize(760, 520)
-        self.root.geometry('900x650')
-        self.root.protocol('WM_DELETE_WINDOW', self.close)
-
-        header = tk.Frame(self.root, padx=22, pady=16)
-        header.pack(fill='x')
-        tk.Label(header, text=self.name, font=('Helvetica', 22, 'bold')).pack(
-            side='left')
-        self.status = tk.Label(header, text='正在启动服务…', anchor='e',
-                               justify='right')
-        self.status.pack(side='right', fill='x', expand=True, padx=(20, 0))
-
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.pack(fill='both', expand=True, padx=16, pady=(0, 12))
-        self._build_overview_tab(tk)
-        self._build_renderer_tab(tk)
-        self._build_protocol_tab(tk)
-        self._build_plugin_tab(tk)
-        self._build_general_tab(tk)
-        self._build_mirror_tab(tk)
-
-        footer = tk.Frame(self.root, padx=16, pady=10)
-        footer.pack(fill='x')
-        self._button(footer, '退出 Macast', self.close).pack(side='right')
-        self.refresh()
-        self.root.mainloop()
-
-    @staticmethod
-    def _button(parent, text, callback):
-        import tkinter as tk
-        return tk.Button(parent, text=text, command=callback, height=2)
-
-    def _tab(self, title):
-        import tkinter as tk
-        frame = tk.Frame(self.tabs, padx=18, pady=18)
-        self.tabs.add(frame, text=title)
-        return frame
-
-    def _build_overview_tab(self, tk):
-        frame = self._tab('概览')
-        self.overview = tk.Label(frame, anchor='nw', justify='left')
-        self.overview.pack(fill='x', pady=(0, 18))
-        self._button(frame, '打开网页高级设置',
-                     self.actions.get('settings')).pack(fill='x', pady=4)
-        self._button(frame, '电脑投屏', self.actions.get('mirror')).pack(
-            fill='x', pady=4)
-        self._button(frame, '启动 / 停止接收服务',
-                     self.actions.get('toggle')).pack(fill='x', pady=4)
-
-    def _build_renderer_tab(self, tk):
-        frame = self._tab('播放器')
-        self.renderer_var = tk.StringVar()
-        self.renderer_buttons = tk.Frame(frame)
-        self.renderer_buttons.pack(fill='both', expand=True, anchor='nw')
-
-    def _build_protocol_tab(self, tk):
-        frame = self._tab('协议')
-        self.protocol_buttons = tk.Frame(frame)
-        self.protocol_buttons.pack(fill='both', expand=True, anchor='nw')
-
-    def _build_plugin_tab(self, tk):
-        frame = self._tab('插件')
-        self.plugin_buttons = tk.Frame(frame)
-        self.plugin_buttons.pack(fill='both', expand=True, anchor='nw')
-
-    def _build_general_tab(self, tk):
-        frame = self._tab('通用')
-        self.general = tk.Label(frame, anchor='nw', justify='left')
-        self.general.pack(fill='x', pady=(0, 18))
-        self.auto_update_var = tk.BooleanVar(value=True)
-        self.start_login_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(frame, text='自动检查更新', variable=self.auto_update_var,
-                       command=lambda: self._act('auto_update',
-                                                 self.auto_update_var.get())).pack(
-                                                     anchor='w', pady=3)
-        tk.Checkbutton(frame, text='登录系统时启动', variable=self.start_login_var,
-                       command=lambda: self._act('start_login',
-                                                 self.start_login_var.get())).pack(
-                                                     anchor='w', pady=3)
-        self._button(frame, '检查更新',
-                     lambda: self.actions.get('check_update', lambda: None)()).pack(
-                         fill='x', pady=4)
-        self._button(frame, '打开配置目录',
-                     self.actions.get('open_config')).pack(fill='x', pady=4)
-
-    def _build_mirror_tab(self, tk):
-        frame = self._tab('电脑投屏')
-        self.mirror = tk.Label(frame, anchor='nw', justify='left')
-        self.mirror.pack(fill='x', pady=(0, 18))
-        self._button(frame, '打开投屏控制台',
-                     self.actions.get('mirror')).pack(fill='x', pady=4)
-
-    def _clear(self, frame):
-        for child in frame.winfo_children():
-            child.destroy()
-
-    def refresh(self):
-        """Re-read controller state and redraw controls after every action."""
-        if self.root is None:
-            return
-        try:
-            state = self.actions['state']()
-        except Exception as exc:
-            state = {'error': str(exc)}
-        self._render_state(state)
-
-    def _render_state(self, state):
-        if state.get('error'):
-            text = '读取配置失败：{}'.format(state['error'])
-            self.overview.configure(text=text)
-            return
-        service = state.get('service', {})
-        self.overview.configure(text=(
-            '设备名称：{name}\n服务地址：{address}\n服务状态：{status}\n版本：{version}'
-        ).format(**service))
-        self.general.configure(text=(
-            '自动检查更新：{}\n启动时运行：{}\n配置目录：{}'
-        ).format(state.get('auto_update'), state.get('start_at_login'),
-                 state.get('config_dir')))
-        self.auto_update_var.set(bool(state.get('auto_update_value')))
-        self.start_login_var.set(bool(state.get('start_at_login_value')))
-        self.mirror.configure(text=state.get('mirror', '电脑投屏由专用控制台管理。'))
-
-        self._clear(self.renderer_buttons)
-        for title in state.get('renderers', []):
-            self._button(self.renderer_buttons, title,
-                         lambda value=title: self._act('renderer', value)
-                         ).pack(fill='x', pady=3)
-        self._clear(self.protocol_buttons)
-        for item in state.get('protocols', []):
-            text = '{} [{}]'.format(item['title'],
-                                    '已启用' if item['enabled'] else '已停用')
-            self._button(self.protocol_buttons, text,
-                         lambda value=item['title']: self._act('protocol', value)
-                         ).pack(fill='x', pady=3)
-        self._clear(self.plugin_buttons)
-        for item in state.get('plugins', []):
-            text = '{} [{}]'.format(item['title'],
-                                    '已启用' if item['enabled'] else '已停用')
-            self._button(self.plugin_buttons, text,
-                         lambda value=item['key']: self._act('plugin', value)
-                         ).pack(fill='x', pady=3)
-
-    def _act(self, kind, value):
-        try:
-            self.actions['change'](kind, value)
-        finally:
-            self.refresh()
-
-    def set_status(self, text):
-        if self.status is not None:
-            try:
-                self.status.after(0, lambda: self.status.configure(text=text))
-            except Exception:
-                pass
-
-    def close(self):
-        callback = self.actions.get('quit')
-        if callback is not None:
-            callback()
-        if self.root is not None:
-            self.root.destroy()
 
 
 class App:
-    def __init__(self, name, icon, menu, template=True, mode='tray',
-                 window_actions=None):
+    #: 'tray' is the normal menu-bar / notification-area shell. 'headless' is for
+    #: everything that must construct the app without a tray backend (a test, a
+    #: machine with no display server): it keeps the same API and does nothing.
+    def __init__(self, name, icon, menu, template=True, mode='tray'):
         self.name = name
         self.icon = icon
         self.app = None
@@ -281,17 +106,10 @@ class App:
         self.menuDict = {}
         self.template = template
         self.mode = mode
-        self.window = None
+        self.platform = (Platform.Darwin if sys.platform == 'darwin'
+                         else Platform.Win32 if sys.platform == 'win32'
+                         else Platform.Others)
         if mode == 'headless':
-            self.platform = (Platform.Darwin if sys.platform == 'darwin'
-                             else Platform.Win32 if sys.platform == 'win32'
-                             else Platform.Others)
-            return
-        if mode == 'window':
-            self.platform = (Platform.Darwin if sys.platform == 'darwin'
-                             else Platform.Win32 if sys.platform == 'win32'
-                             else Platform.Others)
-            self.window = DesktopWindow(name, window_actions or {})
             return
         if sys.platform == 'darwin':
             self.platform = Platform.Darwin
@@ -376,7 +194,7 @@ class App:
 
     def update_menu(self):
         """Refresh the legacy tray menu when a tray backend is active."""
-        if self.mode in ('window', 'headless') or self.app is None:
+        if self.mode == 'headless' or self.app is None:
             return
         if self.platform != Platform.Darwin:
             self.app.update_menu()
@@ -410,7 +228,7 @@ class App:
 
     def set_menu(self, menu):
         self.menu = menu
-        if self.mode == 'window' or self.app is None:
+        if self.app is None:
             return
         if self.platform == Platform.Darwin:
             self.app.menu.clear()
@@ -458,18 +276,10 @@ class App:
     def start(self):
         if self.mode == 'headless':
             return
-        if self.mode == 'window':
-            if self.window is not None:
-                self.window.run()
-        else:
-            self.app.run()
+        self.app.run()
 
     def quit(self, _):
         if self.mode == 'headless':
-            return
-        if self.mode == 'window':
-            if self.window is not None and self.window.root is not None:
-                self.window.root.destroy()
             return
         if self.platform == Platform.Darwin:
             rumps.quit_application()
@@ -489,10 +299,6 @@ class App:
     def notification(self, title, content, sound=True):
         if self.mode == 'headless':
             logger.info('%s: %s', title, content)
-            return
-        if self.mode == 'window':
-            if self.window is not None:
-                self.window.set_status('{}: {}'.format(title, content))
             return
         if self.platform == Platform.Darwin:
             rumps.notification(title, "", content, sound=sound)

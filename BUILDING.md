@@ -164,46 +164,42 @@ On macOS only `IINA Renderer`, `Web Renderer`, `Live Renderer` and
 PIFMRDS (Linux) must still be **listed** with `"available": false`. A plugin
 missing from the list entirely means it was stripped from the bundle.
 
-## Verify the screen-mirror console ships
+## Verify the mirror console ships
 
-`macast/mirror_console.py` — the desktop window that drives the Screen Mirror
-plugin — is loaded **by path** at runtime (`Macast.run_mirror_console`), so the
-same blind spot applies: no dependency scanner follows that import. It has one
-dependency the plugins do not, either: a python that can do Tk.
+The 「电脑投屏」 control surface is no longer a module of its own — it is the
+settings page (`macast/xml/setting.html`, the 「电脑投屏」 tab) plus
+`macast/mirror_view.py`, which decides which cards that tab renders. Neither is
+reached by an `import`, so the same blind spot as the plugins applies: an artefact
+that lost one of them still starts, still serves `/`, and simply shows a page with
+no mirror tab.
 
 ```bash
 APP=/Applications/Macast.app     # or dist/Macast.app
-ls "$APP/Contents/Resources/lib/python3.12/macast/mirror_console.py"
+ls "$APP/Contents/Resources/lib/python3.12/macast/xml/setting.html"
+ls "$APP/Contents/Resources/lib/python3.12/macast/mirror_view.py"
 
-# The .app deliberately ships no Tk (the reason is commented in setup_py2app.py),
-# so the window opens under a Tk-capable python that is already installed.
-# Ask the same candidates the launcher's ladder asks -- and ask them the same
-# question: Tk 8.6 or newer, because `import tkinter` alone also answers "yes"
-# for the 8.5.9 that draws nothing but native buttons.
-for p in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
-  [ -x "$p" ] && "$p" -c 'import sys, tkinter; sys.exit(
-    0 if tuple(int(x) for x in str(tkinter.TkVersion).split("."))[:2] >= (8, 6)
-    else 1)' 2>/dev/null && echo "Tk 8.6+: $p"
-done
+# then ask the running artefact, not the filesystem
+"$APP/Contents/MacOS/Macast" & sleep 10
+curl -s 'http://127.0.0.1:58880/' | grep -c '电脑投屏'
 ```
 
-Nothing printed means the menu item opens no window and the notification says
-what to install (`brew install python-tk`) — that is a supported outcome, not a
-broken artefact. Note that `/usr/bin/python3` is a shim that launches the Command
-Line Tools installer when the tools are absent, which is why the ladder checks
-`/Library/Developer/CommandLineTools` before offering it -- and that its Tk is
-8.5.9, so on a Mac without `python-tk` the honest answer is usually *none*.
+`0` means the tab is not in the artefact. Restarting does not fix it —
+`Handler.__init__` caches the template at startup — and a missing `mirror_view.py`
+is worse than a crash: the page falls back to no cards at all.
 
-The PyInstaller artefacts (Linux, Windows) carry the file **twice**: `--add-data`
-puts a runnable `.py` next to the executable for a system python to run, and
-`--hidden-import=macast.mirror_console` freezes it so `macast.exe
---mirror-console` works on a machine that has no python installed at all. Both
-lines belong to every one of the three jobs, and Part 35 of
-`verify_cast_airplay.py` goes red if any job loses either copy.
+Two things this surface needs that no import will check either:
 
-The window's own output goes to `mirror_console.log` next to `macast.log` — a Tk
-traceback exists nowhere else — and a child that dies immediately is reported as
-a notification carrying its exit code plus that log's last line.
+- **`NSMicrophoneUsageDescription` in the built `Info.plist`** (declared in
+  `scripts/setup_py2app.py`). Without it macOS refuses the audio capture *without
+  ever showing the prompt*, and the one-click BlackHole setup reports a failure the
+  user cannot explain. Part 29 pins the key in the build script.
+- **The screen-recording grant belongs to the binary**, so replacing or re-signing
+  the `.app` revokes it. A fresh artefact shows the preview card's reason instead of
+  a picture until the grant is given again — that is expected, not a regression.
+
+The window this section used to describe (`macast/mirror_console.py`, a Tk process
+launched from the menu) is deleted; Part 35 asserts that no build file, workflow or
+app module still names it.
 
 ## Why py2app and not PyInstaller
 

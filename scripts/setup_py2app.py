@@ -433,17 +433,11 @@ OPTIONS = {
     # touches, and every extra package drags its own bytecode (plus, for
     # extension modules, its dylibs) into the bundle.
     'excludes': [
-        # GUI stacks are unused: the menu-bar UI comes from rumps/AppKit, and
-        # the player is mpv (a separate process). `tkinter` belongs here too
-        # even though the screen-mirror console *is* a Tk window: the bundle's
-        # `sys.executable` is an app, not a python, so it can only serve the
-        # window through `--mirror-console`, while the console file itself
-        # (Resources/lib/pythonX.Y/macast/mirror_console.py, kept by
-        # `packages` below) is stdlib-only and runs under any Tk-capable python
-        # already on the machine. That ladder is `screen_mirror
-        # ._console_interpreter`; shipping a second copy of Tcl/Tk would only
-        # make the .app larger and, if its frameworks ever failed to travel,
-        # the bundle would be picked first and the window would die at startup.
+        # GUI stacks are unused: the menu-bar UI comes from rumps/AppKit, the
+        # rich control surface is the settings page in a browser, and the player
+        # is mpv (a separate process). Nothing in this app opens a Tk window
+        # anymore -- the desktop console that used to is gone, and its control
+        # surface lives in `macast/xml/setting.html` (「电脑投屏」).
         'PIL', 'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
         'wx', 'gtk', 'gnome', 'Xlib',
         # Build-time only (setuptools alone is ~7 MB of shipped bytecode; the
@@ -473,10 +467,10 @@ OPTIONS = {
     # `__init__` and the submodules all ship together. `ifaddr` is zeroconf's
     # only runtime dependency (imported from zeroconf._utils.ipaddress).
     #
-    # `macast` is here for the same reason and one more: `mirror_console.py` has
-    # to survive as a *file on disk*, because that is what the screen-mirror
-    # console gets launched with (`<some python> .../macast/mirror_console.py`)
-    # and a module frozen into the archive is not a path anyone can run.
+    # `macast` is here for the same reason: the plugin loader walks
+    # `macast/plugins/**` with os.listdir and imports what it finds, so the
+    # directory has to exist on disk as a package rather than as scattered
+    # entries inside the zip.
     'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
     'arch': TARGET_ARCH,
@@ -499,7 +493,6 @@ OPTIONS = {
     # "ModuleNotFoundError: No module named 'zeroconf'".
     'includes': ['cherrypy', 'lxml', 'netifaces', 'appdirs', 'pyperclip',
                  'requests', 'cheroot.ssl.builtin',
-                 'macast.config_window', 'macast.mirror_console',
                  # All first-party plugins are shipped in the application. The
                  # loader discovers them from os.listdir, so py2app cannot
                  # infer these imports on its own.

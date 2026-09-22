@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.10</macast.version>
+# <macast.version>0.11</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.10 the whole control surface is embedded in the native configuration window's computer-mirroring tab.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; the menu bar keeps only start, stop and the notifications.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -97,7 +97,7 @@ from queue import Queue, Empty
 
 import cherrypy
 
-from macast import Setting, MenuItem, gui, notice
+from macast import Setting, gui, notice
 from macast.renderer import Renderer, RendererSetting
 from macast.protocol_cast import (encode_cast_message, parse_cast_message,
                                   DEFAULT_MEDIA_APP_ID, NS_CONNECTION,
@@ -109,10 +109,10 @@ logger.setLevel(logging.INFO)
 CAST_PORT = 8009
 SERVICE_TYPE = "_googlecast._tcp.local."
 DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
-#: The version this file announces. One place, because the menu label, the
-#: console window title and the `<macast.version>` manifest have to agree --
-#: a regression test compares all three against this constant.
-PLUGIN_VERSION = '0.10'
+#: The version this file announces. One place, because the header the settings
+#: page shows and the `<macast.version>` manifest have to agree -- a regression
+#: test compares both against this constant.
+PLUGIN_VERSION = '0.11'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -308,10 +308,10 @@ _search_error = ''
 #: of kicking another multicast search (see `_search_due`).
 SEARCH_REFRESH_SECONDS = 15.0
 #: …and a list that is *not* empty is re-checked this often, so a Chromecast that
-#: wakes up later turns up in the window without anyone pressing「重新搜索」.
+#: wakes up later turns up on the page without anyone pressing「重新搜索」.
 STALE_SEARCH_SECONDS = 300.0
 #: How long one browse lasts, and how long a single hit may take to resolve.
-#: The browse is a fixed sleep, so these two numbers are the window's first
+#: The browse is a fixed sleep, so these two numbers are the page's first
 #:「一台都没找到」arriving: 3 s of silence plus 2 s per device used to mean a
 #: LAN with three Chromecasts took eleven seconds to answer.
 DISCOVER_TIMEOUT = 2.0
@@ -448,10 +448,11 @@ def _searched_suffix(searched_at):
 # -- 说给用户听的话 ----------------------------------------------------------
 #
 # Every user-visible sentence this plugin produces goes through `notify`, which
-# fires the system notification *and* writes it to `macast/notice.py`. The
-# desktop console has no notification centre to fall back on -- a message that
-# only ever reaches Notification Center is invisible to someone staring at the
-# window, and during a mirror the window *is* where they are looking.
+# fires the system notification *and* writes it to `macast/notice.py`. A mirror
+# runs for minutes with its control page sitting in a background tab, so a
+# message that only reaches Notification Center is one the user reads after the
+# fact, if at all. The board is what the「电脑投屏」tab shows them when they
+# come back.
 
 
 def notify(message, sound=False):
@@ -2901,7 +2902,7 @@ class _CastSender(object):
 #: How long one M-SEARCH listens, and how long one description GET may take.
 #: Both used to be 3 s *and* sequential, so a LAN with a TV that answers SSDP
 #: and then takes its time over HTTP made the console's first device list arrive
-#: a quarter of a minute after the window opened.
+#: a quarter of a minute after the page opened.
 SSDP_SEARCH_TIMEOUT = 2.5
 DESCRIBE_TIMEOUT = 1.5
 #: Ceiling on how many descriptions are fetched at once.
@@ -4206,7 +4207,7 @@ class ScreenMirrorRenderer(Renderer):
 
     def start(self):
         super(ScreenMirrorRenderer, self).start()
-        # Warm *both* searches. The window's first panel is「哪种投屏方式有设备」,
+        # Warm *both* searches. The page's first panel is「哪种投屏方式有设备」,
         # so an answer for only the stored target reads as the other protocol
         # being empty; and a menu opened before any search finished used to have
         # to say「搜索中…再展开一次」while it waited.
@@ -4243,7 +4244,7 @@ class ScreenMirrorRenderer(Renderer):
             # and telling someone to go pick one is a dead end.
             why = ('浏览器目标没有可中继的设备，它只播这台电脑推出去的流；'
                    if kind == 'browser' else '还没有选择投屏目标；')
-            notify('Screen Mirror 无法播放推送的网址：{}在投屏控制台里把「投屏方式」'
+            notify('Screen Mirror 无法播放推送的网址：{}在「电脑投屏」页里把「投屏方式」'
                    '切到 Chromecast 或 DLNA 电视做中继，或换回默认渲染器播放'
                    .format(why))
             return
@@ -4341,7 +4342,7 @@ class ScreenMirrorRenderer(Renderer):
         if target_prompt(kind):
             # Written by the same function the console shows, so the two can
             # never disagree about what is missing --「…或改用「浏览器」目标」used
-            # to appear on a window that was already on the browser target.
+            # to appear on a page that was already on the browser target.
             # The verdict goes on this copy: one line, no card above it.
             self._fail(target_prompt(kind, with_verdict=True), generation)
             return
@@ -4523,7 +4524,7 @@ class ScreenMirrorRenderer(Renderer):
         """Bridge path for a DLNA renderer: play a pushed URL, no capture."""
         name, control = dlna_target()
         if not control:
-            self._fail('还没有选择 DLNA 电视：在投屏控制台的「投屏方式 → DLNA 电视」'
+            self._fail('还没有选择 DLNA 电视：在「电脑投屏」页的「投屏方式 → DLNA 电视」'
                        '里选一台', generation)
             return
         profile = dlna_profile()
@@ -4593,7 +4594,7 @@ class ScreenMirrorRenderer(Renderer):
         """Stop blaming the TV one poll at a time and tell the user why."""
         current = dlna_profile_id(dlna_profile())
         nxt = profile_order()[0]
-        self._fail('{}：当前档位是「{}」。在投屏控制台「兼容档位」里换成「{}」再试一次'.format(
+        self._fail('{}：当前档位是「{}」。在「电脑投屏」页的「兼容档位」里换成「{}」再试一次'.format(
             reason, DLNA_PROFILES[current].label,
             DLNA_PROFILES[nxt].label),
                    self._generation)
@@ -4615,8 +4616,8 @@ class ScreenMirrorRenderer(Renderer):
         """Bridge path: play a finished URL on the device, no capture."""
         host, port, name = self.target()
         if host is None:
-            self._fail('还没有选择投屏目标：在投屏控制台的「投屏方式」里，'
-                       '从 Chromecast / Google TV 那张卡片下选一台设备', generation)
+            self._fail('还没有选择投屏目标：在「电脑投屏」页的「投屏方式」里，'
+                       '从 Chromecast / Google TV 那一行选一台设备', generation)
             return
         try:
             sender = _CastSender(host, port)
@@ -4797,37 +4798,33 @@ def _drain_stderr(proc, tail):
             pass
 
 
-# -- 投屏控制台：桌面窗口的后端 ------------------------------------------------
+# -- 投屏控制台：设置页那一整块的后端 ------------------------------------------
 #
 # Everything the menu used to carry (about fifty rows, nested four deep) now
-# lives in one desktop window: the menu keeps a door and the live status line,
-# the window owns the controls. Two facts about this app shaped the design:
+# lives in the 电脑投屏 tab of the settings page: the menu keeps a door and the
+# live status line, the page owns the controls. Two facts shaped this:
 #
-#   * the window is a **separate process**. `App.start()` runs the Cocoa loop
-#     (rumps) or pystray's own loop on the main thread on every platform, and
-#     Tk will not pump from anywhere else -- so `macast/mirror_console.py` is
-#     spawned and talks back to this process through the management API;
-#   * that means the console sees the plugin only through `console_state()` and
-#     changes it only through `console_action()`. Worth having on its own: the
-#     entire window is testable without a display, and every sentence the user
-#     reads is written here, next to the setting it describes.
+#   * the page talks to this plugin only over the management API -- so the whole
+#     control surface is `console_state()` for reads and `console_action()` for
+#     writes, and nothing else;
+#   * that split is worth having on its own: the entire control surface is
+#     testable without a browser, and every sentence the user reads is written
+#     here, next to the setting it describes. What the *layout* of those facts
+#     means is decided in the core (`macast/mirror_view.py`), not in the page's
+#     JS -- a rule inside a cached page keeps running after an upgrade.
 #
-# One behaviour change came with the window. The menu said「下次镜像生效」for
+# One behaviour change came with the page. The menu said「下次镜像生效」for
 # quality, screen, cursor and encoder, which is forgivable in a submenu you have
 # to reopen and unforgivable next to a slider you just moved -- so applying any
 # of them restarts a running mirror.
 
-#: Bumped when the state/action protocol changes; a console from another
-#: generation refuses to talk to a host that would be missing its buttons.
-CONSOLE_VERSION = 2
-#: Where the console child's stdout/stderr goes, and where it records its lock
-#: (pid + port + raise token). Both next to the settings file, so a bug report
-#: from a user's machine has them.
-CONSOLE_LOG_NAME = 'mirror_console.log'
-CONSOLE_LOCK_NAME = 'mirror_console.lock'
+#: Bumped when the state/action contract changes; a page from another generation
+#: says so in its banner instead of quietly missing buttons. `mirror_view.VIEW_VERSION`
+#: is the same number on the core's side, and the regression suite pins the two.
+CONSOLE_VERSION = 3
 
-#: One line of trade-off language per target: the cards in the console window
-#: have room to say what choosing this costs, which a menu label never did.
+#: One line of trade-off language per target: the cards in the page have room to
+#: say what choosing this costs, which a menu label never did.
 OUTPUT_HINTS = {
     'cast': '兼容性最好 · 延迟约 2–4 秒 · 有声音',
     'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 无声音 · '
@@ -4843,7 +4840,7 @@ OUTPUT_HINTS = {
 # nothing and a Chromecast that had never been looked for was reported as「没有
 # 发现」. One row per protocol the plugin can drive, each naming how its devices
 # are *found* -- a receiver protocol written later adds a row and a probe, and
-# the window lists it without knowing either name.
+# the page lists it without knowing either name.
 CHANNELS = (('cast', 'cast'),
             ('caststream', 'cast'),
             ('dlna', 'dlna'),
@@ -4949,7 +4946,7 @@ def channels_state(current=None):
         items = _probe_items(probe) if probe else []
         #: A protocol with nothing to search has no verdict to report. Saying
         #: 「还没有搜过」 over the browser target would send the user to look for
-        #: a device that does not exist; the window fills the blank with
+        #: a device that does not exist; the page fills the blank with
         #: 「不需要设备」.
         words = '' if not probe else _search_words(
             items, searching, searched_at, error,
@@ -4975,12 +4972,12 @@ def target_prompt(kind=None, with_verdict=False):
 
     One function writes both the line the console shows and the line a refused
     start reports -- they used to disagree, and「…或改用「浏览器」目标」appeared
-    on a window that was already on the browser target.
+    on a page that was already on the browser target.
 
-    `with_verdict` appends what the last search concluded. The console does not
+    `with_verdict` appends what the last search concluded. The page does not
     want it: it prints that verdict on the line above, and「没有发现 Chromecast」
     twice inside one card reads like a bug rather than like an answer. A refused
-    start does want it -- that one line leaves the window for a notification,
+    start does want it -- that one line leaves the page for a notification,
     where the reason is all the user gets.
     """
     kind = output_kind() if kind is None else kind
@@ -4998,8 +4995,8 @@ def target_prompt(kind=None, with_verdict=False):
 
 # -- 预览快照：低帧率的「这台电脑现在投出去的是什么」 --------------------------
 #
-# A mirror with no picture of its own is a guess: the console cannot show what
-# the TV sees unless it grabs the screen too. This is deliberately *not* a video
+# A mirror with no picture of its own is a guess: the page cannot show what the
+# TV sees unless it grabs the screen too. This is deliberately *not* a video
 # preview -- one ffmpeg per request, single-flight, at most one per second, and
 # the last good frame stays on screen through a failure, because the alternative
 # to a stale frame is a black rectangle where the picture was.
@@ -5014,79 +5011,90 @@ SNAPSHOT_RETRY_INTERVAL = 15.0
 SNAPSHOT_TIMEOUT = 8.0
 #: Wide enough to read a slide deck at, cheap enough to encode in one frame.
 SNAPSHOT_WIDTH = 480
-#: The two rasters a console window can be asked to read, with their magic
-#: bytes. Tk 8.5 -- still what `/usr/bin/python3` carries on macOS -- has no PNG
-#: decoder, so PPM is the format that reaches *every* Tk and PNG is merely the
-#: cheaper one on 8.6+. The window says which one it is; nothing here guesses.
-SNAPSHOT_FORMATS = {'png': b'\x89PNG', 'ppm': b'P6'}
+#: What a real PNG starts with. ffmpeg is asked for no encoder and no muxer --
+#: the `.png` output extension already selects one -- and these magic bytes are
+#: how we notice when a differently-built ffmpeg answered with something else.
+SNAPSHOT_MAGIC = b'\x89PNG'
 
 _snapshot_lock = threading.Lock()
-_snapshot = {'frame': b'', 'fmt': 'png', 'at': 0.0, 'busy': False,
+_snapshot = {'frame': b'', 'at': 0.0, 'busy': False,
              'failed_at': 0.0, 'reason': ''}
 
 
-def _cached(fmt):
-    """The retained frame, but only if it is in the format being asked for."""
-    return _snapshot['frame'] if _snapshot['fmt'] == fmt else b''
-
-
-def snapshot_frame(fmt='png', min_interval=SNAPSHOT_MIN_INTERVAL):
+def snapshot_frame(min_interval=SNAPSHOT_MIN_INTERVAL):
     """(frame bytes, reason) -- newest preview frame, or why there isn't one.
 
     Blocking by design: the caller is an HTTP handler in a worker thread, and a
     second grab in flight would mean two ffmpegs reading the same display.
-
-    One format is cached at a time rather than two: the grab is the expensive
-    part, and a window that changes its mind about formats is rare enough that
-    re-encoding beats doubling the memory and the bookkeeping.
     """
-    fmt = fmt if fmt in SNAPSHOT_FORMATS else 'png'
     now = time.time()
     with _snapshot_lock:
         if _snapshot['busy']:
-            return _cached(fmt), '正在采集上一帧'
-        if _cached(fmt) and now - _snapshot['at'] < min_interval:
-            return _cached(fmt), ''
+            return _snapshot['frame'], '正在采集上一帧'
+        if _snapshot['frame'] and now - _snapshot['at'] < min_interval:
+            return _snapshot['frame'], ''
         if (_snapshot['failed_at']
                 and now - _snapshot['failed_at'] < SNAPSHOT_RETRY_INTERVAL):
-            return _cached(fmt), _snapshot['reason']
+            return _snapshot['frame'], _snapshot['reason']
         _snapshot['busy'] = True
     try:
-        frame, reason = _grab_snapshot(fmt)
+        frame, reason = _grab_snapshot()
     finally:
         with _snapshot_lock:
             _snapshot['busy'] = False
             _snapshot['reason'] = reason
             if frame:
                 _snapshot['frame'] = frame
-                _snapshot['fmt'] = fmt
                 _snapshot['at'] = time.time()
                 _snapshot['failed_at'] = 0.0
             else:
                 _snapshot['failed_at'] = time.time()
-            retained = _cached(fmt)
-    # `retained` rather than `frame`: a failed grab still owes the window the
+            retained = _snapshot['frame']
+    # `retained` rather than `frame`: a failed grab still owes the page the
     # last good picture, because the alternative is a black rectangle.
     return retained, reason
 
 
 def snapshot_state():
-    """What the console needs to know about the preview without asking for it."""
+    """What the page needs to know about the preview without asking for it."""
     with _snapshot_lock:
         return {'busy': _snapshot['busy'],
                 'reason': _snapshot['reason'],
                 'has_frame': bool(_snapshot['frame']),
-                'fmt': _snapshot['fmt'],
                 'at': _snapshot['at']}
 
 
-def _frame_path(fmt):
+#: Why the preview stands down while a mirror runs. Measured on macOS: a second
+#: avfoundation grab of a display the mirror is already reading never produces a
+#: frame -- it costs the full `SNAPSHOT_TIMEOUT` and returns nothing.
+MIRRORING_PREVIEW_NOTE = '镜像进行中：画面正发给观看端，预览不再另开一路采集'
+
+
+def snapshot_wanted():
+    """Is a first preview frame still missing, with nobody on its way to get it?
+
+    The page's `<img>` only exists once a frame does, so nothing in the page ever
+    requested the *first* one -- 「正在抓取第一帧…」was a permanent answer on a
+    freshly started app. The frame rate after that is the image's own doing (its
+    URL changes when `at` does), which is why this asks once rather than always.
+    """
+    now = time.time()
+    with _snapshot_lock:
+        if _snapshot['busy'] or _snapshot['frame']:
+            return False
+        if (_snapshot['failed_at']
+                and now - _snapshot['failed_at'] < SNAPSHOT_RETRY_INTERVAL):
+            return False
+        return True
+
+
+def _frame_path():
     import tempfile
-    return os.path.join(tempfile.gettempdir(), 'macast-mirror-{}-{}.{}'.format(
-        os.getpid(), secrets.token_hex(4), 'png' if fmt == 'png' else 'ppm'))
+    return os.path.join(tempfile.gettempdir(), 'macast-mirror-{}-{}.png'.format(
+        os.getpid(), secrets.token_hex(4)))
 
 
-def _grab_snapshot(fmt='png'):
+def _grab_snapshot():
     """One frame of what this machine would be sending right now.
 
     Same capture path as the mirror (first input, video only), so the preview
@@ -5098,15 +5106,11 @@ def _grab_snapshot(fmt='png'):
     capture = probe_capture(ffmpeg)
     if capture is None:
         return b'', capture_unavailable_hint()
-    path = _frame_path(fmt)
+    path = _frame_path()
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin']
     cmd += list(capture.inputs[0])
     cmd += ['-map', '0:v:0', '-frames:v', '1',
             '-vf', 'scale={}:-2'.format(SNAPSHOT_WIDTH)]
-    if fmt != 'png':
-        # The extension alone would work; naming the codec is what keeps a
-        # differently-built ffmpeg from picking something else for `.ppm`.
-        cmd += ['-f', 'image2', '-c:v', 'ppm']
     cmd += ['-y', path]
     data = b''
     try:
@@ -5129,12 +5133,12 @@ def _grab_snapshot(fmt='png'):
         return b'', '预览采集失败：{}'.format(e)
     finally:
         _remove_quietly(path)
-    if not data.startswith(SNAPSHOT_FORMATS[fmt]):
-        return b'', 'ffmpeg 没有返回 {} 画面'.format(fmt.upper())
+    if not data.startswith(SNAPSHOT_MAGIC):
+        return b'', 'ffmpeg 没有返回 PNG 画面'
     return data, ''
 
 
-# -- 采集探测：菜单/控制台都只读缓存，探测在后台跑 -----------------------------
+# -- 采集探测：菜单/页面都只读缓存，探测在后台跑 -------------------------------
 
 _probe_busy = threading.Event()
 
@@ -5169,432 +5173,38 @@ def _run_capture_probe():
         _probe_busy.clear()
 
 
-# -- 启动器：把控制台窗口拉起来（或者把它叫到前面）------------------------------
-
-#: How the app's own entry point is told to run the window instead of the menu
-#: bar. The only door when the bundle has no importable .py on disk.
-CONSOLE_ARGV = ['--mirror-console']
-#: The Tk floor for drawing this window. Apple's Command Line Tools still ship
-#: Tcl/Tk 8.5.9, and on a current macOS that build paints nothing but native
-#: buttons -- the window opens, every label stays invisible, and nothing errors.
-#: `mirror_console.MIN_TK` is the same floor on the window's side; Part 35 pins
-#: the two together so neither can drift into opening a blank window.
-MIN_TK_VERSION = (8, 6)
-_TK_PROBE = ('import sys, tkinter; '
-             'v = tuple(int(p) for p in str(tkinter.TkVersion).split("."))[:2]; '
-             'sys.exit(0 if v >= ({}, {}) else 1)'.format(*MIN_TK_VERSION))
-#: `_tkinter` is present or absent as a build fact, not per call; find_spec
-#: touches the filesystem, so ask once.
-_tkinter_missing = None
-
-
-def tkinter_missing():
-    global _tkinter_missing
-    if _tkinter_missing is None:
-        import importlib.util
-        _tkinter_missing = importlib.util.find_spec('_tkinter') is None
-    return _tkinter_missing
-
-
-def tkinter_install_hint():
-    """What to tell the user when *no* interpreter on the machine can draw Tk --
-    the ladder in `_console_interpreter` already tried ours and the usual
-    system pythons, so this is the last word, not a first guess."""
-    if sys.platform == 'darwin':
-        return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
-                'brew install python-tk（配合 brew 的 python3）。'
-                '注意 macOS 自带的 /usr/bin/python3 只有 Tk 8.5.9，'
-                '它开出来的窗口是空白的')
-    if sys.platform == 'win32':
-        return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
-                '请在 Python 安装包里勾选 tcl/tk and IDLE')
-    return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
-            'Debian/Ubuntu 请 apt install python3-tk，Arch 请 pacman -S tk，'
-            '然后重启 Macast')
-
-
-#: Key on the message board for "no interpreter here can draw the console".
-TK_KEY = 'python-tk'
-
-
-def tkinter_requirement():
-    """Say once, and keep saying it, that the window needs a Tk-capable python.
-
-    The launcher reaches this only after `_console_interpreter()` has probed our
-    own interpreter and every system python it can find, so the card is the
-    conclusion of a search rather than a guess -- and `_watch_console_start`
-    withdraws it as soon as a window is seen alive.
-    """
-    notice.requirement(
-        TK_KEY,
-        label='投屏控制台窗口需要一个能画 Tk 的 Python',
-        detail=tkinter_install_hint(),
-        command='brew install python-tk' if sys.platform == 'darwin' else '')
-
-
-def _setting_dir():
-    from macast.utils import SETTING_DIR
-    return SETTING_DIR
-
-
-def _console_log_path():
-    return os.path.join(_setting_dir(), CONSOLE_LOG_NAME)
-
-
-def _console_lock_path():
-    return os.path.join(_setting_dir(), CONSOLE_LOCK_NAME)
-
-
-def _console_script_path():
-    """Absolute path to a runnable mirror_console.py, or None.
-
-    Whether the file exists on disk decides *who* can open the window: the
-    console imports nothing from `macast`, so any python carrying Tk can run it,
-    which is what saves a Mac whose Homebrew python has no `python-tk`. Source
-    runs and py2app bundles keep real .py files (§4.4's `packages: ['macast']`);
-    a PyInstaller onefile only if the build also ships it as data, hence the
-    `_MEIPASS` lookup -- and where that fails too the entry point's
-    `--mirror-console` dispatch reads the module out of the archive.
-    """
-    roots = [os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))]
-    meipass = getattr(sys, '_MEIPASS', None)
-    if meipass:
-        roots.append(os.path.join(meipass, 'macast'))
-    for root in roots:
-        path = os.path.join(root, 'mirror_console.py')
-        if os.path.isfile(path):
-            return path
-    return None
-
-
-def _frozen_app():
-    """True when `sys.executable` is an app rather than a python.
-
-    py2app sets `sys.frozen = 'macosx_app'`, PyInstaller sets True, and in both
-    cases running the executable with `-c` launches *Macast* instead of probing
-    Tk -- the user would watch a second menu-bar icon appear. Only argv passed
-    straight through (`--mirror-console`) reaches our code from there.
-    """
-    return bool(getattr(sys, 'frozen', False))
-
-
-def _console_command():
-    """(interpreter, tail) for the window, tail None when there is nothing.
-
-    `interpreter` None means "any python that can do Tk" and the ladder in
-    `_console_interpreter` picks it, off the UI thread; a named one is this
-    executable itself, i.e. the bundle has the only copy of the module.
-    """
-    script = _console_script_path()
-    if script:
-        return None, [script]
-    if _frozen_app():
-        return sys.executable, list(CONSOLE_ARGV)
-    entry = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__))))), 'Macast.py')
-    return (None, [entry] + list(CONSOLE_ARGV)) if os.path.isfile(
-        entry) else (None, None)
-
-
-def _own_python_has_tk():
-    """Can this process's interpreter run the window itself?
-
-    False for a frozen app whatever it carries: its executable is not a python,
-    so it could only serve the console through `--mirror-console`, and that path
-    is the fallback rather than the first choice.
-    """
-    return bool(not tkinter_missing() and not _frozen_app()
-                and _own_tk_version())
-
-
-def _own_tk_version():
-    """This interpreter's Tk, when it can draw the window; else None.
-
-    Only the two integer parts are read, and `TK_VERSION` is a constant inside
-    `_tkinter` -- no Tcl interpreter is created, so this is safe to ask from the
-    menu-bar process that owns the Cocoa run loop.
-    """
-    try:
-        import tkinter
-    except ImportError:
-        return None
-    try:
-        parts = tuple(int(p) for p in str(tkinter.TkVersion).split('.'))[:2]
-    except ValueError:
-        return None
-    return parts if parts >= MIN_TK_VERSION else None
-
-
-
-def _read_console_lock():
-    try:
-        with open(_console_lock_path()) as handle:
-            info = json.loads(handle.read())
-    except Exception:
-        return None
-    return info if isinstance(info, dict) and info.get('port') else None
-
-
-def _console_alive_info():
-    """The running console's lock info, or None.
-
-    Liveness is an HTTP ping, never `os.kill(pid, 0)`: on Windows signal 0
-    terminates the target process, so the check for "is it alive" would be the
-    thing that killed it.
-    """
-    info = _read_console_lock()
-    if info is None:
-        return None
-    try:
-        request = urllib.request.Request(
-            'http://127.0.0.1:{}/ping'.format(info['port']))
-        with urllib.request.urlopen(request, timeout=1.5) as response:
-            body = json.loads(response.read().decode('utf-8', 'replace'))
-    except Exception:
-        _remove_quietly(_console_lock_path())
-        return None
-    return dict(info, **body) if isinstance(body, dict) else info
-
-
-def _raise_console(info):
-    """Ask the open console to lift itself; False when it will not."""
-    request = urllib.request.Request(
-        'http://127.0.0.1:{}/raise'.format(info['port']), data=b'')
-    request.add_header('X-Macast-Console-Token', str(info.get('token') or ''))
-    try:
-        with urllib.request.urlopen(request, timeout=1.5):
-            return True
-    except Exception as e:
-        logger.info('cannot raise the console window: %s', e)
-        return False
-
-
-def _management_token():
-    """The app's management token, which the console must carry to open mirrors.
-
-    `api_token()` creates and persists one on first use -- that is the app's
-    own documented behaviour, not a side effect added here.
-    """
-    try:
-        from macast.protocol import api_token
-        return api_token()
-    except Exception as e:
-        logger.info('no management token for the console: %s', e)
-        return ''
-
-
-def _candidate_interpreters():
-    """Pythons to try for the console window, ours first.
-
-    "Our interpreter has no usable Tk" is the normal case on a Mac, not a broken
-    install: Homebrew's python needs the separate `python-tk` formula, a py2app
-    bundle inherits whichever python built it, and the system python's Tk 8.5.9
-    cannot draw this window at all. That is survivable because the console is
-    stdlib-only by design -- it speaks HTTP to this app, never Python -- so any
-    python3 that carries Tk 8.6+ can run the same file.
-    """
-    seen = set()
-
-    def one(path):
-        if not path:
-            return None
-        key = os.path.realpath(path)
-        if key in seen:
-            return None
-        seen.add(key)
-        return path
-
-    if not _frozen_app():
-        # A frozen `sys.executable` is an app, not a python: probing it with `-c`
-        # would start a second Macast. The bundle still gets its turn, as the
-        # `--mirror-console` fallback in `_launch_console_late`.
-        yield one(sys.executable)
-    if sys.platform == 'darwin':
-        # /usr/bin/python3 is a shim that opens the Command Line Tools installer
-        # when the tools are absent, so never offer it without checking first.
-        if os.path.isdir('/Library/Developer/CommandLineTools'):
-            yield one('/usr/bin/python3')
-        for path in ('/opt/homebrew/bin/python3', '/usr/local/bin/python3'):
-            if os.path.isfile(path):
-                yield one(path)
-    elif sys.platform == 'win32':
-        # pythonw.exe: a console build would flash a black CMD window behind the
-        # only window the user asked for.
-        yield one(shutil.which('pythonw.exe') or shutil.which('pythonw'))
-        yield one(shutil.which('python.exe') or shutil.which('python'))
-    else:
-        for name in ('python3', 'python'):
-            found = one(shutil.which(name))
-            if found:
-                yield found
-
-
-def _tk_probe(interpreter):
-    """Ask an interpreter, by name, whether it can draw the window.
-
-    A subprocess is the only honest test -- `find_spec` in *this* process says
-    nothing about another one -- and it is cheap enough to run when the window
-    is opened, off the UI thread. Importing tkinter is not enough: the answer
-    must clear `MIN_TK_VERSION`, or the ladder picks the very Tk that opens a
-    blank window on a Mac.
-    """
-    try:
-        return subprocess.call(
-            [interpreter, '-c', _TK_PROBE],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=15) == 0
-    except Exception as e:
-        logger.info('tk probe failed for %s: %s', interpreter, e)
-        return False
-
-
-def _console_interpreter():
-    """First interpreter whose Tk can draw the window; None when nothing can."""
-    if _own_python_has_tk():
-        # Ours, and the answer came from find_spec: no need to ask twice.
-        return sys.executable
-    for interpreter in _candidate_interpreters():
-        if _tk_probe(interpreter):
-            logger.info('the console will run under %s', interpreter)
-            return interpreter
-    return None
-
-
-def open_console():
-    """Open the console window, or bring the existing one forward.
-
-    Returns as soon as the decision is made: finding a Tk-capable interpreter
-    costs a subprocess each, and a menu callback runs on the UI thread.
-    """
-    info = _console_alive_info()
-    if info is not None:
-        _raise_console(info)
-        return True
-    interpreter, tail = _console_command()
-    if tail is None:
-        notify('找不到投屏控制台文件 mirror_console.py，无法打开窗口')
-        return False
-    if interpreter is not None:
-        return _launch_console(interpreter, tail)
-    if _own_python_has_tk():
-        return _launch_console(sys.executable, tail)
-    if _frozen_app() and not tkinter_missing():
-        # The bundle can do Tk and no system python can be trusted to; hand the
-        # request to our own entry point, which is the one thing this executable
-        # does understand.
-        return _launch_console(sys.executable, list(CONSOLE_ARGV))
-    threading.Thread(target=_launch_console_late, args=(tail,), daemon=True,
-                     name='SCREEN_MIRROR_CONSOLE_LAUNCH').start()
-    return True
-
-
-def _launch_console_late(tail):
-    """Pick an interpreter off the UI thread and open the window.
-
-    `_tk_probe` costs a subprocess per candidate, and a menu callback runs on
-    the UI thread. When nothing on this machine can do Tk, the bundle's own
-    interpreter still gets one attempt -- it may carry Tk that no system python
-    does -- and only then does the hint ask the user to install something.
-    """
-    interpreter = _console_interpreter()
-    if interpreter is not None:
-        _launch_console(interpreter, tail)
-        return
-    if _frozen_app():
-        _launch_console(sys.executable, list(CONSOLE_ARGV))
-        return
-    notify(tkinter_install_hint())
-    tkinter_requirement()
-
-
-
-def _launch_console(interpreter, tail):
-    argv = [interpreter] + list(tail)
-    env = dict(os.environ)
-    env['MACAST_CONSOLE_API'] = 'http://127.0.0.1:{}'.format(Setting.get_port())
-    env['MACAST_CONSOLE_TOKEN'] = _management_token()
-    env['MACAST_CONSOLE_DIR'] = _setting_dir()
-    try:
-        # The child's own stdout/stderr is the only record a Tk traceback ever
-        # leaves behind, and a windowed parent has nowhere else to put it.
-        handle = open(_console_log_path(), 'ab')
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
-                                stdout=handle, stderr=handle, env=env)
-    except Exception as e:
-        notify('投屏控制台启动失败：{}'.format(e))
-        return False
-    # A lock left by a killed console would otherwise make every later click
-    # "raise" a window that no longer exists.
-    _remove_quietly(_console_lock_path())
-    threading.Thread(target=_watch_console_start, args=(proc,), daemon=True,
-                     name='SCREEN_MIRROR_CONSOLE_WATCH').start()
-    return True
-
-
-def _watch_console_start(proc, delay=2.0):
-    """Report a console that died at once instead of looking like a no-op.
-
-    The realistic causes are a python without Tk (which `_tkinter` usually
-    already caught) and a Tcl/Tk that cannot reach the display; both only ever
-    surface in the child's log.
-    """
-    time.sleep(delay)
-    if proc.poll() is None:
-        # A window that outlived the grace period is the only proof this machine
-        # really can draw Tk, so it is what retires the card.
-        notice.satisfied(TK_KEY)
-        return
-    tail = ''
-    try:
-        with open(_console_log_path(), 'rb') as handle:
-            raw = handle.read().decode('utf-8', 'replace').strip()
-        tail = raw.splitlines()[-1] if raw else ''
-    except Exception:
-        pass
-    notify('投屏控制台没能启动（退出码 {}）：{}（日志 {}）'.format(
-        proc.returncode, tail or '子进程没有输出任何错误', _console_log_path()))
 
 
 class ScreenMirrorSetting(RendererSetting):
 
     #: The renderer that built this surface (`ScreenMirrorRenderer.__init__`).
     #: Deliberately not the bus's `get_renderer`: that answers「whoever is
-    #: playing media right now」, which made the console and the menu-bar door
-    #: depend on Screen Mirror being the selected renderer -- two menu clicks in
-    #: front of a window that captures this desktop and pushes it out, an act
+    #: playing media right now」, which would make this surface depend on Screen
+    #: Mirror being the selected renderer -- and capturing this desktop is an act
     #: with nothing to do with whichever player holds the DLNA stream.
     _owner = None
 
     def _renderer(self):
         return self._owner
 
-    def console_menu(self):
-        """The menu-bar rows for the console: one door, and a way out.
+    def mirror_running(self):
+        """Is this machine's screen being captured right now?
 
-        `macast/macast.py` splices these in whether or not this plugin is the
-        current renderer. 停止镜像 stays because a hidden window must never be
-        the only way out of a live capture of your own desktop.
+        The menu bar asks, and keeps a「停止电脑投屏」row for exactly as long as
+        the answer is yes: a browser tab -- minimised, closed, or open on another
+        machine -- must never be the only way out of a live capture.
         """
         renderer = self._renderer()
-        items = [MenuItem('电脑投屏…', self.on_open_console_clicked)]
-        if renderer is not None and renderer.is_mirroring():
-            items.append(MenuItem('停止电脑投屏', self.on_toggle_clicked))
-        return items
-
-    def on_open_console_clicked(self, item):
-        """Spawn (or focus) the console. Never blocks: the process launch is
-        cheap, and everything slower than that happens in the child."""
-        open_console()
+        return bool(renderer and renderer.is_mirroring())
 
     # -- the console's view model ----------------------------------------------
 
     def console_state(self):
-        """One JSON-ready description of everything the console shows.
+        """One JSON-ready description of everything the page shows.
 
-        Deliberately a view model rather than markup: the console is a different
-        process, and keeping the strings here means the regression suite can
-        assert on the whole window without a display.
+        Deliberately a view model rather than markup: the page is another
+        program's renderer, and keeping the strings here means the regression
+        suite can assert on the whole control surface without a browser.
         """
         renderer = self._renderer()
         mirroring = bool(renderer and renderer.is_mirroring())
@@ -5637,31 +5247,62 @@ class ScreenMirrorSetting(RendererSetting):
             'capture': self._capture_state(),
             'audio': self._audio_state(),
             'viewer': self._viewer_state(renderer, mirroring, kind),
-            'preview': snapshot_state(),
+            'preview': self._preview_state(mirroring),
         }
 
-    def snapshot_frame(self, fmt='png'):
-        """The preview frame the console window polls for, in the format its Tk
-        can actually read (`png` on 8.6+, `ppm` on 8.5).
+    def snapshot_frame(self):
+        """The preview frame the settings page polls for, as PNG.
 
         Reached through the same surface as the state and the actions, but note
         what it does *not* need: the running session. The grab goes straight to
-        the capture probe, so the picture is there before a mirror starts, while
-        one runs, and after it stops -- which is the point of a preview.
+        the capture probe, so the picture is there before a mirror starts and
+        after it stops -- which is the point of a preview. While one *is* running
+        it stands down: the mirror holds that display, and a second capture of it
+        spends eight seconds to produce nothing (see `MIRRORING_PREVIEW_NOTE`).
         """
-        return snapshot_frame(fmt)
+        renderer = self._renderer()
+        if renderer is not None and renderer.is_mirroring():
+            return b'', MIRRORING_PREVIEW_NOTE
+        return snapshot_frame()
+
+    def request_preview(self):
+        """Sponsor the first preview frame; the page's `<img>` asks for the rest.
+
+        A grab is an ffmpeg, so this never runs inside the request that asked for
+        the state -- and it never runs while the mirror holds the display.
+        """
+        renderer = self._renderer()
+        if renderer is not None and renderer.is_mirroring():
+            return False
+        if not snapshot_wanted():
+            return False
+        threading.Thread(target=snapshot_frame, daemon=True,
+                         name='SCREEN_MIRROR_SNAPSHOT').start()
+        return True
+
+    @staticmethod
+    def _preview_state(mirroring):
+        """The preview card's data, with the mirror's claim on it applied."""
+        state = snapshot_state()
+        if mirroring:
+            # A frame grabbed before the mirror started would keep refreshing
+            # into a stale picture presented as live, so the card says why it
+            # stands down instead of showing one.
+            state['has_frame'] = False
+            state['reason'] = MIRRORING_PREVIEW_NOTE
+        return state
 
     @staticmethod
     def _kick_searches():
         """Look for *every* protocol's devices, not just the stored choice's.
 
-        The window's first panel answers「哪种协议有东西可投」, which needs all
+        The page's first panel answers「哪种协议有东西可投」, which needs all
         of the answers: searching only the current target is how an opened
         console reported「没有发现」about a Chromecast it had never looked for.
 
         The 15-second guard the menu grew stays, and matters more now: the
-        console polls this view once a second, so without it a plain window open
-        would keep the LAN busy forever.
+        console polls this view once a second, so without it a page merely being
+        open would keep the LAN busy forever.
         """
         now = time.time()
         if not _searching and _search_due(_searched_at, now, bool(_devices)):
@@ -5669,6 +5310,24 @@ class ScreenMirrorSetting(RendererSetting):
         if not _dlna_searching and _search_due(_dlna_searched_at, now,
                                                bool(_dlna_devices)):
             start_renderer_search()
+
+    def request_probes(self):
+        """Warm the capture and encoder caches if this page has never seen them.
+
+        Called by the mirror-state endpoint rather than by `console_state()`, so
+        the state builder stays a pure read and the caller that has to render
+        「正在探测…」is the one that makes it come true. Both answers come from
+        spawning ffmpeg, so neither is taken on the request that asks for it --
+        but a spinner that never resolves is a lie by omission, and the 编码 row
+        rots worst: the preview's own grab warms the capture cache and never the
+        encoder one, which is how a Mac was told a probe was in flight forever.
+
+        The guard is the caches themselves, because the page polls once a second;
+        `request_capture_probe()` adds the single-flight one.
+        """
+        if _capture_cache and (sys.platform != 'darwin' or _hw_encoder_cache):
+            return
+        request_capture_probe()
 
     @staticmethod
     def _capture_state():
@@ -5728,7 +5387,7 @@ class ScreenMirrorSetting(RendererSetting):
 
     # -- the console's actions --------------------------------------------------
 
-    #: Everything the window may do, in one list: the HTTP endpoint refuses any
+    #: Everything the page may do, in one list: the HTTP endpoint refuses any
     #: name that is not here rather than dispatching on it.
     CONSOLE_ACTIONS = ('start', 'stop', 'toggle', 'set-output', 'set-target',
                        'set-dlna-target', 'set-profile', 'set-quality',

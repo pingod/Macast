@@ -55,7 +55,7 @@ def _tell(message):
 
     The notification is gone in five seconds and the user has to install
     something from it, so the same sentence goes to the message board the
-    desktop console reads (`macast/notice.py`) -- and the install command is
+    「电脑投屏」tab reads (`macast/notice.py`) -- and the install command is
     repeated there as an open requirement until shairport-sync turns up.
     """
     notice.record(message)

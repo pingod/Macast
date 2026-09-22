@@ -148,6 +148,100 @@
             background: var(--panel-2, rgba(127,127,127,.12)); border: 1px solid var(--border);
             font-size: 12px; font-family: monospace; white-space: pre-wrap; word-break: break-all;
         }
+        /* 电脑投屏控制台。这里只有卡片和「严重级别 -> 颜色」：哪块面板出现、
+           出现顺序、某一步算不算失败，全部由 macast/mirror_view.py 决定，
+           所以 lv-* 是后端下发的名字而不是十六进制色值——配色归本页面管。 */
+        .mirror-strip {
+            display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+            border: 1px solid var(--border); border-radius: 10px;
+            background: var(--panel); color: var(--text-soft);
+            padding: 9px 14px; margin-bottom: 12px; font-size: 13px;
+        }
+        .mirror-strip.lv-bad { border-color: #f56c6c; color: #f56c6c; }
+        .mirror-strip.lv-warn { border-color: #e6a23c; color: #b88230; }
+        .mirror-strip.lv-good { border-color: #67c23a; color: #529b2e; }
+        .mirror-strip.lv-accent { border-color: var(--accent); color: var(--accent); }
+        /* muted / dim are states of the *step list*, not faults: 「排队中」and
+           「跳过」must read quieter than the line above them, never redder. */
+        .mirror-strip.lv-muted { border-color: var(--border); color: var(--text-soft); }
+        .mirror-strip.lv-dim { border-color: var(--border); color: var(--text-soft); opacity: .6; }
+        body.theme-dark .mirror-strip.lv-warn { color: #e6a23c; }
+        body.theme-dark .mirror-strip.lv-good { color: #85ce61; }
+        .mirror-head-top {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 10px; flex-wrap: wrap;
+        }
+        .mirror-live {
+            display: inline-flex; align-items: center; gap: 8px;
+            font-size: 14px; font-weight: 600; color: var(--text);
+        }
+        .mirror-dot {
+            width: 9px; height: 9px; border-radius: 50%;
+            background: var(--text-soft); opacity: .45;
+        }
+        .mirror-live.on .mirror-dot {
+            background: #67c23a; opacity: 1;
+            animation: mirror-pulse 1.6s ease-in-out infinite;
+        }
+        @keyframes mirror-pulse { 50% { box-shadow: 0 0 0 4px rgba(103, 194, 58, .18); } }
+        .mirror-head-actions { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+        .mirror-cards {
+            display: grid; gap: 10px;
+            grid-template-columns: repeat(auto-fill, minmax(214px, 1fr));
+        }
+        .mirror-card {
+            border: 1px solid var(--border); border-radius: 10px;
+            padding: 10px 12px; cursor: pointer; background: var(--panel);
+        }
+        .mirror-card:hover, .mirror-card.sel { border-color: var(--accent); }
+        .mc-title { font-weight: 600; font-size: 13px; color: var(--text); }
+        .mc-words { font-size: 12px; color: var(--text-soft); margin-top: 3px; }
+        .mc-choice { font-size: 12px; color: var(--accent); margin-top: 3px; }
+        .mc-hint { font-size: 12px; color: var(--text-soft); margin-top: 5px; line-height: 1.5; }
+        .mirror-dev {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border);
+            cursor: pointer; font-size: 13px;
+        }
+        .mirror-dev:last-child { border-bottom: none; }
+        .mirror-dev:hover .md-name { color: var(--accent); }
+        .mirror-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+        .mirror-pill {
+            border: 1px solid var(--border); border-radius: 14px;
+            padding: 3px 11px; font-size: 12px; cursor: pointer; color: var(--text-soft);
+        }
+        .mirror-pill:hover { border-color: var(--accent); color: var(--accent); }
+        .mirror-pill.sel {
+            border-color: var(--accent); color: var(--accent);
+            background: rgba(64, 158, 255, .10);
+        }
+        .mirror-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+        .mirror-req { padding: 8px 0; border-bottom: 1px solid var(--border); }
+        .mirror-req:last-child { border-bottom: none; }
+        .mr-label { font-weight: 600; font-size: 13px; }
+        .mirror-cmd { display: flex; align-items: center; gap: 8px; margin-top: 5px; flex-wrap: wrap; }
+        .mirror-cmd code {
+            background: rgba(127, 127, 127, .12); padding: 3px 7px;
+            border-radius: 6px; font-size: 12px; word-break: break-all;
+        }
+        .mirror-steps { margin-top: 8px; }
+        .mirror-step { display: flex; align-items: baseline; gap: 8px; font-size: 12px; padding: 2px 0; }
+        .ms-mark { width: 14px; text-align: center; color: var(--text-soft); }
+        .ms-mark.lv-good { color: #67c23a; }
+        .ms-mark.lv-bad { color: #f56c6c; }
+        .ms-mark.lv-warn { color: #e6a23c; }
+        .ms-mark.lv-accent { color: var(--accent); }
+        .ms-mark.lv-muted { color: var(--text-soft); }
+        .ms-mark.lv-dim { color: var(--text-soft); opacity: .55; }
+        .ms-label { min-width: 118px; }
+        .mirror-snap {
+            max-width: 100%; display: block; margin-bottom: 8px;
+            border: 1px solid var(--border); border-radius: 8px;
+        }
+        .mirror-feed { max-height: 260px; overflow: auto; font-size: 12px; }
+        .mf-item { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+        .mf-item:last-child { border-bottom: none; }
+        .mf-time { color: var(--text-soft); white-space: nowrap; font-family: ui-monospace, Menlo, monospace; }
         .history-item {
             display: flex; align-items: center; justify-content: space-between;
             padding: 8px 0; border-bottom: 1px solid var(--border);
@@ -442,12 +536,201 @@
                 </el-table>
             </div>
         </el-tab-pane>
+        <el-tab-pane label="电脑投屏" name="13">
+            <div class="mirror-wrap">
+                <!-- 哪几块、什么顺序，由 macast/mirror_view.py 决定：页面只是渲染器。
+                     规则写在 JS 里就等于"升级之后旧规则还在跑"（模板和 PWA 都有缓存）。 -->
+                <div class="mirror-strip lv-bad" v-if="mirror_offline">
+                    连不上 Macast：投屏控制不可用。确认应用还在运行，再强制刷新本页面。
+                </div>
+                <div class="mirror-strip lv-warn"
+                     v-else-if="mirror_error">{{ mirror_error }}</div>
+                <div class="mirror-strip" :class="mirror_banner.class"
+                     v-else-if="mirror_banner.text">{{ mirror_banner.text }}</div>
+
+                <div class="status-card" v-if="!mirror_state">
+                    <div class="hint">{{ mirror_loaded ? '没有拿到投屏状态。' : '加载中…' }}</div>
+                </div>
+
+                <template v-else>
+                    <div class="status-card mirror-head">
+                        <div class="mirror-head-top">
+                            <span class="mirror-live" :class="{on: mirror_state.mirroring}">
+                                <i class="mirror-dot"></i>{{ mirror_view.header }}
+                            </span>
+                            <span class="mirror-head-actions">
+                                <el-button size="mini" type="primary" v-if="!mirror_state.mirroring"
+                                           :loading="mirror_busy"
+                                           @click="mirror_run('start')">开始镜像</el-button>
+                                <el-button size="mini" type="danger" v-else
+                                           :loading="mirror_busy"
+                                           @click="mirror_run('stop')">停止镜像</el-button>
+                                <el-button size="mini" :loading="mirror_busy"
+                                           @click="mirror_run('refresh')">重搜设备</el-button>
+                                <el-button size="mini" :loading="mirror_busy"
+                                           @click="mirror_run('probe')">重新探测采集</el-button>
+                            </span>
+                        </div>
+                        <div class="hint" v-if="mirror_state.prompt">{{ mirror_state.prompt }}</div>
+                    </div>
+
+                    <template v-for="sec in mirror_view.sections">
+                        <div class="status-card" v-if="sec === 'channels'" key="channels">
+                            <h3>投屏方式</h3>
+                            <div class="mirror-cards">
+                                <div class="mirror-card" :class="{sel: row[3]}"
+                                     v-for="row in mirror_view.channels" :key="row[0]"
+                                     @click="mirror_run('set-output', {value: row[0]})">
+                                    <div class="mc-title">{{ row[1] }}</div>
+                                    <div class="mc-words" :class="{dim: !row[4]}">{{ row[2] }}</div>
+                                    <div class="mc-choice" v-if="row[5]">{{ row[5] }}</div>
+                                    <div class="mc-hint" v-if="row[6]">{{ row[6] }}</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'devices'" key="devices">
+                            <h3>设备</h3>
+                            <div class="hint" v-if="!mirror_view.devices.length">
+                                这一轮没有可点的设备。
+                            </div>
+                            <div class="mirror-dev" v-for="d in mirror_view.devices" :key="d[0]"
+                                 @click="mirror_pick(d)">
+                                <span class="md-name">{{ d[1] }}</span>
+                                <el-tag size="mini" type="success" v-if="d[2]">当前</el-tag>
+                            </div>
+                            <div class="hint" v-if="mirror_view.device_note">
+                                {{ mirror_view.device_note }}
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'requirements'" key="requirements">
+                            <h3>还缺什么</h3>
+                            <div class="mirror-req" v-for="r in mirror_state.requirements" :key="r.key">
+                                <div class="mr-label">{{ r.label }}</div>
+                                <div class="hint" v-if="r.detail">{{ r.detail }}</div>
+                                <div class="mirror-cmd" v-if="r.command">
+                                    <code>{{ r.command }}</code>
+                                    <el-button size="mini" @click.stop="copy_text(r.command)">复制</el-button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'profiles'" key="profiles">
+                            <h3>兼容档位</h3>
+                            <div class="mirror-pills">
+                                <span class="mirror-pill" :class="{sel: p.key === mirror_state.profiles.current}"
+                                      v-for="p in mirror_state.profiles.options" :key="p.key"
+                                      @click="mirror_run('set-profile', {value: p.key})">{{ p.label }}</span>
+                            </div>
+                            <div class="hint" style="margin-top:8px;">
+                                换档位会立刻重启镜像：摆出五种封装就是因为第一种常被电视拒掉。
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'quality'" key="quality">
+                            <h3>画质</h3>
+                            <div class="mirror-pills">
+                                <span class="mirror-pill" :class="{sel: q.key === mirror_state.quality.current}"
+                                      v-for="q in mirror_state.quality.options" :key="q.key"
+                                      @click="mirror_run('set-quality', {value: q.key})">
+                                    {{ mirror_view.quality.labels[q.key] || q.label }}
+                                </span>
+                            </div>
+                            <div class="hint" style="margin-top:8px;">{{ mirror_view.quality.note }}</div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'capture'" key="capture">
+                            <h3>采集</h3>
+                            <div class="hint">{{ mirror_state.capture.label || '还没有探测到采集设备。' }}</div>
+                            <div class="mirror-pills" v-if="mirror_state.capture.screens.length > 1">
+                                <span class="mirror-pill" :class="{sel: s.selected}"
+                                      v-for="s in mirror_state.capture.screens" :key="s.index"
+                                      @click="mirror_run('set-screen', {value: s.index})">{{ s.label }}</span>
+                            </div>
+                            <div class="mirror-line">
+                                <el-switch :value="mirror_state.capture.cursor"
+                                           @change="mirror_run('set-cursor', {value: $event})"
+                                           active-text="采集鼠标指针"></el-switch>
+                            </div>
+                            <div class="mirror-line"
+                                 v-if="mirror_state.capture.hardware_supported && mirror_state.capture.hardware_probed && mirror_state.capture.hardware_available">
+                                <el-switch :value="mirror_state.capture.encoder === 'hardware'"
+                                           @change="mirror_run('set-encoder', {value: $event ? 'hardware' : 'software'})"
+                                           active-text="VideoToolbox 硬件编码"></el-switch>
+                            </div>
+                            <div class="hint" v-else-if="mirror_state.capture.hardware_supported && !mirror_state.capture.hardware_probed">
+                                正在探测这台机器有没有硬件编码…
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'audio'" key="audio">
+                            <h3>系统声音</h3>
+                            <div class="hint" v-if="mirror_state.audio.line">{{ mirror_state.audio.line }}</div>
+                            <div class="mirror-steps" v-if="mirror_state.audio.steps.length">
+                                <div class="mirror-step" v-for="(st, i) in mirror_state.audio.steps" :key="st.id">
+                                    <span class="ms-mark" :class="'lv-' + (mirror_view.step_marks[i] || ['', 'muted'])[1]">
+                                        {{ (mirror_view.step_marks[i] || ['?'])[0] }}
+                                    </span>
+                                    <span class="ms-label">{{ st.label }}</span>
+                                    <span class="hint" v-if="st.note">{{ st.note }}</span>
+                                </div>
+                            </div>
+                            <div class="mirror-line">
+                                <el-button size="mini" type="primary" v-if="mirror_state.audio.setup_available"
+                                           :loading="mirror_state.audio.running"
+                                           @click="mirror_run('audio-setup')">一键设置系统声音</el-button>
+                                <el-button size="mini" v-if="mirror_state.audio.restore_available"
+                                           @click="mirror_run('audio-restore')">恢复原声音输出</el-button>
+                                <el-link type="primary" v-if="mirror_state.audio.progress_url"
+                                         :href="mirror_state.audio.progress_url"
+                                         target="_blank">查看这一步的进度页</el-link>
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'viewer'" key="viewer">
+                            <h3>观看地址</h3>
+                            <div class="mirror-cmd" v-if="mirror_state.viewer.url">
+                                <code>{{ mirror_state.viewer.url }}</code>
+                                <el-button size="mini" @click="copy_text(mirror_state.viewer.url)">复制</el-button>
+                            </div>
+                            <div class="hint" v-if="mirror_state.viewer.hint">
+                                {{ mirror_state.viewer.hint }}
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'preview'" key="preview">
+                            <h3>预览</h3>
+                            <img class="mirror-snap" v-if="mirror_snap_src" :src="mirror_snap_src"
+                                 alt="这台电脑当前的采集画面">
+                            <div class="hint" v-if="!mirror_snap_src">
+                                {{ mirror_state.preview.reason || '正在抓取第一帧…' }}
+                            </div>
+                            <div class="hint" v-else-if="mirror_state.preview.reason">
+                                {{ mirror_state.preview.reason }}（显示的是上一帧）
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'activity'" key="activity">
+                            <h3>活动</h3>
+                            <div class="hint" v-if="!mirror_state.recent.length">暂无消息。</div>
+                            <div class="mirror-feed" v-else>
+                                <div class="mf-item" v-for="(m, i) in mirror_state.recent" :key="i">
+                                    <span class="mf-time">{{ mirror_hms(m.at) }}</span>
+                                    <span>{{ m.text }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </template>
+            </div>
+        </el-tab-pane>
         <el-tab-pane label="高级设置" name="2">
             <div class="status-card">
                 <h3>配置文件</h3>
                 <div class="hint" style="margin-bottom:10px;">
                     这里就是 <span class="uri">macast_setting.json</span> 的全部内容，直接编辑后保存，Macast 会自动重启生效。
-                    不熟悉各字段含义时建议改用菜单栏设置。保存会重置窗口位置等未在此处显示的运行时状态。
+                    不熟悉各字段含义时建议改用「模块设置」页签——那里每个键都写明是谁的、存什么。保存会重启 Macast。
                 </div>
                 <el-input
                         type="textarea"
@@ -922,6 +1205,24 @@
             install_url: '',
             installing: false,
 
+            //电脑投屏（Screen Mirror）控制台。
+            // mirror_state 是插件给的事实，mirror_view 是 macast/mirror_view.py
+            // 给的布局；页面两者都不生产，只渲染，并且永远成对读写
+            // （见 /api?query=mirror-state）。
+            mirror_state: null,
+            mirror_view: {
+                sections: [], channels: [], devices: [], device_note: '',
+                header: '', quality: {labels: {}, note: ''}, step_marks: [],
+                banner: {text: '', level: null}
+            },
+            mirror_busy: false,
+            mirror_loaded: false,
+            // 一次请求失败 = 「连不上 Macast」，与「后端回答了但没有插件」
+            // （mirror_error）是两件事，前者要教用户刷新，后者要教他勾插件。
+            mirror_offline: false,
+            mirror_error: '',
+            mirror_timer: 0,
+
             // pwa
             canInstall: false,
             installPrompt: null,
@@ -959,6 +1260,7 @@
                 clearInterval(this.status_interval);
                 this.status_interval = 0;
             }
+            this.mirror_stop_poll();
         },
         activated() {
 
@@ -1026,6 +1328,25 @@
                     if (!cur || (!cur.usable && row.usable)) by_name.set(row.name, row);
                 }
                 return Array.from(by_name.values());
+            },
+            mirror_banner() {
+                // 横幅的文案与严重级别都来自后端（mirror_view.banner_for）：
+                // 「谁的说明该压过谁」是个顺序判断，写在页面里就等于再造一份。
+                let b = (this.mirror_view || {}).banner || {};
+                return {text: b.text || '', class: 'lv-' + (b.level || 'muted')};
+            },
+            mirror_snap_src() {
+                // 预览帧就是用户桌面几秒前的样子，所以它和 mirror-state 一样要
+                // 令牌（见 protocol.py 的 mirror-snapshot 门控）。URL 只在后端
+                // 报了新的抓帧时刻时才变——`no-store` 让浏览器不会缓存帧，
+                // 而变 URL 才是让 <img> 重新取图的那个动作。
+                let st = this.mirror_state;
+                let token = this.cast_info.token;
+                if (!st || !token) return '';
+                let p = st.preview || {};
+                if (p.reason || !p.has_frame) return '';
+                return `/api?query=mirror-snapshot` +
+                    `&token=${encodeURIComponent(token)}&t=${p.at || 0}`;
             },
         },
         methods: {
@@ -1354,6 +1675,112 @@
                     return false;
                 });
             },
+            // -- 电脑投屏（Screen Mirror）控制台 --------------------------------
+            //
+            // 两条规矩贯穿下面所有方法：
+            // ① 状态每秒重读，且只在页签可见时读；
+            // ② 控件一律「POST 完再读一次」，不做乐观更新——大多数动作会把镜像
+            //    重启一遍，页面停在动作之前的状态上比慢一秒更糟。
+            async load_mirror() {
+                if (!await this.mirror_token()) return false;
+                let url = '/api?query=mirror-state&token=' +
+                    encodeURIComponent(this.cast_info.token);
+                return this.$http.get(url).then(res => {
+                    this.mirror_offline = false;
+                    this.mirror_loaded = true;
+                    let data = res.data || {};
+                    if (data.code !== 0 || !data.state) {
+                        // 「应用还在启动」和「没人拥有这个界面」是后端用这句话
+                        // 区分的：前者等一秒就好，后者要去「插件」里启用 Screen
+                        // Mirror，刷新页面不会让它出现。
+                        this.mirror_error = data.message || '投屏状态不可用';
+                        this.mirror_state = null;
+                        return false;
+                    }
+                    this.mirror_error = '';
+                    this.mirror_state = data.state;
+                    this.mirror_view = data.view || this.mirror_view;
+                    return true;
+                }).catch(err => {
+                    console.log('mirror-state failed:', err);
+                    this.mirror_offline = true;
+                    return false;
+                });
+            },
+            async mirror_token() {
+                // mirror-state / mirror-snapshot / mirror-action 即使来自本机也要
+                // 令牌（理由见 protocol.py 的门控注释），所以这一页得先拿到它。
+                // cast-info 自己是本机门控的：在局域网另一台设备上打开设置页就拿
+                // 不到——与其让每个控件都点出 403，不如一句话把边界说清楚。
+                if (this.cast_info.token) return true;
+                await this.load_cast_info();
+                if (this.cast_info.token) return true;
+                this.mirror_loaded = true;
+                this.mirror_error = '没有拿到管理令牌：电脑投屏只在本机打开的设置页里可用';
+                return false;
+            },
+            async mirror_run(action, args) {
+                if (this.mirror_busy) return false;
+                if (!await this.mirror_token()) return false;
+                this.mirror_busy = true;
+                let fd = new window.FormData();
+                fd.append('mirror-action', action);
+                fd.append('mirror-args', JSON.stringify(args || {}));
+                fd.append('token', this.cast_info.token);
+                let ok = false;
+                try {
+                    let res = await this.$http.post('/api', fd);
+                    let data = res.data || {};
+                    if (data.code === 403) {
+                        this.$message.error('令牌不对或已失效：刷新本页面再试');
+                    } else if (data.code !== 0) {
+                        this.$message.error(data.message || '操作失败');
+                    } else {
+                        ok = true;
+                        this.$message.success(data.message || '已生效');
+                    }
+                } catch (err) {
+                    console.log('mirror-action failed:', err);
+                    this.mirror_offline = true;
+                    this.$message.error('操作失败：连不上 Macast');
+                }
+                this.mirror_busy = false;
+                await this.load_mirror();
+                return ok;
+            },
+            mirror_pick(d) {
+                // d = [id, label, selected, name]：id 对 Chromecast 是 host:port、
+                // 对 DLNA 电视是控制地址，所以动作键也跟着投屏方式换。
+                let kind = ((this.mirror_state || {}).output || {}).kind;
+                if (kind === 'dlna') {
+                    return this.mirror_run('set-dlna-target', {control: d[0], name: d[3]});
+                }
+                return this.mirror_run('set-target', {target: d[0], name: d[3]});
+            },
+            mirror_start_poll() {
+                this.mirror_stop_poll();
+                this.mirror_timer = setInterval(() => {
+                    // 看不见的窗口不该每秒读一次：那会把设备搜索和预览抓帧
+                    // 一直吊在后台。
+                    if (document.hidden) return;
+                    if (this.activeIndex !== '13') {
+                        this.mirror_stop_poll();
+                        return;
+                    }
+                    this.load_mirror();
+                }, 1000);
+            },
+            mirror_stop_poll() {
+                if (this.mirror_timer) clearInterval(this.mirror_timer);
+                this.mirror_timer = 0;
+            },
+            mirror_hms(t) {
+                // 活动栏只需要时分秒：日期在「刚才发生了什么」里没有信息量。
+                if (!t) return '';
+                let d = new Date(t * 1000);
+                let p = n => (n < 10 ? '0' + n : '' + n);
+                return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+            },
             async copy_text(text) {
                 // navigator.clipboard 只在安全上下文可用（http://127.0.0.1 算，
                 // 局域网 IP 不算），所以要有 execCommand 兜底。
@@ -1454,6 +1881,7 @@
                     clearInterval(this.log_timer);
                     this.log_timer = 0;
                 }
+                if (tab.name !== '13') this.mirror_stop_poll();
                 this.switch_page(tab.name)
             },
             async switch_page(page_name) {
@@ -1488,6 +1916,12 @@
                     case '12':
                         this.set_history(page_name);
                         this.load_module_settings();
+                        break;
+                    case '13':
+                        // 菜单栏的「电脑投屏…」直接跳到 ?page=13，所以这一页既要
+                        // 能切过来，也要能被浏览器地址栏打开。
+                        this.set_history(page_name);
+                        this.load_mirror().then(() => this.mirror_start_poll());
                         break;
                 }
             },

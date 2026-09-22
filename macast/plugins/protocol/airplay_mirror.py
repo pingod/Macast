@@ -87,7 +87,7 @@ def _tell(message):
 
     uxplay has to be *compiled* by the user, and that is not a sentence one can
     read in the five seconds a macOS notification stays up. Everything this
-    plugin says to the person also goes to the message board the desktop console
+    plugin says to the person also goes to the message board the「电脑投屏」tab
     reads (`macast/notice.py`), where it stays.
     """
     notice.record(message)

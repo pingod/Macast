@@ -66,7 +66,7 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 | `floating.py` | **Floating Player** — 角落置顶小窗，含实验性壁纸模式 | 纯偏好，跟版本无关 |
 | `hooks.py` | **Automation Hooks** — 投屏 / 暂停 / 继续 / 停止时执行你的命令 | 命令因人而异，配置在设置里 |
 | `cast_bridge.py` | **Chromecast Bridge** — 把收到的投屏转投给另一台 Chromecast | 只对有多台设备的人有用 |
-| `screen_mirror.py` | **Screen Mirror v0.10** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机，v0.9 起按机器状态判定，**不会重复下载已装好的驱动**）。v0.10 起所有控制项在一个**桌面控制台窗口**里，菜单栏只留开门那一项 | 依赖用户自己装的 `ffmpeg` 命令；控制台窗口另需一个 **Tk 8.6+** 的 python（macOS 自带的 `/usr/bin/python3` 只有 8.5.9，画不出这个窗口，会被拒绝；**打开窗口时会在本机自己找一个**，一个都没有时通知会指名该装什么） |
+| `screen_mirror.py` | **Screen Mirror v0.11** — 把桌面屏幕实时镜像到局域网：**两条 Chromecast 通道**（兼容 LOAD / 实验性低延迟 Cast Streaming）、**没有 Google 栈的老电视（DLNA）**、或任意浏览器打开一个网址（三平台，macOS 一键装好系统声音：带进度页的步骤机，v0.9 起按机器状态判定，**不会重复下载已装好的驱动**）。v0.11 起所有控制项都在设置页的「电脑投屏」页签里（v0.10 那个桌面 Tk 窗口已删除），菜单栏只留「电脑投屏…」和镜像进行中的「停止电脑投屏」 | 依赖用户自己装的 `ffmpeg` 命令；macOS 上还要屏幕录制权限（缺了会指名）。页签就是 Macast 自带的那个网页，**不需要额外的 python、Tk 或任何 GUI 库** |
 | `cast_local_file.py` | **Local File Caster v0.1** — 把**这台机器磁盘上的文件**投到电视：菜单里选文件夹、点文件即在 Chromecast / Google TV 或 DLNA 电视上播；能原生解码的文件由内置 Range/206 服务按字节直供（远端的暂停/拖动直接作用在真文件上），其余边播由 ffmpeg 转码；带播放列表自动连播、音轨/字幕选择、音画同步偏移、被抢占后看门狗重投、退出时 QUIT_APP | 依赖用户自己装的 `ffmpeg` / `ffprobe` 命令 |
 | `raop.py` | **AirPlay Audio (RAOP)** — 监督 shairport-sync，接收 AirPlay 音频 | 需要用户自己装 `shairport-sync` |
 | `airplay_mirror.py` | **AirPlay Screen Mirror** — 监督 uxplay，让 iPhone / 另一台 Mac 把屏幕**镜像到这台机器**（镜像流是 AES-128-CTR，不需要 FairPlay；uxplay 自己开窗渲染） | 需要用户自己编译 `uxplay`（macOS 既无 Homebrew formula 也无官方二进制，插件日志里有完整配方） |
@@ -96,18 +96,18 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 - **Chromecast Bridge**：目标在菜单里选（mDNS 搜索 `_googlecast._tcp`，也可以直接在设置里写
   `Cast_Bridge_Target` = `host:port`，测试就是靠这条路径）。它复用 `macast.protocol_cast`
   的 Cast v2 收发实现，**不引入 pychromecast 依赖**。首次投屏前必须选好目标。
-- **Screen Mirror**：控制台窗口「输出目标」先选一类，再点右上角「开始镜像」。链路是 ffmpeg 屏幕采集 →
+- **Screen Mirror**：「电脑投屏」页签的「投屏方式」先选一类，再点「开始镜像」。链路是 ffmpeg 屏幕采集 →
   H.264/MPEG-2 → 插件内的 HTTP 服务持续输出实时流。三类目标只是**封装不同**：
   **Chromecast / Google TV** 走 `video/mp2t`（MPEG-TS）+ Cast `LOAD streamType=LIVE`；
-  **浏览器**走分片 MP4（`frag_keyframe+empty_moov+default_base_moof`），镜像开始时窗口的
+  **浏览器**走分片 MP4（`frag_keyframe+empty_moov+default_base_moof`），镜像开始时页签的
   「观看地址」会给出 `http://<本机>:<端口>/browser?token=…`，局域网里任何浏览器打开即看（MSE 播，
   不支持 MSE 的会退回渐进式下载）。关键帧节奏就是分片节奏（每秒一个），所以后加入的观看端
   能立刻接上。采集按平台分派：macOS `avfoundation`、Windows `gdigrab`、Linux `x11grab`
   （**只认 X11 会话**，纯 Wayland 会明确报出来）。
-  **v0.4 的采集选项**（都在控制台窗口里，改完对下一次镜像生效）：多显示器选择（探针缓存里那台机器
+  **v0.4 的采集选项**（都在「采集」卡片里，改完对下一次镜像生效）：多显示器选择（探针缓存里那台机器
   列出的 `Capture screen N`，插拔后自动回落到默认屏而不是报错）、画质四档 `360p / 720p（默认）/
   1080p / 原始分辨率`、是否画鼠标指针、以及 macOS 上的**硬件编码（VideoToolbox）**开关
-  —— 开关会先真的去问这个 ffmpeg 认不认识 `h264_videotoolbox`（问一次缓存一次，窗口每秒读状态
+  —— 开关会先真的去问这个 ffmpeg 认不认识 `h264_videotoolbox`（问一次缓存一次，页面每秒读状态
   也不 spawn ffmpeg），机器上没这个编码口时就直接拒绝。镜像期间用 `caffeinate` 阻止 Mac 休眠，
   停止镜像即释放；镜像中的状态行显示「已镜像时长 · 实时码率 · 观看端数 · 丢块数」。
   观看地址带**每会话随机**的 stream id 和页面 token（不是应用那个常驻管理令牌），
@@ -121,15 +121,15 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
   `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`，探边界的那几个请求
   必须**恰好**回 n 个字节（不够就用 MPEG-PS 的填充包补齐），断线重连按**绝对字节偏移**
   从一个 48 MiB 环形缓冲里取，偏移落在环外就报丢块而不是回错数据。代价是**延迟**：
-  推流前先攒够约 20 MiB（窗口页脚的状态行与开始提示都会说出这个秒数），所以这条链路是
+  推流前先攒够约 20 MiB（页签上的状态行与开始提示都会说出这个秒数），所以这条链路是
   「客厅挂机上给爸妈看屏幕」而不是「会议低延迟投屏」。封装由**兼容档位**决定
   （`ps-pal` / `ps-ntsc` / `ts-mpeg2` / `ts-h264` / `mkv-h264`，PAL 与 NTSC 分两套帧率与
-  帧尺寸，声音是 AC-3 而不是 AAC —— DVD 时代的电视认得它），窗口「兼容档位」里可手选；
+  帧尺寸，声音是 AC-3 而不是 AAC —— DVD 时代的电视认得它），「兼容档位」卡片里可手选；
   连续读不到 `PLAYING` 会**自动换到下一个档位**并重启编码链路，全部试完就给一句
-  「在窗口的「兼容档位」里换成 X 再试一次」。电视的发现走 SSDP `MediaRenderer:1` →
+  「在「电脑投屏」页的「兼容档位」里换成 X 再试一次」。电视的发现走 SSDP `MediaRenderer:1` →
   抓设备描述 → 只认带 `AVTransport:1` 的（控制 URL 可能是相对路径，也可能是设备自称的
-  另一个地址；描述里漏端口/写错地址都按**实际应答的那个地址**修正），窗口「输出目标 →
-  DLNA 电视」里列出候选，选中即写入 `Mirror_Dlna_Control`（与 Chromecast 的 `Mirror_Target`
+  另一个地址；描述里漏端口/写错地址都按**实际应答的那个地址**修正），「投屏方式 →
+  DLNA 电视」那一行里列出候选，选中即写入 `Mirror_Dlna_Control`（与 Chromecast 的 `Mirror_Target`
   分开的键 —— 那是 `host:port`，用它存 URL 会把 `http` 当成主机名）。推给电视的
   `SetAVTransportURI` 里带 DIDL-Lite（`protocolInfo` 与档位一致），之后每 5 秒
   `GetTransportInfo` 看门狗：掉出 `PLAYING` 就重投 URL，`RelTime` 在动才算真的活着。
@@ -137,7 +137,7 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
   转投给电视（电视已经在放那个网址时不重复推），浏览器目标下这样的推送会被明确拒绝。
   **系统声音**跟随条件：macOS 需要虚拟声卡 `blackhole-2ch`（FFmpeg 至今没有任何发行版
   能直接抓 mac 系统音频——提议中的 screencapturekit demuxer 从未合并）。**v0.3 起不用你手动装**：
-  窗口「系统声音」→「一键设置」会自动下载官方 pkg（地址与 sha256
+  「系统声音」卡片里的「一键设置」会自动下载官方 pkg（地址与 sha256
   以 Homebrew cask API 为准，校验后才安装）、弹出图形安装器（你只需输一次密码——.pkg
   无法静默安装），装好后用 CoreAudio 自动创建「多输出设备」（扬声器 + BlackHole，
   这样电视有声、你自己也听得见）并把默认输出切过去；再点一次可「恢复原声音输出」。
@@ -154,7 +154,7 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
   （`0F5096E8`）发 OFFER，拿回一个 UDP 端口，然后把画面切成带 Cast 头的 RTP 包
   推过去 —— 没有 HTTP 服务、没有 `LOAD`、也没有观看网址。**代价与边界要说清**：
   ① 这条通道**目前没有声音**（镜像接收器的音频流是下一步）；② 单文件插件不能装加密库，
-  加密用纯 Python 实现，所以**码率上限 4.5 Mbps**，1080p 会被压到该上限（窗口会提示）；
+  加密用纯 Python 实现，所以**码率上限 4.5 Mbps**，1080p 会被压到该上限（页面会提示）；
   ③ 帧尺寸是 OFFER 里**先声明后编码**的，所以这一档只跑 360p/720p/1080p 三档，
   「原始分辨率」会按 1080p 信箱化而不是拉伸；④ **这套字段是从参考实现转写的，还没有在任何
   真电视上验证过**，所以它是 opt-in：设备不认（`LAUNCH_ERROR`）就自动回落到 LOAD 通道，
@@ -191,39 +191,34 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
   `ffmpeg -f avfoundation -list_devices true -i ""` 这台机器有哪些设备，而那段解析是按一个
   **从未存在过的输出格式**写的 —— 它找 `Video devices:`（大写 V）并且只取双引号里的名字，
   真实输出却是小写的 `AVFoundation video devices:`、设备名**不加引号**（`[0] OBS Virtual Camera`），
-  于是两个列表永远为空，窗口只会说「ffmpeg 没有列出任何屏幕采集设备（avfoundation）」。
+  于是两个列表永远为空，插件只会说「ffmpeg 没有列出任何屏幕采集设备（avfoundation）」。
   现在的解析也认旧版 ffmpeg 的 `List of Video devices:` + `0) name` 写法；**没有索引的行不算设备**，
   因为 `-i N:none` 需要那个数字。为什么四个版本都没被发现：Part 21/22/23 里的假 ffmpeg 输出的
   正是那个虚构格式 —— 测试和实现共享了同一个错误假设。现在所有假 ffmpeg 一律照抄真机输出，
   并且验证套件 Part 31 有一条用例**去扫测试文件自己**：任何 `-list_devices` 回答里出现
   「带引号却没有索引」的设备行，当场变红。
-  **v0.10 把整张菜单搬进了一个桌面窗口**（`macast/mirror_console.py`）。原来那份控制面有
-  五十来行、嵌套四层，「输出目标」「兼容档位」「系统声音」挤在同一个 160 像素的列里，而真正
-  该看见的东西 —— 投出去了吗、电视看到的是什么 —— 一点位置都没有。菜单栏现在只剩版本号、
-  「打开投屏控制台…」，以及镜像进行中的状态行与「停止镜像」（**停止必须留在菜单里**：一个会被
-  最小化、会被别的窗口盖住的窗口，不能是唯一一条从「正在采集你的桌面」里出来的路）。
-  窗口的四条实现约束，改代码前先读：
-  ① **它是另一个进程**，因为 `App.start()` 占住主线程（rumps 跑 Cocoa 循环、pystray 跑自己的），
-  Tk 不能在别处泵事件。它**只走管理 API** 与插件说话（`mirror-state` / `mirror-action` /
-  `mirror-snapshot`），所以**不 import `macast` 里的任何东西** —— 这正是"任何带 Tk 8.6+ 的 python
-  都能跑这个文件"的前提，也是"我们的解释器没有 Tk"不算故障的原因。
-  但**带 Tk 不等于画得出来**：Apple 的 Command Line Tools 至今只给 Tk 8.5.9，而那份 Tk 在新 macOS
-  上只画原生按钮 —— 窗口会打开、里面一片空白、没有任何报错（2026-09-22 实测，从 CLI 与从
-  Launch Services 各跑一次都一样）。所以启动器的探测问的是**版本**（`MIN_TK_VERSION`），
-  窗口自己也在 `main()` 里拒绝（`MIN_TK`），两处是同一个下限，Part 35 钉住它们不许漂移。
-  ② **三个新端点的门控比 `status`/`log` 更严**：`mirror-state` 回的是用户局域网里的设备清单，
+  **v0.10 曾把整张菜单搬进一个桌面 Tk 窗口，v0.11 又把它搬进了设置页**（布局规则在
+  `macast/mirror_view.py`，卡片在 `macast/xml/setting.html` 的「电脑投屏」页签，菜单栏那一项
+  只是 `?page=13` 这一跳）。动机从头到尾是同一个：原来那份控制面有五十来行、嵌套四层，
+  「输出目标」「兼容档位」「系统声音」挤在同一个 160 像素的列里，而真正该看见的东西 ——
+  投出去了吗、电视看到的是什么 —— 一点位置都没有。菜单栏现在只剩「电脑投屏…」，
+  以及镜像进行中的「停止电脑投屏」（**停止必须留在菜单里**：控制面是一个网页，它可能在另一台
+  机器上被打开、可能被最小化，不能是唯一一条从「正在采集你的桌面」里出来的路）。
+  三条实现约束，改代码前先读：
+  ① **事实出自插件，排版出自核心**：`console_state()` 只报这台机器的状态，
+  `mirror_view.view_for()` 决定哪些卡片出现、每一行说什么，两者在**同一个响应**里返回 ——
+  `view_for` 是这份 state 的纯函数，拆开返回会让页面按一份已经不存在的状态排版。
+  于是插件不必知道自己的宿主有没有图形界面，回归套件也不必开浏览器：Part 35 断言的就是整张表。
+  ② **三个 mirror 端点的门控比 `status`/`log` 更严**：`mirror-state` 回的是用户局域网里的设备清单，
   `mirror-snapshot` 回的是**他桌面的一帧**，所以即使来自 127.0.0.1 也**必须带令牌** ——
-  任何用户访问到的网页都能对 loopback 发一个 GET（同 §4.7 的 `cast` 判据）。
-  ③ **只有一个窗口**：`mirror_console.lock`（pid/port/token/version）+ `GET /ping` 判活，
-  **绝不用 `os.kill(pid, 0)`**（Windows 上信号 0 会真的杀掉目标进程，"查它活着没"就成了"把它弄死"），
-  再点菜单项是 `/raise` 把开着的窗口叫到前面。锁文件残留（被 kill 掉的窗口）由启动器清掉，
-  否则每次点都是"叫醒"一个不存在的窗口。
-  ④ **预览是快照不是视频**：约 1 fps 一张 480px 宽的桌面图，同一时刻只有一个 ffmpeg 在跑，
-  失败时留着上一帧并说明原因（黑框比旧帧更糟）。**帧写成临时文件按名字加载**，因为没有任何一代
-  Tk 能从字符串读 PPM；格式仍按窗口报的 `preview_format()` 协商（8.6+ 用 PNG，读不懂的版本退回
-  PPM），并且先认**魔数**再交给 Tk —— 截断的响应或"没有帧"时那段 JSON 都必须在进 Tk 之前被拒掉。
-  窗口自己的输出在 `mirror_console.log`（Tk 的 traceback 只有这一处记录），启动失败会以通知
-  指名退出码与最后一行错误，不会静默。
+  任何用户访问到的网页都能对 loopback 发一个 GET（同 §4.7 的 `cast` 判据）。令牌由页面从本机
+  门控的 `query=cast-info` 里读，所以「电脑投屏」页签只在**这台电脑自己的浏览器**里能用；
+  局域网里另一台机器要控制它，得手动带令牌。
+  ③ **预览是快照不是视频**：约 1 fps 一张 480px 宽的 PNG，同一时刻只有一个 ffmpeg 在跑，
+  失败时留着上一帧并说明原因（黑框比旧帧更糟）。两个"没人会问"的坑都藏在这里：页面的 `<img>`
+  是**有了帧才存在**的，所以第一帧从来没有人要过 —— 现在由读状态的那个请求在后台线程里补一次
+  （请求线程里绝不 spawn ffmpeg）；而镜像进行中**预览直接站下来**，因为同一块屏幕开第二路采集
+  只会耗满 8 秒超时然后什么都没有（macOS 实测），卡片写明原因而不是继续转圈。
 - **Local File Caster**：JustStream 的另一半能力 ——「文件在这台 Mac 上，想看的屏幕在客厅」。
   菜单选一个文件夹（`File_Folder` / 设置里的 `Folder`），列出其中的媒体文件，点一下就投出去。
   两个塑造整个文件的判断：

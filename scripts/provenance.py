@@ -177,7 +177,12 @@ def is_upstream_bytes(path):
 
 
 def blame_lines(path, before):
-    """(upstream_lines, our_lines) for the file as it stands at HEAD."""
+    """(upstream_lines, our_lines) for the file **as it stands on disk**.
+
+    `git blame HEAD -- path` reads the working tree, so uncommitted edits count
+    here immediately -- and a line that is not committed yet has no attribution,
+    which puts it in `our_lines` even when the edit *removed* an upstream line.
+    """
     counts = [0, 0]
     for line in git("blame", "--line-porcelain", "HEAD", "--", path).splitlines():
         head = line.split(" ", 1)[0]

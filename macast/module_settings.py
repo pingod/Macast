@@ -65,11 +65,11 @@ PLUGIN_LABELS = {
     'screen_mirror': {
         'Mirror_Target': ('镜像目标（Cast）', '"host:port"，局域网里的 Chromecast。'),
         'Mirror_Target_Name': ('镜像目标名称', '仅用于提示文案。'),
-        'Mirror_Quality': ('画质档位', '投屏控制台窗口「画质」写入的档位索引。'),
+        'Mirror_Quality': ('画质档位', '「电脑投屏」页「画质」写入的档位索引。'),
         'Mirror_Audio_Aggregate': ('聚合设备 ID', '一键设置创建的 CoreAudio 多输出设备，复用而非叠建。'),
         'Mirror_Audio_Original': ('原声音输出 ID', '「恢复原声音输出」要回到的默认设备。'),
         'Mirror_Output': ('投屏方式', "'cast' | 'caststream' | 'browser' | 'dlna'。"
-                                       '投屏控制台窗口「投屏方式」选中的那一种。'),
+                                       '「电脑投屏」页「投屏方式」选中的那一种。'),
         'Mirror_Screen': ('采集屏幕', 'avfoundation 视频设备序号；空串 = 第一块屏幕。'),
         'Mirror_Cursor': ('显示鼠标指针', 'bool。'),
         'Mirror_Encoder': ('编码器', "'software'（x264）| 'hardware'（VideoToolbox，仅 macOS）。"),

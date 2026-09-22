@@ -22,6 +22,7 @@ from .utils import load_xml, XMLPath, Setting, SettingProperty, cherrypy_publish
 from .discovery import advertisable_addresses
 from . import plugin_repo
 from . import logsplit
+from . import mirror_view
 from . import module_settings
 
 logger = logging.getLogger("Protocol")
@@ -1239,13 +1240,10 @@ def read_log_all(path, max_bytes=LOG_ALL_MAX_BYTES):
     return data[:max_bytes].decode('utf-8', errors='replace'), truncated, size
 
 
-#: What `GET /api?query=mirror-snapshot&fmt=` may say, and what comes back.
-#: PPM stays in the table for a Tk that cannot read PNG: the launcher refuses
-#: Tk 8.5 for the window (§ MIN_TK_VERSION in the screen_mirror plugin), but a
-#: console started by hand is still served what it asks for -- the console
-#: negotiates this, see `preview_format` in macast/mirror_console.py.
-_MIRROR_SNAPSHOT_TYPES = {'png': 'image/png',
-                          'ppm': 'image/x-portable-pixmap'}
+#: Content type of `GET /api?query=mirror-snapshot`. PNG only, because that is
+#: the one raster a browser decodes and the one the plugin grabs: the preview
+#: used to offer PPM as well, for a Tk 8.5 console window that no longer exists.
+MIRROR_SNAPSHOT_MIME = 'image/png'
 
 
 @cherrypy.expose
@@ -1292,7 +1290,7 @@ class Handler:
     def _management_allowed(self):
         """Management endpoints must only be reachable from an authenticated
         channel. A channel is trusted when it is:
-          - the loopback interface (the desktop app talking to itself), or
+          - the loopback interface (this machine's own settings page), or
           - received over HTTPS (the admin explicitly opened the https
             endpoint), or
           - carrying a valid X-Macast-Token.
@@ -1333,21 +1331,21 @@ class Handler:
 
     # -- screen mirror console ---------------------------------------------
     #
-    # The desktop window in `macast/mirror_console.py` is a **separate process**
-    # (the menu-bar app owns the main thread on every platform, and Tk needs it
-    # for itself), so this plugin's control surface is reachable only through
-    # these three endpoints. Nothing here knows what Screen Mirror *is*: the
-    # plugin is asked for a `console_state` / `console_action` pair and the core
-    # stays free of plugin imports -- see `ScreenMirrorSetting` in
+    # Screen Mirror's control surface is the settings page, and the page reaches
+    # it only through these three endpoints. Nothing here knows what Screen
+    # Mirror *is*: the plugin is asked for a `console_state` / `console_action`
+    # pair, and `macast/mirror_view.py` turns the state into a layout -- so the
+    # core stays free of plugin imports. See `ScreenMirrorSetting` in
     # macast/plugins/renderer/screen_mirror.py.
 
     def _mirror_setting(self):
         """The screen-mirror console surface, whichever renderer is playing.
 
         Resolved through the plugin manager rather than through the live
-        renderer: 电脑投屏 is a window, not a mode of the player, and making the
-        user pick the Screen Mirror renderer first meant opening the menu *and*
-        the window to do one thing.
+        renderer: 电脑投屏 drives its own ffmpeg and its own stream, an act with
+        nothing to do with whichever player holds the DLNA stream -- making the
+        user select the Screen Mirror renderer first meant two clicks in front
+        of a control that was never about the player.
         """
         manager = cherrypy_publish('get_plugin_manager', None)
         if manager is None or not hasattr(manager, 'mirror_setting'):
@@ -1359,48 +1357,57 @@ class Handler:
             return None
 
     def _mirror_unavailable(self):
-        """Which problem the window is being told about.
+        """Which problem the page is being told about.
 
         "The app has not built its plugin manager yet" is a two-second state of
         a starting app; "no plugin owns the console" means someone switched the
-        Screen Mirror renderer off, and only the second one is a thing to fix in
-        the settings page.
+        Screen Mirror renderer off, and only the second one is a thing to fix by
+        clicking a checkbox.
         """
         if cherrypy_publish('get_plugin_manager', None) is None:
             return {'code': 1, 'message': '应用还在启动，请一秒后再试'}
         return {'code': 1,
-                'message': '没有可用的电脑投屏插件：在设置页的「插件」里启用 Screen Mirror'}
+                'message': '没有可用的电脑投屏插件：在「插件」页签里启用 Screen Mirror'}
 
     def _mirror_state(self):
+        """The plugin's facts plus the core's view of them, in one response.
+
+        The pair is deliberately read together: `view_for` is a pure function of
+        this same dict, so splitting the calls would let a page render a layout
+        derived from a state it no longer has.
+        """
         setting = self._mirror_setting()
         if setting is None:
             return self._mirror_unavailable()
+        if hasattr(setting, 'request_probes'):
+            # The page's first read is what asks for the two ffmpeg-spawning
+            # probes; `console_state()` itself never spawns, so a cold machine
+            # would otherwise be shown「正在探测…」as a permanent answer.
+            setting.request_probes()
+        if hasattr(setting, 'request_preview'):
+            # Same reason, different grab: the preview's `<img>` is only in the
+            # DOM once a frame exists, so nothing in the page ever asks for the
+            # first one. This is the read that sponsors it.
+            setting.request_preview()
         try:
-            return {'code': 0, 'state': setting.console_state()}
+            state = setting.console_state()
         except Exception as e:
             logger.error('mirror state failed: %s' % e)
             return {'code': 1, 'message': 'mirror state failed: {}'.format(e)}
+        return {'code': 0, 'state': state, 'view': mirror_view.view_for(state)}
 
-    def _mirror_snapshot(self, fmt=None):
-        """One preview frame as PNG or PPM, or the reason there isn't one as JSON.
+    def _mirror_snapshot(self):
+        """One preview frame as PNG, or the reason there isn't one as JSON.
 
-        The format is the *window's* choice, not ours: a Tk without a PNG
-        decoder asks for PPM (Tk 8.5 is one; the launcher refuses it for the
-        window, but the server answers whatever a running console requests). An
-        unknown name falls back to PNG rather than 400ing, because the caller is
-        a poll loop.
+        The content type is the answer, not the status code: "no frame yet" and
+        "no ffmpeg on this machine" are ordinary states of a page that polls, not
+        errors to surface anywhere. The page can branch on it in one place (an
+        `<img>` that fails just stops showing a picture), which is why this stays
+        a 200 either way.
 
-        The content type is the answer: the console looks at it instead of at a
-        status code, because "no frame yet" and "no ffmpeg" are ordinary states
-        of a window that polls, not errors to surface in a log. The cache
-        headers matter more than usual here -- the frame is the user's desktop,
-        seconds ago.
+        The cache headers matter more than usual here -- the frame is the user's
+        desktop, seconds ago.
         """
-        if isinstance(fmt, (list, tuple)):
-            fmt = fmt[0] if fmt else ''
-        fmt = str(fmt or 'png').lower()
-        if fmt not in _MIRROR_SNAPSHOT_TYPES:
-            fmt = 'png'
         setting = self._mirror_setting()
         if setting is None:
             body = json.dumps(self._mirror_unavailable(), indent=4).encode()
@@ -1409,13 +1416,13 @@ class Handler:
             return body
         cherrypy.response.headers['Cache-Control'] = 'no-store'
         cherrypy.response.headers['X-Content-Type-Options'] = 'nosniff'
-        frame, reason = setting.snapshot_frame(fmt)
+        frame, reason = setting.snapshot_frame()
         if not frame:
             cherrypy.response.headers['Content-Type'] = \
                 'application/json;charset:utf-8'
-            return json.dumps({'code': 1, 'message': reason, 'fmt': fmt},
+            return json.dumps({'code': 1, 'message': reason},
                               indent=4).encode()
-        cherrypy.response.headers['Content-Type'] = _MIRROR_SNAPSHOT_TYPES[fmt]
+        cherrypy.response.headers['Content-Type'] = MIRROR_SNAPSHOT_MIME
         cherrypy.response.headers['Content-Length'] = str(len(frame))
         return frame
 
@@ -1650,13 +1657,14 @@ class Handler:
                                    'message': 'Forbidden: management API requires local access or token'},
                                   indent=4).encode()
             if query in ('mirror-state', 'mirror-snapshot'):
-                # The screen-mirror console's two reads, and they are gated
-                # *stricter* than the block above on purpose: one returns the
-                # list of devices on the user's LAN plus their activity feed,
-                # the other returns an actual frame of their desktop. Loopback
-                # is not proof of intent here -- any page the user visits can
-                # fire a GET at 127.0.0.1 (see the `cast` branch above), so
-                # these require the api token even from this machine.
+                # The page's two mirror reads, and they are gated *stricter*
+                # than the block above on purpose: one returns the list of
+                # devices on the user's LAN plus their activity feed, the other
+                # returns an actual frame of their desktop. Loopback is not
+                # proof of intent here -- any page the user visits can fire a
+                # GET at 127.0.0.1 (see the `cast` branch above), so these
+                # require the api token even from this machine. The settings
+                # page has it: `query=cast-info` hands it out over loopback.
                 if not self._token_present():
                     return json.dumps(
                         {'code': 403,
@@ -1664,7 +1672,7 @@ class Handler:
                                     'token (see the settings page)'},
                         indent=4).encode()
                 if query == 'mirror-snapshot':
-                    return self._mirror_snapshot(kwargs.get('fmt'))
+                    return self._mirror_snapshot()
                 res = self._mirror_state()
                 return json.dumps(res, indent=4).encode()
             res = {
@@ -1813,14 +1821,6 @@ class Handler:
                           # because this one would accept plain loopback.
                           'mirror-action')
 
-    def _open_mirror_console(self):
-        """Compatibility response for old callers.
-
-        The only supported UI now owns the mirror page itself. Starting another
-        MirrorConsole process here would recreate the duplicate-window bug.
-        """
-        return {'code': 0, 'message': '电脑投屏已整合在主配置窗口的「电脑投屏」页签'}
-
     def _set_renderer(self, title):
         manager = self._plugin_manager()
         plugin = next((item for item in manager.renderer_list
@@ -1841,7 +1841,7 @@ class Handler:
         return {'code': 0, 'message': '{}已{}'.format(title, '启用' if enabled else '停用')}
 
     def _app_action(self, action):
-        """Dispatch actions owned by the desktop controller."""
+        """Dispatch the handful of app-level buttons the page may press."""
         action = str(action or '').strip()
         if action == 'quit':
             threading.Thread(target=lambda: cherrypy.engine.publish('quit_app', None),
@@ -2004,18 +2004,15 @@ class Handler:
         elif kwargs.get('app-action', None) is not None:
             res = self._app_action(kwargs.get('app-action'))
         elif kwargs.get('mirror-action', None) is not None:
-            # Start/stop a capture of this machine's screen, from a window in
-            # another process. Token always -- the generic gate above would
-            # wave through anything from loopback, and a page the user visits
-            # can post a form to 127.0.0.1 just as easily as it can GET one.
+            # Start/stop a capture of this machine's screen, posted by the
+            # settings page. Token always -- the generic gate above would wave
+            # through anything from loopback, and a page the user visits can post
+            # a form to 127.0.0.1 just as easily as it can GET one.
             if not self._token_present():
                 res['code'] = 403
                 res['message'] = 'Forbidden: mirroring requires the api token'
                 return json.dumps(res, indent=4).encode()
-            if str(kwargs.get('mirror-action')) == 'open-console':
-                res = self._open_mirror_console()
-            else:
-                res = self._mirror_action(kwargs)
+            res = self._mirror_action(kwargs)
         elif kwargs.get('save-launch-param', None) is not None:
             setting = kwargs.get('save-launch-param', None)
             try:

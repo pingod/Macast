@@ -6,7 +6,7 @@
 
 A macOS notification is gone in five seconds, and the user was told to install
 something by one. Everything a plugin says to the user therefore goes here as
-well as to the notification centre, so the desktop console can still show it an
+well as to the notification centre, so the settings page can still show it an
 hour later -- and anything the user has to *install* is recorded as an open
 requirement, with the command, until it is satisfied.
 
@@ -18,8 +18,8 @@ import threading
 import time
 from collections import deque
 
-#: Messages kept for the console's feed. Long enough that a scrollback survives
-#: a whole mirrored session, short enough that the window never has to page.
+#: Messages kept for the activity feed. Long enough that a scrollback survives a
+#: whole mirrored session, short enough that the page never has to page.
 MAX_MESSAGES = 60
 
 _lock = threading.Lock()
