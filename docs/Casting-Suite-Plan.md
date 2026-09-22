@@ -18,7 +18,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 
 ### 硬约束（来自 AGENTS.md，违反即返工）
 
-1. **在线插件（`plugins/*.py`）只能是单个 .py 文件**，依赖仅限：标准库 + Macast 已带的库
+1. **内置插件（`macast/plugins/*.py`）只能是单个 .py 文件**，依赖仅限：标准库 + Macast 已带的库
    （`cherrypy / requests / zeroconf / lxml / pillow / netifaces / appdirs / pystray / pyperclip / rumps`）
    + 机器上已有的命令行程序（`ffmpeg / ffprobe / caffeinate / uxplay / shairport-sync`）。
    要 pip 库就必须走内置插件路线（`macast/plugins/`）+ §4.4 的三处打包配置同步。
@@ -230,7 +230,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 - **一期仍然让它自己开窗**（`-vs osxvideosink`），`-vrtp → mpv` 那条留在二期 ——
   没做实机证据之前不把「统一渲染」写进承诺。
 - uxplay 是**完整的 AirPlay 接收端**（镜像 + RAOP 音频，看 `lib/dnssdint.h` 的 TXT 键就知道），
-  所以它和 `plugins/raop.py`（shairport-sync）**广播的是同一个名字**：两个都启用时 iPhone 只会看到
+  所以它和 `macast/plugins/protocol/raop.py`（shairport-sync）**广播的是同一个名字**：两个都启用时 iPhone 只会看到
   一个入口，谁抢到算谁。这一点插件不猜，只在启动时提示一次，交给用户关一个。
 
 ### 2.6 mkchromecast：这次只挖到「发送端该抄的 4 件事」
@@ -249,7 +249,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 
 **P4 落地的偏差**（2026-09-21）：
 
-- **这一阶段动了核心**，虽然是「在线插件」阶段：`macast/protocol_cast.py` 的 STOP / QUIT_APP
+- **这一阶段动了核心**，虽然是「内置插件」阶段：`macast/protocol_cast.py` 的 STOP / QUIT_APP
   现在会清掉会话账本（`_session_id` / `_media` / `_observed_transport` / `_idle_reason` 置空 +
   `generation` 递增）。因为「停止投屏电视还挂着最后一帧」有两半：设备侧要 QUIT_APP（插件发），
   **我们自己的接收端**也不能继续声称还在播那部片子（核心记账）。Part 25 的 A/B 就是打在这 11 行上：
@@ -280,7 +280,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 
 因为**采集与系统音频那 600 行只有一份**：avfoundation/gdigrab/x11grab 探测、BlackHole 探测与
 CoreAudio 聚合设备、`_Broadcaster` 扇出、ffmpeg 进程监工与 generation 判定。
-拆成三个单文件插件（在线插件必须单文件，见 AGENTS.md §4.8）= 复制三份同样的坑，且**渲染器互斥**
+拆成三个单文件插件（内置插件必须单文件，见 AGENTS.md §4.8）= 复制三份同样的坑，且**渲染器互斥**
 （§0 硬约束 2）意味着用户装三个也只能用一个。
 
 所以：`screen_mirror.py` 从「镜像到 Chromecast」升级为**镜像中枢，多目标**（Chromecast-LOAD /
@@ -359,7 +359,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 配置目录整个搬到临时目录，种子设置直接写 JSON：`ApplicationPort=58999` +
 `Macast_Protocols=['DLNA Protocol']` + `DLNA_FriendlyName='Macast E2E Smoke'` + 预置 `Api_Token`，
 然后 `runpy` 跑真的 `Macast.py`。它问的是：设置页回不回（88 724 字节）、`/api?query=status`
-报的版本对不对、**9 个在线插件在活进程里能不能全 import 出来**（标题/版本/类型/已装可用逐条对
+报的版本对不对、**9 个内置插件在活进程里能不能全 import 出来**（标题/版本/类型/已装可用逐条对
 `plugins/info.json`）、11 个日志模块、6 个网卡与广播地址、DLNA 事件线程活着、`cast-info`
 回显刚种的令牌、无令牌的 GET `cast` 被 403、裸路径被 "url must be absolute" 拒、SSDP `M-SEARCH`
 由**这一个实例**应答（6 个 LOCATION，其中 3 个是它的）且描述文件能解析出 `friendlyName`
@@ -426,7 +426,7 @@ pkgutil 收据都是**今天 12:58** 落盘的；`ffmpeg -f avfoundation -list_d
 `selfcheck.py` 不再把"HAL 目录里有文件"报成 ok —— 它现在再问一次 ffmpeg，
 文件在而设备不在就说"coreaudiod 没加载它，一键设置会去重载、不会重新下载"。
 
-**A/B**：把 `plugins/screen_mirror.py` 换成 `git show HEAD~1` 的那一份重跑套件 →
+**A/B**：把 `macast/plugins/renderer/screen_mirror.py` 换成 `git show HEAD~1` 的那一份重跑套件 →
 **1081/1089**，红的 8 条正是新写的反循环用例（这一轮跑在中途，所以总数还是当时的 1089；
 下面补完排他性用例与打桩后才是最终那份 **1121**）。其中两条最能说明旧代码有多不该过：
 盘上有驱动那一支旧流程留下 `'install': done` + `['open', '/tmp/bh29.pkg']`（**它自己刚说完会跳过**），

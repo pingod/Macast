@@ -2546,7 +2546,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 # Plugin harness (shared by Parts 13-17)
 #
-# The online plugins in plugins/ are written against the app's public surface:
+# The bundled plugins in macast/plugins/{renderer,protocol}/ are written against the app's public surface:
 # `macast`, `macast.renderer`, `macast.gui` and `macast_renderer.mpv`. This
 # suite loads macast's submodules by hand, so before any plugin is imported:
 #
@@ -2558,12 +2558,26 @@ except Exception as e:
 #     wrong is exactly why these are tested against the real classes.
 # --------------------------------------------------------------------------
 print("\n=== plugin harness ===")
-_plugin_dir = os.path.join(REPO, "plugins")
+_plugin_dir = os.path.join(REPO, "plugins")  # legacy index dir; fallback only
 
 
 def _load_plugin(name, filename=None):
-    """Import plugins/<filename> as a standalone module (as Macast does)."""
-    path = os.path.join(_plugin_dir, filename or (name + ".py"))
+    """Import a bundled plugin module by file name, as Macast does at startup.
+
+    Plugin sources now live under ``macast/plugins/{renderer,protocol}/`` (they
+    ship inside the package), so resolve the file from there instead of the
+    flat ``plugins/`` index directory.
+    """
+    filename = filename or (name + ".py")
+    path = None
+    for _d in (os.path.join(MACAST, "plugins", "renderer"),
+               os.path.join(MACAST, "plugins", "protocol")):
+        _candidate = os.path.join(_d, filename)
+        if os.path.isfile(_candidate):
+            path = _candidate
+            break
+    if path is None:
+        path = os.path.join(_plugin_dir, filename)  # last-resort fallback
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -2682,8 +2696,8 @@ print("\n=== Part 13: yt-dlp downloader plugin ===")
 try:
     import cherrypy
 
-    _plugin_file = os.path.join(REPO, "plugins", "macast_ytdlp.py")
-    check("the downloader plugin ships in plugins/",
+    _plugin_file = os.path.join(MACAST, "plugins", "renderer", "macast_ytdlp.py")
+    check("the downloader plugin ships in macast/plugins/renderer/",
           os.path.isfile(_plugin_file), _plugin_file)
 
     _saved_setting5 = (utils.Setting.setting, utils.Setting.setting_path)
@@ -8747,11 +8761,11 @@ try:
 
         # -- build_groups --------------------------------------------------
         _sm_mod = types.ModuleType("alias_x")
-        _sm_mod.__file__ = os.path.join(REPO, "plugins", "screen_mirror.py")
+        _sm_mod.__file__ = os.path.join(MACAST, "plugins", "renderer", "screen_mirror.py")
         _sm_mod.SettingProperty = _Enum28(
             "SettingProperty", {"Mirror_Quality": 1, "Mirror_Target": 2})
         _raop_old = types.ModuleType("alias_y")
-        _raop_old.__file__ = os.path.join(REPO, "plugins", "raop.py")  # v0.1: no enum
+        _raop_old.__file__ = os.path.join(MACAST, "plugins", "protocol", "raop.py")  # v0.1: no enum
         _weird = types.ModuleType("alias_z")
         _weird.__file__ = "/somewhere/weird_thing.py"
         _weird.SettingProperty = _Enum28("SettingProperty", {"Third_Party_Key": 1})
@@ -9697,7 +9711,7 @@ try:
         # had to remember to edit this file -- and the interesting failure is a
         # *stale* label, so the check now reads the manifest and demands that no
         # other version appears in the plugin at all.
-        with open(os.path.join(REPO, "plugins", "screen_mirror.py"), "r",
+        with open(os.path.join(MACAST, "plugins", "renderer", "screen_mirror.py"), "r",
                   encoding="utf-8") as _f:
             _src29 = _f.read()
         import re as _re29
@@ -9857,12 +9871,16 @@ try:
     def _illegal30(source):
         return sorted(r for r in _import_roots(source) if r not in _allowed30)
 
-    _plugin_dir30 = os.path.join(REPO, "plugins")
+    _plugin_files30 = []
+    for _k in ("renderer", "protocol"):
+        _pd30 = os.path.join(MACAST, "plugins", _k)
+        for _fname in sorted(os.listdir(_pd30)):
+            if _fname.endswith(".py") and not _fname.startswith("__"):
+                _plugin_files30.append(os.path.join(_pd30, _fname))
     _bad30 = {}
-    for _fname in sorted(os.listdir(_plugin_dir30)):
-        if not _fname.endswith(".py") or _fname.startswith("__"):
-            continue
-        with open(os.path.join(_plugin_dir30, _fname), encoding="utf-8") as fh:
+    for _fpath in _plugin_files30:
+        _fname = os.path.basename(_fpath)
+        with open(_fpath, encoding="utf-8") as fh:
             _offenders = _illegal30(fh.read())
         if _offenders:
             _bad30[_fname] = _offenders
@@ -9929,7 +9947,7 @@ try:
     # ... and the plugin keeps those names out of module scope, so a Windows or
     # Linux user can still load the file: the import is reached only from the
     # CoreAudio paths, and `from Foundation import ...` sits in a try/except.
-    with open(os.path.join(_plugin_dir30, "screen_mirror.py"), encoding="utf-8") as fh:
+    with open(os.path.join(MACAST, "plugins", "renderer", "screen_mirror.py"), encoding="utf-8") as fh:
         _mirror_src30 = fh.read()
     _hoisted = sorted(r for r in _import_roots(_mirror_src30, top_level_only=True)
                       if r in _PLATFORM_OPTIONAL)
@@ -10188,7 +10206,7 @@ try:
         _pre32 = _fh32.read()
     _plug32 = ""
     for _name32 in ("screen_mirror.py", "cast_local_file.py"):
-        with open(os.path.join(REPO, "plugins", _name32),
+        with open(os.path.join(MACAST, "plugins", "renderer", _name32),
                   encoding="utf-8") as _fh32:
             _plug32 += _fh32.read()
 
@@ -10226,7 +10244,7 @@ try:
     _plugin_bin32 = set()
     for _name32, _marker32 in (("screen_mirror.py", "def find_ffmpeg("),
                                ("cast_local_file.py", "def find_tool(")):
-        with open(os.path.join(REPO, "plugins", _name32),
+        with open(os.path.join(MACAST, "plugins", "renderer", _name32),
                   encoding="utf-8") as _fh32:
             _plugin_bin32 |= _listed_dirs(_fh32.read(), _marker32)
     _pre_bin32 = _listed_dirs(_pre32, "COMMON_BIN_DIRS = ")
@@ -10515,12 +10533,23 @@ try:
           and 'Tim Potter' in _read34('macast', 'ssdp.py'),
           "that block belongs to neither us nor upstream -- nobody may remove it")
 
-    check("every bundled plugin is declared vendored, and nothing else is",
-          sorted(_led34.get('vendored', [])) == sorted(
-              p for p in _by_path34
-              if p.startswith('macast/plugins/') and not p.endswith('__init__.py')),
-          "declared=%s present=%s" % (sorted(_led34.get('vendored', [])),
-                                       sorted(_by_path34)))
+    # The bundle (`macast/plugins/`) now holds both vendored upstream plugins
+    # and this fork's own built-in plugins, so it is no longer exclusively
+    # vendored. The invariant that still holds: the `VENDORED` tuple must
+    # exactly match the set of bundled files provenance actually classifies as
+    # vendored -- every declared-vendored file really is there and really is
+    # vendored, and none the tool flags as vendored was left out of the
+    # declaration.
+    _vendored_in_bundle34 = sorted(
+        r['path'] for r in _files34
+        if r.get('state') == 'vendored'
+        and r['path'].startswith('macast/plugins/')
+        and not r['path'].endswith('__init__.py'))
+    check("every declared-vendored bundled plugin is genuinely vendored, "
+          "and none is missed",
+          sorted(_led34.get('vendored', [])) == _vendored_in_bundle34,
+          "declared=%s vendored-in-bundle=%s"
+          % (sorted(_led34.get('vendored', [])), _vendored_in_bundle34))
 
     # -- 3. the numbers written down in the docs ----------------------------
     _doc34 = _read34('docs', 'Provenance.md')

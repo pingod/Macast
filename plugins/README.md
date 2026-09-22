@@ -1,6 +1,6 @@
-# `plugins/` — 在线插件索引
+# `plugins/` — 插件索引（第三方 / 用户自建）
 
-这个目录**不是** Macast 内置插件所在的地方（那是 `macast/plugins/`）。
+本仓库 15 个第一方插件已内置在 `macast/plugins/`（`renderer/` 与 `protocol/`，见 AGENTS.md §4.8），随应用一起发布。本目录不再是插件代码所在，只保留**可选的第三方 / 用户自建插件索引** `info.json`。
 它是设置页「插件 → 可安装」分组的数据源：一个静态的 `info.json`，由设置页在
 浏览器里直接拉取；提供安装的插件 `.py` 也放这里。
 
@@ -37,25 +37,27 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 
 ## 为什么不放上游那 6 个插件
 
-上游插件合集 `xfangfang/Macast-plugins` 里发布的 6 个插件，现在**全部内置**在
-本仓库的 `macast/plugins/` 下，随应用一起发布：
+上游插件合集 `xfangfang/Macast-plugins` 里的 6 个插件，以及本 fork 自研的 9 个插件，
+现在**全部内置**在本仓库的 `macast/plugins/` 下（`renderer/` 与 `protocol/`），随应用一起发布；
+其中 6 个来自上游合集的插件状态为 `vendored`，9 个自研插件为本 fork 自己的 `ours`：
 
-| 插件 | 类型 | 平台 |
-|---|---|---|
-| IINA Renderer | renderer | darwin |
-| Web Renderer | renderer | darwin,linux,win32 |
-| Live Renderer | renderer | win32,darwin,linux |
-| PotPlayer Renderer | renderer | win32 |
-| PIFMRDS Renderer | renderer | linux |
-| NVA Protocol | protocol | darwin,linux,win32 |
+| 插件 | 类型 | 平台 | 状态 |
+|---|---|---|---|
+| IINA Renderer | renderer | darwin | vendored |
+| Web Renderer | renderer | darwin,linux,win32 | vendored |
+| Live Renderer | renderer | win32,darwin,linux | vendored |
+| PotPlayer Renderer | renderer | win32 | vendored |
+| PIFMRDS Renderer | renderer | linux | vendored |
+| NVA Protocol | protocol | darwin,linux,win32 | vendored |
+| yt-dlp Downloader / External Player / Floating / Hooks / Chromecast Bridge / Screen Mirror / Local File Caster / RAOP / AirPlay Screen Mirror | renderer / protocol | 见 §4.8 | ours（本 fork 自研） |
 
 继续读上游索引只会给每个内置插件再生成一张重复卡片，还挂着指回上游旧文件的
-「可更新」角标。所以索引搬到了这里。索引为空也是合法状态：设置页拉到一个空
-`plugin_v1` 时只显示本机插件，不报错。
+「可更新」角标。所以第一方插件的索引不再出现在这里。第三方 / 用户自建插件的条目仍可加进
+本目录的 `info.json`（目前为空 `plugin_v1`）：设置页拉到一个空索引时只显示本机已内置的插件，不报错。
 
 内置插件的发现、热插拔与 `<macast.*>` 清单格式见 `AGENTS.md` §4.4 / §4.5。
 
-## 当前提供的插件
+## 本仓库内置的插件（已在 `macast/plugins/`，开箱即得）
 
 | 文件 | 插件 | 为什么放在线而不是内置 |
 |---|---|---|

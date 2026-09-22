@@ -7,7 +7,7 @@ of the same tables as the sender, so it can only prove the bytes are
 self-consistent. AGENTS.md 4.9 is explicit that "self-consistent" and "a
 television painted it" are different claims, and only hardware can settle the
 second one. This script is the hardware half -- and it imports
-`plugins/screen_mirror.py` rather than reimplementing it, so a failure here is a
+`macast/plugins/renderer/screen_mirror.py` rather than reimplementing it, so a failure here is a
 failure of the code the menu bar actually runs.
 
     env -u PYTHONPATH .venv/bin/python scripts/cast_streaming_probe.py 192.168.1.30
@@ -32,7 +32,7 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PLUGIN = os.path.join(REPO, 'plugins', 'screen_mirror.py')
+PLUGIN = os.path.join(REPO, 'macast', 'plugins', 'renderer', 'screen_mirror.py')
 # The plugin imports `macast`, so the checkout has to be on the path the way
 # `scripts/run-from-source.sh` puts it there.
 sys.path.insert(0, REPO)

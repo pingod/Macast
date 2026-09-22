@@ -16,7 +16,7 @@ Macast `8e02bb5` / v0.7.11
 - **AirConnect**：**一半同向、一半反向**（收 AirPlay 音频 → 发 UPnP/Cast）。**不要集成**；
   但它是第一个提供了"Macast 缺的那半边"的现成实现，其中 **Cast v2 发送端**和
   **"长度未知的实时流怎么喂给挑剔的 HTTP 客户端"**两处可直接对照。注意它**没有本地播放后端**，
-  所以那半边缺口对 Macast 而言仍然由 `plugins/raop.py` 监督 shairport-sync 覆盖。
+  所以那半边缺口对 Macast 而言仍然由 `macast/plugins/protocol/raop.py` 监督 shairport-sync 覆盖。
 
 ---
 
@@ -234,7 +234,7 @@ RTP；`-z` 才能自守护（**README 明确警告：别用 `&` 后台化而不�
 - **方向卡在它的出口上**：Macast 要的是"把收到的媒体在本机放出来"，AirConnect 的出口是
   "把音频以 HTTP 流推给**别的**播放器"，它**没有任何本地播放后端**。接进 Macast 只会得到
   一条"AirPlay → AirConnect → 远端播放器"的链路，和 Macast 自己造的接收端不搭。
-- **本地那半已经有更合适的解**：`plugins/raop.py` 监督 shairport-sync，而 shairport-sync
+- **本地那半已经有更合适的解**：`macast/plugins/protocol/raop.py` 监督 shairport-sync，而 shairport-sync
   的强项恰好是 AirConnect 完全不做的部分——**本地播放**、系统音频设备与 mixer 选择、
   自带 mDNS 广播。对"iPhone 音频在这台 Mac 上响"这个需求，shairport-sync 是严格更顺手的工具。
 - **构建**：`build.sh` 是**交叉编译**流程，`common/crosstools` 是它自己维护的工具链仓库，
@@ -256,7 +256,7 @@ RTP；`-z` 才能自守护（**README 明确警告：别用 `&` 后台化而不�
 ### 3.3 值得借鉴（三处，都能直接落到现有代码上）
 
 1. **Cast v2 发送端实现** —— `aircast/src/castcore.c` + `cast_util.c` + `CastMessage.proto`。
-   Macast 的 `plugins/cast_bridge.py` 也是**发送端**（把 DLNA 来的 URL 中继到 Chromecast），
+   Macast 的 `macast/plugins/renderer/cast_bridge.py` 也是**发送端**（把 DLNA 来的 URL 中继到 Chromecast），
    正好同类。这是一份经过 251 个 fork、多年真机打磨的对照实现，可用来核对：投屏序列
    （我们记录的是 deviceauth CHALLENGE → CONNECT receiver-0 → LAUNCH → CONNECT transportId
    → LOAD）、`transportId` 是不是真的取自 LAUNCH 的回复、心跳与重连时机，以及各代
@@ -270,7 +270,7 @@ RTP；`-z` 才能自守护（**README 明确警告：别用 `&` 后台化而不�
    **假 content-length `2^31-1`**（`0`）；并保留一份"最近发过的字节"以便客户端重开连接时重发。
    它还记录了一个很实用的观察：*当客户端请求 Range 而服务器回 200，就意味着源不支持 Range，
    但有些客户端不认*。这一节值得整段读，尤其如果以后要做"边下边播"类的流服务
-   （`plugins/macast_ytdlp.py` 的流模式就在这个方向）。
+   （`macast/plugins/renderer/macast_ytdlp.py` 的流模式就在这个方向）。
 3. **RAOP / AirPlay 音频协议本体** —— `common/libraop`。C 里少有的生产级 RAOP 实现：
    RTP 帧编号与丢包重传（"收到 1,2,3,6 时要先补请求 4,5，不能直接发 6"）、AES、
    ALAC 解码、FLUSH 语义、时钟漂移补偿（README 的 *Latency parameters explained*
@@ -305,7 +305,7 @@ iPhone (AirPlay) ──RAOP──▶ aircast ──HTTP 音频流 + Cast v2─�
 |---|---|
 | 集成代码 | **不做**（C + 10 子模块 + 自带交叉编译链；出口方向与产品需求相反；**没有本地播放**；许可证要逐个审计） |
 | 集成协议 | **不做**——它做"AirPlay 收 → UPnP/Cast 发"，Macast 做"UPnP/Cast/AirPlay 收 → 本机播"，只在一半上重叠且方向错开 |
-| 借鉴具体做法 | **做**：§3.3 的三条。第 1 条对 `plugins/cast_bridge.py` 有直接对照价值，第 2 条与 AGENTS.md §6/§4.9 的 Range 经验同源 |
+| 借鉴具体做法 | **做**：§3.3 的三条。第 1 条对 `macast/plugins/renderer/cast_bridge.py` 有直接对照价值，第 2 条与 AGENTS.md §6/§4.9 的 Range 经验同源 |
 | 当依赖/子模块引入 | **不做**：会同时放大 AGENTS.md §4.3/§4.4 的打包脆弱性，并引入一个 NOASSERTION 子模块 |
 | 那个串联组合 | **可选实验**，不进产品（§3.4，未实测） |
 
@@ -334,7 +334,7 @@ iPhone (AirPlay) ──RAOP──▶ aircast ──HTTP 音频流 + Cast v2─�
 
 **除了 AirConnect 的「AirPlay 音频接收」这一半，它们有而我们没有的功能都落在"发送端"或"另一种协议"上，
 对接收端产品没有意义。** AirConnect 那一半虽然同向，但它没有本地播放（只有"推给远端播放器"），
-所以对 Macast 的直接价值仍然只是参考，不是集成——本地那半继续由 `plugins/raop.py` 承担。
+所以对 Macast 的直接价值仍然只是参考，不是集成——本地那半继续由 `macast/plugins/protocol/raop.py` 承担。
 
 ---
 
