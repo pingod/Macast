@@ -1239,6 +1239,15 @@ def read_log_all(path, max_bytes=LOG_ALL_MAX_BYTES):
     return data[:max_bytes].decode('utf-8', errors='replace'), truncated, size
 
 
+#: What `GET /api?query=mirror-snapshot&fmt=` may say, and what comes back.
+#: PPM stays in the table for a Tk that cannot read PNG: the launcher refuses
+#: Tk 8.5 for the window (§ MIN_TK_VERSION in the screen_mirror plugin), but a
+#: console started by hand is still served what it asks for -- the console
+#: negotiates this, see `preview_format` in macast/mirror_console.py.
+_MIRROR_SNAPSHOT_TYPES = {'png': 'image/png',
+                          'ppm': 'image/x-portable-pixmap'}
+
+
 @cherrypy.expose
 class Handler:
 
@@ -1255,16 +1264,30 @@ class Handler:
             return Protocol()
         return protocols.pop()
 
+    def _param(self, name):
+        """One value out of the request parameters.
+
+        A caller that sends the same key twice -- a token in the query string of
+        a URL *and* in its form body -- is the same token twice, not a wrong one,
+        but CherryPy hands such a pair back as a list. Comparing that list to a
+        string would 403 a caller who is right, and send them off looking for a
+        bad token.
+        """
+        value = cherrypy.request.params.get(name)
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else ''
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', 'replace')
+        return value or ''
+
     def _token_present(self):
         """Whether this request carries the management token.
 
         The header is what scripts use; the query parameter is what anything
         that can only open a URL (a phone Shortcut, a bookmarklet) can use.
         """
-        token = cherrypy.request.headers.get('X-Macast-Token')
-        if not token:
-            token = cherrypy.request.params.get('token')
-        return bool(token and token == api_token())
+        token = cherrypy.request.headers.get('X-Macast-Token') or self._param('token')
+        return bool(token and str(token) == api_token())
 
     def _management_allowed(self):
         """Management endpoints must only be reachable from an authenticated
@@ -1307,6 +1330,119 @@ class Handler:
             return {'code': 1, 'message': 'cast failed'}
         logger.info('cast url from web endpoint: %s', url)
         return {'code': 0, 'message': 'success', 'url': url, 'title': title}
+
+    # -- screen mirror console ---------------------------------------------
+    #
+    # The desktop window in `macast/mirror_console.py` is a **separate process**
+    # (the menu-bar app owns the main thread on every platform, and Tk needs it
+    # for itself), so this plugin's control surface is reachable only through
+    # these three endpoints. Nothing here knows what Screen Mirror *is*: the
+    # plugin is asked for a `console_state` / `console_action` pair and the core
+    # stays free of plugin imports -- see `ScreenMirrorSetting` in
+    # macast/plugins/renderer/screen_mirror.py.
+
+    def _mirror_setting(self):
+        """The screen-mirror console surface, whichever renderer is playing.
+
+        Resolved through the plugin manager rather than through the live
+        renderer: 电脑投屏 is a window, not a mode of the player, and making the
+        user pick the Screen Mirror renderer first meant opening the menu *and*
+        the window to do one thing.
+        """
+        manager = cherrypy_publish('get_plugin_manager', None)
+        if manager is None or not hasattr(manager, 'mirror_setting'):
+            return None
+        try:
+            return manager.mirror_setting()
+        except Exception as e:
+            logger.error('mirror console surface unavailable: %s' % e)
+            return None
+
+    def _mirror_unavailable(self):
+        """Which problem the window is being told about.
+
+        "The app has not built its plugin manager yet" is a two-second state of
+        a starting app; "no plugin owns the console" means someone switched the
+        Screen Mirror renderer off, and only the second one is a thing to fix in
+        the settings page.
+        """
+        if cherrypy_publish('get_plugin_manager', None) is None:
+            return {'code': 1, 'message': '应用还在启动，请一秒后再试'}
+        return {'code': 1,
+                'message': '没有可用的电脑投屏插件：在设置页的「插件」里启用 Screen Mirror'}
+
+    def _mirror_state(self):
+        setting = self._mirror_setting()
+        if setting is None:
+            return self._mirror_unavailable()
+        try:
+            return {'code': 0, 'state': setting.console_state()}
+        except Exception as e:
+            logger.error('mirror state failed: %s' % e)
+            return {'code': 1, 'message': 'mirror state failed: {}'.format(e)}
+
+    def _mirror_snapshot(self, fmt=None):
+        """One preview frame as PNG or PPM, or the reason there isn't one as JSON.
+
+        The format is the *window's* choice, not ours: a Tk without a PNG
+        decoder asks for PPM (Tk 8.5 is one; the launcher refuses it for the
+        window, but the server answers whatever a running console requests). An
+        unknown name falls back to PNG rather than 400ing, because the caller is
+        a poll loop.
+
+        The content type is the answer: the console looks at it instead of at a
+        status code, because "no frame yet" and "no ffmpeg" are ordinary states
+        of a window that polls, not errors to surface in a log. The cache
+        headers matter more than usual here -- the frame is the user's desktop,
+        seconds ago.
+        """
+        if isinstance(fmt, (list, tuple)):
+            fmt = fmt[0] if fmt else ''
+        fmt = str(fmt or 'png').lower()
+        if fmt not in _MIRROR_SNAPSHOT_TYPES:
+            fmt = 'png'
+        setting = self._mirror_setting()
+        if setting is None:
+            body = json.dumps(self._mirror_unavailable(), indent=4).encode()
+            cherrypy.response.headers['Content-Type'] = \
+                'application/json;charset:utf-8'
+            return body
+        cherrypy.response.headers['Cache-Control'] = 'no-store'
+        cherrypy.response.headers['X-Content-Type-Options'] = 'nosniff'
+        frame, reason = setting.snapshot_frame(fmt)
+        if not frame:
+            cherrypy.response.headers['Content-Type'] = \
+                'application/json;charset:utf-8'
+            return json.dumps({'code': 1, 'message': reason, 'fmt': fmt},
+                              indent=4).encode()
+        cherrypy.response.headers['Content-Type'] = _MIRROR_SNAPSHOT_TYPES[fmt]
+        cherrypy.response.headers['Content-Length'] = str(len(frame))
+        return frame
+
+    def _mirror_action(self, kwargs):
+        setting = self._mirror_setting()
+        if setting is None:
+            return self._mirror_unavailable()
+        raw = kwargs.get('mirror-args', '{}')
+        if isinstance(raw, bytes):
+            raw = raw.decode('utf-8', 'replace')
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw or '{}')
+            except ValueError:
+                return {'code': 1, 'message': 'mirror-args 不是合法的 JSON'}
+        if not isinstance(raw, dict):
+            # The plugin validates every value it reads out of this dict, so a
+            # list or a bare string is a caller mistake, not an input to trust.
+            return {'code': 1, 'message': 'mirror-args 必须是 JSON 对象'}
+        action = kwargs.get('mirror-action', '')
+        if isinstance(action, bytes):
+            action = action.decode('utf-8', 'replace')
+        try:
+            return setting.console_action(str(action), raw)
+        except Exception as e:
+            logger.error('mirror action %s failed: %s' % (action, e))
+            return {'code': 1, 'message': '操作失败：{}'.format(e)}
 
     def reload(self):
         cherrypy.server.httpserver = _cpnative_server.CPHTTPServer(cherrypy.server)
@@ -1513,6 +1649,24 @@ class Handler:
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
                                   indent=4).encode()
+            if query in ('mirror-state', 'mirror-snapshot'):
+                # The screen-mirror console's two reads, and they are gated
+                # *stricter* than the block above on purpose: one returns the
+                # list of devices on the user's LAN plus their activity feed,
+                # the other returns an actual frame of their desktop. Loopback
+                # is not proof of intent here -- any page the user visits can
+                # fire a GET at 127.0.0.1 (see the `cast` branch above), so
+                # these require the api token even from this machine.
+                if not self._token_present():
+                    return json.dumps(
+                        {'code': 403,
+                         'message': 'Forbidden: mirroring API requires the api '
+                                    'token (see the settings page)'},
+                        indent=4).encode()
+                if query == 'mirror-snapshot':
+                    return self._mirror_snapshot(kwargs.get('fmt'))
+                res = self._mirror_state()
+                return json.dumps(res, indent=4).encode()
             res = {
                 'api?query=log': 'get logs of macast',
                 'api?query=settings': 'get settings of macast',
@@ -1651,7 +1805,52 @@ class Handler:
     #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
     _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
                           'plugin-disable', 'plugin-uninstall', 'set-interface',
-                          'set-github-mirror', 'set-module-setting')
+                          'set-github-mirror', 'set-module-setting',
+                          'set-renderer', 'toggle-protocol', 'app-action',
+                          # In the list so a future edit that drops the explicit
+                          # token check below still cannot be driven from the
+                          # LAN; that check is the one that actually applies,
+                          # because this one would accept plain loopback.
+                          'mirror-action')
+
+    def _open_mirror_console(self):
+        """Compatibility response for old callers.
+
+        The only supported UI now owns the mirror page itself. Starting another
+        MirrorConsole process here would recreate the duplicate-window bug.
+        """
+        return {'code': 0, 'message': '电脑投屏已整合在主配置窗口的「电脑投屏」页签'}
+
+    def _set_renderer(self, title):
+        manager = self._plugin_manager()
+        plugin = next((item for item in manager.renderer_list
+                       if item.title == str(title or '').strip()), None)
+        if plugin is None:
+            return {'code': 1, 'message': '未找到播放器：{}'.format(title)}
+        cherrypy.engine.publish('set_renderer', plugin.title)
+        return {'code': 0, 'message': '播放器已切换为 {}'.format(plugin.title)}
+
+    def _toggle_protocol(self, title):
+        manager = self._plugin_manager()
+        enabled = title not in manager.enabled_protocol_titles()
+        try:
+            manager.set_protocol_enabled(title, enabled)
+        except ValueError as exc:
+            return {'code': 1, 'message': str(exc)}
+        cherrypy.engine.publish('plugins_changed')
+        return {'code': 0, 'message': '{}已{}'.format(title, '启用' if enabled else '停用')}
+
+    def _app_action(self, action):
+        """Dispatch actions owned by the desktop controller."""
+        action = str(action or '').strip()
+        if action == 'quit':
+            threading.Thread(target=lambda: cherrypy.engine.publish('quit_app', None),
+                             daemon=True, name='MACAST_QUIT').start()
+            return {'code': 0, 'message': 'Macast 正在退出'}
+        if action == 'check-update':
+            cherrypy.engine.publish('check_update', True)
+            return {'code': 0, 'message': '正在检查更新'}
+        return {'code': 1, 'message': '未知应用操作：{}'.format(action)}
 
     def _log_path(self, module):
         """Which file a log query targets: macast.log, or one module's own.
@@ -1798,11 +1997,30 @@ class Handler:
             res = self._plugin_change('uninstall', key=kwargs.get('plugin-key', ''))
         elif kwargs.get('set-github-mirror', None) is not None:
             res = self._set_github_mirror(kwargs.get('set-github-mirror'))
+        elif kwargs.get('set-renderer', None) is not None:
+            res = self._set_renderer(kwargs.get('set-renderer'))
+        elif kwargs.get('toggle-protocol', None) is not None:
+            res = self._toggle_protocol(kwargs.get('toggle-protocol'))
+        elif kwargs.get('app-action', None) is not None:
+            res = self._app_action(kwargs.get('app-action'))
+        elif kwargs.get('mirror-action', None) is not None:
+            # Start/stop a capture of this machine's screen, from a window in
+            # another process. Token always -- the generic gate above would
+            # wave through anything from loopback, and a page the user visits
+            # can post a form to 127.0.0.1 just as easily as it can GET one.
+            if not self._token_present():
+                res['code'] = 403
+                res['message'] = 'Forbidden: mirroring requires the api token'
+                return json.dumps(res, indent=4).encode()
+            if str(kwargs.get('mirror-action')) == 'open-console':
+                res = self._open_mirror_console()
+            else:
+                res = self._mirror_action(kwargs)
         elif kwargs.get('save-launch-param', None) is not None:
             setting = kwargs.get('save-launch-param', None)
             try:
                 setting = json.loads(setting)
-            except Exception as e:
+            except Exception:
                 res['code'] = 1
                 res['message'] = 'json format error'
             else:

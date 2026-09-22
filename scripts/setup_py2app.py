@@ -434,7 +434,16 @@ OPTIONS = {
     # extension modules, its dylibs) into the bundle.
     'excludes': [
         # GUI stacks are unused: the menu-bar UI comes from rumps/AppKit, and
-        # the player is mpv (a separate process).
+        # the player is mpv (a separate process). `tkinter` belongs here too
+        # even though the screen-mirror console *is* a Tk window: the bundle's
+        # `sys.executable` is an app, not a python, so it can only serve the
+        # window through `--mirror-console`, while the console file itself
+        # (Resources/lib/pythonX.Y/macast/mirror_console.py, kept by
+        # `packages` below) is stdlib-only and runs under any Tk-capable python
+        # already on the machine. That ladder is `screen_mirror
+        # ._console_interpreter`; shipping a second copy of Tcl/Tk would only
+        # make the .app larger and, if its frameworks ever failed to travel,
+        # the bundle would be picked first and the window would die at startup.
         'PIL', 'tkinter', 'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
         'wx', 'gtk', 'gnome', 'Xlib',
         # Build-time only (setuptools alone is ~7 MB of shipped bytecode; the
@@ -463,6 +472,11 @@ OPTIONS = {
     # `packages` copies the whole directory verbatim, so the compiled
     # `__init__` and the submodules all ship together. `ifaddr` is zeroconf's
     # only runtime dependency (imported from zeroconf._utils.ipaddress).
+    #
+    # `macast` is here for the same reason and one more: `mirror_console.py` has
+    # to survive as a *file on disk*, because that is what the screen-mirror
+    # console gets launched with (`<some python> .../macast/mirror_console.py`)
+    # and a module frozen into the archive is not a path anyone can run.
     'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
     'arch': TARGET_ARCH,
@@ -485,25 +499,25 @@ OPTIONS = {
     # "ModuleNotFoundError: No module named 'zeroconf'".
     'includes': ['cherrypy', 'lxml', 'netifaces', 'appdirs', 'pyperclip',
                  'requests', 'cheroot.ssl.builtin',
-                 # Bundled plugins under macast/plugins/ are imported *by name*
-                 # at runtime (MacastPluginManager._load_bundled_plugins builds
-                 # the dotted path from an `os.listdir` result), so modulegraph
-                 # never sees a static import for them. `packages: ['macast']`
-                 # copies the directory, but anything modulegraph judges
-                 # unreachable can still be stripped, and the failure mode is
-                 # the one this project has already been bitten by: everything
-                 # builds, CI is green, and the .app silently loses a plugin.
-                 #
-                 # NOTE: this is py2app -- the key is `includes`. There is no
-                 # `hiddenimports` option here (that one belongs to
-                 # PyInstaller); passing it aborts the build with
-                 # "command 'py2app' has no such option 'hiddenimports'".
+                 'macast.config_window', 'macast.mirror_console',
+                 # All first-party plugins are shipped in the application. The
+                 # loader discovers them from os.listdir, so py2app cannot
+                 # infer these imports on its own.
+                 'macast.plugins.renderer.cast_bridge',
+                 'macast.plugins.renderer.cast_local_file',
+                 'macast.plugins.renderer.external_player',
+                 'macast.plugins.renderer.floating',
+                 'macast.plugins.renderer.hooks',
                  'macast.plugins.renderer.iina',
-                 'macast.plugins.renderer.web',
                  'macast.plugins.renderer.live',
-                 'macast.plugins.renderer.potplayer',
+                 'macast.plugins.renderer.macast_ytdlp',
                  'macast.plugins.renderer.pi_fm',
-                 'macast.plugins.protocol.nirvana'],
+                 'macast.plugins.renderer.potplayer',
+                 'macast.plugins.renderer.screen_mirror',
+                 'macast.plugins.renderer.web',
+                 'macast.plugins.protocol.airplay_mirror',
+                 'macast.plugins.protocol.nirvana',
+                 'macast.plugins.protocol.raop'],
 }
 
 setup(

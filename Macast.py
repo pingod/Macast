@@ -15,6 +15,14 @@ from macast.macast import gui
 
 logger = logging.getLogger("Macast")
 logger.setLevel(logging.DEBUG)
+_ = gettext.gettext
+
+#: What the screen-mirror plugin's launcher passes when it wants *this*
+#: executable to become the console window process instead of the menu bar.
+#: Normally the window runs as `<python> macast/mirror_console.py`; a PyInstaller
+#: onefile has no such file on disk, so the bundled interpreter is the only one
+#: that can see the module and this is the door it comes through.
+MIRROR_CONSOLE_ARG = '--mirror-console'
 
 #: One run used to be able to write ~40 MB/day (measured on a busy instance:
 #: 27 KB/min with a video playing and the settings page open — every HTTP
@@ -205,7 +213,68 @@ def setup_logging():
               handler.baseFilename)
 
 
+def _mirror_console_module():
+    """Load the console window module, from disk wherever disk exists.
+
+    `mirror_console.py` imports nothing from `macast` and needs no third-party
+    package, so loading it by path keeps this process a plain Tk host: CherryPy,
+    mpv and the menu-bar machinery have no business in the window.
+    `find_spec` is used only to *locate* the package -- a top-level lookup does
+    not execute it -- because a py2app bundle keeps `macast/` under
+    `Contents/Resources/lib/pythonX.Y/`, nowhere near this script.
+    """
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    roots = [os.path.join(here, 'macast'), here]
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        roots += [os.path.join(meipass, 'macast'), meipass]
+    try:
+        spec = importlib.util.find_spec('macast')
+    except Exception:
+        spec = None
+    if spec is not None:
+        roots += list(spec.submodule_search_locations or [])
+        if spec.origin:
+            roots.append(os.path.dirname(spec.origin))
+    for root in roots:
+        path = os.path.join(root, 'mirror_console.py')
+        if not os.path.isfile(path):
+            continue
+        found = importlib.util.spec_from_file_location('mirror_console', path)
+        if found is None or found.loader is None:
+            continue
+        module = importlib.util.module_from_spec(found)
+        found.loader.exec_module(module)
+        sys.stderr.write('投屏控制台模块：{}\n'.format(path))
+        return module
+    try:
+        # Frozen with no source file in the bundle: the module is in the
+        # archive, and reading it costs importing `macast`.
+        from macast import mirror_console
+        sys.stderr.write('投屏控制台模块：应用包内归档\n')
+        return mirror_console
+    except ImportError:
+        return None
+
+
+def run_mirror_console():
+    """Be the desktop console window instead of the menu bar; returns its code.
+
+    Logging stays out of this branch on purpose: `macast.log` has exactly one
+    writer (the app), and the launcher already points this process's stderr at
+    `mirror_console.log`.
+    """
+    module = _mirror_console_module()
+    if module is None:
+        sys.stderr.write('找不到 macast/mirror_console.py，无法打开投屏控制台\n')
+        return 3
+    return module.main()
+
+
 if __name__ == '__main__':
+    if MIRROR_CONSOLE_ARG in sys.argv[1:]:
+        sys.exit(run_mirror_console())
     clear_env()
     setup_logging()
     get_lang()

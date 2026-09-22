@@ -6,7 +6,7 @@
 > `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
 > 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
 
-<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=31061 -->
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=33800 -->
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
@@ -66,19 +66,23 @@
 
 | 域 | 上游行 | 本 fork 行 | 文件数 | ours 占比 |
 |---|---:|---:|---:|---:|
-| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5496 | 17 | 64.1% |
+| 核心接收端 `macast/**`（不含内置插件） | 3076 | 5497 | 17 | 64.1% |
 | 内置插件 `macast/plugins/**`（vendored，来自上游合集 `Macast-plugins`） | 2885 | 0 | 6 | 0.0% |
-| 内置插件 `macast/plugins/**`（本 fork 自研并内置，含 3 个空 `__init__.py`） | 0 | 10034 | 12 | 100.0% |
+| 内置插件 `macast/plugins/**`（本 fork 自研并内置，含 3 个空 `__init__.py`） | 0 | 11164 | 12 | 100.0% |
 | mpv 渲染器 `macast_renderer/**` | 573 | 102 | 2 | 15.1% |
-| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 215 | 4 | 64.9% |
-| 工具与验证 `scripts/*.py` | 0 | 15214 | 11 | 100.0% |
-| **合计** | **6650** | **31061** | **52** | **82.4%** |
+| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 215 | 4 | 65.0% |
+| 工具与验证 `scripts/*.py` | 0 | 16822 | 11 | 100.0% |
+| **合计** | **6650** | **33800** | **52** | **83.6%** |
 
-两个读数要点：
+三个读数要点：
 
-- **占比 82.4% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10842 行
-  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 70.4%；只看**运行时真正加载的**代码
+- **占比 83.5% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 12450 行
+  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 71.8%；只看**运行时真正加载的**代码
   （核心接收端 + mpv 渲染器）是 60.5%，也就是说应用本体还有约 3649 行是上游的。
+- **这张表按 `git ls-files` 数文件**，所以还没被跟踪的文件不在账上：
+  `macast/mirror_console.py`（投屏控制台窗口）与 `macast/notice.py`（消息板）是**本 fork 写的**、
+  头部已带我们的声明，`git add` 之后合计会变成 54 个文件、`ours` 33 个 —— 届时 Part 34 会要求
+  把这一行删掉并同步表格，这正是它存在的意义。
 - **"看声明头"会把这件事估反**：按文件头里有没有 `by xfangfang` 数，会得出"21623 行是上游的"
   ——因为上游的头贴在了一堆**代码早被我们重写干净**的文件上（`macast/discovery.py`、
   `protocol_cast.py`、`protocol_group.py`、`protocol_airplay.py`、`scripts/verify_cast_airplay.py`

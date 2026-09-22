@@ -2604,6 +2604,129 @@ def _wait_until(predicate, timeout=10.0, interval=0.1):
     return False
 
 
+class _FakeMdns(object):
+    """Be the network for a few seconds: `zeroconf` answered with these services.
+
+    Both Chromecast searches reach into `zeroconf` inside the function, so the
+    only way to test what a search *keeps* is to hand it an answer. Each service
+    is `(instance name, friendly name, address, port)`.
+    """
+
+    def __init__(self, services):
+        self.services = list(services)
+        self.saved = sys.modules.get('zeroconf')
+
+    def __enter__(self):
+        outer = self
+
+        class _Info(object):
+            def __init__(self, friendly, address, port):
+                self.friendly, self.address, self.port = friendly, address, port
+                self.server = 'fake.local.'
+
+            def parsed_addresses(self, api=4):
+                return [self.address]
+
+            @property
+            def properties(self):
+                return {b'fn': self.friendly.encode('utf-8')}
+
+        class _Zeroconf(object):
+            def get_service_info(self, type_, name, timeout=None):
+                for instance, friendly, address, port in outer.services:
+                    if instance == name:
+                        return _Info(friendly, address, port)
+                return None
+
+            def close(self):
+                pass
+
+        class _ServiceBrowser(object):
+            def __init__(self, zc, type_, listener):
+                for instance, _f, _a, _p in outer.services:
+                    listener.add_service(zc, type_, instance)
+
+        module = types.ModuleType('zeroconf')
+        module.Zeroconf = _Zeroconf
+        module.ServiceBrowser = _ServiceBrowser
+        sys.modules['zeroconf'] = module
+        return self
+
+    def __exit__(self, *exc):
+        if self.saved is None:
+            sys.modules.pop('zeroconf', None)
+        else:
+            sys.modules['zeroconf'] = self.saved
+        return False
+
+
+def _own_address(setting_cls, address='192.0.2.1'):
+    """Pin "which addresses are ours" for a search test; returns the restore.
+
+    Restored exactly as found: an earlier Part may already have replaced this
+    with a plain lambda, and unwrapping that would put a `staticmethod` where a
+    function was.
+    """
+    marker = object()
+    saved = setting_cls.__dict__.get('get_advertisable_ip', marker)
+
+    def restore():
+        if saved is marker:
+            try:
+                delattr(setting_cls, 'get_advertisable_ip')
+            except AttributeError:
+                pass
+        else:
+            setting_cls.get_advertisable_ip = saved
+    setting_cls.get_advertisable_ip = staticmethod(lambda: [address])
+    return restore
+
+
+def _console_texts(state):
+    """Every string the console window would lay out, for the「says X」checks.
+
+    `console_state()` replaced this suite's menu walks: the screen-mirror
+    controls live in another process now, so the view model *is* the surface, and
+    asserting on it needs no display.
+    """
+    texts = [state['audio']['line'], state['capture']['label'],
+             state['quality']['note'], state['prompt'],
+             state['viewer']['hint'],
+             state['viewer']['url'], state['status_line']]
+    for group in ('output', 'quality', 'profiles'):
+        texts += [opt['label'] + opt.get('hint', '')
+                  for opt in state[group]['options']]
+    #: Channel rows carry what the old `search` card carried -- the verdict per
+    #: protocol and the devices behind it -- because the window now asks the
+    #: protocol question first.
+    for row in state.get('channels') or []:
+        texts += [row['label'], row['words'], row['choice'], row['hint']]
+        texts += [d['label'] for d in row['devices']]
+    texts += [r['label'] + r['detail'] + r['command']
+              for r in state.get('requirements') or []]
+    texts += [s['label'] for s in state['capture']['screens']]
+    return [t for t in texts if t]
+
+
+def _channel(state, key):
+    """One protocol's row from `console_state()['channels']`.
+
+    The suite used to read a single `state['search']` card; with the protocol
+    question asked first, every verdict is per protocol, so a check has to say
+    which protocol it means -- and that is the check's whole point.
+    """
+    for row in state.get('channels') or []:
+        if row.get('key') == key:
+            return row
+    raise KeyError(key)
+
+
+# The window itself needs Tk, its *view* helpers do not: importing the module is
+# headless-safe because every `import tkinter` sits inside `main()`. That split is
+# what makes "which panels does this state warrant" testable here at all.
+from macast import mirror_console as _mc  # noqa: E402
+
+
 class _StateRec(object):
     """Stands in for the protocol a renderer reports to."""
 
@@ -4165,38 +4288,78 @@ done
               and _wait_until(lambda: mir21._proc is None, timeout=10),
               str(_rec21.rows))
 
-        # -- the menu -----------------------------------------------------------
-        def _menu_texts21(items):
-            texts = []
-            for i in items:
-                texts.append(i.text)
-                texts.extend(_menu_texts21(i.children or []))
-            return texts
+        # -- our own receiver is not a device to mirror to --------------------
+        #
+        # Found on a real machine, not invented: Macast broadcasts
+        # `_googlecast._tcp` exactly like a Chromecast does, so the Chromecast
+        # row's first entry was *this instance* -- and「投给我自己」is a loop, not
+        # a target. The DLNA search already dropped itself; this is the same
+        # rule on the other half of the list.
+        _restore21 = _own_address(mirror.Setting)
+        try:
+            with _FakeMdns([('Living-Room@abc._googlecast._tcp.local.',
+                             '客厅的电视', '192.0.2.77', 8009),
+                            ('Macast@abc._googlecast._tcp.local.',
+                             'Macast 自己', '192.0.2.1', 8009)]):
+                _found21 = mirror.discover(timeout=0.01)
+        finally:
+            _restore21()
+        check("the Chromecast search does not offer this machine as a target",
+              [host for _name, host, _port in _found21] == ['192.0.2.77'],
+              str(_found21))
 
+        # -- the console's view model (the menu kept only the door) ----------
         mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
-
-        mirror._capture_cache.clear()
-        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
-        check("the menu offers a start entry and a target submenu",
-              any('开始镜像' in t for t in _labels21)
-              and any(t == '输出目标' for t in _labels21), str(_labels21))
-        check("before the first probe the menu defers the audio state",
-              any('系统声音：开始镜像后' in t for t in _labels21), str(_labels21))
-        if sys.platform == 'darwin':
-            check("before the first probe the menu already offers the one click",
-                  any('一键设置' in t for t in _labels21), str(_labels21))
-        mirror.probe_capture(fake_ffmpeg21)          # the video-only fake
-        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
-        check("a BlackHole-less probe names the fix instead of staying mute",
-              any('blackhole' in t.lower() for t in _labels21), str(_labels21))
-        mirror._capture_cache.clear()
-        mirror.probe_capture(fake_bh21)              # the BlackHole fake
-        _labels21 = _menu_texts21(mirror.ScreenMirrorSetting().build_menu())
-        check("with system audio captured the menu says so",
-              any('系统声音：已启用' in t for t in _labels21), str(_labels21))
-        if sys.platform == 'darwin':
-            check("once audio works the one-click entry steps aside",
-                  not any('一键设置' in t for t in _labels21), str(_labels21))
+        # console_state() kicks a stale search, which is the window's business
+        # and not this check's: a live mDNS browse here would only be noise.
+        _kick21, _kick_dlna21 = mirror.start_search, mirror.start_renderer_search
+        mirror.start_search = mirror.start_renderer_search = lambda: None
+        try:
+            mirror._capture_cache.clear()
+            _st21 = mirror.ScreenMirrorSetting().console_state()
+            _texts21 = _console_texts(_st21)
+            check("the console offers every output target with its trade-off",
+                  len(_st21['output']['options']) == 4
+                  and all(o['label'] and o['hint']
+                          for o in _st21['output']['options']),
+                  str(_st21['output']['options']))
+            check("the console keeps a way out of a live capture",
+                  'stop' in mirror.ScreenMirrorSetting.CONSOLE_ACTIONS
+                  and _st21['console_version'] == mirror.CONSOLE_VERSION,
+                  str(_st21['console_version']))
+            check("before the first probe the console defers the audio state",
+                  '系统声音：开始镜像后' in _st21['audio']['line']
+                  and not _st21['capture']['probed'], _texts21)
+            if sys.platform == 'darwin':
+                check("before the first probe the console already offers the one click",
+                      _st21['audio']['setup_available'], _st21['audio'])
+            mirror.probe_capture(fake_ffmpeg21)          # the video-only fake
+            _st21 = mirror.ScreenMirrorSetting().console_state()
+            _texts21 = _console_texts(_st21)
+            check("a BlackHole-less probe names the fix instead of staying mute",
+                  any('blackhole' in t.lower() for t in _texts21), _texts21)
+            mirror._capture_cache.clear()
+            mirror.probe_capture(fake_bh21)              # the BlackHole fake
+            _st21 = mirror.ScreenMirrorSetting().console_state()
+            check("with system audio captured the console says so",
+                  '系统声音：已启用' in _st21['audio']['line']
+                  and _st21['audio']['capturable'], _st21['audio']['line'])
+            if sys.platform == 'darwin':
+                check("once audio works the one-click entry steps aside",
+                      not _st21['audio']['setup_available'], _st21['audio'])
+            _rows21 = {r['key']: r for r in _st21['channels']}
+            _devs21 = [d for r in _st21['channels'] for d in r['devices']]
+            check("the device list is carried as id plus label, not markup",
+                  all(d['id'] and d['label'] for d in _devs21), str(_devs21))
+            check("each protocol answers only for itself",
+                  set(_rows21) == {'cast', 'caststream', 'dlna', 'browser'}
+                  and _rows21['cast']['words'].startswith('发现 ')
+                  and _rows21['dlna']['words'] != _rows21['cast']['words']
+                  and _rows21['browser']['words'] == ''
+                  and _rows21['browser']['needs_device'] is False,
+                  str([(k, v['words']) for k, v in sorted(_rows21.items())]))
+        finally:
+            mirror.start_search, mirror.start_renderer_search = _kick21, _kick_dlna21
 
         # -- v0.3: the assisted BlackHole install --------------------------------
         _good21 = ('{"url":"https://existential.audio/BlackHole2ch-0.8.0.pkg",'
@@ -4731,10 +4894,16 @@ done
             _url_before22 = mir22.playing_url()
             _notify22.clear()
             mir22.set_media_url('http://elsewhere/movie.mp4')
+            _refused22 = ' '.join(str(n) for n in _notify22)
             check("a pushed url is refused loudly instead of killing the mirror",
-                  any('无法播放' in str(n) for n in _notify22)
+                  '无法播放' in _refused22
                   and mir22.is_mirroring()
                   and mir22.playing_url() == _url_before22, str(_notify22))
+            check("and the refusal says a browser target has no device to pick",
+                  '浏览器目标' in _refused22
+                  and '还没有选择投屏目标' not in _refused22,
+                  'telling someone to choose a device that does not exist is '
+                  'exactly how this window reads as broken')
             _notify22.clear()
             mir22.set_media_url(_url_before22)
             check("the mirror's own stream address is not a push to bridge",
@@ -4795,6 +4964,9 @@ done
             def is_mirroring(self):
                 return True
 
+            def is_starting(self):
+                return False
+
             def stop_mirror(self):
                 self.stops += 1
 
@@ -4808,115 +4980,126 @@ done
                 return {'kind': 'browser', 'clients': 2, 'chunks': 40,
                         'bytes': 500000, 'drops': 3, 'mbps': 4.2, 'seconds': 65}
 
-        def _menu_texts22(items):
-            texts = []
-            for i in items:
-                texts.append(i.text)
-                texts.extend(_menu_texts22(i.children or []))
-            return texts
-
-        def _find22(items, text):
-            for i in items:
-                if i.text == text:
-                    return i
-                hit = _find22(i.children or [], text)
-                if hit is not None:
-                    return hit
-            return None
-
         fake22 = _FakeMirror22()
         mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
         setting22 = mirror.ScreenMirrorSetting()
         _saved_renderer_fn22 = setting22._renderer
         setting22._renderer = lambda: fake22
+        _kick22, _kick_dlna22 = mirror.start_search, mirror.start_renderer_search
+        mirror.start_search = mirror.start_renderer_search = lambda: None
         utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'browser')
         mirror.probe_capture(fake_ffmpeg22, 'darwin', True)
-        _items22 = setting22.build_menu()
-        _labels22 = _menu_texts22(_items22)
-        check("both output targets are offered, and the running one is checked",
-              _find22(_items22, 'Chromecast / Google TV').checked is False
-              and _find22(_items22, '浏览器（打开网址即可看）').checked is True,
-              str(_labels22))
+        _st22 = setting22.console_state()
+        _labels22 = _console_texts(_st22)
+        check("both output targets are offered, and the running one is the state",
+              _st22['output']['kind'] == 'browser'
+              and [o['key'] for o in _st22['output']['options']].count('browser') == 1,
+              str(_st22['output']))
         check("a browser mirror stops offering Chromecast devices",
-              'Living Room TV · 192.0.2.7' not in _labels22, str(_labels22))
+              _mc.current_channel(_st22)['needs_device'] is False
+              and _mc.device_rows(_mc.current_channel(_st22)) == []
+              and 'devices' not in _mc.sections_for(_st22),
+              str(_st22['channels']))
         check("and offers the viewing address to copy instead",
-              '复制观看地址' in _labels22
-              and 'http://192.0.2.9:5555/browser?token=abc123' in _labels22,
-              str(_labels22))
-        check("all four quality presets are on the menu",
-              sum(1 for t in _menu_texts22(
-                  _find22(_items22, '画质').children or []) if 'Mbps' in t) == 4,
-              str(_labels22))
+              _st22['viewer']['available']
+              and _st22['viewer']['url'] == 'http://192.0.2.9:5555/browser?token=abc123'
+              and 'viewer' in _mc.sections_for(_st22), str(_st22['viewer']))
+        check("the address carries the warning a menu label never had room for",
+              '令牌' in _st22['viewer']['hint'], _st22['viewer']['hint'])
+        check("all four quality presets are offered",
+              len([o for o in _st22['quality']['options'] if 'Mbps' in o['label']])
+              == 4 and _st22['quality']['current'] in mirror.QUALITY_ORDER,
+              str(_st22['quality']['options']))
         check("the display picker is filled from the cached probe",
-              _find22(_items22, '采集屏幕') is not None
-              and any('Capture screen 1' in t for t in _labels22),
-              str(_labels22))
+              _st22['capture']['probed']
+              and any('Capture screen 1' in s['label']
+                      for s in _st22['capture']['screens']), str(_labels22))
         check("a running mirror reports what it is costing",
-              any('已镜像 1:05' in t and '4.2 Mbps' in t and '丢块 3' in t
-                  for t in _labels22), str(_labels22))
+              '已镜像 1:05' in _st22['status_line']
+              and '4.2 Mbps' in _st22['status_line']
+              and '丢块 3' in _st22['status_line'], _st22['status_line'])
+        check("the menu bar kept a single door, and a way out of a live capture",
+              [i.text for i in setting22.console_menu()]
+              == ['电脑投屏…', '停止电脑投屏'],
+              str([i.text for i in setting22.console_menu()]))
+        check("...so nothing else about mirroring is reachable from the menu",
+              _st22['status_line']
+              and not any(_st22['status_line'] in i.text
+                          for i in setting22.console_menu()),
+              'the readout lives in the window; a second copy in the menu is '
+              'how the two came to disagree')
 
         utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
-        _items22 = setting22.build_menu()
-        _labels22 = _menu_texts22(_items22)
-        check("the Chromecast target puts the devices back on the menu",
-              _find22(_items22, 'Chromecast / Google TV').checked is True
-              and 'Living Room TV · 192.0.2.7' in _labels22
-              and '重新搜索' in _labels22, str(_labels22))
-        check("a Chromecast mirror has no address to copy",
-              '复制观看地址' not in _labels22, str(_labels22))
+        _st22 = setting22.console_state()
+        _labels22 = _console_texts(_st22)
+        check("the Chromecast target puts the devices back in the window",
+              _st22['output']['kind'] == 'cast'
+              and 'Living Room TV · 192.0.2.7' in _labels22, str(_labels22))
+        check("a Chromecast mirror gets no viewer panel, address or not",
+              'viewer' not in _mc.sections_for(_st22)
+              and _st22['viewer']['kind'] == 'cast', str(_st22['viewer']))
+        check("and the device list is in the layout while the target is a cast",
+              'devices' in _mc.sections_for(_st22), str(_labels22))
 
-        setting22.on_output_clicked(mirror.MenuItem('x', data='browser'))
+        setting22.console_action('set-output', {'value': 'browser'})
         check("switching the output restarts the running pipeline",
               mirror.output_kind() == 'browser' and fake22.stops == 1
               and fake22.starts == 1, str(fake22.stops))
         fake22.stops = fake22.starts = 0
-        setting22.on_output_clicked(mirror.MenuItem('x', data='browser'))
-        check("clicking the output that is already chosen changes nothing",
+        setting22.console_action('set-output', {'value': 'browser'})
+        check("choosing the output that is already chosen changes nothing",
               fake22.stops == 0 and fake22.starts == 0)
+        check("and an output that does not exist is refused, not stored",
+              setting22.console_action('set-output', {'value': 'telnet'})['code'] == 1
+              and mirror.output_kind() == 'browser', mirror.output_kind())
 
         mirror._capture_cache[('ffmpeg', 'darwin', True)] = object()
-        setting22.on_cursor_clicked(mirror.MenuItem('显示鼠标指针'))
+        setting22.console_action('set-cursor', {'value': False})
         check("the pointer toggle stores the wish and clears the probe cache",
               mirror.cursor_enabled() is False and mirror._capture_cache == {})
         mirror._capture_cache[('ffmpeg', 'darwin', False)] = object()
-        setting22.on_cursor_clicked(mirror.MenuItem('显示鼠标指针'))
-        check("clicking the pointer entry again puts it back, and empties the cache",
+        setting22.console_action('set-cursor', {'value': True})
+        check("turning the pointer back on puts it there, and empties the cache",
               mirror.cursor_enabled() is True and mirror._capture_cache == {})
         utils.Setting.unset(mirror.SettingProperty.Mirror_Cursor)
 
-        setting22.on_encoder_clicked(mirror.MenuItem('硬件编码'))
-        check("the encoder toggle is only honest about what it can do",
+        _enc22 = setting22.console_action('set-encoder', {'value': 'hardware'})
+        check("the encoder switch is only honest about what it can do",
               mirror.encoder_kind() == ('hardware' if sys.platform == 'darwin'
-                                        else 'software'),
-              str(utils.Setting.get(mirror.SettingProperty.Mirror_Encoder, '')))
+                                        else 'software')
+              and _enc22['code'] == (0 if sys.platform == 'darwin' else 1),
+              "{} / {}".format(utils.Setting.get(
+                  mirror.SettingProperty.Mirror_Encoder, ''), _enc22['message']))
+        check("and an encoder no build of ffmpeg here has is refused",
+              setting22.console_action('set-encoder', {'value': 'nvenc'})['code'] == 1)
         utils.Setting.unset(mirror.SettingProperty.Mirror_Encoder)
 
-        setting22.on_screen_clicked(mirror.MenuItem('2 · Capture screen 1',
-                                                   data='2'))
+        setting22.console_action('set-screen', {'value': '2'})
         check("choosing a display stores the index the probe uses",
               str(utils.Setting.get(mirror.SettingProperty.Mirror_Screen, '')) == '2')
-        setting22.on_screen_clicked(mirror.MenuItem('第一块屏幕（默认）', data=''))
+        setting22.console_action('set-screen', {'value': ''})
         check("choosing the default takes the stored value away again",
               not utils.Setting.has(mirror.SettingProperty.Mirror_Screen))
+        check("a screen that is not a number never reaches the command line",
+              setting22.console_action('set-screen', {'value': '../x'})['code'] == 1
+              and not utils.Setting.has(mirror.SettingProperty.Mirror_Screen), '')
 
-        _clip22 = types.ModuleType('pyperclip')
-        _copied22 = []
-        _clip22.copy = lambda text: _copied22.append(text)
-        _py22 = sys.modules.get('pyperclip')
-        sys.modules['pyperclip'] = _clip22
         try:
             utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'browser')
-            setting22.on_copy_url_clicked(mirror.MenuItem('复制观看地址'))
-            check("the copy entry puts the session address on the clipboard",
-                  _copied22 == ['http://192.0.2.9:5555/browser?token=abc123'],
-                  str(_copied22))
+            check("the window's only clipboard is the address in the state",
+                  setting22.console_state()['viewer']['url']
+                  == 'http://192.0.2.9:5555/browser?token=abc123', '')
+            check("nothing the console may ask for is invented by the console",
+                  all(a in mirror.ScreenMirrorSetting.CONSOLE_ACTIONS
+                      for a in ('set-output', 'set-target', 'set-dlna-target',
+                                'set-profile', 'set-quality', 'set-screen',
+                                'set-cursor', 'set-encoder', 'audio-setup')), '')
+            check("an action the plugin does not know is a refusal, not a crash",
+                  setting22.console_action('delete-everything')['code'] == 1, '')
         finally:
-            if _py22 is not None:
-                sys.modules['pyperclip'] = _py22
-            else:
-                sys.modules.pop('pyperclip', None)
             utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
             setting22._renderer = _saved_renderer_fn22
+            mirror.start_search, mirror.start_renderer_search = _kick22, _kick_dlna22
     finally:
         if _server22 is not None:
             try:
@@ -5701,6 +5884,9 @@ done
             def is_mirroring(self):
                 return True
 
+            def is_starting(self):
+                return False
+
             def stop_mirror(self):
                 self.stops += 1
 
@@ -5715,22 +5901,6 @@ done
                         'bytes': 900000, 'drops': 0, 'mbps': 1.2, 'seconds': 75,
                         'profile': 'ps-pal', 'state': 'PLAYING',
                         'buffered': 20971520}
-
-        def _menu_texts23(items):
-            texts = []
-            for i in items:
-                texts.append(i.text)
-                texts.extend(_menu_texts23(i.children or []))
-            return texts
-
-        def _find23(items, text):
-            for i in items:
-                if i.text == text:
-                    return i
-                hit = _find23(i.children or [], text)
-                if hit is not None:
-                    return hit
-            return None
 
         fake23 = _FakeMirror23()
         setting23 = mirror.ScreenMirrorSetting()
@@ -5747,84 +5917,120 @@ done
         _saved_cr23 = mirror.start_search
         mirror.start_renderer_search = lambda: _searches23.append('dlna') or True
         mirror.start_search = lambda: _searches23.append('cast') or True
-        _items23 = setting23.build_menu()
-        _labels23 = _menu_texts23(_items23)
-        check("the menu offers three targets and marks the running one",
-              _find23(_items23, 'Chromecast / Google TV').checked is False
-              and _find23(_items23, 'DLNA 电视（老电视，MPEG-PS）').checked is True
-              and _find23(_items23, '浏览器（打开网址即可看）').checked is False,
-              str(_labels23))
+        _st23 = setting23.console_state()
+        _labels23 = _console_texts(_st23)
+        check("the console offers four targets and names the running one",
+              _st23['output']['kind'] == 'dlna'
+              and len(_st23['output']['options']) == 4
+              and any(o['key'] == 'dlna' and 'MPEG-PS' in o['label']
+                      for o in _st23['output']['options']), str(_st23['output']))
         check("a DLNA target lists the renderers discovery found",
               '厨房的小电视 · 192.0.2.40' in _labels23
               and '客厅 · 192.0.2.41' in _labels23
-              and '重新搜索' in _labels23, str(_labels23))
+              and any(d['id'] == _control23 and d['selected']
+                      for d in _mc.current_channel(_st23)['devices']),
+              str(_labels23))
         check("and the live line names the profile, the TV's state and the hoard",
-              any('已镜像 1:15' in t and '档位 ps-pal' in t
-                  and '电视 PLAYING' in t and '缓冲 20 MiB' in t
-                  for t in _labels23), str(_labels23))
-        check("all five compatibility profiles are on the menu",
-              len(_menu_texts23(_find23(_items23, '兼容档位').children or []))
-              == len(mirror.DLNA_PROFILES)
-              and _find23(_items23, 'MPEG-PS · PAL 576p（老电视首选）').checked
-              is True, '')
+              '已镜像 1:15' in _st23['status_line']
+              and '档位 ps-pal' in _st23['status_line']
+              and '电视 PLAYING' in _st23['status_line']
+              and '缓冲 20 MiB' in _st23['status_line'], _st23['status_line'])
+        check("all five compatibility profiles are offered",
+              len(_st23['profiles']['options']) == len(mirror.DLNA_PROFILES)
+              and _st23['profiles']['current'] == 'ps-pal', str(_st23['profiles']))
         check("a DLNA mirror has no address to copy",
-              '复制观看地址' not in _labels23, str(_labels23))
-        setting23.on_profile_clicked(mirror.MenuItem('x', data='ts-h264'))
+              not _st23['viewer']['available'], str(_st23['viewer']))
+        _sections23 = _mc.sections_for(_st23)
+        check("and a DLNA target is laid out with its compatibility profiles",
+              [s for s in _sections23 if s != 'requirements'][:3]
+              == ['channels', 'devices', 'profiles'], str(_sections23))
+        # The board is the app's, not this plugin's: whatever an *other* plugin
+        # said it needs is on it, and the window shows that instead of keeping
+        # it to a five-second notification. Where it sits is the whole design.
+        check("a requirement from another plugin sits under the devices, "
+              "not above them",
+              'requirements' not in _sections23
+              or _sections23.index('requirements')
+              == _sections23.index('devices') + 1, str(_sections23))
+        setting23.console_action('set-profile', {'value': 'ts-h264'})
         check("choosing a profile stores it and restarts the running stream",
               mirror.dlna_profile_id(mirror.dlna_profile()) == 'ts-h264'
               and fake23.stops == 1 and fake23.starts == 1, str(fake23.stops))
         fake23.stops = fake23.starts = 0
-        setting23.on_profile_clicked(mirror.MenuItem('x', data='ts-h264'))
-        check("clicking the profile that is already chosen changes nothing",
+        setting23.console_action('set-profile', {'value': 'ts-h264'})
+        check("choosing the profile that is already chosen changes nothing",
               fake23.stops == 0 and fake23.starts == 0)
-        setting23.on_dlna_target_clicked(
-            mirror.MenuItem('x', data=('客厅', 'http://192.0.2.41:49152/x')))
+        check("and a profile that is not on the list is refused",
+              setting23.console_action('set-profile', {'value': 'vp9'})['code'] == 1
+              and mirror.dlna_profile_id(mirror.dlna_profile()) == 'ts-h264', '')
+        setting23.console_action('set-dlna-target',
+                                 {'name': '客厅',
+                                  'control': 'http://192.0.2.41:49152/x'})
         check("choosing a TV stores its control URL and leaves the Chromecast "
               "target alone",
               mirror.dlna_target() == ('客厅', 'http://192.0.2.41:49152/x')
               and mirror.output_kind() == 'dlna', str(mirror.dlna_target()))
-        setting23.on_refresh(mirror.MenuItem('重新搜索'))
-        check("refresh on this target re-runs SSDP, not the Chromecast search",
-              _searches23 == ['dlna'], str(_searches23))
+        _searches23[:] = []
+        setting23.console_action('refresh')
+        check("refresh reruns every protocol's search, not the chosen one's",
+              _searches23 == ['cast', 'dlna'], str(_searches23))
+        # A search that finished with nothing in it is a *result*: the row has
+        # to say 没有发现 rather than keep the「还没有搜过」it had before anyone
+        # looked, which is what made an empty LAN read as「still working」.
+        mirror._dlna_searched_at = time.time()
         check("an empty renderer list says so instead of vanishing",
               (setattr(mirror, '_dlna_devices', []), True)[1]
-              and any('没有发现' in t or '搜索中' in t
-                      for t in _menu_texts23(setting23.build_menu())), '')
+              and '没有发现' in _channel(setting23.console_state(),
+                                       'dlna')['words'], '')
+        mirror._dlna_searched_at = 0.0
         utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
         _searches23[:] = []
-        setting23.build_menu()
-        check("and a cast target still searches for Chromecasts",
-              _searches23 == ['cast'], str(_searches23))
+        setting23.console_state()
+        check("and the cast protocol is searched whatever the target is",
+              _searches23 == ['cast', 'dlna'], str(_searches23))
         utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'dlna')
         _searches23[:] = []
-        setting23.build_menu()
-        check("opening the menu on an empty renderer list kicks a search",
-              _searches23 == ['dlna'], str(_searches23))
+        setting23.console_state()
+        check("opening the console on an empty renderer list kicks a search",
+              _searches23 == ['cast', 'dlna'], str(_searches23))
         mirror._dlna_devices = [('厨房的小电视', _control23, '192.0.2.40')]
+        mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
+        # Both searches start out never-run, which is due by definition; this
+        # case is about a *young* answer not being re-run every poll, so date
+        # both of them -- including the Chromecast one, which the window now
+        # kicks on every poll too.
+        mirror._searched_at = mirror._dlna_searched_at = time.time()
         _searches23[:] = []
-        setting23.build_menu()
-        check("a full renderer list does not search on every redraw",
+        setting23.console_state()
+        check("a full device list does not search on every poll",
               _searches23 == [], str(_searches23))
         # The bug this guards: on a LAN where discovery finds nothing the list
-        # stayed empty, so build_menu re-kicked the search on every open and the
+        # stayed empty, so the menu re-kicked the search on every open and the
         # submenu could only ever read「搜索中…再展开一次菜单」. A completed
         # search has to turn that into a dated「没有发现」and stop re-searching,
         # while the very first (still-running) look is the only「搜索中」left.
+        # The console polls its state once a second, so this guard matters more
+        # than it ever did for a menu.
         mirror._dlna_devices = []
         mirror._dlna_searched_at = time.time()
         _searches23[:] = []
-        _labels23fresh = _menu_texts23(setting23.build_menu())
+        _empty23 = _channel(setting23.console_state(), 'dlna')
         check("a completed empty search reads as a dated「没有发现」and is not "
-              "re-run on every open",
+              "re-run on every poll",
               _searches23 == []
-              and not any('搜索中' in t for t in _labels23fresh)
-              and any(t.startswith('没有发现 DLNA 电视（搜于 ')
-                      for t in _labels23fresh), str(_labels23fresh))
+              and not _empty23['searching']
+              and _empty23['words'].startswith('没有发现 DLNA 电视（搜于 '),
+              str(_empty23))
+        check("and that verdict stays off the other protocol's row",
+              _channel(setting23.console_state(), 'cast')['words']
+              .startswith('发现 1 台'), str(_channel(
+                  setting23.console_state(), 'cast')))
         mirror._dlna_searched_at = 0.0
         mirror._dlna_searching = True
-        _labels23first = _menu_texts23(setting23.build_menu())
+        _first23 = _channel(setting23.console_state(), 'dlna')
         check("only the very first, still-running search says「搜索中」",
-              any('搜索中' in t for t in _labels23first), str(_labels23first))
+              _first23['searching'] and not _first23['searched_at']
+              and _first23['words'] == '正在搜索局域网设备…', str(_first23))
         mirror._dlna_searching = False
         utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
         utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
@@ -6548,15 +6754,15 @@ try:
         check("the menu line counts frames and the window instead of viewers",
               'caststream' not in _line24 and '帧' in _line24
               and '在途' in _line24, _line24)
-        # 'source' is a promise this channel cannot keep, and the menu has to
+        # 'source' is a promise this channel cannot keep, and the console has to
         # say so out loud rather than quietly letterbox somebody's desktop.
         utils.Setting.set(mirror.SettingProperty.Mirror_Quality, 'source')
-        _note24 = mirror.ScreenMirrorSetting._quality_note(None)
-        check("the menu admits what the low-latency channel caps",
+        _note24 = mirror.ScreenMirrorSetting._quality_note()
+        check("the console admits what the low-latency channel caps",
               '4.5 Mbps' in _note24 and '1920x1080' in _note24, _note24)
         utils.Setting.set(mirror.SettingProperty.Mirror_Quality, '720')
         check("and a 720p request keeps its own size",
-              '1280x720' in mirror.ScreenMirrorSetting._quality_note(None))
+              '1280x720' in mirror.ScreenMirrorSetting._quality_note())
 
         mir24.stop_mirror()
         check("teardown leaves the app before it drops the transport",
@@ -7851,6 +8057,21 @@ done
         check("a renderer that answers both search targets is listed once",
               _again25 == [('楼上的电视', 'http://192.0.2.9:49152/c',
                             '192.0.2.9')], str(_again25))
+        # …and the Chromecast half of the list drops itself the same way: this
+        # app broadcasts `_googlecast._tcp`, so without it the first device the
+        # user can pick is the machine holding the file.
+        _restore25 = _own_address(clf.Setting)
+        try:
+            with _FakeMdns([('upstairs@abc._googlecast._tcp.local.',
+                              '楼上的 Chromecast', '192.0.2.77', 8009),
+                             ('Macast@abc._googlecast._tcp.local.',
+                              '本机', '192.0.2.1', 8009)]):
+                _cast25 = clf.discover_cast(timeout=0.01)
+        finally:
+            _restore25()
+        check("the file caster's Chromecast search drops this machine",
+              [host for _name, host, _port in _cast25] == ['192.0.2.77'],
+              str(_cast25))
         _searching25 = []
         _saved_rsearch_fn25 = clf.start_renderer_search
         clf.start_renderer_search = lambda: _searching25.append('dlna') or True
@@ -9769,10 +9990,17 @@ try:
         import re as _re29
         _manifest29 = _re29.search(r'<macast\.version>([^<]*)</macast\.version>',
                                    _src29).group(1)
-        _announced29 = set(_re29.findall(r'Screen Mirror v([0-9][.\w]*)', _src29))
+        # The window's title row is built as `'Screen Mirror v' + PLUGIN_VERSION`,
+        # so the version the user reads comes from one place. A literal
+        # `Screen Mirror v0.x` anywhere in the file would be a second, staler one.
+        _declared29 = _re29.search(r"^PLUGIN_VERSION = '([^']*)'", _src29,
+                                  _re29.M)
+        _stray29 = set(_re29.findall(r"'Screen Mirror v([0-9][.\w]*)'", _src29))
         check("the plugin announces its manifest version everywhere the user reads it",
-              _announced29 == {_manifest29},
-              "manifest=%s, menu says=%s" % (_manifest29, sorted(_announced29)))
+              _declared29 is not None and _declared29.group(1) == _manifest29
+              and not _stray29,
+              "manifest=%s, PLUGIN_VERSION=%s, literals=%s" % (
+                  _manifest29, _declared29 and _declared29.group(1), sorted(_stray29)))
         check("the setup hands its progress object down the whole chain",
               "_route_audio_through_blackhole(ffmpeg, progress=progress)"
               in _src29 and "_wait_for_blackhole(ffmpeg, progress=progress)"
@@ -10341,12 +10569,17 @@ try:
     # -- 1. every codec the plugins hand to ffmpeg gets asked about ----------
     _used32 = set(_re32.findall(r"'-c:[va]',\s*'([^']+)'", _plug32))
     # `aac` ships in every ffmpeg build, so probing for it would only produce
-    # noise; anything else has to be named in the preflight.
+    # noise; anything else has to be named in the preflight. `ppm` joins it for
+    # the same reason: the preview frame is raw pixels, an encoder no build of
+    # ffmpeg is without, and a missing one would take the picture with it -- the
+    # mirror's real encoders (x264 / VideoToolbox / mpeg2 / ac3) each still cost
+    # a link, so they stay on the list.
+    _always32 = {'aac', 'ppm'}
     _probe_src32 = (_pre32.split('for flag, why in (')[1]
                     .split('if flag in out:')[0])
     _probed32 = set(_re32.findall(r'\(\s*"([a-z0-9_]+)"', _probe_src32))
     check("the preflight asks about every codec the plugins encode to",
-          _used32 - {'aac'} <= _probed32,
+          _used32 - _always32 <= _probed32,
           "codecs in plugins=%s, probed=%s" % (sorted(_used32), sorted(_probed32)))
     check("and it does not still ask about a codec no sender plugin uses",
           not (_probed32 - _used32),
@@ -10824,6 +11057,1381 @@ except Exception as _e34:
     traceback.print_exc()
     check("the provenance ledger is checkable", False,
           "{}: {}".format(type(_e34).__name__, _e34))
+
+
+# --------------------------------------------------------------------------
+# Part 35: the mirror console window.
+#
+# The mirror controls left the menu bar and became a Tk window in its own
+# process, so three things that used to be "a row in a menu" are now contracts:
+# the HTTP endpoints the window reads, the launcher that decides which python
+# may run it, and the view rules that decide what it shows. Each is tested where
+# it is decided -- and because `mirror_console` imports nothing from `macast`,
+# its pure half is checked by calling it rather than by reading its source.
+# --------------------------------------------------------------------------
+print("\n=== Part 35: the mirror console window ===")
+import ast as _ast35
+import contextlib as _ctx35
+import io as _io35
+import re as _re35
+import urllib.error as _urlerr35
+import urllib.request as _urlreq35
+
+_saved_setting35 = (utils.Setting.setting, utils.Setting.setting_path)
+_saved_dir35 = utils.SETTING_DIR
+_tmp35 = _tempfile.mkdtemp(prefix="macast-console-")
+_notify35 = []
+_notify35_rec = lambda *a, **k: _notify35.append(a)          # noqa: E731
+mirror35 = None
+_patches35 = {}
+
+
+def _patch35(**kw):
+    """Patch names on the plugin module only -- never on a shared stdlib module."""
+    for _name, _value in kw.items():
+        _patches35.setdefault(_name, getattr(mirror35, _name))
+        setattr(mirror35, _name, _value)
+
+
+def _unpatch35():
+    for _name, _value in _patches35.items():
+        setattr(mirror35, _name, _value)
+    _patches35.clear()
+
+
+try:
+    utils.SETTING_DIR = _tmp35
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp35, "macast_setting.json")
+    cherrypy.engine.subscribe('app_notify', _notify35_rec)
+    mirror35 = _load_plugin("screen_mirror_plugin_v35", "screen_mirror.py")
+
+    # -- the view rules: what a state dict turns into -----------------------
+    _base35 = {'platform': 'darwin', 'available': True,
+               'console_version': _mc.PROTOCOL_VERSION,
+               'capture': {'probed': True}, 'audio': {'line': ''},
+               'output': {'kind': 'cast'}}
+
+    def _state35(**kw):
+        merged = dict(_base35)
+        merged.update(kw)
+        return merged
+
+    check("the window and the plugin agree on the contract version",
+          _mc.PROTOCOL_VERSION == mirror35.CONSOLE_VERSION,
+          "an old window against a new app has to say so; silently losing "
+          "buttons is the failure this guards")
+    check("a Chromecast target lays out devices but no viewer panel",
+          _mc.sections_for(_base35) == ['channels', 'devices', 'quality',
+                                        'capture', 'audio', 'preview',
+                                        'activity'],
+          str(_mc.sections_for(_base35)))
+    check("a DLNA电视 adds its compatibility profiles beside the devices",
+          _mc.sections_for(_state35(output={'kind': 'dlna'}))[:4]
+          == ['channels', 'devices', 'profiles', 'quality'],
+          str(_mc.sections_for(_state35(output={'kind': 'dlna'}))))
+    check("a browser target drops the device list and gains the viewer",
+          'devices' not in _mc.sections_for(_state35(output={'kind': 'browser'}))
+          and 'viewer' in _mc.sections_for(_state35(output={'kind': 'browser'})))
+    check("Windows with nothing to report gets no audio panel",
+          'audio' not in _mc.sections_for(_state35(platform='win32')))
+    check("...and gets one the moment the plugin has something to say",
+          'audio' in _mc.sections_for(_state35(platform='win32',
+                                              audio={'line': '系统声音：无'})))
+    check("an unknown output kind still produces a window",
+          _mc.sections_for(_state35(output={'kind': 'telnet'}))[:1]
+          == ['channels'],
+          '「投屏方式」is the one card that always has an honest answer')
+
+    # 「需要安装」is the difference between a notification the user missed and a
+    # card that stays until the binary turns up, so its absence is as much a
+    # bug as its presence: an empty table must not hold a panel open.
+    check("the requirements card appears only while something is outstanding",
+          'requirements' not in _mc.sections_for(_base35)
+          and 'requirements' in _mc.sections_for(
+              _state35(requirements=[{'key': 'ffmpeg', 'label': 'ffmpeg',
+                                      'detail': '', 'command': ''}])),
+          str(_mc.sections_for(_base35)))
+
+    # The card being in the layout is worth nothing if what a plugin records
+    # never reaches it -- that was the whole report: a「brew install …」that
+    # lived only in Notification Center. The board is the app's shared one, so
+    # this writes an entry of its own and takes it back afterwards.
+    import macast.notice as _board35
+    _saved_kick35 = mirror35.start_search, mirror35.start_renderer_search
+    mirror35.start_search = mirror35.start_renderer_search = lambda: None
+    try:
+        _board35.requirement('zz-suite-35', label='测试用需求',
+                             detail='这条是用例写进去的，不是真的缺东西',
+                             command='brew install something')
+        _req35 = mirror35.ScreenMirrorSetting().console_state()['requirements']
+        _board35.satisfied('zz-suite-35')
+        _after35 = mirror35.ScreenMirrorSetting().console_state()['requirements']
+        _prompt35 = mirror35.ScreenMirrorSetting().console_state()['prompt']
+        _verdict35 = mirror35.target_prompt('cast', with_verdict=True)
+    finally:
+        _board35.satisfied('zz-suite-35')
+        mirror35.start_search, mirror35.start_renderer_search = _saved_kick35
+    check("what a plugin records as missing reaches the window",
+          any(r['key'] == 'zz-suite-35'
+              and r['command'] == 'brew install something'
+              and '测试用需求' in r['label'] for r in _req35), str(_req35))
+    check("and the card row disappears once the thing turns up",
+          not any(r['key'] == 'zz-suite-35' for r in _after35), str(_after35))
+
+    # The feed is the same board: 「刚才通知了个要 brew 安装个啥东西」 was the
+    # report, and a notification centre is not somewhere you can scroll back to.
+    _board35.record('ZZ 套件：这条通知要能在窗口里读到')
+    _recent35 = mirror35.ScreenMirrorSetting().console_state()['recent']
+    check("a sentence said to the user is in the window's feed",
+          any('ZZ 套件' in m['text'] for m in _recent35), str(_recent35[-3:]))
+
+    # The prompt used to carry the search verdict inside it, so one card read
+    # 「没有发现 Chromecast（搜于 19:53:42）」twice -- once on its own line and
+    # once in the sentence under it. The window already has the verdict; only a
+    # refused start, which leaves for a notification with no card beside it,
+    # has to say why as well as what is missing.
+    check("the card's prompt says what is missing, and leaves the verdict out",
+          '还没有选择' in _prompt35 and '（' not in _prompt35, _prompt35)
+    check("a refused start says the verdict too",
+          _verdict35.startswith(_prompt35) and len(_verdict35) > len(_prompt35),
+          _verdict35)
+
+    # -- the door in the menu bar, whichever renderer is playing -------------
+    #
+    # v2 moved 电脑投屏 out of the renderer's own `build_menu()`: the app only
+    # asks *that* of the selected renderer, so opening the window used to mean
+    # selecting Screen Mirror, clicking the door, then selecting the real player
+    # back. These three cases are the detachment, and they never start anything.
+    class _NoConsole35(object):
+        """A renderer that owns no console must contribute no menu row."""
+
+    class _Owner35(mirror35.ScreenMirrorRenderer):
+        #: Building the door must not put a capture of this machine on the LAN.
+        def start(self):
+            raise AssertionError('the console door must not start the renderer')
+
+    def _plugin35(title, cls):
+        return macast_mod.MacastPlugin(None, title, plugin_factory=cls,
+                                       platform='darwin,win32,linux')
+
+    _mgr35b = macast_mod.MacastPluginManager.__new__(
+        macast_mod.MacastPluginManager)
+    _plain35 = _plugin35('MPV', _NoConsole35)
+    _owner35 = _plugin35('Screen Mirror', _Owner35)
+    _mgr35b.renderer_all = [_plain35, _owner35]
+    check("the console's owner is found by a class flag, not by its title",
+          _mgr35b.console_plugin() is _owner35
+          and mirror35.ScreenMirrorRenderer.MIRROR_CONSOLE is True,
+          'a title is user-editable; a class attribute is not')
+    _mgr35b.renderer_all = [_owner35, _plain35]
+    check("and the order of the renderer list does not decide it",
+          _mgr35b.console_plugin() is _owner35, 'no selected renderer is '
+          'involved, so nothing about the list can shadow it')
+    _setting35 = _mgr35b.mirror_setting()
+    check("asking for the surface instantiates the plugin without starting it",
+          isinstance(_setting35, mirror35.ScreenMirrorSetting)
+          and _owner35.plugin_instance is not None
+          and _owner35.plugin_instance._proc is None,
+          'instantiating is not selecting: no bus topic is taken, no media routed')
+    def _door35(manager):
+        """Row texts the app would put in the menu bar for this plugin manager."""
+        return [item.text for item in
+                macast_mod.Macast._mirror_menu_rows(
+                    types.SimpleNamespace(plugin_manager=manager))]
+
+    def _boom35():
+        raise RuntimeError('boom')
+
+    check("with no console anywhere the app offers no extra row",
+          _door35(types.SimpleNamespace(mirror_setting=lambda: None)) == [],
+          'every other renderer keeps the menu it always had')
+    check("with the console plugin loaded the menu gains exactly one door",
+          _door35(_mgr35b) == ['电脑投屏…'], str(_door35(_mgr35b)))
+    check("and a plugin that cannot answer is a missing row, not a dead menu",
+          _door35(types.SimpleNamespace(mirror_setting=_boom35)) == [],
+          'the menu bar is built on the UI thread; nothing there may raise')
+
+    # -- the window's own geometry ------------------------------------------
+    #
+    # Every label used to carry a hand-picked `wraplength`, so each one was
+    # right at exactly one window size: at the default 1080 the four output
+    # cards clipped by a few pixels, and the activity box asked for 772 px
+    # inside a 445 px panel. The numbers are derived from the column now, which
+    # makes the arithmetic checkable without a display -- the only place a
+    # truncated window can be caught before someone opens one.
+    def _wraps35(outer):
+        """[(where, source, wraplength)] for every label the window wraps.
+
+        Mirrors `mirror_console`'s sources: `_text_width(column)` for the panels,
+        that minus `ROW_INSET` for text inside a card, `_window_width` for the
+        footer -- and the step note, which pays for the mark and the step name
+        before it is allowed to wrap. The column split is the
+        `columnconfigure(0, weight=5)` / `(1, weight=2)` pair in `_build`.
+        """
+        left = outer * 5 // 7 - _mc.COLUMN_INSET
+        return [('panel', left, left - _mc.LABEL_SLACK),
+                ('card row', left, left - _mc.LABEL_SLACK - _mc.ROW_INSET),
+                ('step note', left, left - _mc.STEP_TEXT_INSET - _mc.LABEL_SLACK),
+                ('footer', outer, outer - 2 * 16 - _mc.LABEL_SLACK)]
+
+    check("no wrap the window computes can outgrow the width it came from",
+          all(_mc.MIN_WRAP <= value <= source
+              for outer in (_mc.WINDOW_MIN[0], 1080, 1440, 2560)
+              for _where, source, value in _wraps35(outer)),
+          'a wrap that fits is the difference between a tall card and a '
+          'truncated one')
+    check("the row text keeps a readable line at the smallest window",
+          min(value for _w, _s, value in _wraps35(_mc.WINDOW_MIN[0])) >= 140,
+          'Chinese labels wrap by character, so a too-narrow box becomes a '
+          'column of one glyph per line')
+
+    # Quality presets in a row are a choice, and a choice has to look like one:
+    # `weight` alone splits only the *leftover*, so a shorter label leaves its
+    # button narrower and the four stop being comparable. Tk 9 dropped the
+    # slave-level `-uniform`, so this pins the column-level spelling. The
+    # protocol rows went the other way with v2 -- one full-width card each,
+    # because a row now carries a device name as well as a title.
+    _geo_src35 = open(_mc.__file__, encoding='utf-8').read()
+    check("the quality presets stay equal-width",
+          "columnconfigure(index, weight=1, uniform='quality')" in _geo_src35,
+          'uniform groups them; without it a short label shrinks its button')
+    check("and a protocol row takes the whole column it is in",
+          "card.pack(fill='x', pady=(0, 6))" in _geo_src35,
+          'half a column is how the old output cards clipped their trade-off')
+    check("and no label is left holding a pixel guess",
+          not _re35.search(r'wraplength\s*=\s*\d', _geo_src35),
+          'every wrap comes from _wrap()/the column instead')
+
+    # The window asks for a height that ends the left column on a panel edge,
+    # and a 13-inch laptop is 800 points tall: unclamped, the bottom half of the
+    # window -- 「开始镜像」 and the whole「设备」panel -- sits under the Dock.
+    check("the window fits the screen it opens on",
+          _mc.window_size_for(1440) == _mc.WINDOW_SIZE
+          and _mc.window_size_for(800) == '1080x690',
+          _mc.window_size_for(800))
+    check("and never shrinks past its own minimum",
+          _mc.window_size_for(400) == '1080x{}'.format(_mc.WINDOW_MIN[1])
+          and _mc.window_size_for(0) == _mc.WINDOW_SIZE,
+          'a window shorter than WINDOW_MIN is a window the user resizes '
+          'immediately; 0 means no display answered')
+    check("so the height it asks for is the one the code reads",
+          int(_mc.WINDOW_SIZE.split('x')[1]) >= _mc.WINDOW_MIN[1]
+          and 'geometry(window_size_for(' in _geo_src35,
+          'the clamp is only real if run() uses it')
+
+    # Tk's scrollbar cannot be coloured on macOS -- Aqua ignores -background and
+    # -troughcolor -- so the dark window grew three light-grey strips the moment
+    # both columns became scrollable. The console draws its own thumb instead.
+    check("the console draws no native scrollbar",
+          'Scrollbar(' not in _geo_src35,
+          'Aqua paints them light and takes the colours back; the window is dark')
+    check("and the thumb it draws is wired to the canvas both ways",
+          'yscrollcommand=self.bar.set' in _geo_src35
+          and 'self.view(\'moveto\'' in _geo_src35
+          and 'def set(self, lo, hi)' in _geo_src35,
+          'set(lo, hi) in, moveto out -- same contract the real widget offered')
+    check("a column that already fits shows no thumb",
+          'self.hi - self.lo >= 0.999' in _geo_src35,
+          'a full-length thumb is a control with nothing to do')
+
+    # The cards fall back to these names when the app answers without a catalog
+    # -- which is what it does when Screen Mirror is not the current renderer.
+    # Showing the raw key ('cast') is a key name, not a label, so the fallback
+    # has to keep saying what the plugin says.
+    check("the window's card names match the plugin's own output labels",
+          set(_mc.OUTPUT_FALLBACK) == set(mirror35.OUTPUTS)
+          and all(_mc.OUTPUT_FALLBACK[key] == mirror35.OUTPUTS[key][0]
+                  for key in _mc.OUTPUT_FALLBACK),
+          str(_mc.OUTPUT_FALLBACK))
+
+    # A control that is built and never laid out still exists -- `winfo` answers
+    # for it, the view model renders it, and the window shows nothing. That is
+    # how the「兼容档位」and screen dropdowns shipped invisible: `_choice()` handed
+    # back a holder no caller ever packed. No amount of view-model asserting can
+    # see it, so the source itself is asked.
+    _BUILDERS35 = ('_button', '_check', '_choice')
+
+    def _unpacked35(source):
+        """[(function, name, line)] for builder results no pack/grid claims.
+
+        Three shapes have to be told apart, and only the middle one is a bug:
+        a builder that packs what it returns (``_choice``) owes its caller
+        nothing; a control packed from another method (the three audio buttons,
+        shown only when there is something to show) is laid out; and a control
+        assigned and never packed is an invisible widget.
+        """
+        tree = _ast35.parse(source)
+
+        def key_of(node):
+            """'self.start' / 'button' -- the whole receiver, not its last part.
+
+            Matching on the bare attribute name is what makes this check lie:
+            `_button()` returns a local called `button`, other methods pack a
+            local called `button`, and on that reading every unbuilt button in
+            the window counts as laid out.
+            """
+            if isinstance(node, _ast35.Attribute):
+                base = key_of(node.value)
+                return node.attr if base is None else '{}.{}'.format(base,
+                                                                     node.attr)
+            if isinstance(node, _ast35.Name):
+                return node.id
+            return None
+
+        def laid_out(node):
+            """Receivers of every pack()/grid() call at or below `node`."""
+            out = set()
+            for sub in _ast35.walk(node):
+                if (isinstance(sub, _ast35.Call)
+                        and isinstance(sub.func, _ast35.Attribute)
+                        and sub.func.attr in ('pack', 'grid')):
+                    name = key_of(sub.func.value)
+                    if name:
+                        out.add(name)
+            return out
+
+        packed = laid_out(tree)
+        # Walked, not scanned at module level: the builders are methods, so a
+        # `for fn in tree.body` loop finds none of them and every `_choice()`
+        # result looks like an orphan. Self-packing is judged from the builder's
+        # own body only -- that is the question ("does it place what it hands
+        # back?"), and no other method's answer makes it true.
+        self_packing = set()
+        for fn in _ast35.walk(tree):
+            if not (isinstance(fn, _ast35.FunctionDef)
+                    and fn.name in _BUILDERS35):
+                continue
+            returned = [key_of(node.value) for node in _ast35.walk(fn)
+                        if isinstance(node, _ast35.Return)
+                        and isinstance(node.value, (_ast35.Name,
+                                                    _ast35.Attribute))]
+            own = laid_out(fn)
+            if returned and all(name in own for name in returned):
+                self_packing.add(fn.name)
+
+        offenders = []
+        for fn in _ast35.walk(tree):
+            if not isinstance(fn, _ast35.FunctionDef):
+                continue
+            for node in _ast35.walk(fn):
+                if not (isinstance(node, _ast35.Assign)
+                        and len(node.targets) == 1
+                        and isinstance(node.value, _ast35.Call)
+                        and isinstance(node.value.func, _ast35.Attribute)
+                        and node.value.func.attr in _BUILDERS35):
+                    continue
+                if node.value.func.attr in self_packing:
+                    continue
+                name = key_of(node.targets[0])
+                if name and name not in packed:
+                    offenders.append((fn.name, name, node.lineno))
+        return sorted(offenders, key=lambda row: row[2])
+
+    check("every control the window builds is actually laid out",
+          _unpacked35(_geo_src35) == [],
+          'built-but-never-packed is invisible to every other assertion here')
+    check("...and the check still catches the shape that shipped invisible",
+          _unpacked35('def _build_x(self, body):\n'
+                      '    self.gone = self._button(body, "x", f)\n'
+                      '    self.shown = self._button(body, "y", g)\n'
+                      '    self.shown.pack()\n')
+          == [('_build_x', 'self.gone', 2)],
+          'one packed, one not: only the orphan is reported')
+    # The qualification is the whole difference between a check and a decoration:
+    # `_button()` returns a local named `button`, some other method packs a local
+    # named `button`, and matching the last attribute alone lets every orphan
+    # hide behind that coincidence.
+    check("a same-named local in another method does not count as its layout",
+          _unpacked35('def _button(self, parent, text):\n'
+                      '    button = Label(parent)\n'
+                      '    return button\n'
+                      'def _build_a(self):\n'
+                      '    self.orphan = self._button(body, "x")\n'
+                      'def _build_b(self):\n'
+                      '    button = self._button(body, "y")\n'
+                      '    button.pack()\n')
+          == [('_build_a', 'self.orphan', 5)],
+          'a builder places nothing it does not place itself')
+
+    check("Tk 8.5 is asked for PPM because it has no PNG decoder",
+          _mc.preview_format('8.5.3') == 'ppm')
+    check("Tk 8.6 and newer keep the cheaper PNG",
+          _mc.preview_format('8.6.1') == 'png' and _mc.preview_format('9.0') == 'png')
+    check("a version that is not one falls back to the format every Tk reads",
+          _mc.preview_format('') == 'ppm' and _mc.preview_format(None) == 'ppm')
+
+    # Apple's Command Line Tools still ship Tcl/Tk 8.5.9, and on a current macOS
+    # that build opens a window that paints nothing but native widgets -- no
+    # error, no traceback, just an empty rectangle. Both processes therefore
+    # hold the same floor, and each is checked from the other side.
+    check("the window refuses Tk 8.5 and takes 8.6 up",
+          _mc.tk_ok(types.SimpleNamespace(TkVersion='8.5')) is None
+          and _mc.tk_ok(types.SimpleNamespace(TkVersion='8.6')) == (8, 6)
+          and _mc.tk_ok(types.SimpleNamespace(TkVersion='9.0')) == (9, 0))
+    check("a Tk whose version cannot be read is refused rather than tried",
+          _mc.tk_ok(types.SimpleNamespace()) is None
+          and _mc.tk_ok(types.SimpleNamespace(TkVersion='unknown')) is None)
+    check("the launcher and the window hold one Tk floor, not two",
+          mirror35.MIN_TK_VERSION == _mc.MIN_TK,
+          '{} vs {}'.format(mirror35.MIN_TK_VERSION, _mc.MIN_TK))
+    check("so the probe asks for a version instead of an importable tkinter",
+          'TkVersion' in mirror35._TK_PROBE
+          and '({}, {})'.format(*mirror35.MIN_TK_VERSION) in mirror35._TK_PROBE,
+          mirror35._TK_PROBE)
+
+    _stub35 = _tempfile.mkdtemp(prefix='macast-tkstub-')
+    _stub_path35 = os.path.join(_stub35, 'tkinter.py')
+
+    def _probe_verdict(version):
+        """Run the launcher's real probe against an interpreter whose only Tk
+        is the stub, so the exit code is the floor's own answer."""
+        with open(_stub_path35, 'w') as _fh35:
+            _fh35.write('TkVersion = {!r}\n'.format(version))
+        return subprocess.call(
+            [sys.executable, '-c', mirror35._TK_PROBE],
+            env=dict(os.environ, PYTHONPATH=_stub35,
+                     # Two versions can differ only in one character, and a
+                     # stale __pycache__ entry then answers for the file that
+                     # is no longer there.
+                     PYTHONDONTWRITEBYTECODE='1'),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL) == 0
+
+    try:
+        _ok35 = (_probe_verdict('8.6'), _probe_verdict('9.0'))
+        check("the probe lets a Tk 8.6 interpreter through", all(_ok35),
+              '8.6→{} 9.0→{}'.format(*_ok35))
+        _no35 = (_probe_verdict('8.5'), _probe_verdict('unknown'))
+        check("and rejects the 8.5 that would open a blank window",
+              not any(_no35), '8.5→{} unknown→{}'.format(*_no35))
+    finally:
+        _shutil.rmtree(_stub35, ignore_errors=True)
+
+    _saved_tk35 = sys.modules.get('tkinter')
+    try:
+        sys.modules['tkinter'] = types.SimpleNamespace(TkVersion='8.5')
+        check("our own interpreter is not 'Tk-capable' when its Tk is 8.5",
+              mirror35._own_tk_version() is None)
+        sys.modules['tkinter'] = types.SimpleNamespace(TkVersion='8.6')
+        check("and is only when it clears the floor",
+              mirror35._own_tk_version() == (8, 6))
+    finally:
+        if _saved_tk35 is None:
+            sys.modules.pop('tkinter', None)
+        else:
+            sys.modules['tkinter'] = _saved_tk35
+    _stderr35 = _io35.StringIO()
+    _saved_tk35 = sys.modules.get('tkinter')
+    try:
+        sys.modules['tkinter'] = types.SimpleNamespace(TkVersion='8.5')
+        with _ctx35.redirect_stderr(_stderr35):
+            _rc35 = _mc.main()
+        check("a hand-started console under Tk 8.5 exits instead of "
+              "opening an empty window", _rc35 == 3, str(_rc35))
+        check("and names what to install instead of the symptom",
+              'Tk' in _stderr35.getvalue()
+              and '8.6' in _stderr35.getvalue(), _stderr35.getvalue())
+    finally:
+        if _saved_tk35 is None:
+            sys.modules.pop('tkinter', None)
+        else:
+            sys.modules['tkinter'] = _saved_tk35
+
+    check("a frame is accepted only when its magic bytes match the ask",
+          _mc.frame_ok(b'\x89PNG\r\n\x1a\nrest', 'png')
+          and _mc.frame_ok(b'P6\n1 1\n\xff', 'ppm'))
+    check("so a JSON answer about a missing frame can never reach Tk",
+          not _mc.frame_ok(b'{\n    "code": 1\n}', 'png')
+          and not _mc.frame_ok(b'\x89PNG', 'ppm')
+          and not _mc.frame_ok(b'', 'ppm'),
+          "8.5's PhotoImage(data=) raises on that with text nobody can act on")
+    check("the file the frame is written to carries its format's suffix",
+          _mc.frame_suffix('png') == '.png' and _mc.frame_suffix('ppm') == '.ppm')
+
+    check("the preview is subsampled into its column, never allowed to widen it",
+          _mc.fit_factor(480, 300) == 2 and _mc.fit_factor(480, 600) == 1)
+    check("the fit rounds up, because a too-wide frame breaks the layout",
+          _mc.fit_factor(481, 240) == 3, "2.004 has to be 3, not 2")
+    check("and a column that is not laid out yet asks for no subsampling",
+          _mc.fit_factor(480, 0) == 1 and _mc.fit_factor(0, 300) == 1)
+
+    check("the header line is the plugin's own status, so they cannot disagree",
+          _mc.format_stats({'status_line': '正在镜像 1920x1080 @ 24 fps',
+                            'available': True}) == '正在镜像 1920x1080 @ 24 fps')
+    check("a start that has not finished reads as starting, not as a dead button",
+          _mc.format_stats({'available': True, 'starting': True})
+          == '正在开始镜像…',
+          'the capture probe costs a second; without this the pill says 未镜像 '
+          'at a mirror that is on its way')
+    check("an unavailable plugin is not the header's story to tell",
+          _mc.format_stats({'available': False}) == '未镜像'
+          and '启用 Screen Mirror'
+          in _mc.banner_for(_state35(available=False), '')[0],
+          'one sentence per channel: the pill says state, the strip says fault')
+    check("and an idle mirror reads 未镜像",
+          _mc.format_stats({'available': True}) == '未镜像')
+
+    check("device rows carry the key the window posts back, not the label",
+          _mc.device_rows({'devices': [{'id': '192.168.1.9:8009',
+                                        'label': '电视 · 192.168.1.9',
+                                        'selected': True, 'name': '电视'}]})
+          == [('192.168.1.9:8009', '电视 · 192.168.1.9', True, '电视')],
+          "the label has a ' · ' in it; a key rebuilt from it never matches")
+    check("and no devices is an empty list rather than None",
+          _mc.device_rows({}) == [] and _mc.device_rows({'devices': None}) == [])
+    check("one protocol's devices are never read out of another's row",
+          _mc.device_rows(_mc.current_channel(
+              _state35(output={'kind': 'dlna'},
+                       channels=[{'key': 'cast', 'devices': [{'id': 'c'}]},
+                                 {'key': 'dlna', 'devices': [{'id': 'd'}]}])))
+          == [('d', '', False, '')],
+          'the list panel follows the protocol, which is the whole redesign')
+
+    check("the note under a device list is the plugin's own verdict",
+          _mc.search_note({'words': '没有发现 Chromecast（搜于 12:00:00）'})
+          == '没有发现 Chromecast（搜于 12:00:00）'
+          and _mc.search_note({}) == '',
+          'written once, in the plugin, so a refused start and the card under '
+          'the list cannot drift apart')
+    check("the first search is the only thing allowed to say 正在搜索局域网设备",
+          mirror35._search_words([], True, 0.0, '')
+          == '正在搜索局域网设备…'
+          and mirror35._search_words([], True, 1.0, '') == '正在重新搜索…',
+          'a second look has an earlier verdict behind it, and says so')
+    check("a completed empty search stays dated",
+          mirror35._search_words([], False, 1.0, '', '没有发现 Chromecast')
+          == '没有发现 Chromecast' + mirror._searched_suffix(1.0),
+          "otherwise a list that has always been empty looks alive")
+    check("a search that could not run says that instead of 没有发现",
+          mirror35._search_words([], False, 1.0, '组播被防火墙挡了')
+          == '组播被防火墙挡了',
+          'the user goes looking for a TV that is fine when this machine is the '
+          'problem')
+    check("and a protocol with nothing to search has no verdict to give",
+          [r for r in mirror35.channels_state('browser')
+           if r['key'] == 'browser'][0]['words'] == '',
+          '「没有发现」about the browser target would be a lie')
+
+    # Four presets share one row, so a pill can only carry「1080p」-- but the
+    # bandwidth cost is the entire reason to pick one preset over another, so
+    # dropping it with the label would remove the decision's only evidence.
+    _q35 = {'current': '1080',
+            'options': [{'key': k, 'label': v}
+                        for k, v in sorted(mirror35.QUALITY_LABELS.items())]}
+    _short35, _note35 = _mc.quality_text(_q35)
+    check("each pill keeps its resolution and loses nothing else",
+          _short35 == {'360': '360p', '720': '720p', '1080': '1080p',
+                       'source': '原始分辨率'},
+          str(_short35))
+    check("with nothing overriding them, the line says what is chosen costs",
+          _note35 == mirror35.QUALITY_LABELS['1080'], _note35)
+    check("a preset with no list around it still reports its own cost",
+          _mc.quality_text({'current': '360',
+                            'options': [{'key': '360',
+                                         'label': mirror35.QUALITY_LABELS['360']}]})
+          [1] == mirror35.QUALITY_LABELS['360'])
+    # The low-latency channel's note is the case that decides the precedence: it
+    # contradicts the preset's number on purpose, so quoting both would read as
+    # a bug rather than as a ceiling.
+    check("a situational note wins over the preset's own number",
+          _mc.quality_text(dict(_q35, note='低延迟通道上限 4.5 Mbps'))[1]
+          == '低延迟通道上限 4.5 Mbps',
+          "「10 Mbps · 上限 4.5 Mbps」 is a contradiction, not information")
+    check("an empty quality block renders as nothing rather than as 'None'",
+          _mc.quality_text({}) == ({}, ''))
+
+    check("the audio steps' glyphs cover every state the progress machine emits",
+          [_mc.audio_step_mark({'state': s})[0] for s in
+           ('running', 'done', 'fail', 'skipped', 'pending')]
+          == ['▶', '✓', '✗', '—', '○'])
+    check("and a state it has never seen is marked rather than swallowed",
+          _mc.audio_step_mark({'state': 'stalled'})[0] == '?'
+          and _mc.audio_step_mark({})[0] == '?')
+
+    check("a healthy machine produces no banner",
+          _mc.banner_for(_base35, '') == ('', None))
+    check("a lost connection outranks everything it could be blamed for",
+          _mc.banner_for(_state35(available=False, console_version=99,
+                                  capture={'probed': False}), 'boom')[0]
+          .startswith('连不上 Macast')
+          and _mc.banner_for(_base35, 'boom')[1] == _mc.BAD)
+    check("a window written against another protocol version names both",
+          'v99' in _mc.banner_for(_state35(console_version=99), '')[0]
+          and 'v%d' % _mc.PROTOCOL_VERSION
+          in _mc.banner_for(_state35(console_version=99), '')[0]
+          and _mc.banner_for(_state35(console_version=99), '')[1] == _mc.WARN)
+    check("a missing plugin is named as the problem, not a dead button",
+          '没有可用的电脑投屏插件'
+          in _mc.banner_for(_state35(available=False), '')[0],
+          _mc.banner_for(_state35(available=False), '')[0])
+    check("and a machine still being probed is explained while it is probed",
+          '正在探测' in _mc.banner_for(_state35(capture={'probed': False}), '')[0])
+
+    # -- the HTTP surface: these endpoints start a capture of the desktop ----
+    _token35 = protocol.api_token()
+
+    class _Surface35(object):
+        """The plugin's console face, as the window sees it over HTTP."""
+
+        def __init__(self):
+            self.state_calls = 0
+            self.snaps = []
+            self.actions = []
+            self.frame = b'\x89PNG\r\n\x1a\nfake-frame'
+            self.reason = ''
+
+        def console_state(self):
+            self.state_calls += 1
+            return {'available': True, 'mirroring': False,
+                    'output': {'kind': 'cast'}, 'recent': []}
+
+        def snapshot_frame(self, fmt='png'):
+            self.snaps.append(fmt)
+            return self.frame, self.reason
+
+        def console_action(self, name, args):
+            self.actions.append((name, args))
+            return {'code': 0, 'message': 'ok'}
+
+    class _MirrorHandler35(protocol.Handler):
+        # Not the real __init__: it loads the settings page off disk and makes a
+        # local-files directory, and neither is what is under test here.
+        def __init__(self, surface):
+            self._surface = surface
+
+        def _mirror_setting(self):
+            # The real one resolves this off the plugin manager -- see
+            # `MacastPluginManager.mirror_setting` -- because the console is not
+            # a mode of whichever renderer is playing.
+            return self._surface
+
+    surface35 = _Surface35()
+    handler35 = _MirrorHandler35(surface35)
+    bare35 = _MirrorHandler35(None)   # the app is up, but no plugin owns the console
+    request35 = cherrypy.serving.request
+    response35 = cherrypy.serving.response
+    _saved_req35 = (request35.params, getattr(request35, 'remote', None),
+                    request35.scheme, dict(response35.headers))
+    _saved_running35 = utils.Setting.is_service_running
+    utils.Setting.is_service_running = staticmethod(lambda: True)
+
+    def _reset35(ip='127.0.0.1', token=None, scheme='http'):
+        request35.headers.clear()
+        request35.params = {'token': token} if token else {}
+        request35.remote = types.SimpleNamespace(ip=ip)
+        request35.scheme = scheme
+        return request35
+
+    def _getraw35(handler=None, **kw):
+        # The snapshot endpoint answers with an image, which is not JSON: the
+        # checks that only look at bytes and headers ask for the raw body.
+        return (handler or handler35).GET(param='api', **kw)
+
+    def _get35(handler=None, **kw):
+        raw = _getraw35(handler, **kw)
+        return json.loads(raw.decode()), raw
+
+    def _post35(**kw):
+        return json.loads(handler35.POST(**kw).decode())
+
+    try:
+        _reset35()
+        res, _ = _get35(query='mirror-state')
+        check("mirror-state is refused without the token even from this machine",
+              res['code'] == 403 and surface35.state_calls == 0, str(res))
+        res, _ = _get35(query='mirror-snapshot')
+        check("mirror-snapshot too, so a drive-by cannot read the desktop",
+              res['code'] == 403 and surface35.snaps == [], str(res))
+        res = _post35(**{'mirror-action': 'start'})
+        check("and mirror-action cannot be fired by a form on some page either",
+              res['code'] == 403 and surface35.actions == [], str(res))
+
+        _reset35(ip='192.168.1.42')
+        res, _ = _get35(query='mirror-state')
+        check("a LAN caller without the token gets the same answer",
+              res['code'] == 403 and surface35.state_calls == 0, str(res))
+
+        _reset35(token=_token35)
+        res, _ = _get35(query='mirror-state')
+        check("the token in the query opens the state read",
+              res.get('code') == 0 and res['state']['available'] is True
+              and surface35.state_calls == 1, str(res))
+
+        _reset35()
+        request35.params = {'token': [_token35, _token35]}
+        res = _post35(**{'mirror-action': 'set-quality',
+                         'mirror-args': '{"value": "720"}'})
+        check("the same token in the query *and* the form body is one token, not a "
+              "wrong one",
+              res.get('code') == 0 and surface35.actions[-1][0] == 'set-quality',
+              "%s -- CherryPy hands a repeated key back as a list, and comparing "
+              "that list to a string 403s a caller who is right" % res)
+        _reset35()
+        request35.params = {'token': ['wrong', _token35]}
+        res = _post35(**{'mirror-action': 'start'})
+        check("and only the value the caller led with counts",
+              res['code'] == 403 and surface35.actions[-1][0] == 'set-quality',
+              str(res))
+
+        _reset35()
+        request35.headers['X-Macast-Token'] = _token35
+        raw = _getraw35(query='mirror-snapshot')
+        check("the token header works too, and the frame is the raw image",
+              raw == surface35.frame
+              and response35.headers.get('Content-Type') == 'image/png',
+              "%r / %s" % (raw, response35.headers.get('Content-Type')))
+        check("with its length in bytes and the caches told to stay out",
+              response35.headers.get('Content-Length') == str(len(raw))
+              and response35.headers.get('Cache-Control') == 'no-store'
+              and response35.headers.get('X-Content-Type-Options') == 'nosniff',
+              "the frame is the user's desktop, seconds ago")
+
+        _reset35(token=_token35)
+        _getraw35(query='mirror-snapshot', fmt='ppm')
+        check("the window asks for the raster its Tk can read",
+              surface35.snaps[-1] == 'ppm'
+              and response35.headers.get('Content-Type')
+              == 'image/x-portable-pixmap',
+              str(response35.headers.get('Content-Type')))
+        _getraw35(query='mirror-snapshot', fmt='tiff')
+        check("an unknown format falls back to PNG instead of erroring",
+              surface35.snaps[-1] == 'png'
+              and response35.headers.get('Content-Type') == 'image/png',
+              "the caller is a one-second poll loop, not a form")
+        _getraw35(query='mirror-snapshot', fmt=['png', 'ppm'])
+        check("a repeated parameter is taken as its first value",
+              surface35.snaps[-1] == 'png', str(surface35.snaps))
+
+        surface35.frame, surface35.reason = b'', '找不到 ffmpeg，无法生成预览'
+        _, raw = _get35(query='mirror-snapshot')
+        check("no frame answers with the reason, and not as an image",
+              json.loads(raw.decode())['message'] == '找不到 ffmpeg，无法生成预览'
+              and response35.headers.get('Content-Type').startswith('application/json'),
+              "%r" % raw)
+        surface35.frame, surface35.reason = b'\x89PNG\r\n\x1a\nfake-frame', ''
+
+        _, raw = _get35(bare35, query='mirror-state')
+        check("while the app is still booting the window is told that",
+              json.loads(raw.decode())['message'] == '应用还在启动，请一秒后再试',
+              "%s -- 'go enable a plugin' is the wrong advice for a two-second "
+              "state" % raw)
+        # A manager that answers means the app is up: the same `None` surface is
+        # then the *other* problem, and the sentence has to change.
+        _mgr35 = types.SimpleNamespace(mirror_setting=lambda: None)
+        _get_mgr35 = lambda: _mgr35                                     # noqa: E731
+        cherrypy.engine.subscribe('get_plugin_manager', _get_mgr35)
+        try:
+            _, raw = _get35(bare35, query='mirror-state')
+            check("with the plugin switched off the window is told which problem",
+                  json.loads(raw.decode())['message']
+                  .startswith('没有可用的电脑投屏插件'), str(raw))
+            _, raw = _get35(bare35, query='mirror-snapshot')
+            check("and the preview answers the same way, not as a broken image",
+                  response35.headers.get('Content-Type')
+                  .startswith('application/json')
+                  and '没有可用的电脑投屏插件'
+                  in json.loads(raw.decode())['message'], str(raw))
+            res = json.loads(bare35.POST(**{'mirror-action': 'start'}).decode())
+            check("an action is refused with the same sentence",
+                  res['code'] == 1 and '没有可用的电脑投屏插件' in res['message'],
+                  str(res))
+        finally:
+            try:
+                cherrypy.engine.unsubscribe('get_plugin_manager', _get_mgr35)
+            except Exception:
+                pass
+
+        _reset35()                      # the token is gone again
+        _seen35 = len(surface35.actions)
+        res = _post35(**{'mirror-action': 'start'})
+        check("a refusal on the gate never reaches the plugin, checked again "
+              "after the authorised calls",
+              res['code'] == 403 and len(surface35.actions) == _seen35, str(res))
+        _reset35(token=_token35)
+        res = _post35(**{'mirror-action': 'set-quality',
+                         'mirror-args': '{"value": "1080p"}'})
+        check("a console action reaches the plugin with its arguments parsed",
+              surface35.actions[-1] == ('set-quality', {'value': '1080p'})
+              and res['code'] == 0, str(surface35.actions))
+        res = _post35(**{'mirror-action': 'start', 'mirror-args': 'not json'})
+        check("malformed arguments are refused before the plugin is asked",
+              res['code'] == 1 and '不是合法的 JSON' in res['message'], str(res))
+        res = _post35(**{'mirror-action': 'start', 'mirror-args': '["start"]'})
+        check("so is a value that is not an object",
+              res['code'] == 1 and '必须是 JSON 对象' in res['message'], str(res))
+        res = _post35(**{'mirror-action': 'set-target', 'mirror-args': '{"id": "x"}'})
+        check("arguments travel as the dict the plugin validates",
+              surface35.actions[-1] == ('set-target', {'id': 'x'}), str(res))
+        check("and the only state read that ever happened was the authorised one",
+              surface35.state_calls == 1, str(surface35.state_calls))
+    finally:
+        request35.params, request35.remote, request35.scheme = _saved_req35[:3]
+        response35.headers.clear()
+        for _k35, _v35 in _saved_req35[3].items():
+            response35.headers[_k35] = _v35
+        utils.Setting.is_service_running = _saved_running35
+
+    # -- the launcher: which python may run this window, and what it is given --
+    check("the suite runs from source, so the frozen branches below are the ones "
+          "being faked",
+          mirror35._frozen_app() is False)
+    _script35 = mirror35._console_script_path()
+    check("a source run finds the console file beside the package",
+          _script35 == os.path.join(MACAST, 'mirror_console.py')
+          and os.path.isfile(_script35), str(_script35))
+    check("and hands that file to any Tk-capable python rather than to itself",
+          mirror35._console_command() == (None, [_script35]),
+          "interpreter None means the ladder picks one; naming ours is the bug "
+          "that spawns a second Macast")
+
+    _spawns35 = []
+
+    def _fake_popen35(argv, **kw):
+        _spawns35.append((argv, kw))
+        return types.SimpleNamespace(poll=lambda: None, returncode=None)
+
+    _lock35file = os.path.join(_tmp35, mirror35.CONSOLE_LOCK_NAME)
+    _saved_popen35 = mirror35.subprocess.Popen
+    _threads35 = []
+
+    def _fake_thread35(*a, **k):
+        # `.start()` is chained onto the return value by the launcher, so the
+        # stand-in has to answer for it -- and nothing here may really thread.
+        _threads35.append((a, k))
+        return types.SimpleNamespace(start=lambda: None, daemon=True)
+
+    _fake_threading35 = types.SimpleNamespace(Thread=_fake_thread35)
+    try:
+        mirror35.subprocess.Popen = _fake_popen35
+        _patch35(_console_alive_info=lambda: None,
+                 _own_python_has_tk=lambda: True,
+                 _management_token=lambda: 'tok35')
+        check("opening the console from a source run spawns the script by path",
+              mirror35.open_console() is True
+              and _spawns35[-1][0] == [sys.executable, _script35],
+              str(_spawns35[-1][0] if _spawns35 else None))
+        _env35 = _spawns35[-1][1]['env']
+        check("the window is told where the app is and with what token",
+              _env35['MACAST_CONSOLE_API'] == 'http://127.0.0.1:{}'.format(
+                  utils.Setting.get_port())
+              and _env35['MACAST_CONSOLE_TOKEN'] == 'tok35'
+              and _env35['MACAST_CONSOLE_DIR'] == _tmp35,
+              str({k: v for k, v in _env35.items() if 'CONSOLE' in k}))
+        check("its child stdio goes to the one log a Tk traceback ever reaches",
+              os.path.basename(_spawns35[-1][1]['stdout'].name)
+              == mirror35.CONSOLE_LOG_NAME
+              and _spawns35[-1][1]['stdin'] is mirror35.subprocess.DEVNULL,
+              str(_spawns35[-1][1].get('stdout')))
+
+        with open(_lock35file, 'w') as _fh35:
+            _fh35.write('{"pid": 1, "port": 65000}')
+        check("a lock left by a killed console is cleared on the way out",
+              mirror35._launch_console(sys.executable, [_script35]) is True
+              and not os.path.exists(_lock35file))
+
+        _unpatch35()
+        _spawns35[:] = []
+        _patch35(_console_alive_info=lambda: {'port': 65001, 'token': 'x'},
+                 _raise_console=lambda info: _spawns35.append(('raise', info)),
+                 _launch_console=lambda *a: _spawns35.append(('spawn', a)))
+        check("an open window is raised, never duplicated",
+              mirror35.open_console() is True
+              and [k for k, _ in _spawns35] == ['raise'], str(_spawns35))
+
+        _spawns35[:] = []
+        del _notify35[:]
+        _patch35(_console_alive_info=lambda: None,
+                 _console_command=lambda: (None, None))
+        check("with no console file anywhere the user is told, and nothing spawns",
+              mirror35.open_console() is False and _spawns35 == []
+              and 'mirror_console.py' in _notify35[-1][1], str(_notify35))
+
+        _spawns35[:] = []
+        _threads35[:] = []
+        _patch35(_console_command=lambda: (None, [_script35]),
+                 _own_python_has_tk=lambda: False,
+                 tkinter_missing=lambda: True,
+                 _frozen_app=lambda: False,
+                 _launch_console=lambda *a: _spawns35.append(a),
+                 threading=_fake_threading35)
+        check("without Tk in our own interpreter the search happens off the UI "
+              "thread and the click still returns at once",
+              mirror35.open_console() is True and _spawns35 == []
+              and _threads35[-1][1]['name'] == 'SCREEN_MIRROR_CONSOLE_LAUNCH'
+              and _threads35[-1][1]['args'] == ([_script35],),
+              str(_threads35))
+
+        # What that thread does when it runs, called directly: the ordering is
+        # the contract, and a real subprocess per candidate is the cost.
+        _spawns35[:] = []
+        del _notify35[:]
+        _patch35(_own_python_has_tk=lambda: False, tkinter_missing=lambda: True,
+                 _frozen_app=lambda: False, _console_interpreter=lambda: None,
+                 _launch_console=lambda *a: (_spawns35.append(a) or True))
+        mirror35._launch_console_late([_script35])
+        check("a machine with no Tk anywhere is told what to install, not left "
+              "with a silent click",
+              _spawns35 == [] and 'python-tk' in _notify35[-1][1]
+              and '投屏控制台' in _notify35[-1][1], str(_notify35))
+        _patch35(_frozen_app=lambda: True, _launch_console=lambda *a: (_spawns35.append(a) or True))
+        _spawns35[:] = []
+        mirror35._launch_console_late(mirror35.CONSOLE_ARGV)
+        check("a bundle still gets one attempt through its own entry point "
+              "before it asks for anything",
+              _spawns35 == [(sys.executable, mirror35.CONSOLE_ARGV)], str(_spawns35))
+
+        _threads35[:] = []
+        _spawns35[:] = []
+        _patch35(_frozen_app=lambda: True, tkinter_missing=lambda: False,
+                 _console_alive_info=lambda: None)
+        check("a bundle that carries Tk goes through its own entry point",
+              mirror35.open_console() is True
+              and _spawns35 == [(sys.executable, mirror35.CONSOLE_ARGV)],
+              "sys.executable there is the app: -c would start a second Macast; "
+              "got %s" % (_spawns35,))
+        _unpatch35()
+    finally:
+        mirror35.subprocess.Popen = _saved_popen35
+        _unpatch35()
+
+    _frozen35 = mirror35._candidate_interpreters
+    _patch35(_frozen_app=lambda: True)
+    _ladder35 = list(_frozen35())
+    _unpatch35()
+    check("a frozen executable is never offered as a python",
+          sys.executable not in _ladder35, str(_ladder35))
+    check("while a source run tries its own interpreter first",
+          list(mirror35._candidate_interpreters())[:1] == [sys.executable])
+    check("and the same file under two names is not tried twice",
+          len(list(mirror35._candidate_interpreters()))
+          == len(set(os.path.realpath(p)
+                     for p in mirror35._candidate_interpreters())))
+
+    _probes35 = []
+    _patch35(_own_python_has_tk=lambda: True,
+             _tk_probe=lambda path: _probes35.append(path) or True)
+    check("when our own python can do Tk, no interpreter is asked twice",
+          mirror35._console_interpreter() == sys.executable and _probes35 == [],
+          str(_probes35))
+    _patch35(_own_python_has_tk=lambda: False,
+             _candidate_interpreters=lambda: iter(['/a', '/b', '/c']),
+             _tk_probe=lambda path: _probes35.append(path) or path == '/b')
+    check("the ladder stops at the first interpreter whose Tk can draw",
+          mirror35._console_interpreter() == '/b' and _probes35 == ['/a', '/b'],
+          str(_probes35))
+    _probes35[:] = []
+    _patch35(_tk_probe=lambda path: _probes35.append(path) or False)
+    check("and reports that nothing can, instead of opening a window on a lie",
+          mirror35._console_interpreter() is None
+          and _probes35 == ['/a', '/b', '/c'], str(_probes35))
+    _unpatch35()
+    _patch35(tkinter_missing=lambda: False, _frozen_app=lambda: False,
+             _own_tk_version=lambda: None)
+    check("an interpreter whose Tk is too old is not 'ours, use it'",
+          mirror35._own_python_has_tk() is False)
+    _unpatch35()
+
+    _saved_platform35 = mirror35.sys.platform
+    try:
+        for _platform35, _needle35 in (('darwin', 'python-tk'),
+                                       ('win32', 'tcl/tk'),
+                                       ('linux', 'python3-tk')):
+            mirror35.sys.platform = _platform35
+            check("the last word before giving up names a package for %s"
+                  % _platform35,
+                  _needle35 in mirror35.tkinter_install_hint(),
+                  mirror35.tkinter_install_hint())
+        mirror35.sys.platform = 'darwin'
+        check("and on a Mac it says why the python that is already there "
+              "does not count", '8.5' in mirror35.tkinter_install_hint(),
+              mirror35.tkinter_install_hint())
+    finally:
+        mirror35.sys.platform = _saved_platform35
+
+    with open(os.path.join(_tmp35, mirror35.CONSOLE_LOG_NAME), 'wb') as _fh35:
+        _fh35.write(b'TclError: no display name and no $DISPLAY environment '
+                    b'variable\n')
+    del _notify35[:]
+    mirror35._watch_console_start(types.SimpleNamespace(poll=lambda: 1,
+                                                        returncode=1), delay=0.0)
+    check("a console that dies at once is reported instead of looking like a no-op",
+          _notify35 and '没能启动' in _notify35[-1][1]
+          and 'TclError' in _notify35[-1][1], str(_notify35))
+    _notify35[:] = []
+    mirror35._watch_console_start(types.SimpleNamespace(poll=lambda: None,
+                                                        returncode=None), delay=0.0)
+    check("a console that is still starting is left alone", _notify35 == [])
+
+    # -- the preview: throttling, retention, and what a frame really is ------
+    def _reset35snap():
+        mirror35._snapshot.update({'frame': b'', 'fmt': 'png', 'at': 0.0,
+                                   'busy': False, 'failed_at': 0.0,
+                                   'reason': ''})
+
+    _grabs35 = []
+    _saved_grab35 = mirror35._grab_snapshot
+
+    def _fake_grab35(fmt='png'):
+        _grabs35.append(fmt)
+        return (b'\x89PNG\x00\x01' if fmt == 'png' else b'P6\n2 2\n\xff'), ''
+
+    _reset35snap()
+    mirror35._grab_snapshot = _fake_grab35
+    try:
+        frame, reason = mirror35.snapshot_frame('png', min_interval=60)
+        check("the first preview request really grabs a frame",
+              frame.startswith(b'\x89PNG') and reason == '' and _grabs35 == ['png'],
+              str(_grabs35))
+        frame, reason = mirror35.snapshot_frame('png', min_interval=60)
+        check("the next one within the interval gets the cached frame",
+              _grabs35 == ['png'] and frame.startswith(b'\x89PNG'), str(_grabs35))
+        frame, reason = mirror35.snapshot_frame('ppm', min_interval=60)
+        check("a different format is a miss: one format is cached at a time",
+              _grabs35 == ['png', 'ppm'] and frame.startswith(b'P6'), str(_grabs35))
+        mirror35.snapshot_frame('png', min_interval=60)
+        check("and switching back re-encodes rather than keeping two frames",
+              _grabs35 == ['png', 'ppm', 'png'], str(_grabs35))
+        _grabs35[:] = []
+        for _ in range(3):
+            mirror35.snapshot_frame('png', min_interval=0)
+        check("once the interval has passed every poll gets a fresh frame",
+              len(_grabs35) == 3, str(_grabs35))
+        _grabs35[:] = []
+        _reset35snap()
+        mirror35.snapshot_frame('tiff', min_interval=60)
+        check("an unknown format is normalised before the grab, not passed on",
+              _grabs35 == ['png'], str(_grabs35))
+
+        _reset35snap()
+        mirror35.snapshot_frame('png', min_interval=0)
+        _grabs35[:] = []
+        _refuses35 = [True]
+
+        def _flaky_grab35(fmt='png'):
+            _grabs35.append(fmt)
+            if _refuses35[0]:
+                return b'', '屏幕录制权限被拒'
+            return b'\x89PNG\x00\x02', ''
+
+        mirror35._grab_snapshot = _flaky_grab35
+        frame, reason = mirror35.snapshot_frame('png', min_interval=0)
+        check("a failed grab keeps showing the last good picture",
+              frame.startswith(b'\x89PNG') and reason == '屏幕录制权限被拒',
+              "a black rectangle where the desktop was is not an answer")
+        _grabs35[:] = []
+        frame, reason = mirror35.snapshot_frame('png', min_interval=0)
+        check("and the next poll backs off instead of spawning ffmpeg every second",
+              _grabs35 == [] and reason == '屏幕录制权限被拒', str(_grabs35))
+        mirror35._snapshot['failed_at'] = 0.0     # time passes
+        _refuses35[0] = False
+        frame, reason = mirror35.snapshot_frame('png', min_interval=0)
+        check("once the backoff window passes it tries again, and a good frame "
+              "replaces the reason",
+              _grabs35 == ['png'] and reason == ''
+              and mirror35._snapshot['failed_at'] == 0.0, str(_grabs35))
+        _grabs35[:] = []
+        mirror35._snapshot['busy'] = True
+        frame, reason = mirror35.snapshot_frame('png', min_interval=0)
+        check("a second concurrent reader waits for the frame in flight",
+              _grabs35 == [] and reason == '正在采集上一帧'
+              and frame.startswith(b'\x89PNG'), str(_grabs35))
+        mirror35._snapshot['busy'] = False
+        _snap35 = mirror35.snapshot_state()
+        check("the state describes the preview without asking for a frame",
+              _snap35['has_frame'] and _snap35['fmt'] == 'png'
+              and _snap35['busy'] is False and _grabs35 == [], str(_snap35))
+        check("and never leaks the bytes themselves into the state",
+              'frame' not in _snap35, str(sorted(_snap35)))
+        _grabs35[:] = []
+        mirror35.snapshot_frame('png', min_interval=0)
+        check("after a success the retry window is forgotten",
+              mirror35._snapshot['failed_at'] == 0.0 and _grabs35 == ['png'])
+
+        # The real grab now, with only ffmpeg faked: this is where the argv
+        # contract lives.
+        _cap35 = types.SimpleNamespace(
+            inputs=[['-f', 'avfoundation', '-capture_cursor', '1', '-i', '1:none']],
+            audio_map=None, label='内置显示器', screens=[(1, '内置显示器')])
+        _written35 = []
+        _payload35 = [b'\x89PNG\r\n\x1a\nIHDR', 0]
+        _saved_run35 = mirror35.subprocess.run
+
+        def _fake_run35(cmd, **kw):
+            _written35.append(list(cmd))
+            with open(cmd[-1], 'wb') as _fh:
+                _fh.write(_payload35[0])
+            return types.SimpleNamespace(returncode=_payload35[1], stderr=b'')
+
+        mirror35._grab_snapshot = _saved_grab35
+        _patch35(find_ffmpeg=lambda: '/usr/bin/ffmpeg',
+                 probe_capture=lambda *a, **k: _cap35)
+        mirror35.subprocess.run = _fake_run35
+        try:
+            frame, reason = mirror35._grab_snapshot('png')
+            check("a PNG frame comes back with its magic bytes intact",
+                  frame.startswith(b'\x89PNG') and reason == '', str(reason))
+            _argv35 = _written35[-1]
+            check("the grab is one frame of the same source the mirror uses",
+                  _argv35[:4] == ['/usr/bin/ffmpeg', '-hide_banner',
+                                  '-loglevel', 'error']
+                  and '1:none' in _argv35 and '0:v:0' in _argv35
+                  and '-frames:v' in _argv35, str(_argv35))
+            check("and it is scaled to the width the console was told about",
+                  _argv35[_argv35.index('-vf') + 1]
+                  == 'scale={}:-2'.format(mirror35.SNAPSHOT_WIDTH), str(_argv35))
+            check("PNG names no encoder: the extension is enough",
+                  '-c:v' not in _argv35, str(_argv35))
+            _payload35[0] = b'P6\n2 2\n\xff\xff'
+            frame, reason = mirror35._grab_snapshot('ppm')
+            check("PPM names its encoder, because a differently-built ffmpeg "
+                  "would pick something else for the same extension",
+                  frame.startswith(b'P6')
+                  and '-c:v ppm' in ' '.join(_written35[-1])
+                  and '-f image2' in ' '.join(_written35[-1]),
+                  str(_written35[-1]))
+            check("the frame file is named for the format it holds",
+                  _written35[-1][-1].endswith('.ppm'), str(_written35[-1][-1]))
+            check("and it is gone once the bytes have been read",
+                  not os.path.exists(_written35[-1][-1]),
+                  "a stray frame is a screenshot of the user's desktop left in /tmp")
+            _payload35[0], _payload35[1] = b'garbage', 0
+            frame, reason = mirror35._grab_snapshot('png')
+            check("bytes that are not the promised image are refused",
+                  frame == b'' and 'PNG' in reason, str((frame, reason)))
+            _payload35[0], _payload35[1] = b'', 1
+            frame, reason = mirror35._grab_snapshot('png')
+            check("a failing ffmpeg says which exit code it used",
+                  frame == b'' and '退出码 1' in reason, str(reason))
+            _patch35(find_ffmpeg=lambda: None)
+            frame, reason = mirror35._grab_snapshot('png')
+            check("no ffmpeg at all is named as the reason, not a black box",
+                  'ffmpeg' in reason and frame == b'', str(reason))
+            _patch35(find_ffmpeg=lambda: '/usr/bin/ffmpeg',
+                     probe_capture=lambda *a, **k: None,
+                     capture_unavailable_hint=lambda: '这台电脑还不能采集屏幕')
+            frame, reason = mirror35._grab_snapshot('png')
+            check("an unprobeable machine gets the plugin's own hint",
+                  reason == '这台电脑还不能采集屏幕', str(reason))
+        finally:
+            mirror35.subprocess.run = _saved_run35
+            _unpatch35()
+        _reset35snap()
+    finally:
+        mirror35._grab_snapshot = _saved_grab35
+
+    # -- one window per machine: the lock file and the two loopback calls ----
+    _raised35 = []
+    _lockpath35 = os.path.join(_tmp35, 'console.lock')
+    _lock35 = _mc.ConsoleLock(path=_lockpath35)
+    check("the window advertises itself on a loopback port",
+          _lock35.acquire(lambda: _raised35.append(1)) is True
+          and _lock35.server is not None)
+    try:
+        with open(_lockpath35) as _fh35:
+            _advert35 = json.loads(_fh35.read())
+        check("the advertisement names the pid, the port and a private token",
+              _advert35['pid'] == os.getpid()
+              and _advert35['port'] == _lock35.server.server_address[1]
+              and _advert35['token'] == _lock35.token
+              and _advert35['version'] == _mc.PROTOCOL_VERSION
+              and _advert35['token'] != _token35,
+              str(_advert35))
+        check("a second window sees the first one",
+              _mc.ConsoleLock(path=_lockpath35).existing() == _advert35,
+              "the ping, not the file, is what says it is alive")
+
+        def _http35(method, path, token=None):
+            request = _urlreq35.Request(
+                'http://127.0.0.1:{}{}'.format(_advert35['port'], path),
+                data=b'' if method == 'POST' else None)
+            if token is not None:
+                request.add_header('X-Macast-Console-Token', token)
+            try:
+                with _mc._opener().open(request, timeout=3) as response:
+                    return response.status, response.read()
+            except _urlerr35.HTTPError as exc:
+                return exc.code, exc.read()
+
+        _code35, _body35 = _http35('GET', '/ping')
+        check("/ping answers the version the launcher matches against",
+              _code35 == 200 and json.loads(_body35.decode())['version']
+              == _mc.PROTOCOL_VERSION, str(_body35))
+        _code35, _ = _http35('POST', '/raise', token='wrong')
+        check("raising the window needs the token from the lock file",
+              _code35 == 403 and _raised35 == [], str(_code35))
+        _code35, _ = _http35('POST', '/raise', token='')
+        check("including when the header is there but empty",
+              _code35 == 403 and _raised35 == [])
+        _code35, _ = _http35('POST', '/raise', token=_advert35['token'])
+        check("with it, the open window is told to come forward",
+              _code35 == 200 and _raised35 == [1], str(_raised35))
+        _code35, _ = _http35('GET', '/elsewhere')
+        check("and nothing else is served on that port", _code35 == 404)
+        _code35, _body35 = _http35('GET', '/ping')
+        check("liveness is a question, never a signal: pinging costs the "
+              "window nothing",
+              _code35 == 200 and _mc.ConsoleLock(path=_lockpath35).existing()
+              == _advert35)
+
+        _stale35 = os.path.join(_tmp35, 'stale.lock')
+        with open(_stale35, 'w') as _fh35:
+            _fh35.write(json.dumps({'pid': 999999, 'port': 1}))
+        check("a lock whose window is gone is treated as no lock at all",
+              _mc.ConsoleLock(path=_stale35).existing() is None)
+        check("and it is removed, so the next open is not held hostage by it",
+              not os.path.exists(_stale35))
+        _junk35 = os.path.join(_tmp35, 'junk.lock')
+        with open(_junk35, 'w') as _fh35:
+            _fh35.write('not json')
+        check("a half-written lock file is not an error either",
+              _mc.ConsoleLock(path=_junk35).existing() is None)
+        _noling35 = os.path.join(_tmp35, 'no-port.lock')
+        with open(_noling35, 'w') as _fh35:
+            _fh35.write('{"pid": 3}')
+        check("a lock without a port cannot be pinged, so it is no lock",
+              _mc.ConsoleLock(path=_noling35).existing() is None)
+    finally:
+        _lock35.release()
+    check("releasing takes down the port and the advertisement",
+          not os.path.exists(_lockpath35)
+          and _mc.ConsoleLock(path=_lockpath35).existing() is None)
+    try:
+        _http35('GET', '/ping')
+        _after35 = 200
+    except Exception:
+        _after35 = 0
+    check("and after release nothing answers", _after35 == 0)
+    check("the plugin and the window agree on the lock file's name",
+          os.path.basename(mirror35._console_lock_path())
+          == _mc.LOCK_NAME == mirror35.CONSOLE_LOCK_NAME,
+          "one name, two processes; renaming on one side means two windows")
+
+    # -- what the window says to the app, in the app's own words -------------
+    _console_src35 = open(_mc.__file__, encoding='utf-8').read()
+    _plugin_src35 = open(mirror35.__file__, encoding='utf-8').read()
+    _protocol_src35 = open(protocol.__file__, encoding='utf-8').read()
+    _entry_src35 = open(os.path.join(os.path.dirname(MACAST), 'Macast.py'),
+                        encoding='utf-8').read()
+
+    _queries35 = set(_re35.findall(r"query=([\w-]+)", _console_src35))
+    check("every endpoint the window calls is one the server answers",
+          _queries35 and all(q in _protocol_src35 for q in _queries35),
+          str(sorted(_queries35)))
+    check("the preview URL asks for the two parameters the server reads",
+          'mirror-snapshot' in _mc.SNAPSHOT_URL and 'fmt={' in _mc.SNAPSHOT_URL
+          and 'token={' in _mc.SNAPSHOT_URL
+          and "kwargs.get('fmt')" in _protocol_src35, _mc.SNAPSHOT_URL)
+    for _field35 in ('mirror-action', 'mirror-args'):
+        check("the POST field %s is spelled the same in both processes" % _field35,
+              _field35 in _console_src35 and _field35 in _protocol_src35)
+    for _header35, _other35 in (('X-Macast-Token', _protocol_src35),
+                                ('X-Macast-Console-Token', _plugin_src35)):
+        check("%s is spelled the same in both processes" % _header35,
+              _header35 in _console_src35 and _header35 in _other35)
+    check("the environment the launcher sets is the environment the window reads",
+          set(_re35.findall(r"MACAST_CONSOLE_[A-Z]+", _console_src35))
+          == set(_re35.findall(r"MACAST_CONSOLE_[A-Z]+", _plugin_src35))
+          >= {'MACAST_CONSOLE_API', 'MACAST_CONSOLE_TOKEN', 'MACAST_CONSOLE_DIR'},
+          str(sorted(set(_re35.findall(r"MACAST_CONSOLE_[A-Z]+", _plugin_src35)))))
+    _m_arg35 = _re35.search(r"^MIRROR_CONSOLE_ARG = '([^']+)'", _entry_src35,
+                            _re35.M)
+    check("the entry point's flag is the launcher's flag",
+          _m_arg35 is not None and [_m_arg35.group(1)] == mirror35.CONSOLE_ARGV,
+          "%s / %s" % (_m_arg35 and _m_arg35.group(1), mirror35.CONSOLE_ARGV))
+    _main35 = _entry_src35[_entry_src35.index("if __name__"):]
+    check("the console branch is taken before the app clears the logs its child "
+          "writes into",
+          _entry_src35.index('MIRROR_CONSOLE_ARG in sys.argv')
+          < _entry_src35.index("if __name__") + _main35.index('clear_env()'),
+          "otherwise opening the window would wipe macast.log under itself")
+    _run35 = _entry_src35[_entry_src35.index('def run_mirror_console'):
+                          _entry_src35.index("if __name__")]
+    check("and the console never installs the app's log handler",
+          'setup_logging' not in _run35 and 'clear_env' not in _run35,
+          "macast.log has exactly one writer; a second is a rotation bug")
+    check("the entry point loads the console by path, not by package name",
+          'spec_from_file_location' in _entry_src35
+          and '_MEIPASS' in _entry_src35,
+          "a frozen bundle has no importable macast package for the window")
+
+    _tree35 = _ast35.parse(_console_src35)
+    _top35 = set()
+    _all35 = set()
+    for _node35 in _tree35.body:
+        if isinstance(_node35, _ast35.Import):
+            _top35.update(a.name.split('.')[0] for a in _node35.names)
+        elif isinstance(_node35, _ast35.ImportFrom):
+            _top35.add((_node35.module or '').split('.')[0])
+    for _node35 in _ast35.walk(_tree35):
+        if isinstance(_node35, _ast35.Import):
+            _all35.update(a.name.split('.')[0] for a in _node35.names)
+        elif isinstance(_node35, _ast35.ImportFrom):
+            _all35.add((_node35.module or '').split('.')[0])
+    check("the console imports nothing from macast, so any python with Tk can "
+          "run this file",
+          'macast' not in _all35, str(sorted(_all35)))
+    check("and nothing third-party either: it is stdlib or nothing",
+          not _all35 - set(sys.stdlib_module_names),
+          str(sorted(_all35 - set(sys.stdlib_module_names))))
+    check("tkinter is imported where a display is guaranteed, not at import time",
+          'tkinter' not in _top35 and 'tkinter' in _all35,
+          "this suite imports the module headless; a top-level import would make "
+          "every check above impossible")
+    check("the window's own entry point explains a python without Tk by exit code",
+          '没有自带 Tk' in _console_src35 and 'return 1' in _console_src35
+          and 'MACAST_CONSOLE_TOKEN' in _console_src35 and 'return 2' in _console_src35,
+          "1 = wrong python, 2 = launched by hand without the token")
+
+    # -- how the window reaches a machine that installed nothing -------------
+    # §4.3 and §4.4 are one story told twice: a list copied per build job drifts,
+    # and the artefact that drops a piece is the piece nobody launches by hand.
+    # The console needs the same file twice over -- as a real .py for a
+    # Tk-capable python that is already installed, and as a frozen module behind
+    # --mirror-console for the machine that has no python at all.
+    with open(os.path.join(REPO, ".github", "workflows", "build.yml"),
+              encoding="utf-8") as fh:
+        _wf35 = fh.read()
+    _blocks35 = _wf35.split('pyinstaller --noconfirm --onefile')[1:]
+    _missing35 = []
+    for _block35 in _blocks35:
+        _argv35 = _block35.split('Macast.py')[0]
+        # ':' on posix, ';' on Windows: the wrong one is a build that fails.
+        _sep35 = ';' if 'macast.exe' in _argv35.split('\n')[0] else ':'
+        for _need35 in ('"macast/mirror_console.py{}macast"'.format(_sep35),
+                        '--hidden-import=macast.mirror_console'):
+            if _need35 not in _argv35:
+                _missing35.append(_need35)
+    check("every PyInstaller job ships the console both ways, a file and a "
+          "frozen module, with its own path separator",
+          len(_blocks35) >= 3 and not _missing35, str(_missing35))
+    with open(os.path.join(REPO, "scripts", "setup_py2app.py"),
+              encoding="utf-8") as fh:
+        _p2a35 = fh.read()
+    _excludes35 = _p2a35.split("'excludes': [", 1)[-1].split('],', 1)[0]
+    check("the macOS bundle keeps macast/mirror_console.py as a file it can hand "
+          "to a python",
+          _re35.search(r"'packages':\s*\[[^\]]*'macast'", _p2a35) is not None,
+          "macast is in `packages`, not just `includes`: an archived module is "
+          "not a path anyone can run")
+    check("and the .app's decision to carry no Tk of its own is written where it "
+          "is taken",
+          "'tkinter'" in _excludes35 and 'mirror_console' in _excludes35,
+          "the ladder probes a system python for Tk instead; a second Tcl/Tk "
+          "would be ballast that can break first")
+except Exception as _e35:
+    import traceback
+    traceback.print_exc()
+    check("the mirror console window behaves", False,
+          "{}: {}".format(type(_e35).__name__, _e35))
+finally:
+    _unpatch35()
+    utils.SETTING_DIR = _saved_dir35
+    utils.Setting.setting, utils.Setting.setting_path = _saved_setting35
+    try:
+        cherrypy.engine.unsubscribe('app_notify', _notify35_rec)
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------

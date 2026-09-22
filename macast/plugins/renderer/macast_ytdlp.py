@@ -8,6 +8,7 @@
 # <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
+# <macast.role>addon</macast.role>
 # <macast.desc>Download what you cast instead of playing it (Bilibili, YouTube, m3u8 ...), or stream it while it downloads. Needs the yt-dlp command installed.</macast.desc>
 #
 # Why this exists: a sender can only hand over a URL. For Bilibili / YouTube /

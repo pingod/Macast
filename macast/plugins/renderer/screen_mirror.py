@@ -5,10 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.9</macast.version>
+# <macast.version>0.10</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next.</macast.desc>
+# <macast.role>addon</macast.role>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.10 the whole control surface is embedded in the native configuration window's computer-mirroring tab.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -96,7 +97,7 @@ from queue import Queue, Empty
 
 import cherrypy
 
-from macast import Setting, MenuItem, gui
+from macast import Setting, MenuItem, gui, notice
 from macast.renderer import Renderer, RendererSetting
 from macast.protocol_cast import (encode_cast_message, parse_cast_message,
                                   DEFAULT_MEDIA_APP_ID, NS_CONNECTION,
@@ -108,6 +109,10 @@ logger.setLevel(logging.INFO)
 CAST_PORT = 8009
 SERVICE_TYPE = "_googlecast._tcp.local."
 DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
+#: The version this file announces. One place, because the menu label, the
+#: console window title and the `<macast.version>` manifest have to agree --
+#: a regression test compares all three against this constant.
+PLUGIN_VERSION = '0.10'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -138,6 +143,21 @@ def quality_preset(key=None):
     if key is None:
         key = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
     return QUALITIES.get(key, QUALITIES['720'])
+
+
+def quality_key():
+    """The stored preset name, validated: an unknown value is 720p, exactly as
+    `quality_preset` resolves it -- the console must not highlight a row that
+    does not exist while encoding a different one."""
+    key = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
+    return key if key in QUALITIES else '720'
+
+QUALITY_LABELS = {'360': '360p · 2.5 Mbps（省带宽）',
+                  '720': '720p · 5 Mbps（默认）',
+                  '1080': '1080p · 10 Mbps（更吃带宽）',
+                  'source': '原始分辨率 · 12 Mbps（不缩放）'}
+#: The console lists the presets in this order, cheapest bandwidth first.
+QUALITY_ORDER = ('360', '720', '1080', 'source')
 #: keyframe / fragment cadence in seconds. One per second keeps the browser's
 #: MSE join latency and the TV's seek behaviour both honest.
 FPS = 24
@@ -276,30 +296,57 @@ SSDP_PORT = 1900
 
 _devices = []
 _searching = False
-#: wall clock of the last completed Chromecast search; 0.0 = never. The menu
+#: wall clock of the last completed Chromecast search; 0.0 = never. The console
 #: reads it to tell「still looking」from「looked, found nothing」-- without it
 #: a LAN with no device to find made the menu read「搜索中」on every open.
 _searched_at = 0.0
-#: Opening the menu again inside this window reuses the cached answer instead
+#: Why the last Chromecast search could not run at all (no zeroconf, a socket
+#: that would not bind).「没有发现」and「这台机器搜不了」are different things to
+#: read: only one of them is fixed by switching the TV on.
+_search_error = ''
+#: Opening the console again inside this window reuses the cached answer instead
 #: of kicking another multicast search (see `_search_due`).
 SEARCH_REFRESH_SECONDS = 15.0
+#: …and a list that is *not* empty is re-checked this often, so a Chromecast that
+#: wakes up later turns up in the window without anyone pressing「重新搜索」.
+STALE_SEARCH_SECONDS = 300.0
+#: How long one browse lasts, and how long a single hit may take to resolve.
+#: The browse is a fixed sleep, so these two numbers are the window's first
+#:「一台都没找到」arriving: 3 s of silence plus 2 s per device used to mean a
+#: LAN with three Chromecasts took eleven seconds to answer.
+DISCOVER_TIMEOUT = 2.0
+DISCOVER_RESOLVE_TIMEOUT = 800
 _search_lock = threading.Lock()
 #: cached result of `ffmpeg -encoders`, because the menu must never spawn it
 _hw_encoder_cache = {}
 
 
-def discover(timeout=3.0):
-    """[(friendly name, host, port)] for Chromecasts answering on the LAN."""
+class DiscoveryError(Exception):
+    """Discovery could not run, which is not the same as finding nothing."""
+
+
+def discover(timeout=DISCOVER_TIMEOUT):
+    """[(friendly name, host, port)] for Chromecasts answering on the LAN.
+
+    Raises DiscoveryError when the search itself was impossible; an honest
+    empty list then means nobody answered.
+
+    Our own receiver is not among them. Macast broadcasts `_googlecast._tcp`
+    like any Chromecast does, so a machine with the Chromecast receiver enabled
+    finds *itself* first -- and mirroring a screen into the player that is
+    showing it is a loop, not a target. The DLNA search drops itself the same
+    way (`discover_renderers`).
+    """
     try:
         from zeroconf import Zeroconf, ServiceBrowser
     except ImportError:
-        logger.error("zeroconf is unavailable: cannot look for Chromecasts")
-        return []
+        raise DiscoveryError('zeroconf 没有装，无法用 mDNS 搜索 Chromecast')
     found = {}
 
     class _Listener(object):
         def add_service(self, zc, type_, name):
-            info = zc.get_service_info(type_, name, timeout=2000)
+            info = zc.get_service_info(type_, name,
+                                       timeout=DISCOVER_RESOLVE_TIMEOUT)
             if info is None:
                 return
             addresses = info.parsed_addresses()
@@ -321,15 +368,26 @@ def discover(timeout=3.0):
         def remove_service(self, zc, type_, name):
             found.pop(name, None)
 
-    zeroconf = Zeroconf()
+    try:
+        zeroconf = Zeroconf()
+    except Exception as e:
+        raise DiscoveryError(
+            '这台机器起不了 mDNS 服务（没有可用网卡或被防火墙拦住）：{}'.format(e))
     try:
         ServiceBrowser(zeroconf, SERVICE_TYPE, _Listener())
         time.sleep(timeout)
     except Exception as e:
         logger.error("Chromecast discovery failed: %s", e)
+        raise DiscoveryError('Chromecast 搜索失败：{}'.format(e))
     finally:
         zeroconf.close()
-    return sorted(found.values())
+    try:
+        ours = set(Setting.get_advertisable_ip())
+    except Exception:
+        # Failing to name our own addresses must not empty the list: a device
+        # list with nothing in it reads as "no TV on the LAN".
+        ours = set()
+    return sorted(hit for hit in found.values() if hit[1] not in ours)
 
 
 def start_search():
@@ -344,27 +402,39 @@ def start_search():
 
 
 def _search():
-    global _devices, _searching, _searched_at
+    """One Chromecast search, keeping whatever it concluded.
+
+    The thread must not die on a discovery that throws: that is how a search
+    which ran once and failed left the console reading「正在搜索」forever.
+    """
+    global _devices, _searching, _searched_at, _search_error
     try:
-        found = discover()
-        if found:
-            _devices = found
+        _devices = discover()
+        _search_error = ''
+    except DiscoveryError as e:
+        _search_error = str(e)
+        logger.error('chromecast search failed: %s', e)
+    except Exception as e:
+        _search_error = 'Chromecast 搜索失败：{}'.format(e)
+        logger.error('chromecast search failed: %s', e)
     finally:
         with _search_lock:
             _searching = False
             _searched_at = time.time()
 
 
-def _search_due(searched_at, now):
-    """Whether an empty device list warrants a fresh multicast search.
+def _search_due(searched_at, now, found=False):
+    """Whether a fresh multicast search is warranted for this protocol.
 
     Never searched counts as due, so the first open always looks. A completed
-    search younger than SEARCH_REFRESH_SECONDS does not -- and that is what
-    stops `build_menu` from restarting the search on every single open, which
-    is how the menu came to read「搜索中…再展开一次菜单」forever on a LAN
-    that has no device to find.
+    search younger than its interval does not -- and that is what stops the
+    console's one-second polling from keeping the LAN busy forever, which is
+    how the menu came to read「搜索中…再展开一次菜单」forever on a LAN that has
+    no device to find. An empty list asks again sooner than a list that found
+    something: nothing to show is the case worth chasing.
     """
-    return searched_at == 0.0 or (now - searched_at) >= SEARCH_REFRESH_SECONDS
+    interval = STALE_SEARCH_SECONDS if found else SEARCH_REFRESH_SECONDS
+    return searched_at == 0.0 or (now - searched_at) >= interval
 
 
 def _searched_suffix(searched_at):
@@ -373,6 +443,36 @@ def _searched_suffix(searched_at):
         return ''
     return '（搜于 {}）'.format(
         time.strftime('%H:%M:%S', time.localtime(searched_at)))
+
+
+# -- 说给用户听的话 ----------------------------------------------------------
+#
+# Every user-visible sentence this plugin produces goes through `notify`, which
+# fires the system notification *and* writes it to `macast/notice.py`. The
+# desktop console has no notification centre to fall back on -- a message that
+# only ever reaches Notification Center is invisible to someone staring at the
+# window, and during a mirror the window *is* where they are looking.
+
+
+def notify(message, sound=False):
+    """Tell the user something, on the message board and as a notification.
+
+    Both, because the notification is what catches them when they are elsewhere
+    and the board is what they can still read ten minutes later -- a recipe for
+    `brew install …` that only ever reached Notification Center was the report
+    this replaces: gone before it could be copied.
+    """
+    notice.record(message)
+    cherrypy.engine.publish('app_notify', 'Macast', message, sound=sound)
+
+
+def recent_messages(limit=20):
+    """The app's recent sentences, oldest first (for the console feed).
+
+    The whole board, not just this plugin's: the missing thing on a machine
+    where「屏幕镜像」won't start is often a binary another plugin looks for.
+    """
+    return notice.recent(limit)
 
 
 class SettingProperty(Enum):
@@ -418,6 +518,36 @@ def find_ffmpeg():
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
     return None
+
+
+#: Where ffmpeg comes from on each platform. A notification is gone in five
+#: seconds, so the same words live on the console's 「需要安装」 card.
+FFMPEG_WAY = {'darwin': 'brew install ffmpeg',
+              'win32': '从 ffmpeg.org 下载，并把解压出的 bin 目录加入 PATH'}
+
+
+def ffmpeg_requirement(found=None):
+    """Report ffmpeg's state to the message board; return the binary.
+
+    Called from every place that was about to give up for the want of it, so
+    the card appears whether the user pressed 开始镜像, opened the preview, or
+    ran the sound installer -- and disappears on the first call that finds it.
+    """
+    if found is None:
+        found = find_ffmpeg()
+    if found:
+        notice.satisfied('ffmpeg')
+        return found
+    way = FFMPEG_WAY.get(
+        sys.platform, '用发行版的包管理器安装 ffmpeg，例如 apt install ffmpeg')
+    notice.requirement(
+        'ffmpeg',
+        label='电脑投屏需要 ffmpeg',
+        detail='截屏、编码和预览都是它做的，Macast 只负责指挥它。装上之后点「重新扫描」，'
+               '不用重启应用。',
+        command=way if sys.platform == 'darwin' else '')
+    return None
+
 
 
 class _Capture(object):
@@ -663,6 +793,7 @@ def _probe_avfoundation(ffmpeg, cursor=True):
             blackhole = index
             break
     base = ['-f', 'avfoundation', '-framerate', str(FPS),
+            '-pixel_format', 'uyvy422',
             '-capture_cursor', '1' if cursor else '0']
     if blackhole is None:
         return _Capture('屏幕 (avfoundation)',
@@ -1608,6 +1739,9 @@ class _AudioProgressHandler(BaseHTTPRequestHandler):
 #: Kept between runs so a second click can replace the previous page's server
 #: instead of stacking ports.
 _audio_progress = None
+#: The loopback URL of the assisted-install progress page, kept so the console
+#: can offer it again after the notification that announced it scrolled away.
+_audio_progress_url = ''
 _audio_server = None
 _audio_server_timer = None
 
@@ -1635,11 +1769,13 @@ def _open_audio_progress(progress):
 
 
 def _close_audio_server():
-    global _audio_server, _audio_server_timer
+    """Retire the progress page: its URL is only offered while it serves."""
+    global _audio_server, _audio_server_timer, _audio_progress_url
     if _audio_server_timer is not None:
         _audio_server_timer.cancel()
         _audio_server_timer = None
     server, _audio_server = _audio_server, None
+    _audio_progress_url = ''
     if server is not None:
         try:
             server.shutdown()
@@ -1673,7 +1809,7 @@ def setup_system_audio(report=lambda message: None, progress=None):
         progress.fail('env', '辅助安装仅适用于 macOS')
         report('辅助安装仅适用于 macOS')
         return False
-    ffmpeg = find_ffmpeg()
+    ffmpeg = ffmpeg_requirement()
     if ffmpeg is None:
         progress.fail('env', '找不到 ffmpeg')
         report('找不到 ffmpeg：先 brew install ffmpeg')
@@ -1784,10 +1920,10 @@ def _audio_setup_worker():
     in-progress flag and schedule the page's retirement no matter how it ends.
     The page is a convenience -- if it cannot start, the install still runs
     and every step stays in the notifications."""
-    global _audio_progress, _audio_server
+    global _audio_progress, _audio_server, _audio_progress_url
 
     def _report(message):
-        cherrypy.engine.publish('app_notify', 'Macast', message, sound=False)
+        notify(message)
 
     progress = _SetupProgress()
     _audio_progress = progress
@@ -1795,6 +1931,7 @@ def _audio_setup_worker():
     try:
         try:
             url, _audio_server = _open_audio_progress(progress)
+            _audio_progress_url = url
             _report('已在本机打开详细进度页，可实时查看每一步：{}'.format(url))
         except Exception as e:
             logger.info('audio progress page unavailable: %s', e)
@@ -2761,8 +2898,17 @@ class _CastSender(object):
 # standard library: `macast/ssdp.py` is a *device* (it answers M-SEARCH), not a
 # control point, and a single-file plugin cannot pip-install one.
 
+#: How long one M-SEARCH listens, and how long one description GET may take.
+#: Both used to be 3 s *and* sequential, so a LAN with a TV that answers SSDP
+#: and then takes its time over HTTP made the console's first device list arrive
+#: a quarter of a minute after the window opened.
+SSDP_SEARCH_TIMEOUT = 2.5
+DESCRIBE_TIMEOUT = 1.5
+#: Ceiling on how many descriptions are fetched at once.
+MAX_DESCRIBE = 12
 
-def _ssdp_search(st, timeout=3.0, interface=None):
+
+def _ssdp_search(st, timeout=SSDP_SEARCH_TIMEOUT, interface=None):
     """(LOCATION, answering ip) pairs for one SSDP search target."""
     request = '\r\n'.join([
         'M-SEARCH * HTTP/1.1',
@@ -2871,7 +3017,7 @@ def parse_description(raw, base_url, peer_ip):
     return name, control
 
 
-def describe_renderer(url, peer_ip, timeout=3.0):
+def describe_renderer(url, peer_ip, timeout=DESCRIBE_TIMEOUT):
     import urllib.request
     try:
         opener = urllib.request.build_opener(
@@ -2884,26 +3030,72 @@ def describe_renderer(url, peer_ip, timeout=3.0):
     return parse_description(raw, url, peer_ip)
 
 
-def discover_renderers(timeout=3.0):
+def _ask_renderers(targets, timeout):
+    """[(LOCATION, ip)] answered for each target, plus why a target could not ask.
+
+    The M-SEARCHes overlap: two targets searched one after the other is what
+    made the console's first「没有发现」take half a minute to arrive.
+    """
+    buckets = [[] for _ in targets]
+    failures = []
+
+    def ask(index, st):
+        try:
+            buckets[index] = list(_ssdp_search(st, timeout=timeout))
+        except Exception as e:
+            failures.append(str(e))
+            logger.error('ssdp search for %s failed: %s', st, e)
+
+    workers = [threading.Thread(target=ask, args=(index, st), daemon=True,
+                                name='SCREEN_MIRROR_SSDP')
+               for index, st in enumerate(targets)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout + 2.0)
+    answers = []
+    for bucket in buckets:
+        for answer in bucket:
+            if answer not in answers:
+                answers.append(answer)
+    if not answers and len(failures) == len(targets):
+        raise DiscoveryError('DLNA 搜索发不出去：{}'.format(failures[0]))
+    return answers
+
+
+def discover_renderers(timeout=SSDP_SEARCH_TIMEOUT):
     """[(friendly name, control url, host)] for DLNA renderers on the LAN.
 
     The host is what `advertise_host()` must be compared against: a TV on
     another subnet can answer SSDP and still never reach our stream URL.
+
+    Reading the descriptions is the slow part when several devices answer --
+    a TV that ignores HTTP holds a slot for the whole timeout -- so those
+    requests overlap too, instead of adding up.
     """
     seen = {}
     try:
         ours = set(Setting.get_advertisable_ip())
     except Exception:
         ours = set()
-    for st in DLNA_SEARCH_TARGETS:
-        for location, peer in _ssdp_search(st, timeout=timeout):
-            if peer in ours:
-                continue                      # do not mirror to ourselves
-            parsed = describe_renderer(location, peer)
-            if parsed is None:
-                continue
+    answers = [answer for answer in _ask_renderers(DLNA_SEARCH_TARGETS, timeout)
+               if answer[1] not in ours]      # do not mirror to ourselves
+    described = [None] * len(answers)
+
+    def read(index, location, peer):
+        described[index] = describe_renderer(location, peer)
+
+    workers = [threading.Thread(target=read, args=(index, location, peer),
+                                daemon=True, name='SCREEN_MIRROR_DESCRIBE')
+               for index, (location, peer) in enumerate(answers[:MAX_DESCRIBE])]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(DESCRIBE_TIMEOUT + 2.0)
+    for answer, parsed in zip(answers, described):
+        if parsed:
             name, control = parsed
-            host = _url_host(control) or peer
+            host = _url_host(control) or answer[1]
             seen[host] = (name, control, host)
     return sorted(seen.values())
 
@@ -2912,6 +3104,8 @@ _dlna_devices = []
 _dlna_searching = False
 #: wall clock of the last completed DLNA search; 0.0 = never (see _searched_at).
 _dlna_searched_at = 0.0
+#: why the last DLNA search could not run (see _search_error).
+_dlna_search_error = ''
 
 
 def start_renderer_search():
@@ -2924,10 +3118,16 @@ def start_renderer_search():
 
     def _run():
         global _dlna_devices, _dlna_searching, _dlna_searched_at
+        global _dlna_search_error
         try:
-            found = discover_renderers()
-            if found:
-                _dlna_devices = found
+            _dlna_devices = discover_renderers()
+            _dlna_search_error = ''
+        except DiscoveryError as e:
+            _dlna_search_error = str(e)
+            logger.error('dlna search failed: %s', e)
+        except Exception as e:
+            _dlna_search_error = 'DLNA 搜索失败：{}'.format(e)
+            logger.error('dlna search failed: %s', e)
         finally:
             with _search_lock:
                 _dlna_searching = False
@@ -3904,6 +4104,11 @@ class _Aborted(Exception):
 
 class ScreenMirrorRenderer(Renderer):
 
+    #: Told to `MacastPluginManager` that this plugin owns the desktop console:
+    #: the menu-bar door and the management API ask it for its surface without
+    #: the user having picked it as the current renderer first.
+    MIRROR_CONSOLE = True
+
     def __init__(self):
         super(ScreenMirrorRenderer, self).__init__()
         self._lock = threading.Lock()
@@ -3922,7 +4127,14 @@ class ScreenMirrorRenderer(Renderer):
         self._url = ''
         #: What the DLNA renderer last said (TransportState), for the menu.
         self._dlna_state = ''
+        #: A session is being set up: the console's button must not start a
+        #: second one while the first is still probing, and「已经在镜像了」would
+        #: be a lie for the ~3 s the setup takes.
+        self._starting = False
         self.renderer_setting = ScreenMirrorSetting()
+        # The surface asks *this* renderer about the session, not the bus's
+        # "whoever is playing": see `ScreenMirrorSetting._owner`.
+        self.renderer_setting._owner = self
 
     # -- settings helpers ----------------------------------------------------
 
@@ -3994,13 +4206,12 @@ class ScreenMirrorRenderer(Renderer):
 
     def start(self):
         super(ScreenMirrorRenderer, self).start()
+        # Warm *both* searches. The window's first panel is「哪种投屏方式有设备」,
+        # so an answer for only the stored target reads as the other protocol
+        # being empty; and a menu opened before any search finished used to have
+        # to say「搜索中…再展开一次」while it waited.
         start_search()
-        # The「输出目标」submenu reads the DLNA renderer list when a TV is the
-        # target -- the Chromecast search above does not fill it. Warming it
-        # here is what keeps the first open of that submenu from having to say
-        #「搜索中…再展开一次菜单」while it waits.
-        if output_kind() == 'dlna':
-            start_renderer_search()
+        start_renderer_search()
 
     def set_media_url(self, url, start="0"):
         """A phone pushed something: mirror stops and the pushed url plays.
@@ -4027,12 +4238,14 @@ class ScreenMirrorRenderer(Renderer):
         if not ready:
             # Nothing to bridge to: this user has no device selected, and mpv
             # is not ours to drive here. Say so instead of silently swallowing
-            # the push (or killing a running mirror for it).
-            cherrypy.engine.publish(
-                'app_notify', 'Macast',
-                'Screen Mirror 无法播放推送的网址：把「输出目标」切到 '
-                'Chromecast 或 DLNA 电视做中继，或换回默认渲染器播放',
-                sound=False)
+            # the push (or killing a running mirror for it) -- and say *which*
+            # of the two it is, because a browser target has no device to pick
+            # and telling someone to go pick one is a dead end.
+            why = ('浏览器目标没有可中继的设备，它只播这台电脑推出去的流；'
+                   if kind == 'browser' else '还没有选择投屏目标；')
+            notify('Screen Mirror 无法播放推送的网址：{}在投屏控制台里把「投屏方式」'
+                   '切到 Chromecast 或 DLNA 电视做中继，或换回默认渲染器播放'
+                   .format(why))
             return
         self._url = url
         with self._lock:
@@ -4080,16 +4293,28 @@ class ScreenMirrorRenderer(Renderer):
         self._teardown()
         super(ScreenMirrorRenderer, self).stop()
 
-    # -- mirror control (menu bar) ----------------------------------------------
+    # -- mirror control (console window) ----------------------------------------
 
     def start_mirror(self):
+        """Begin a mirror; False when one is running or already being set up.
+
+        The setup takes seconds (probe, encoder, prefill), and during it
+        `_mirroring` is still False -- so five clicks on「开始镜像」used to bump
+        the generation five times and leave the fifth attempt racing the first.
+        """
         with self._lock:
-            if self._mirroring:
-                return
+            if self._mirroring or self._starting:
+                return False
+            self._starting = True
             self._generation += 1
             generation = self._generation
         threading.Thread(target=self._mirror, args=(generation,),
                          daemon=True, name="SCREEN_MIRROR").start()
+        return True
+
+    def is_starting(self):
+        """A session is in flight but has not produced a frame yet."""
+        return self._starting
 
     def stop_mirror(self):
         with self._lock:
@@ -4099,28 +4324,35 @@ class ScreenMirrorRenderer(Renderer):
     # -- internals ---------------------------------------------------------------
 
     def _mirror(self, generation):
+        """Set one session up, and stop saying「正在启动」whichever way it ends."""
+        try:
+            self._run_mirror(generation)
+        finally:
+            with self._lock:
+                # A newer generation owns the flag now; it clears its own.
+                if generation == self._generation:
+                    self._starting = False
+
+    def _run_mirror(self, generation):
         kind = output_kind()
         host = port = None
         name = ''
         control = ''
+        if target_prompt(kind):
+            # Written by the same function the console shows, so the two can
+            # never disagree about what is missing --「…或改用「浏览器」目标」used
+            # to appear on a window that was already on the browser target.
+            # The verdict goes on this copy: one line, no card above it.
+            self._fail(target_prompt(kind, with_verdict=True), generation)
+            return
         if kind in ('cast', 'caststream'):
             host, port, name = self.target()
-            if host is None:
-                self._fail('还没有选择投屏目标：在菜单栏的「输出目标」里选一台 '
-                           'Chromecast 设备，或改用「浏览器」目标', generation)
-                return
         elif kind == 'dlna':
             name, control = dlna_target()
-            if not control:
-                self._fail('还没有选择 DLNA 电视：在菜单栏的「输出目标 → DLNA '
-                           '电视」里选一台，或改用「浏览器」目标', generation)
-                return
-        ffmpeg = find_ffmpeg()
+        ffmpeg = ffmpeg_requirement()
         if ffmpeg is None:
-            self._fail('找不到 ffmpeg：{}后重试'.format(
-                {'darwin': 'brew install ffmpeg',
-                 'win32': '安装 ffmpeg 并加入 PATH',
-                 }.get(sys.platform, '用包管理器安装 ffmpeg')), generation)
+            self._fail('找不到 ffmpeg：{}后重试'.format(FFMPEG_WAY.get(
+                sys.platform, '用包管理器安装 ffmpeg')), generation)
             return
         capture = probe_capture(ffmpeg)
         if capture is None:
@@ -4160,6 +4392,9 @@ class ScreenMirrorRenderer(Renderer):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 env=_clean_env())
+            command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
+                                           kind=kind, encoder=encoder)
+            logger.info('screen capture command: %s', ' '.join(command))
             with self._lock:
                 if generation != self._generation:
                     raise _Aborted()
@@ -4186,6 +4421,14 @@ class ScreenMirrorRenderer(Renderer):
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
             first_bytes.wait(timeout=3.0)
+            if not first_bytes.is_set():
+                if proc.poll() is None:
+                    proc.terminate()
+                detail = '；'.join(list(tail)[-3:])
+                raise RuntimeError(
+                    '屏幕采集在 3 秒内没有返回画面{}'.format(
+                        '：{}'.format(detail) if detail else
+                        '；请在系统设置 → 隐私与安全性 → 屏幕录制中允许 Macast'))
             if proc.poll() is not None or generation != self._generation:
                 raise _Aborted()
             if kind == 'dlna':
@@ -4224,16 +4467,20 @@ class ScreenMirrorRenderer(Renderer):
         # Spawned outside the lock: a menu click that aborts this session must
         # not queue behind an OS call.
         awake = _keep_awake()
+        aborted = False
         with self._lock:
             if generation != self._generation:
-                self._teardown()
-                _stop_awake(awake)
-                return
-            self._sender = sender
-            self._awake = awake
-            self._mirroring = True
-            self._started_at = time.time()
-            self._url = url
+                aborted = True
+            else:
+                self._sender = sender
+                self._awake = awake
+                self._mirroring = True
+                self._started_at = time.time()
+                self._url = url
+        if aborted:
+            self._teardown()
+            _stop_awake(awake)
+            return
         self.set_state_transport('PLAYING')
         if kind == 'dlna':
             # The renderer needs a push of its own to recover from the pauses
@@ -4251,7 +4498,7 @@ class ScreenMirrorRenderer(Renderer):
             message = '已开始低延迟镜像到 {}（此通道还没有声音）'.format(name)
         else:
             message = '已开始镜像到 {}'.format(name)
-        cherrypy.engine.publish('app_notify', 'Macast', message)
+        notify(message, sound=True)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
 
@@ -4276,7 +4523,7 @@ class ScreenMirrorRenderer(Renderer):
         """Bridge path for a DLNA renderer: play a pushed URL, no capture."""
         name, control = dlna_target()
         if not control:
-            self._fail('还没有选择 DLNA 电视：在菜单栏的「输出目标 → DLNA 电视」'
+            self._fail('还没有选择 DLNA 电视：在投屏控制台的「投屏方式 → DLNA 电视」'
                        '里选一台', generation)
             return
         profile = dlna_profile()
@@ -4346,7 +4593,7 @@ class ScreenMirrorRenderer(Renderer):
         """Stop blaming the TV one poll at a time and tell the user why."""
         current = dlna_profile_id(dlna_profile())
         nxt = profile_order()[0]
-        self._fail('{}：当前档位是「{}」。在菜单栏「兼容档位」里换成「{}」再试一次'.format(
+        self._fail('{}：当前档位是「{}」。在投屏控制台「兼容档位」里换成「{}」再试一次'.format(
             reason, DLNA_PROFILES[current].label,
             DLNA_PROFILES[nxt].label),
                    self._generation)
@@ -4368,8 +4615,8 @@ class ScreenMirrorRenderer(Renderer):
         """Bridge path: play a finished URL on the device, no capture."""
         host, port, name = self.target()
         if host is None:
-            self._fail('还没有选择投屏目标：在菜单栏的「输出目标 → Chromecast」'
-                       '里选一台设备', generation)
+            self._fail('还没有选择投屏目标：在投屏控制台的「投屏方式」里，'
+                       '从 Chromecast / Google TV 那张卡片下选一台设备', generation)
             return
         try:
             sender = _CastSender(host, port)
@@ -4410,7 +4657,7 @@ class ScreenMirrorRenderer(Renderer):
         logger.error(message)
         self.set_state('CurrentTrackTitle', message)
         self.set_state_transport_error()
-        cherrypy.engine.publish('app_notify', 'Macast', message)
+        notify(message, sound=True)
 
     def _teardown_async(self):
         threading.Thread(target=self._teardown, daemon=True,
@@ -4424,6 +4671,7 @@ class ScreenMirrorRenderer(Renderer):
             self._sink = None
             self._kind = ''
             self._mirroring = False
+            self._starting = False
             # Claim the assert here so a second teardown (the encoder dying
             # right after a manual stop) cannot release someone else's.
             awake, self._awake = self._awake, None
@@ -4549,178 +4797,1138 @@ def _drain_stderr(proc, tail):
             pass
 
 
+# -- 投屏控制台：桌面窗口的后端 ------------------------------------------------
+#
+# Everything the menu used to carry (about fifty rows, nested four deep) now
+# lives in one desktop window: the menu keeps a door and the live status line,
+# the window owns the controls. Two facts about this app shaped the design:
+#
+#   * the window is a **separate process**. `App.start()` runs the Cocoa loop
+#     (rumps) or pystray's own loop on the main thread on every platform, and
+#     Tk will not pump from anywhere else -- so `macast/mirror_console.py` is
+#     spawned and talks back to this process through the management API;
+#   * that means the console sees the plugin only through `console_state()` and
+#     changes it only through `console_action()`. Worth having on its own: the
+#     entire window is testable without a display, and every sentence the user
+#     reads is written here, next to the setting it describes.
+#
+# One behaviour change came with the window. The menu said「下次镜像生效」for
+# quality, screen, cursor and encoder, which is forgivable in a submenu you have
+# to reopen and unforgivable next to a slider you just moved -- so applying any
+# of them restarts a running mirror.
+
+#: Bumped when the state/action protocol changes; a console from another
+#: generation refuses to talk to a host that would be missing its buttons.
+CONSOLE_VERSION = 2
+#: Where the console child's stdout/stderr goes, and where it records its lock
+#: (pid + port + raise token). Both next to the settings file, so a bug report
+#: from a user's machine has them.
+CONSOLE_LOG_NAME = 'mirror_console.log'
+CONSOLE_LOCK_NAME = 'mirror_console.lock'
+
+#: One line of trade-off language per target: the cards in the console window
+#: have room to say what choosing this costs, which a menu label never did.
+OUTPUT_HINTS = {
+    'cast': '兼容性最好 · 延迟约 2–4 秒 · 有声音',
+    'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 无声音 · '
+                   '未在真电视上验证过'),
+    'dlna': '给没有 Google 栈的老电视 · 先攒 20 MiB 再交给它，约 20–25 秒延迟',
+    'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
+}
+
+# -- 投屏方式：先问用哪种协议，再问投给哪台设备 --------------------------------
+#
+# The window used to ask the second question first: it showed the device list of
+# whichever target happened to be stored, so opening it on「浏览器」measured
+# nothing and a Chromecast that had never been looked for was reported as「没有
+# 发现」. One row per protocol the plugin can drive, each naming how its devices
+# are *found* -- a receiver protocol written later adds a row and a probe, and
+# the window lists it without knowing either name.
+CHANNELS = (('cast', 'cast'),
+            ('caststream', 'cast'),
+            ('dlna', 'dlna'),
+            ('browser', ''))
+#: what an empty answer is called, per probe.「没有发现」is a verdict about the
+#: LAN, and the two protocols have different things to have not found.
+PROBE_LABELS = {'cast': ('Chromecast', '没有发现 Chromecast'),
+                'dlna': ('DLNA 电视', '没有发现 DLNA 电视')}
+
+
+def _probe_answer(probe):
+    """(devices, searching, searched_at, error) for one way of searching.
+
+    Reads the module globals when called, not when defined: the searches own
+    them and the regression suite swaps them out.
+    """
+    if probe == 'cast':
+        return _devices, _searching, _searched_at, _search_error
+    if probe == 'dlna':
+        return (_dlna_devices, _dlna_searching, _dlna_searched_at,
+                _dlna_search_error)
+    return [], False, 0.0, ''
+
+
+def _probe_items(probe):
+    """The device rows for one probe, `selected` from the stored choice."""
+    if probe == 'cast':
+        current = str(Setting.get(SettingProperty.Mirror_Target, '') or '')
+        return [{'id': '{}:{}'.format(host, port),
+                 'name': name,
+                 'host': host,
+                 'label': '{} · {}'.format(name, host),
+                 'selected': '{}:{}'.format(host, port) == current}
+                for name, host, port in list(_devices)]
+    if probe == 'dlna':
+        _name, control = dlna_target()
+        return [{'id': device_control,
+                 'name': device_name,
+                 'host': host,
+                 'label': '{} · {}'.format(device_name, host),
+                 'selected': device_control == control}
+                for device_name, device_control, host in list(_dlna_devices)]
+    return []
+
+
+def _search_words(devices, searching, searched_at, error, nothing=''):
+    """One phrase: what the last search of this protocol actually concluded.
+
+    「正在搜索」is only ever true of a first look still in flight -- a completed
+    empty search is a result, and says when it was taken. A search that could
+    not run says that instead, because「没有发现」sends the user to look for a
+    TV that is fine when the real problem is this machine.
+    """
+    if devices:
+        return '发现 {} 台'.format(len(devices))
+    if error:
+        return error
+    if searching:
+        return '正在搜索局域网设备…' if not searched_at else '正在重新搜索…'
+    if not searched_at:
+        return '还没有搜过'
+    return nothing + _searched_suffix(searched_at)
+
+
+def _probe_chosen(probe):
+    """Whether the device a protocol would use is actually stored.
+
+    Asked of the setting, not of the device list: a Chromecast that answered
+    once and is now switched off is still the target the user chose, and start
+    reads it from there. Judging readiness by list membership would tell them
+    to choose again the moment the search stopped seeing it.
+    """
+    if probe == 'cast':
+        return bool(str(Setting.get(SettingProperty.Mirror_Target, '') or ''))
+    if probe == 'dlna':
+        return bool(str(Setting.get(SettingProperty.Mirror_Dlna_Control, '')
+                        or ''))
+    return True
+
+
+def _probe_choice(probe, items):
+    """What this protocol would actually mirror to, as one line -- or ''.
+
+    Read off the stored setting, not off the row the user is looking at: a
+    Chromecast that answered once and is now switched off is still the chosen
+    target, and the row has to say so honestly instead of claiming a device
+    that start would never use.
+    """
+    if not probe:
+        return ''
+    if not _probe_chosen(probe):
+        return ''
+    hit = next((item['label'] for item in items if item['selected']), '')
+    return '投给 ' + hit if hit else '已选设备本轮没有应答'
+
+
+def channels_state(current=None):
+    """Every protocol this plugin can mirror over, and what each one answers to."""
+    current = output_kind() if current is None else current
+    out = []
+    for key, probe in CHANNELS:
+        _, searching, searched_at, error = _probe_answer(probe)
+        items = _probe_items(probe) if probe else []
+        #: A protocol with nothing to search has no verdict to report. Saying
+        #: 「还没有搜过」 over the browser target would send the user to look for
+        #: a device that does not exist; the window fills the blank with
+        #: 「不需要设备」.
+        words = '' if not probe else _search_words(
+            items, searching, searched_at, error,
+            PROBE_LABELS.get(probe, ('', '没有发现设备'))[1])
+        out.append({'key': key,
+                    'label': OUTPUTS[key][0],
+                    'hint': OUTPUT_HINTS.get(key, ''),
+                    'probe': probe,
+                    'selected': key == current,
+                    'devices': items,
+                    'searching': searching,
+                    'searched_at': searched_at,
+                    'error': error,
+                    'words': words,
+                    'choice': _probe_choice(probe, items),
+                    'needs_device': bool(probe),
+                    'chosen': _probe_chosen(probe)})
+    return out
+
+
+def target_prompt(kind=None, with_verdict=False):
+    """What still has to be chosen before this target can start, '' if nothing.
+
+    One function writes both the line the console shows and the line a refused
+    start reports -- they used to disagree, and「…或改用「浏览器」目标」appeared
+    on a window that was already on the browser target.
+
+    `with_verdict` appends what the last search concluded. The console does not
+    want it: it prints that verdict on the line above, and「没有发现 Chromecast」
+    twice inside one card reads like a bug rather than like an answer. A refused
+    start does want it -- that one line leaves the window for a notification,
+    where the reason is all the user gets.
+    """
+    kind = output_kind() if kind is None else kind
+    for key, probe in CHANNELS:
+        if key != kind or not probe or _probe_chosen(probe):
+            continue
+        name, nothing = PROBE_LABELS[probe]
+        line = '还没有选择「{}」：在「设备」里点一台'.format(name)
+        if with_verdict:
+            devices, searching, searched_at, error = _probe_answer(probe)
+            line += '（{}）'.format(_search_words(devices, searching, searched_at,
+                                                 error, nothing))
+        return line
+    return ''
+
+# -- 预览快照：低帧率的「这台电脑现在投出去的是什么」 --------------------------
+#
+# A mirror with no picture of its own is a guess: the console cannot show what
+# the TV sees unless it grabs the screen too. This is deliberately *not* a video
+# preview -- one ffmpeg per request, single-flight, at most one per second, and
+# the last good frame stays on screen through a failure, because the alternative
+# to a stale frame is a black rectangle where the picture was.
+
+#: Minimum spacing between grabs, and the pause after one fails (a machine
+#: without Screen Recording permission would otherwise pay a process spawn
+#: every second for the rest of the session).
+SNAPSHOT_MIN_INTERVAL = 1.0
+SNAPSHOT_RETRY_INTERVAL = 15.0
+#: A first grab on macOS waits for the Screen Recording prompt to be answered,
+#: which is minutes when the user is away -- this only bounds the ffmpeg itself.
+SNAPSHOT_TIMEOUT = 8.0
+#: Wide enough to read a slide deck at, cheap enough to encode in one frame.
+SNAPSHOT_WIDTH = 480
+#: The two rasters a console window can be asked to read, with their magic
+#: bytes. Tk 8.5 -- still what `/usr/bin/python3` carries on macOS -- has no PNG
+#: decoder, so PPM is the format that reaches *every* Tk and PNG is merely the
+#: cheaper one on 8.6+. The window says which one it is; nothing here guesses.
+SNAPSHOT_FORMATS = {'png': b'\x89PNG', 'ppm': b'P6'}
+
+_snapshot_lock = threading.Lock()
+_snapshot = {'frame': b'', 'fmt': 'png', 'at': 0.0, 'busy': False,
+             'failed_at': 0.0, 'reason': ''}
+
+
+def _cached(fmt):
+    """The retained frame, but only if it is in the format being asked for."""
+    return _snapshot['frame'] if _snapshot['fmt'] == fmt else b''
+
+
+def snapshot_frame(fmt='png', min_interval=SNAPSHOT_MIN_INTERVAL):
+    """(frame bytes, reason) -- newest preview frame, or why there isn't one.
+
+    Blocking by design: the caller is an HTTP handler in a worker thread, and a
+    second grab in flight would mean two ffmpegs reading the same display.
+
+    One format is cached at a time rather than two: the grab is the expensive
+    part, and a window that changes its mind about formats is rare enough that
+    re-encoding beats doubling the memory and the bookkeeping.
+    """
+    fmt = fmt if fmt in SNAPSHOT_FORMATS else 'png'
+    now = time.time()
+    with _snapshot_lock:
+        if _snapshot['busy']:
+            return _cached(fmt), '正在采集上一帧'
+        if _cached(fmt) and now - _snapshot['at'] < min_interval:
+            return _cached(fmt), ''
+        if (_snapshot['failed_at']
+                and now - _snapshot['failed_at'] < SNAPSHOT_RETRY_INTERVAL):
+            return _cached(fmt), _snapshot['reason']
+        _snapshot['busy'] = True
+    try:
+        frame, reason = _grab_snapshot(fmt)
+    finally:
+        with _snapshot_lock:
+            _snapshot['busy'] = False
+            _snapshot['reason'] = reason
+            if frame:
+                _snapshot['frame'] = frame
+                _snapshot['fmt'] = fmt
+                _snapshot['at'] = time.time()
+                _snapshot['failed_at'] = 0.0
+            else:
+                _snapshot['failed_at'] = time.time()
+            retained = _cached(fmt)
+    # `retained` rather than `frame`: a failed grab still owes the window the
+    # last good picture, because the alternative is a black rectangle.
+    return retained, reason
+
+
+def snapshot_state():
+    """What the console needs to know about the preview without asking for it."""
+    with _snapshot_lock:
+        return {'busy': _snapshot['busy'],
+                'reason': _snapshot['reason'],
+                'has_frame': bool(_snapshot['frame']),
+                'fmt': _snapshot['fmt'],
+                'at': _snapshot['at']}
+
+
+def _frame_path(fmt):
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), 'macast-mirror-{}-{}.{}'.format(
+        os.getpid(), secrets.token_hex(4), 'png' if fmt == 'png' else 'ppm'))
+
+
+def _grab_snapshot(fmt='png'):
+    """One frame of what this machine would be sending right now.
+
+    Same capture path as the mirror (first input, video only), so the preview
+    cannot disagree with the stream about which display or which crop is live.
+    """
+    ffmpeg = ffmpeg_requirement()
+    if ffmpeg is None:
+        return b'', '找不到 ffmpeg，无法生成预览'
+    capture = probe_capture(ffmpeg)
+    if capture is None:
+        return b'', capture_unavailable_hint()
+    path = _frame_path(fmt)
+    cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin']
+    cmd += list(capture.inputs[0])
+    cmd += ['-map', '0:v:0', '-frames:v', '1',
+            '-vf', 'scale={}:-2'.format(SNAPSHOT_WIDTH)]
+    if fmt != 'png':
+        # The extension alone would work; naming the codec is what keeps a
+        # differently-built ffmpeg from picking something else for `.ppm`.
+        cmd += ['-f', 'image2', '-c:v', 'ppm']
+    cmd += ['-y', path]
+    data = b''
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                              env=_clean_env(), timeout=SNAPSHOT_TIMEOUT)
+        if proc.returncode != 0:
+            err = (proc.stderr or b'').decode('utf-8', 'replace').strip()
+            return b'', '预览采集失败（ffmpeg 退出码 {}）{}'.format(
+                proc.returncode, '：' + err.splitlines()[-1] if err else '')
+        with open(path, 'rb') as handle:
+            data = handle.read()
+    except subprocess.TimeoutExpired:
+        # `str(e)` spells out the whole argv, which is a wall of text in a card
+        # whose only useful content is「it did not finish」-- and a locked or
+        # sleeping display is exactly the case this fires on.
+        return b'', '预览采集超时（{:.0f} 秒）：屏幕是不是锁了？'.format(
+            SNAPSHOT_TIMEOUT)
+    except Exception as e:
+        return b'', '预览采集失败：{}'.format(e)
+    finally:
+        _remove_quietly(path)
+    if not data.startswith(SNAPSHOT_FORMATS[fmt]):
+        return b'', 'ffmpeg 没有返回 {} 画面'.format(fmt.upper())
+    return data, ''
+
+
+# -- 采集探测：菜单/控制台都只读缓存，探测在后台跑 -----------------------------
+
+_probe_busy = threading.Event()
+
+
+def request_capture_probe():
+    """Warm the capture and encoder caches in the background; False if busy.
+
+    Both probes spawn ffmpeg, and neither the menu nor the console's polling
+    loop may do that on the UI thread -- the console asks once when it opens and
+    again when the user presses「重新探测」.
+    """
+    if _probe_busy.is_set():
+        return False
+    _probe_busy.set()
+    threading.Thread(target=_run_capture_probe, daemon=True,
+                     name='SCREEN_MIRROR_PROBE').start()
+    return True
+
+
+def _run_capture_probe():
+    try:
+        ffmpeg = ffmpeg_requirement()
+        if ffmpeg is None:
+            notify('找不到 ffmpeg：镜像与预览都没法工作，先安装 ffmpeg')
+            return
+        if probe_capture(ffmpeg) is None:
+            notify(capture_unavailable_hint())
+        has_hardware_encoder(ffmpeg)
+    except Exception as e:
+        logger.info('capture probe failed: %s', e)
+    finally:
+        _probe_busy.clear()
+
+
+# -- 启动器：把控制台窗口拉起来（或者把它叫到前面）------------------------------
+
+#: How the app's own entry point is told to run the window instead of the menu
+#: bar. The only door when the bundle has no importable .py on disk.
+CONSOLE_ARGV = ['--mirror-console']
+#: The Tk floor for drawing this window. Apple's Command Line Tools still ship
+#: Tcl/Tk 8.5.9, and on a current macOS that build paints nothing but native
+#: buttons -- the window opens, every label stays invisible, and nothing errors.
+#: `mirror_console.MIN_TK` is the same floor on the window's side; Part 35 pins
+#: the two together so neither can drift into opening a blank window.
+MIN_TK_VERSION = (8, 6)
+_TK_PROBE = ('import sys, tkinter; '
+             'v = tuple(int(p) for p in str(tkinter.TkVersion).split("."))[:2]; '
+             'sys.exit(0 if v >= ({}, {}) else 1)'.format(*MIN_TK_VERSION))
+#: `_tkinter` is present or absent as a build fact, not per call; find_spec
+#: touches the filesystem, so ask once.
+_tkinter_missing = None
+
+
+def tkinter_missing():
+    global _tkinter_missing
+    if _tkinter_missing is None:
+        import importlib.util
+        _tkinter_missing = importlib.util.find_spec('_tkinter') is None
+    return _tkinter_missing
+
+
+def tkinter_install_hint():
+    """What to tell the user when *no* interpreter on the machine can draw Tk --
+    the ladder in `_console_interpreter` already tried ours and the usual
+    system pythons, so this is the last word, not a first guess."""
+    if sys.platform == 'darwin':
+        return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
+                'brew install python-tk（配合 brew 的 python3）。'
+                '注意 macOS 自带的 /usr/bin/python3 只有 Tk 8.5.9，'
+                '它开出来的窗口是空白的')
+    if sys.platform == 'win32':
+        return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
+                '请在 Python 安装包里勾选 tcl/tk and IDLE')
+    return ('本机没有任何 Tk ≥ 8.6 的 Python，投屏控制台打不开：'
+            'Debian/Ubuntu 请 apt install python3-tk，Arch 请 pacman -S tk，'
+            '然后重启 Macast')
+
+
+#: Key on the message board for "no interpreter here can draw the console".
+TK_KEY = 'python-tk'
+
+
+def tkinter_requirement():
+    """Say once, and keep saying it, that the window needs a Tk-capable python.
+
+    The launcher reaches this only after `_console_interpreter()` has probed our
+    own interpreter and every system python it can find, so the card is the
+    conclusion of a search rather than a guess -- and `_watch_console_start`
+    withdraws it as soon as a window is seen alive.
+    """
+    notice.requirement(
+        TK_KEY,
+        label='投屏控制台窗口需要一个能画 Tk 的 Python',
+        detail=tkinter_install_hint(),
+        command='brew install python-tk' if sys.platform == 'darwin' else '')
+
+
+def _setting_dir():
+    from macast.utils import SETTING_DIR
+    return SETTING_DIR
+
+
+def _console_log_path():
+    return os.path.join(_setting_dir(), CONSOLE_LOG_NAME)
+
+
+def _console_lock_path():
+    return os.path.join(_setting_dir(), CONSOLE_LOCK_NAME)
+
+
+def _console_script_path():
+    """Absolute path to a runnable mirror_console.py, or None.
+
+    Whether the file exists on disk decides *who* can open the window: the
+    console imports nothing from `macast`, so any python carrying Tk can run it,
+    which is what saves a Mac whose Homebrew python has no `python-tk`. Source
+    runs and py2app bundles keep real .py files (§4.4's `packages: ['macast']`);
+    a PyInstaller onefile only if the build also ships it as data, hence the
+    `_MEIPASS` lookup -- and where that fails too the entry point's
+    `--mirror-console` dispatch reads the module out of the archive.
+    """
+    roots = [os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))]
+    meipass = getattr(sys, '_MEIPASS', None)
+    if meipass:
+        roots.append(os.path.join(meipass, 'macast'))
+    for root in roots:
+        path = os.path.join(root, 'mirror_console.py')
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _frozen_app():
+    """True when `sys.executable` is an app rather than a python.
+
+    py2app sets `sys.frozen = 'macosx_app'`, PyInstaller sets True, and in both
+    cases running the executable with `-c` launches *Macast* instead of probing
+    Tk -- the user would watch a second menu-bar icon appear. Only argv passed
+    straight through (`--mirror-console`) reaches our code from there.
+    """
+    return bool(getattr(sys, 'frozen', False))
+
+
+def _console_command():
+    """(interpreter, tail) for the window, tail None when there is nothing.
+
+    `interpreter` None means "any python that can do Tk" and the ladder in
+    `_console_interpreter` picks it, off the UI thread; a named one is this
+    executable itself, i.e. the bundle has the only copy of the module.
+    """
+    script = _console_script_path()
+    if script:
+        return None, [script]
+    if _frozen_app():
+        return sys.executable, list(CONSOLE_ARGV)
+    entry = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))), 'Macast.py')
+    return (None, [entry] + list(CONSOLE_ARGV)) if os.path.isfile(
+        entry) else (None, None)
+
+
+def _own_python_has_tk():
+    """Can this process's interpreter run the window itself?
+
+    False for a frozen app whatever it carries: its executable is not a python,
+    so it could only serve the console through `--mirror-console`, and that path
+    is the fallback rather than the first choice.
+    """
+    return bool(not tkinter_missing() and not _frozen_app()
+                and _own_tk_version())
+
+
+def _own_tk_version():
+    """This interpreter's Tk, when it can draw the window; else None.
+
+    Only the two integer parts are read, and `TK_VERSION` is a constant inside
+    `_tkinter` -- no Tcl interpreter is created, so this is safe to ask from the
+    menu-bar process that owns the Cocoa run loop.
+    """
+    try:
+        import tkinter
+    except ImportError:
+        return None
+    try:
+        parts = tuple(int(p) for p in str(tkinter.TkVersion).split('.'))[:2]
+    except ValueError:
+        return None
+    return parts if parts >= MIN_TK_VERSION else None
+
+
+
+def _read_console_lock():
+    try:
+        with open(_console_lock_path()) as handle:
+            info = json.loads(handle.read())
+    except Exception:
+        return None
+    return info if isinstance(info, dict) and info.get('port') else None
+
+
+def _console_alive_info():
+    """The running console's lock info, or None.
+
+    Liveness is an HTTP ping, never `os.kill(pid, 0)`: on Windows signal 0
+    terminates the target process, so the check for "is it alive" would be the
+    thing that killed it.
+    """
+    info = _read_console_lock()
+    if info is None:
+        return None
+    try:
+        request = urllib.request.Request(
+            'http://127.0.0.1:{}/ping'.format(info['port']))
+        with urllib.request.urlopen(request, timeout=1.5) as response:
+            body = json.loads(response.read().decode('utf-8', 'replace'))
+    except Exception:
+        _remove_quietly(_console_lock_path())
+        return None
+    return dict(info, **body) if isinstance(body, dict) else info
+
+
+def _raise_console(info):
+    """Ask the open console to lift itself; False when it will not."""
+    request = urllib.request.Request(
+        'http://127.0.0.1:{}/raise'.format(info['port']), data=b'')
+    request.add_header('X-Macast-Console-Token', str(info.get('token') or ''))
+    try:
+        with urllib.request.urlopen(request, timeout=1.5):
+            return True
+    except Exception as e:
+        logger.info('cannot raise the console window: %s', e)
+        return False
+
+
+def _management_token():
+    """The app's management token, which the console must carry to open mirrors.
+
+    `api_token()` creates and persists one on first use -- that is the app's
+    own documented behaviour, not a side effect added here.
+    """
+    try:
+        from macast.protocol import api_token
+        return api_token()
+    except Exception as e:
+        logger.info('no management token for the console: %s', e)
+        return ''
+
+
+def _candidate_interpreters():
+    """Pythons to try for the console window, ours first.
+
+    "Our interpreter has no usable Tk" is the normal case on a Mac, not a broken
+    install: Homebrew's python needs the separate `python-tk` formula, a py2app
+    bundle inherits whichever python built it, and the system python's Tk 8.5.9
+    cannot draw this window at all. That is survivable because the console is
+    stdlib-only by design -- it speaks HTTP to this app, never Python -- so any
+    python3 that carries Tk 8.6+ can run the same file.
+    """
+    seen = set()
+
+    def one(path):
+        if not path:
+            return None
+        key = os.path.realpath(path)
+        if key in seen:
+            return None
+        seen.add(key)
+        return path
+
+    if not _frozen_app():
+        # A frozen `sys.executable` is an app, not a python: probing it with `-c`
+        # would start a second Macast. The bundle still gets its turn, as the
+        # `--mirror-console` fallback in `_launch_console_late`.
+        yield one(sys.executable)
+    if sys.platform == 'darwin':
+        # /usr/bin/python3 is a shim that opens the Command Line Tools installer
+        # when the tools are absent, so never offer it without checking first.
+        if os.path.isdir('/Library/Developer/CommandLineTools'):
+            yield one('/usr/bin/python3')
+        for path in ('/opt/homebrew/bin/python3', '/usr/local/bin/python3'):
+            if os.path.isfile(path):
+                yield one(path)
+    elif sys.platform == 'win32':
+        # pythonw.exe: a console build would flash a black CMD window behind the
+        # only window the user asked for.
+        yield one(shutil.which('pythonw.exe') or shutil.which('pythonw'))
+        yield one(shutil.which('python.exe') or shutil.which('python'))
+    else:
+        for name in ('python3', 'python'):
+            found = one(shutil.which(name))
+            if found:
+                yield found
+
+
+def _tk_probe(interpreter):
+    """Ask an interpreter, by name, whether it can draw the window.
+
+    A subprocess is the only honest test -- `find_spec` in *this* process says
+    nothing about another one -- and it is cheap enough to run when the window
+    is opened, off the UI thread. Importing tkinter is not enough: the answer
+    must clear `MIN_TK_VERSION`, or the ladder picks the very Tk that opens a
+    blank window on a Mac.
+    """
+    try:
+        return subprocess.call(
+            [interpreter, '-c', _TK_PROBE],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=15) == 0
+    except Exception as e:
+        logger.info('tk probe failed for %s: %s', interpreter, e)
+        return False
+
+
+def _console_interpreter():
+    """First interpreter whose Tk can draw the window; None when nothing can."""
+    if _own_python_has_tk():
+        # Ours, and the answer came from find_spec: no need to ask twice.
+        return sys.executable
+    for interpreter in _candidate_interpreters():
+        if _tk_probe(interpreter):
+            logger.info('the console will run under %s', interpreter)
+            return interpreter
+    return None
+
+
+def open_console():
+    """Open the console window, or bring the existing one forward.
+
+    Returns as soon as the decision is made: finding a Tk-capable interpreter
+    costs a subprocess each, and a menu callback runs on the UI thread.
+    """
+    info = _console_alive_info()
+    if info is not None:
+        _raise_console(info)
+        return True
+    interpreter, tail = _console_command()
+    if tail is None:
+        notify('找不到投屏控制台文件 mirror_console.py，无法打开窗口')
+        return False
+    if interpreter is not None:
+        return _launch_console(interpreter, tail)
+    if _own_python_has_tk():
+        return _launch_console(sys.executable, tail)
+    if _frozen_app() and not tkinter_missing():
+        # The bundle can do Tk and no system python can be trusted to; hand the
+        # request to our own entry point, which is the one thing this executable
+        # does understand.
+        return _launch_console(sys.executable, list(CONSOLE_ARGV))
+    threading.Thread(target=_launch_console_late, args=(tail,), daemon=True,
+                     name='SCREEN_MIRROR_CONSOLE_LAUNCH').start()
+    return True
+
+
+def _launch_console_late(tail):
+    """Pick an interpreter off the UI thread and open the window.
+
+    `_tk_probe` costs a subprocess per candidate, and a menu callback runs on
+    the UI thread. When nothing on this machine can do Tk, the bundle's own
+    interpreter still gets one attempt -- it may carry Tk that no system python
+    does -- and only then does the hint ask the user to install something.
+    """
+    interpreter = _console_interpreter()
+    if interpreter is not None:
+        _launch_console(interpreter, tail)
+        return
+    if _frozen_app():
+        _launch_console(sys.executable, list(CONSOLE_ARGV))
+        return
+    notify(tkinter_install_hint())
+    tkinter_requirement()
+
+
+
+def _launch_console(interpreter, tail):
+    argv = [interpreter] + list(tail)
+    env = dict(os.environ)
+    env['MACAST_CONSOLE_API'] = 'http://127.0.0.1:{}'.format(Setting.get_port())
+    env['MACAST_CONSOLE_TOKEN'] = _management_token()
+    env['MACAST_CONSOLE_DIR'] = _setting_dir()
+    try:
+        # The child's own stdout/stderr is the only record a Tk traceback ever
+        # leaves behind, and a windowed parent has nowhere else to put it.
+        handle = open(_console_log_path(), 'ab')
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                stdout=handle, stderr=handle, env=env)
+    except Exception as e:
+        notify('投屏控制台启动失败：{}'.format(e))
+        return False
+    # A lock left by a killed console would otherwise make every later click
+    # "raise" a window that no longer exists.
+    _remove_quietly(_console_lock_path())
+    threading.Thread(target=_watch_console_start, args=(proc,), daemon=True,
+                     name='SCREEN_MIRROR_CONSOLE_WATCH').start()
+    return True
+
+
+def _watch_console_start(proc, delay=2.0):
+    """Report a console that died at once instead of looking like a no-op.
+
+    The realistic causes are a python without Tk (which `_tkinter` usually
+    already caught) and a Tcl/Tk that cannot reach the display; both only ever
+    surface in the child's log.
+    """
+    time.sleep(delay)
+    if proc.poll() is None:
+        # A window that outlived the grace period is the only proof this machine
+        # really can draw Tk, so it is what retires the card.
+        notice.satisfied(TK_KEY)
+        return
+    tail = ''
+    try:
+        with open(_console_log_path(), 'rb') as handle:
+            raw = handle.read().decode('utf-8', 'replace').strip()
+        tail = raw.splitlines()[-1] if raw else ''
+    except Exception:
+        pass
+    notify('投屏控制台没能启动（退出码 {}）：{}（日志 {}）'.format(
+        proc.returncode, tail or '子进程没有输出任何错误', _console_log_path()))
+
 
 class ScreenMirrorSetting(RendererSetting):
 
+    #: The renderer that built this surface (`ScreenMirrorRenderer.__init__`).
+    #: Deliberately not the bus's `get_renderer`: that answers「whoever is
+    #: playing media right now」, which made the console and the menu-bar door
+    #: depend on Screen Mirror being the selected renderer -- two menu clicks in
+    #: front of a window that captures this desktop and pushes it out, an act
+    #: with nothing to do with whichever player holds the DLNA stream.
+    _owner = None
+
     def _renderer(self):
-        renderers = cherrypy.engine.publish('get_renderer')
-        renderer = renderers.pop() if renderers else None
-        return renderer if isinstance(renderer, ScreenMirrorRenderer) else None
+        return self._owner
 
-    def build_menu(self):
-        kind = output_kind()
-        now = time.time()
-        # Only look when there is nothing to show AND the last answer has gone
-        # stale -- otherwise a menu opened a second apart re-ran the multicast
-        # search each time and could never report what it had already found.
-        if (kind in ('cast', 'caststream') and not _devices
-                and not _searching and _search_due(_searched_at, now)):
-            start_search()
-        if (kind == 'dlna' and not _dlna_devices
-                and not _dlna_searching
-                and _search_due(_dlna_searched_at, now)):
-            start_renderer_search()
+    def console_menu(self):
+        """The menu-bar rows for the console: one door, and a way out.
+
+        `macast/macast.py` splices these in whether or not this plugin is the
+        current renderer. 停止镜像 stays because a hidden window must never be
+        the only way out of a live capture of your own desktop.
+        """
         renderer = self._renderer()
-        mirroring = bool(renderer and renderer.is_mirroring())
-
-        items = [
-            MenuItem('Screen Mirror v0.9', enabled=False),
-            MenuItem('停止镜像' if mirroring else '开始镜像',
-                     self.on_toggle_clicked),
-            MenuItem('输出目标', children=self._output_children(kind)),
-        ]
-        if kind == 'dlna':
-            items.append(MenuItem('兼容档位', children=self._profile_children()))
-        if kind == 'browser' and mirroring:
-            items.append(MenuItem('复制观看地址', self.on_copy_url_clicked))
-            items.append(MenuItem(renderer.viewer_url(), enabled=False))
-        items.append(MenuItem('画质', children=self._quality_children()))
-        note = self._quality_note()
-        if note:
-            items.append(MenuItem(note, enabled=False))
-        screen_children = self._screen_children()
-        if screen_children:
-            items.append(MenuItem('采集屏幕', children=screen_children))
-        #: The pointer flag reaches ffmpeg through the capture probe, so the
-        #: menu shows the stored wish, not what the running stream does --
-        #: changing it restarts the mirror (see on_cursor_clicked).
-        items.append(MenuItem('显示鼠标指针', self.on_cursor_clicked,
-                              checked=cursor_enabled()))
-        if sys.platform == 'darwin':
-            items.append(MenuItem(
-                '硬件编码（VideoToolbox）', self.on_encoder_clicked,
-                checked=str(Setting.get(SettingProperty.Mirror_Encoder,
-                                        'software')) == 'hardware'))
-            audio_children = [MenuItem(self._audio_line(), enabled=False)]
-            if audio_setup_needed():
-                audio_children.append(
-                    MenuItem('一键设置（BlackHole + 多输出设备）',
-                             self.on_audio_setup_clicked))
-            if Setting.get(SettingProperty.Mirror_Audio_Original, None) not in (
-                    None, ''):
-                audio_children.append(
-                    MenuItem('恢复原声音输出', self.on_audio_restore_clicked))
-            items.append(MenuItem('系统声音', children=audio_children))
-        else:
-            items.append(MenuItem(self._audio_line()))
-        if mirroring:
-            items.append(MenuItem(self._status_line(renderer), enabled=False))
+        items = [MenuItem('电脑投屏…', self.on_open_console_clicked)]
+        if renderer is not None and renderer.is_mirroring():
+            items.append(MenuItem('停止电脑投屏', self.on_toggle_clicked))
         return items
 
-    def _output_children(self, kind):
-        children = [MenuItem(OUTPUTS[key][0], self.on_output_clicked,
-                             checked=(kind == key), data=key)
-                    for key in ('cast', 'caststream', 'dlna', 'browser')]
-        if kind in ('cast', 'caststream'):
-            # Both targets are the same device reached a different way, so the
-            # discovered list hangs under either choice.
-            children.append(MenuItem('— — —', enabled=False))
-            children.extend(self._device_children())
-        elif kind == 'dlna':
-            children.append(MenuItem('— — —', enabled=False))
-            children.extend(self._renderer_children())
-        return children
+    def on_open_console_clicked(self, item):
+        """Spawn (or focus) the console. Never blocks: the process launch is
+        cheap, and everything slower than that happens in the child."""
+        open_console()
 
-    def _renderer_children(self):
-        """DLNA renderers from the last background SSDP search.
+    # -- the console's view model ----------------------------------------------
 
-        Cached like the Chromecast list: the menu is built on the UI thread and
-        a search sends multicast and waits seconds for replies.
+    def console_state(self):
+        """One JSON-ready description of everything the console shows.
+
+        Deliberately a view model rather than markup: the console is a different
+        process, and keeping the strings here means the regression suite can
+        assert on the whole window without a display.
         """
-        name, control = dlna_target()
-        children = []
-        for device_name, device_control, host in list(_dlna_devices):
-            children.append(MenuItem('{} · {}'.format(device_name, host),
-                                     self.on_dlna_target_clicked,
-                                     checked=(device_control == control),
-                                     data=(device_name, device_control)))
-        if not children:
-            #「搜索中」is only honest while the very first look is in flight:
-            # once a search has completed, an empty list is a fact to state
-            # (with the time it was established), not a reason to claim the
-            # search is still running.
-            if _dlna_searching and not _dlna_searched_at:
-                children.append(MenuItem('搜索中…再展开一次菜单', enabled=False))
-            else:
-                children.append(MenuItem(
-                    '没有发现 DLNA 电视' + _searched_suffix(_dlna_searched_at),
-                    enabled=False))
-        children.append(MenuItem('重新搜索', self.on_refresh))
-        return children
+        renderer = self._renderer()
+        mirroring = bool(renderer and renderer.is_mirroring())
+        kind = output_kind()
+        self._kick_searches()
+        return {
+            'console_version': CONSOLE_VERSION,
+            'version': PLUGIN_VERSION,
+            'platform': sys.platform,
+            # False means the plugin could not build a session at all (no
+            # renderer behind this surface): the console says so instead of
+            # letting a start button do nothing.
+            'available': renderer is not None,
+            'mirroring': mirroring,
+            'starting': bool(renderer and renderer.is_starting()),
+            'status_line': (self._status_line(renderer) if mirroring else ''),
+            'stats': renderer.stats() if renderer is not None else {},
+            'recent': recent_messages(),
+            'requirements': notice.requirements(),
+            'output': {
+                'kind': kind,
+                'options': [{'key': key,
+                             'label': OUTPUTS[key][0],
+                             'hint': OUTPUT_HINTS.get(key, '')}
+                            for key, _probe in CHANNELS],
+            },
+            'channels': channels_state(kind),
+            'prompt': target_prompt(kind),
+            'profiles': {
+                'current': dlna_profile_id(dlna_profile()),
+                'options': [{'key': key, 'label': profile.label}
+                            for key, profile in DLNA_PROFILES.items()],
+            },
+            'quality': {
+                'current': quality_key(),
+                'options': [{'key': key, 'label': QUALITY_LABELS[key]}
+                            for key in QUALITY_ORDER],
+                'note': self._quality_note() or '',
+            },
+            'capture': self._capture_state(),
+            'audio': self._audio_state(),
+            'viewer': self._viewer_state(renderer, mirroring, kind),
+            'preview': snapshot_state(),
+        }
 
-    def _profile_children(self):
-        current = dlna_profile_id(dlna_profile())
-        return [MenuItem(profile.label, self.on_profile_clicked,
-                         checked=(current == key), data=key)
-                for key, profile in DLNA_PROFILES.items()]
+    def snapshot_frame(self, fmt='png'):
+        """The preview frame the console window polls for, in the format its Tk
+        can actually read (`png` on 8.6+, `ppm` on 8.5).
 
-    def _device_children(self):
-        """The discovered Chromecasts, as the v0.3 menu had them."""
-        current = Setting.get(SettingProperty.Mirror_Target, '') or ''
-        children = []
-        for name, host, port in list(_devices):
-            target = '{}:{}'.format(host, port)
-            children.append(MenuItem('{} · {}'.format(name, host),
-                                     self.on_target_clicked,
-                                     checked=(target == current),
-                                     data=(name, target)))
-        if not children:
-            if _searching and not _searched_at:
-                children.append(MenuItem('搜索中…再展开一次菜单', enabled=False))
-            else:
-                children.append(MenuItem(
-                    '没有发现 Chromecast' + _searched_suffix(_searched_at),
-                    enabled=False))
-        children.append(MenuItem('重新搜索', self.on_refresh))
-        return children
+        Reached through the same surface as the state and the actions, but note
+        what it does *not* need: the running session. The grab goes straight to
+        the capture probe, so the picture is there before a mirror starts, while
+        one runs, and after it stops -- which is the point of a preview.
+        """
+        return snapshot_frame(fmt)
 
-    def _quality_children(self):
-        quality = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
-        labels = {'360': '360p · 2.5 Mbps（省带宽）',
-                  '720': '720p · 5 Mbps（默认）',
-                  '1080': '1080p · 10 Mbps（更吃带宽）',
-                  'source': '原始分辨率 · 12 Mbps（不缩放）'}
-        return [MenuItem(labels[key], self.on_quality_clicked,
-                         checked=(quality == key), data=key)
-                for key in ('360', '720', '1080', 'source')]
+    @staticmethod
+    def _kick_searches():
+        """Look for *every* protocol's devices, not just the stored choice's.
 
-    def _quality_note(self):
-        """The low-latency channel cannot spend what the menu offers."""
-        if output_kind() != 'caststream':
-            return None
-        width, height, _filter = cast_stream_shape(quality_preset()[0])
-        return ('低延迟通道上限 {:.1f} Mbps（软件加密跟不上）· '
-                '帧尺寸固定 {}x{}（信箱化）'.format(
-                    CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
+        The window's first panel answers「哪种协议有东西可投」, which needs all
+        of the answers: searching only the current target is how an opened
+        console reported「没有发现」about a Chromecast it had never looked for.
 
-    def _screen_children(self):
-        """One entry per display the last probe saw; empty when it has no list.
+        The 15-second guard the menu grew stays, and matters more now: the
+        console polls this view once a second, so without it a plain window open
+        would keep the LAN busy forever.
+        """
+        now = time.time()
+        if not _searching and _search_due(_searched_at, now, bool(_devices)):
+            start_search()
+        if not _dlna_searching and _search_due(_dlna_searched_at, now,
+                                               bool(_dlna_devices)):
+            start_renderer_search()
 
-        The list comes from the cache instead of a fresh probe because
-        build_menu runs on the UI thread and probing spawns ffmpeg.
+    @staticmethod
+    def _capture_state():
+        """What the last probe decided -- never probes, the console polls this.
         """
         capture = next(iter(_capture_cache.values()), None)
-        if capture is None or not capture.screens:
-            return []
         wanted = str(Setting.get(SettingProperty.Mirror_Screen, '') or '')
-        children = [MenuItem('第一块屏幕（默认）', self.on_screen_clicked,
-                             checked=(wanted == ''), data='')]
-        for index, name in capture.screens:
-            children.append(MenuItem('{} · {}'.format(index, name),
-                                     self.on_screen_clicked,
-                                     checked=(wanted == str(index)),
-                                     data=str(index)))
-        return children
+        screens = [{'index': '', 'label': '第一块屏幕（默认）',
+                     'selected': wanted == ''}]
+        for index, name in (capture.screens if capture else []):
+            screens.append({'index': str(index),
+                            'label': '{} · {}'.format(index, name),
+                            'selected': wanted == str(index)})
+        hardware = sys.platform == 'darwin'
+        #: None means the encoder probe has not answered yet; the console hides
+        #: the switch rather than offering a choice it cannot keep.
+        hardware_available = _hw_encoder_cache.get(
+            (find_ffmpeg(), sys.platform)) if hardware else None
+        return {
+            'probed': capture is not None,
+            'probing': _probe_busy.is_set(),
+            'label': capture.label if capture else '',
+            'screens': screens,
+            'cursor': cursor_enabled(),
+            'encoder': encoder_kind(),
+            'hardware_supported': hardware,
+            'hardware_probed': hardware_available is not None,
+            'hardware_available': bool(hardware_available),
+        }
+
+    @staticmethod
+    def _audio_state():
+        capture = next(iter(_capture_cache.values()), None)
+        progress = _audio_progress.snapshot() if _audio_progress else {}
+        return {
+            'line': ScreenMirrorSetting._audio_line(),
+            'capturable': bool(capture and capture.audio_map),
+            'setup_available': sys.platform == 'darwin' and audio_setup_needed(),
+            'restore_available': Setting.get(
+                SettingProperty.Mirror_Audio_Original, None) not in (None, ''),
+            'running': _audio_setup_busy.is_set(),
+            'steps': progress.get('steps', []),
+            'pct': progress.get('pct', 0.0),
+            'message': progress.get('message', ''),
+            'done': progress.get('done', False),
+            'ok': progress.get('ok'),
+            'progress_url': _audio_progress_url,
+        }
+
+    @staticmethod
+    def _viewer_state(renderer, mirroring, kind):
+        url = renderer.viewer_url() if renderer is not None else ''
+        hint = '不要把这条地址转发出去：它带着本次会话的观看令牌' if url else (
+            '开始镜像后这里会给出观看地址' if kind == 'browser' else '')
+        return {'url': url, 'available': bool(url), 'hint': hint,
+                'kind': kind, 'mirroring': mirroring}
+
+    # -- the console's actions --------------------------------------------------
+
+    #: Everything the window may do, in one list: the HTTP endpoint refuses any
+    #: name that is not here rather than dispatching on it.
+    CONSOLE_ACTIONS = ('start', 'stop', 'toggle', 'set-output', 'set-target',
+                       'set-dlna-target', 'set-profile', 'set-quality',
+                       'set-screen', 'set-cursor', 'set-encoder', 'refresh',
+                       'probe', 'audio-setup', 'audio-restore')
+
+    def console_action(self, action, args=None):
+        """Single entry point for the console; {'code', 'message'} either way.
+
+        `args` comes off the network, so nothing here trusts its shape -- every
+        value is validated against the same tables the state reports from.
+        """
+        args = args if isinstance(args, dict) else {}
+        if action not in self.CONSOLE_ACTIONS:
+            return {'code': 1, 'message': '未知操作：{}'.format(action)}
+        return getattr(self, '_do_' + action.replace('-', '_'))(args)
+
+    def _ok(self, message, restart=False):
+        notify(message, sound=False)
+        if restart:
+            self._restart()
+        return {'code': 0, 'message': message}
+
+    def _no(self, message):
+        logger.info('console action refused: %s', message)
+        return {'code': 1, 'message': message}
+
+    def _renderer_or_no(self):
+        renderer = self._renderer()
+        if renderer is None:
+            return None, self._no('这个 Screen Mirror 插件实例没有加载成功：在设置页'
+                                  '的「插件」里重新启用它再试')
+        return renderer, None
+
+    def _do_start(self, args):
+        renderer, refused = self._renderer_or_no()
+        if refused:
+            return refused
+        if renderer.is_mirroring():
+            return self._ok('已经在镜像了')
+        if not renderer.start_mirror():
+            return self._ok('正在开始镜像…（上一台还在启动）')
+        return {'code': 0, 'message': '正在开始镜像…'}
+
+    def _do_stop(self, args):
+        renderer, refused = self._renderer_or_no()
+        if refused:
+            return refused
+        if not renderer.is_mirroring() and not renderer.is_starting():
+            return self._ok('现在没有镜像')
+        renderer.stop_mirror()
+        return self._ok('已停止镜像')
+
+    def _do_toggle(self, args):
+        renderer, refused = self._renderer_or_no()
+        if refused:
+            return refused
+        if renderer.is_mirroring():
+            return self._do_stop(args)
+        return self._do_start(args)
+
+    def _do_set_output(self, args):
+        key = str(args.get('value') or '')
+        if key not in OUTPUTS:
+            return self._no('没有这种投屏方式：{}'.format(key))
+        if key == output_kind():
+            return {'code': 0,
+                    'message': '投屏方式已经是{}'.format(OUTPUTS[key][0])}
+        Setting.set(SettingProperty.Mirror_Output, key)
+        return self._ok('投屏方式：{}（正在切换封装与目标）'.format(OUTPUTS[key][0]),
+                        restart=True)
+
+    def _do_set_target(self, args):
+        target = str(args.get('target') or '')
+        name = str(args.get('name') or '') or target
+        if not target.partition(':')[0]:
+            return self._no('没有给出 Chromecast 地址')
+        Setting.set(SettingProperty.Mirror_Target, target)
+        Setting.set(SettingProperty.Mirror_Target_Name, name)
+        return self._ok('镜像目标：{}'.format(name), restart=True)
+
+    def _do_set_dlna_target(self, args):
+        control = str(args.get('control') or '')
+        name = str(args.get('name') or '') or control
+        if not control:
+            return self._no('没有给出 DLNA 电视的控制地址')
+        Setting.set(SettingProperty.Mirror_Dlna_Control, control)
+        Setting.set(SettingProperty.Mirror_Target_Name, name)
+        return self._ok('DLNA 电视：{}'.format(name), restart=True)
+
+    def _do_set_profile(self, args):
+        """A profile is a different encoder, muxer and advertised file, so a
+        running stream is wrong the instant the choice changes; it restarts for
+        the same reason the menu did -- the point of five shapes is that the TV
+        rejects the first one, and asking the user to flip the mirror by hand
+        between each try is busywork."""
+        key = str(args.get('value') or '')
+        if key not in DLNA_PROFILES:
+            return self._no('没有这个兼容档位：{}'.format(key))
+        if key == dlna_profile_id(dlna_profile()):
+            return {'code': 0, 'message': '档位已经是{}'.format(DLNA_PROFILES[key].label)}
+        Setting.set(SettingProperty.Mirror_Dlna_Profile, key)
+        return self._ok('兼容档位：{}'.format(DLNA_PROFILES[key].label),
+                        restart=True)
+
+    def _do_set_quality(self, args):
+        key = str(args.get('value') or '')
+        if key not in QUALITIES:
+            return self._no('没有这个画质档位：{}'.format(key))
+        Setting.set(SettingProperty.Mirror_Quality, key)
+        return self._ok('画质：{}'.format(QUALITY_LABELS[key]), restart=True)
+
+    def _do_set_screen(self, args):
+        index = str(args.get('value') or '')
+        if index == '':
+            Setting.unset(SettingProperty.Mirror_Screen)
+            label = '第一块屏幕（默认）'
+        else:
+            if not index.isdigit():
+                return self._no('屏幕编号只能是数字：{}'.format(index))
+            Setting.set(SettingProperty.Mirror_Screen, index)
+            label = '第 {} 块采集设备'.format(index)
+        # The choice is baked into the probe result, not read per frame.
+        invalidate_capture_cache()
+        return self._ok('采集屏幕：{}'.format(label), restart=True)
+
+    def _do_set_cursor(self, args):
+        want = bool(args.get('value'))
+        Setting.set(SettingProperty.Mirror_Cursor, want)
+        invalidate_capture_cache()
+        return self._ok('鼠标指针：{}'.format('显示' if want else '不显示'),
+                        restart=True)
+
+    def _do_set_encoder(self, args):
+        """Only stores the wish; a mirror that cannot use VideoToolbox falls back
+        to libx264 with a warning, which is better than refusing here (the
+        probe may not have run yet)."""
+        want = str(args.get('value') or '')
+        if want not in ('software', 'hardware'):
+            return self._no('没有这种编码器：{}'.format(want))
+        if want == 'hardware' and sys.platform != 'darwin':
+            return self._no('硬件编码（VideoToolbox）只有 macOS 有')
+        Setting.set(SettingProperty.Mirror_Encoder, want)
+        return self._ok('编码器：{}'.format(
+            'VideoToolbox 硬件编码' if want == 'hardware' else '软件编码（x264）'),
+            restart=True)
+
+    def _do_refresh(self, args):
+        """Re-run every protocol's search, not just the chosen target's.
+
+        The window asks「哪种投屏方式有设备」, so an answer for one protocol is
+        what made a rerun look like it had done nothing.
+        """
+        started = [name for name, kicked in
+                   (('Chromecast', start_search()),
+                    ('DLNA 电视', start_renderer_search())) if kicked]
+        if len(started) == 2:
+            return {'code': 0, 'message': '正在搜索 Chromecast 与 DLNA 电视…'}
+        if started:
+            return {'code': 0, 'message': '正在搜索 {}…（另一种已在进行中）'
+                    .format(started[0])}
+        return {'code': 0, 'message': '两种搜索都已在进行中'}
+
+    def _do_probe(self, args):
+        if not request_capture_probe():
+            return {'code': 0, 'message': '采集探测已在进行中'}
+        return {'code': 0, 'message': '正在重新探测采集设备与编码器…'}
+
+    def _do_audio_setup(self, args):
+        if sys.platform != 'darwin':
+            return self._no('系统声音辅助安装只有 macOS 有')
+        if _audio_setup_busy.is_set():
+            return self._ok('系统声音设置已在进行中')
+        _audio_setup_busy.set()
+        threading.Thread(target=_audio_setup_worker, daemon=True,
+                         name="SCREEN_MIRROR_AUDIO_SETUP").start()
+        return {'code': 0, 'message': '开始一键设置系统声音…'}
+
+    def _do_audio_restore(self, args):
+        restore_system_audio(lambda message: notify(message, sound=False))
+        return {'code': 0, 'message': '正在恢复原声音输出'}
+
+    # -- menu-era callbacks kept for the two rows the menu still has ------------
+
+    def on_toggle_clicked(self, item):
+        renderer = self._renderer()
+        if renderer is None:
+            notify('Screen Mirror 未选中为当前渲染器')
+            return
+        if renderer.is_mirroring():
+            renderer.stop_mirror()
+            notify('已停止镜像')
+        else:
+            renderer.start_mirror()
+
+    def _restart(self):
+        renderer = self._renderer()
+        if renderer is not None and renderer.is_mirroring():
+            renderer.stop_mirror()
+            renderer.start_mirror()
 
     @staticmethod
     def _status_line(renderer):
@@ -4745,11 +5953,20 @@ class ScreenMirrorSetting(RendererSetting):
         return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
             minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
 
+    @staticmethod
+    def _quality_note():
+        """The low-latency channel cannot spend what the menu offers."""
+        if output_kind() != 'caststream':
+            return None
+        width, height, _filter = cast_stream_shape(quality_preset()[0])
+        return ('低延迟通道上限 {:.1f} Mbps（软件加密跟不上）· '
+                '帧尺寸固定 {}x{}（信箱化）'.format(
+                    CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
 
     @staticmethod
     def _audio_line():
         """What the last probe decided about system audio (never probes:
-        build_menu runs on the UI thread)."""
+        the console polls this view while it is open)."""
         capture = next(iter(_capture_cache.values()), None)
         if capture is None:
             return '系统声音：开始镜像后这里会显示'
@@ -4760,145 +5977,6 @@ class ScreenMirrorSetting(RendererSetting):
         if sys.platform == 'win32':
             return '系统声音：Windows 下仅画面'
         return '系统声音：未启用（需要 PulseAudio）'
-
-    def on_audio_setup_clicked(self, item):
-        if _audio_setup_busy.is_set():
-            cherrypy.engine.publish('app_notify', 'Macast',
-                                    '系统声音设置已在进行中', sound=False)
-            return
-        _audio_setup_busy.set()
-        threading.Thread(target=_audio_setup_worker, daemon=True,
-                         name="SCREEN_MIRROR_AUDIO_SETUP").start()
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '开始一键设置系统声音…', sound=False)
-
-    def on_audio_restore_clicked(self, item):
-        restore_system_audio(
-            lambda message: cherrypy.engine.publish('app_notify', 'Macast',
-                                                    message, sound=False))
-
-    def on_toggle_clicked(self, item):
-        renderer = self._renderer()
-        if renderer is None:
-            cherrypy.engine.publish('app_notify', 'Macast',
-                                    'Screen Mirror 未选中为当前渲染器')
-            return
-        if renderer.is_mirroring():
-            renderer.stop_mirror()
-            cherrypy.engine.publish('app_notify', 'Macast', '已停止镜像',
-                                    sound=False)
-        else:
-            renderer.start_mirror()
-
-    def on_target_clicked(self, item):
-        name, target = item.data
-        Setting.set(SettingProperty.Mirror_Target, target)
-        Setting.set(SettingProperty.Mirror_Target_Name, name)
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '镜像目标：{}'.format(name), sound=False)
-        self._restart()
-
-    def on_dlna_target_clicked(self, item):
-        name, control = item.data
-        Setting.set(SettingProperty.Mirror_Dlna_Control, control)
-        Setting.set(SettingProperty.Mirror_Target_Name, name)
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                'DLNA 电视：{}'.format(name), sound=False)
-        self._restart()
-
-    def on_output_clicked(self, item):
-        """Switching target switches the muxer too, so the running pipeline is
-        already wrong the moment the setting changes -- restart it."""
-        if item.data == output_kind():
-            return
-        Setting.set(SettingProperty.Mirror_Output, item.data)
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '输出目标：{}'.format(OUTPUTS[item.data][0]),
-                                sound=False)
-        self._restart()
-
-    def on_screen_clicked(self, item):
-        if item.data:
-            Setting.set(SettingProperty.Mirror_Screen, item.data)
-        else:
-            Setting.unset(SettingProperty.Mirror_Screen)
-        # The choice is baked into the probe result, not read per frame.
-        invalidate_capture_cache()
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '采集屏幕：{}（下次镜像生效）'.format(item.text),
-                                sound=False)
-
-    def on_cursor_clicked(self, item):
-        want = not cursor_enabled()
-        Setting.set(SettingProperty.Mirror_Cursor, want)
-        invalidate_capture_cache()
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '鼠标指针：{}（下次镜像生效）'.format(
-                                    '显示' if want else '不显示'), sound=False)
-
-    def on_encoder_clicked(self, item):
-        """Only store the wish. Probing `ffmpeg -encoders` here would spawn a
-        process on the UI thread; _mirror() falls back to libx264, with a
-        warning, when the tap is not actually there."""
-        want = 'software' if encoder_kind() == 'hardware' else 'hardware'
-        Setting.set(SettingProperty.Mirror_Encoder, want)
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '编码器：{}（下次镜像生效）'.format(
-                                    'VideoToolbox 硬件编码' if want == 'hardware'
-                                    else '软件编码'), sound=False)
-
-    def on_copy_url_clicked(self, item):
-        renderer = self._renderer()
-        url = renderer.viewer_url() if renderer is not None else ''
-        if not url:
-            cherrypy.engine.publish('app_notify', 'Macast',
-                                    '现在没有镜像到浏览器', sound=False)
-            return
-        try:
-            import pyperclip
-            pyperclip.copy(url)
-            message = '观看地址已复制：{}'.format(url)
-        except Exception as e:
-            logger.info('cannot reach the clipboard: %s', e)
-            message = '观看地址：{}'.format(url)
-        cherrypy.engine.publish('app_notify', 'Macast', message, sound=False)
-
-    def _restart(self):
-        renderer = self._renderer()
-        if renderer is not None and renderer.is_mirroring():
-            renderer.stop_mirror()
-            renderer.start_mirror()
-
-    def on_quality_clicked(self, item):
-        Setting.set(SettingProperty.Mirror_Quality, item.data)
-        renderer = self._renderer()
-        if renderer is not None and renderer.is_mirroring():
-            cherrypy.engine.publish('app_notify', 'Macast',
-                                    '画质将在下次镜像时生效', sound=False)
-
-    def on_profile_clicked(self, item):
-        """A profile is a different encoder, muxer and advertised file, so the
-        running stream is wrong the instant the choice changes. Unlike quality
-        this one restarts immediately: the menu offers five shapes precisely
-        because the TV rejects the first one, and making the user toggle the
-        mirror again after each try is busywork."""
-        if item.data == dlna_profile_id(dlna_profile()):
-            return
-        Setting.set(SettingProperty.Mirror_Dlna_Profile, item.data)
-        cherrypy.engine.publish('app_notify', 'Macast',
-                                '兼容档位：{}'.format(DLNA_PROFILES[item.data].label),
-                                sound=False)
-        self._restart()
-
-    def on_refresh(self, item):
-        if output_kind() == 'dlna':
-            start_renderer_search()
-            cherrypy.engine.publish('app_notify', 'Macast',
-                                    '正在搜索 DLNA 电视…', sound=False)
-            return
-        start_search()
-        cherrypy.engine.publish('app_notify', 'Macast', '正在搜索 Chromecast…',
-                                sound=False)
 
 
 if __name__ == '__main__':

@@ -249,10 +249,15 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
+          # The console window needs two copies of one file: a real .py on disk
+          # for a Tk-capable system python, and the frozen module behind
+          # --mirror-console for the machines that have no python at all.
           pyinstaller --noconfirm --onefile --name macast \
             --add-data "i18n:i18n" \
             --add-data "macast/assets:macast/assets" \
             --add-data "macast/xml:macast/xml" \
+            --add-data "macast/mirror_console.py:macast" \
+            --add-data "macast/config_window.py:macast" \
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
@@ -260,7 +265,17 @@ jobs:
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
+            --hidden-import=macast.mirror_console \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.cast_bridge \
+            --hidden-import=macast.plugins.renderer.cast_local_file \
+            --hidden-import=macast.plugins.renderer.external_player \
+            --hidden-import=macast.plugins.renderer.floating \
+            --hidden-import=macast.plugins.renderer.hooks \
+            --hidden-import=macast.plugins.renderer.macast_ytdlp \
+            --hidden-import=macast.plugins.renderer.screen_mirror \
+            --hidden-import=macast.plugins.protocol.airplay_mirror \
+            --hidden-import=macast.plugins.protocol.raop \
             --hidden-import=macast.plugins.renderer.iina \
             --hidden-import=macast.plugins.renderer.web \
             --hidden-import=macast.plugins.renderer.live \
@@ -334,10 +349,15 @@ jobs:
 
       - name: Build with PyInstaller
         run: |
+          # The console window needs two copies of one file: a real .py on disk
+          # for a Tk-capable system python, and the frozen module behind
+          # --mirror-console for the machines that have no python at all.
           pyinstaller --noconfirm --onefile --name macast \
             --add-data "i18n:i18n" \
             --add-data "macast/assets:macast/assets" \
             --add-data "macast/xml:macast/xml" \
+            --add-data "macast/mirror_console.py:macast" \
+            --add-data "macast/config_window.py:macast" \
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
@@ -345,7 +365,17 @@ jobs:
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
+            --hidden-import=macast.mirror_console \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.cast_bridge \
+            --hidden-import=macast.plugins.renderer.cast_local_file \
+            --hidden-import=macast.plugins.renderer.external_player \
+            --hidden-import=macast.plugins.renderer.floating \
+            --hidden-import=macast.plugins.renderer.hooks \
+            --hidden-import=macast.plugins.renderer.macast_ytdlp \
+            --hidden-import=macast.plugins.renderer.screen_mirror \
+            --hidden-import=macast.plugins.protocol.airplay_mirror \
+            --hidden-import=macast.plugins.protocol.raop \
             --hidden-import=macast.plugins.renderer.iina \
             --hidden-import=macast.plugins.renderer.web \
             --hidden-import=macast.plugins.renderer.live \
@@ -444,10 +474,15 @@ jobs:
       - name: Build with PyInstaller
         shell: bash
         run: |
+          # The console window needs two copies of one file: a real .py on disk
+          # for a Tk-capable system python, and the frozen module behind
+          # --mirror-console for the machines that have no python at all.
           pyinstaller --noconfirm --onefile --name macast.exe \
             --add-data "i18n;i18n" \
             --add-data "macast/assets;macast/assets" \
             --add-data "macast/xml;macast/xml" \
+            --add-data "macast/mirror_console.py;macast" \
+            --add-data "macast/config_window.py;macast" \
             --add-binary "bin;bin" \
             --collect-all cherrypy \
             --collect-all lxml \
@@ -456,7 +491,17 @@ jobs:
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
             --hidden-import=macast.macast \
+            --hidden-import=macast.mirror_console \
             --hidden-import=macast_renderer.mpv \
+            --hidden-import=macast.plugins.renderer.cast_bridge \
+            --hidden-import=macast.plugins.renderer.cast_local_file \
+            --hidden-import=macast.plugins.renderer.external_player \
+            --hidden-import=macast.plugins.renderer.floating \
+            --hidden-import=macast.plugins.renderer.hooks \
+            --hidden-import=macast.plugins.renderer.macast_ytdlp \
+            --hidden-import=macast.plugins.renderer.screen_mirror \
+            --hidden-import=macast.plugins.protocol.airplay_mirror \
+            --hidden-import=macast.plugins.protocol.raop \
             --hidden-import=macast.plugins.renderer.iina \
             --hidden-import=macast.plugins.renderer.web \
             --hidden-import=macast.plugins.renderer.live \

@@ -69,7 +69,8 @@ After opening this app, a small icon will appear in the **menubar** / **taskbar*
   The nine plugins this fork wrote itself ship **inside** the app as well: an yt-dlp
   downloader, an external-player renderer, a floating-window renderer,
   automation hooks, a Chromecast bridge, RAOP (AirPlay audio) supervision, a three-platform
-  **Screen Mirror** (Chromecast / DLNA television / any browser), a **Local File Caster**
+  **Screen Mirror** (Chromecast / DLNA television / any browser, driven from a
+  desktop console window), a **Local File Caster**
   (play a file or playlist from this disk on the TV: byte-exact serving when the set can decode
   it, ffmpeg transcoding when it cannot) and an **AirPlay Screen Mirror** receiver (supervises
   uxplay, so an iPhone can mirror onto this Mac; uxplay is yours to build).

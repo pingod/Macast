@@ -8,6 +8,7 @@
 # <macast.version>0.1</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
+# <macast.role>addon</macast.role>
 # <macast.desc>Cast what is already on this machine's disk to a Chromecast / Google TV or to a DLNA television: choose a folder in the menu bar, click a file, and it plays on the TV. Files the device decodes natively are streamed byte-for-byte by a built-in Range/206 HTTP server, so the remote's own pause and seek act on the real file. Anything else (AVI, MKV, HEVC, DTS, AC-3, a second audio track, an embedded subtitle) is transcoded to MPEG-TS by ffmpeg while it plays, and a seek restarts the encoder at the new position. Also: a playlist that advances when the device reports the last item finished, audio track choice plus an audio/video sync offset on the transcoding path, embedded subtitles re-served as WebVTT for Chromecast (or burnt in when this ffmpeg has libass), a watchdog that takes the television back when another sender squats it, a real QUIT_APP so the set returns to its input instead of a frozen frame, direct casting of an ordinary URL without touching any file, and an audio-only mode that streams this machine's system sound where a capture tap exists.</macast.desc>
 #
 # Why: Macast receives a URL and plays it here. The other half of the
@@ -1005,7 +1006,12 @@ _search_lock = threading.Lock()
 
 
 def discover_cast(timeout=3.0):
-    """[(friendly name, host, port)] for Chromecasts answering on the LAN."""
+    """[(friendly name, host, port)] for Chromecasts answering on the LAN.
+
+    Our own receiver is dropped: Macast broadcasts `_googlecast._tcp` like any
+    Chromecast does, so without this the first entry is this machine, and
+    "投给我自己" is not a target. `discover_renderers` below already does it.
+    """
     try:
         from zeroconf import Zeroconf, ServiceBrowser
     except ImportError:
@@ -1045,7 +1051,11 @@ def discover_cast(timeout=3.0):
         logger.error('Chromecast discovery failed: %s', e)
     finally:
         zeroconf.close()
-    return sorted(found.values())
+    try:
+        ours = set(Setting.get_advertisable_ip())
+    except Exception:
+        ours = set()
+    return sorted(hit for hit in found.values() if hit[1] not in ours)
 
 
 def start_search():

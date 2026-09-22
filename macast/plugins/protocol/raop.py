@@ -40,7 +40,7 @@ from enum import Enum
 
 import cherrypy
 
-from macast import utils
+from macast import utils, notice
 from macast.protocol import Protocol
 from macast.utils import Setting
 
@@ -48,6 +48,18 @@ logger = logging.getLogger("AirPlayAudio")
 logger.setLevel(logging.INFO)
 
 CONFIG_NAME = 'shairport-sync.conf'
+
+
+def _tell(message):
+    """Tell the user twice: once as a notification, once to last.
+
+    The notification is gone in five seconds and the user has to install
+    something from it, so the same sentence goes to the message board the
+    desktop console reads (`macast/notice.py`) -- and the install command is
+    repeated there as an open requirement until shairport-sync turns up.
+    """
+    notice.record(message)
+    cherrypy.engine.publish('app_notify', 'Macast', message)
 
 
 class SettingProperty(Enum):
@@ -141,14 +153,21 @@ class AirPlayAudioProtocol(Protocol):
             message = ('未找到 shairport-sync，AirPlay 音频无法启动：'
                        'brew install shairport-sync（Linux: 包管理器安装）')
             logger.error(message)
-            cherrypy.engine.publish('app_notify', 'Macast', message)
+            _tell(message)
+            notice.requirement(
+                'shairport-sync',
+                label='AirPlay 音频需要 shairport-sync',
+                detail='Macast 只监督它、不实现 RAOP：装上它才能把这台电脑的声音投给 '
+                       'AirPlay 音箱。Linux 用发行版的包管理器装同名包。',
+                command='brew install shairport-sync')
             return
+        notice.satisfied('shairport-sync')
         try:
             config = write_config(service_name())
         except OSError as e:
             message = '无法写入 shairport-sync 配置：{}'.format(e)
             logger.error(message)
-            cherrypy.engine.publish('app_notify', 'Macast', message)
+            _tell(message)
             return
         # -v so the log carries "Connection from ..." lines; without it
         # shairport-sync says nothing at all and there is no way to tell whether
@@ -163,7 +182,7 @@ class AirPlayAudioProtocol(Protocol):
         except OSError as e:
             message = '启动 shairport-sync 失败：{}'.format(e)
             logger.error(message)
-            cherrypy.engine.publish('app_notify', 'Macast', message)
+            _tell(message)
             return
         with self._lock:
             self._proc = proc
@@ -204,11 +223,9 @@ class AirPlayAudioProtocol(Protocol):
                 logger.info('shairport-sync: %s', line)
                 lowered = line.lower()
                 if 'connection from' in lowered:
-                    cherrypy.engine.publish('app_notify', 'Macast',
-                                            'AirPlay 音频已连接')
+                    _tell('AirPlay 音频已连接')
                 elif 'connection closed' in lowered or 'disconnected' in lowered:
-                    cherrypy.engine.publish('app_notify', 'Macast',
-                                            'AirPlay 音频已断开')
+                    _tell('AirPlay 音频已断开')
         except (OSError, ValueError) as e:
             logger.error('shairport-sync log reader stopped: %s', e)
 

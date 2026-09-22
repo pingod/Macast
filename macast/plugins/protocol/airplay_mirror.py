@@ -67,7 +67,7 @@ from enum import Enum
 
 import cherrypy
 
-from macast import utils
+from macast import utils, notice
 from macast.protocol import Protocol
 from macast.utils import Setting
 
@@ -80,6 +80,18 @@ RC_NAME = 'uxplayrc'
 
 #: Free-text escape hatch: extra option lines appended to the generated file.
 OPTIONS_KEY = 'Mirror_Uxplay_Options'
+
+
+def _tell(message):
+    """Tell the user twice: once as a notification, once to last.
+
+    uxplay has to be *compiled* by the user, and that is not a sentence one can
+    read in the five seconds a macOS notification stays up. Everything this
+    plugin says to the person also goes to the message board the desktop console
+    reads (`macast/notice.py`), where it stays.
+    """
+    notice.record(message)
+    cherrypy.engine.publish('app_notify', 'Macast', message)
 
 
 class SettingProperty(Enum):
@@ -297,14 +309,23 @@ class AirPlayMirrorProtocol(Protocol):
         binary = find_uxplay()
         if binary is None:
             logger.error(INSTALL_GUIDE)
-            cherrypy.engine.publish('app_notify', 'Macast', NO_UXPLAY_MESSAGE)
+            _tell(NO_UXPLAY_MESSAGE)
+            notice.requirement(
+                'uxplay',
+                label='AirPlay 屏幕镜像需要 uxplay',
+                detail='它没有 Homebrew 包，官方发布也不给 macOS 二进制，必须自己编译：'
+                       'sudo xcode-select --install → brew install cmake libplist openssl@3 '
+                       '→ 从 gstreamer.freedesktop.org 装 runtime 与 -devel 两个 .pkg → '
+                       'git clone https://github.com/FDH2/UxPlay 后 cmake . && make && '
+                       'sudo make install。完整说明也在日志里。')
             return
+        notice.satisfied('uxplay')
         try:
             rc_path = write_rc(Setting.get_friendly_name())
         except OSError as e:
             message = '无法写入 uxplay 选项文件：{}'.format(e)
             logger.error(message)
-            cherrypy.engine.publish('app_notify', 'Macast', message)
+            _tell(message)
             return
         argv = [binary, '-rc', rc_path]
         logger.info('starting %s', ' '.join(argv))
@@ -317,7 +338,7 @@ class AirPlayMirrorProtocol(Protocol):
         except OSError as e:
             message = '启动 uxplay 失败：{}'.format(e)
             logger.error(message)
-            cherrypy.engine.publish('app_notify', 'Macast', message)
+            _tell(message)
             for fd in (child_fd, read_fd):
                 if fd is not None:
                     try:
@@ -386,8 +407,7 @@ class AirPlayMirrorProtocol(Protocol):
             # spelling; nothing here is supposed to match this plugin, and
             # exactly one thing must: the competing video-URL receiver.
             if str(title).lower().replace(' protocol', '').strip() == 'airplay':
-                cherrypy.engine.publish(
-                    'app_notify', 'Macast',
+                _tell(
                     '屏幕镜像列表里会有两个接收端：能镜像的是本插件起的 uxplay，'
                     'Macast 内置的 AirPlay 只接受视频网址；两者名字都跟这台机器的'
                     '友好名一致，分不清就在设置里关掉其中一个')
@@ -421,7 +441,7 @@ class AirPlayMirrorProtocol(Protocol):
         if detail:
             message = '{}：{}'.format(message, detail[-160:])
         logger.error(message)
-        cherrypy.engine.publish('app_notify', 'Macast', message)
+        _tell(message)
 
     def _read_output(self, proc, stream):
         """Follow uxplay's log and surface its session events to the user.
@@ -443,7 +463,7 @@ class AirPlayMirrorProtocol(Protocol):
                 event, message = log_event(line)
                 if event in (None, 'ready'):
                     continue
-                cherrypy.engine.publish('app_notify', 'Macast', message)
+                _tell(message)
         except (OSError, ValueError) as e:
             # Reading a pty master whose child has gone raises OSError(ENOTTY
             # /EIO) rather than ending the iteration cleanly. That is this

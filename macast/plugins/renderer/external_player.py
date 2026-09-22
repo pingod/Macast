@@ -8,6 +8,7 @@
 # <macast.version>0.1</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
+# <macast.role>addon</macast.role>
 # <macast.desc>Play the cast url in a player you already use -- VLC, MPC-BE/HC or mpv.net -- instead of the built-in mpv. Pick it from the menu bar.</macast.desc>
 #
 # Why: the bundled mpv is a good default, but people keep their own player for a

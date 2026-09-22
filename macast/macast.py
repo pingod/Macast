@@ -2,6 +2,7 @@
 # Copyright (c) 2026 by pingod. All Rights Reserved.
 
 import os
+import subprocess
 import re
 import sys
 import time
@@ -22,7 +23,7 @@ from . import plugin_repo
 # must query that repo, not the upstream xfangfang/Macast.
 GITHUB_REPO = 'pingod/Macast'
 from .gui import App, MenuItem, Platform
-from .protocol import DLNAProtocol, Protocol
+from .protocol import DLNAProtocol, Protocol, api_token
 from .server import Service
 from .utils import RENDERER_DIR, PROTOCOL_DIR, Setting
 from macast_renderer.mpv import MPVRenderer
@@ -135,7 +136,7 @@ class MacastPlugin:
 
     def __init__(self, path, title="None", plugin_instance=None, platform='none',
                  desc='', plugin_factory=None, module=None, version='',
-                 author=''):
+                 author='', role='player'):
         # path is allowed to be set to None only when renderer is macast default plugin
         self.path = path
         self.title = title
@@ -158,6 +159,7 @@ class MacastPlugin:
         # instance handed in); load_from_file() fills it in for file plugins.
         self.plugin_type = '' if plugin_instance is None else (
             'protocol' if isinstance(plugin_instance, Protocol) else 'renderer')
+        self.role = 'protocol' if self.plugin_type == 'protocol' else role
         if self.plugin_type == '' and module is not None:
             self.plugin_type = self._infer_type(module)
         if path:
@@ -219,6 +221,7 @@ class MacastPlugin:
         for i in props:
             res[i] = getattr(self, i, '')
         res['type'] = self.kind()
+        res['role'] = self.role
         res['key'] = self.key
         res['installed'] = self.installed
         res['can_uninstall'] = self.installed
@@ -322,6 +325,8 @@ class MacastPlugin:
         else:
             logger.error(f"Cannot find any plugin in {base_name}")
             return
+        if self.plugin_type == 'protocol':
+            self.role = 'protocol'
         # A plugin's own log goes to logs/<Logger>.log, not into macast.log --
         # a 30 fps mirror would bury the core lines (see macast/logsplit.py).
         logsplit.claim_from_module(module)
@@ -571,6 +576,44 @@ class MacastPluginManager:
         plugin = self.get_plugin_from_list(self.protocol_list, name)
         return plugin.get_instance()
 
+    def console_plugin(self):
+        """The renderer plugin that owns the desktop console, or None.
+
+        Found by a class attribute instead of by title: 「电脑投屏」 has to work
+        whichever renderer is currently selected, and a title is user-editable
+        while a class attribute is not.
+        """
+        for plugin in self.renderer_all:
+            exported = (plugin.plugin_class or plugin.plugin_factory
+                        or type(plugin.plugin_instance))
+            if getattr(exported, 'MIRROR_CONSOLE', False):
+                return plugin
+        return None
+
+    def mirror_setting(self):
+        """The screen-mirror plugin's console surface, whatever is playing.
+
+        Instantiating the renderer is not the same as selecting it: nothing here
+        calls `start()`, so no bus topic is taken over and no media is routed to
+        it. It exists so the console window answers to its own plugin.
+        """
+        plugin = self.console_plugin()
+        if plugin is None:
+            return None
+        is_enabled = getattr(self, 'is_plugin_enabled', None)
+        if is_enabled is not None and hasattr(self, 'renderer_list'):
+            if not is_enabled(plugin):
+                return None
+        try:
+            instance = plugin.get_instance()
+        except Exception as e:
+            logger.error('Creating the screen mirror renderer failed: %s', e)
+            return None
+        setting = getattr(instance, 'renderer_setting', None)
+        if setting is None or not hasattr(setting, 'console_state'):
+            return None
+        return setting
+
     @staticmethod
     def canonical_title(title):
         """Normalise a protocol title for comparison (case/space tolerant)."""
@@ -784,6 +827,8 @@ class MacastPluginManager:
                 module=module,
                 version=meta.get('version', ''),
                 author=meta.get('author', ''),
+                role=meta.get('role', 'protocol' if kind == 'protocol'
+                              else 'player'),
             ))
         return plugins
 
@@ -856,6 +901,9 @@ class Macast(App):
         # live (this is what makes it hot rather than "restart to take effect").
         cherrypy.engine.subscribe('get_plugin_manager', self.get_plugin_manager)
         cherrypy.engine.subscribe('plugins_changed', self.on_plugins_changed)
+        cherrypy.engine.subscribe('set_renderer', self.set_renderer)
+        cherrypy.engine.subscribe('quit_app', self.quit)
+        cherrypy.engine.subscribe('check_update', self._check_update_from_window)
         cherrypy.engine.subscribe('network_interface_changed',
                                   self.on_network_interface_changed)
 
@@ -865,6 +913,7 @@ class Macast(App):
         self.setting_menubar_icon = 0
         self.setting_renderer = ''
         self.setting_protocol = ''
+        self._config_process = None
         self.init_setting()
 
         # init service. Several protocols can be enabled at once; they are
@@ -879,8 +928,9 @@ class Macast(App):
         self.copy_menuitem = None
         super(Macast, self).__init__("Macast",
                                      icon_path,
-                                     self.build_app_menu(),
-                                     template
+                                     [],
+                                     template,
+                                     mode='headless'
                                      )
         cherrypy.engine.subscribe('start', self.service_start)
         cherrypy.engine.subscribe('stop', self.service_stop)
@@ -891,6 +941,90 @@ class Macast(App):
         cherrypy.engine.subscribe('app_notify', self.notification)
         self.start_cast()
         logger.debug("Macast APP started")
+
+    def window_state(self):
+        """JSON-free view model consumed by the native configuration window."""
+        info = self.plugin_manager.get_info()
+        renderers = [item['title'] for item in info
+                     if item.get('type') == 'renderer' and item.get('available')]
+        protocols = [{'title': item['title'], 'enabled': item.get('enabled', False)}
+                     for item in info if item.get('type') == 'protocol'
+                     and item.get('available')]
+        plugins = [{'title': item['title'], 'key': item['key'],
+                    'type': item.get('type', ''),
+                    'role': item.get('role', ''),
+                    'enabled': item.get('enabled', False),
+                    'available': item.get('available', False)}
+                   for item in info
+                   if item.get('role') == 'addon'
+                   and item.get('available')
+                   ]
+        addresses = '/'.join(ip for ip, _port in Setting.get_ip())
+        return {
+            'service': {
+                'name': Setting.get_friendly_name(),
+                'address': '{}:{}'.format(addresses, Setting.get_port()),
+                'status': '运行中' if Setting.is_service_running() else '已停止',
+                'version': Setting.get_version(),
+            },
+            'renderers': renderers,
+            'protocols': protocols,
+            'plugins': plugins,
+            'auto_update': '开启' if self.setting_check else '关闭',
+            'start_at_login': '开启' if self.setting_start_at_login else '关闭',
+            'auto_update_value': bool(self.setting_check),
+            'start_at_login_value': bool(self.setting_start_at_login),
+            'config_dir': SETTING_DIR,
+            'mirror': '电脑投屏使用独立控制台，可在这里打开并配置。',
+        }
+
+    def window_change(self, kind, value):
+        """Apply a value from the configuration window, then refresh state."""
+        if kind == 'renderer':
+            self.set_renderer(value)
+            return
+        if kind == 'protocol':
+            enabled = value not in self.enabled_protocols
+            self.set_protocol_enabled(value, enabled)
+            return
+        if kind == 'plugin':
+            plugin = self.plugin_manager.plugin_by_key(value)
+            if plugin is None:
+                raise ValueError('未找到插件')
+            enabled = not self.plugin_manager.is_plugin_enabled(plugin)
+            if plugin.kind() == 'protocol':
+                self.set_protocol_enabled(plugin.title, enabled)
+            else:
+                self.plugin_manager.set_renderer_enabled(value, enabled)
+                self.on_plugins_changed()
+            return
+        if kind == 'auto_update':
+            self.setting_check = 1 if value else 0
+            Setting.set(SettingProperty.CheckUpdate, self.setting_check)
+            return
+        if kind == 'start_login':
+            result = Setting.set_start_at_login(bool(value))
+            if result[0] != 0:
+                raise ValueError(result[1])
+            self.setting_start_at_login = 1 if value else 0
+            Setting.set(SettingProperty.StartAtLogin, self.setting_start_at_login)
+            return
+        raise ValueError('未知窗口操作：{}'.format(kind))
+
+    def set_renderer(self, title):
+        title = str(title or '').strip()
+        renderer_config = next((item for item in self.plugin_manager.renderer_list
+                                if item.title == title), None)
+        if renderer_config is None:
+            raise ValueError('未找到播放器：{}'.format(title))
+        self.service.renderer = renderer_config.get_instance()
+        self.setting_renderer = renderer_config.title
+        Setting.set(SettingProperty.Macast_Renderer, renderer_config.title)
+
+    def set_protocol_enabled(self, title, enabled):
+        self.plugin_manager.set_protocol_enabled(title, enabled)
+        self.enabled_protocols = self.plugin_manager.enabled_protocol_titles()
+        self._apply_enabled_protocols(rebuild_menu=False)
 
     def build_app_menu(self):
         self.toggle_menuitem = MenuItem(_("Stop Cast"), self.on_toggle_service_click, key="p")
@@ -980,7 +1114,10 @@ class Macast(App):
         if len(player_settings) > 0:
             player_settings.append(None)
 
+        mirror_rows = self._mirror_menu_rows()
+
         return [self.version_menuitem, self.ip_menuitem] + \
+               ([None] + mirror_rows if mirror_rows else []) + \
                renderer_select + \
                protocol_select + \
                [None] + \
@@ -989,6 +1126,41 @@ class Macast(App):
                 self.open_config_menuitem, self.advanced_menuitem] + \
                platform_options + \
                [None, self.check_update_menuitem, self.about_menuitem]
+
+    def _mirror_menu_rows(self):
+        """The 电脑投屏 door, offered whichever renderer is selected.
+
+        Spliced in by the app rather than by the plugin's own `build_menu()`,
+        because that one only exists while the plugin holds the player -- and
+        casting this screen is its own window driving its own ffmpeg, not a mode
+        of whatever is playing sound. A plugin with no console contributes
+        nothing, so every other renderer's menu is unchanged.
+        """
+        try:
+            setting = self.plugin_manager.mirror_setting()
+        except Exception as e:
+            logger.error("Asking for the mirror console failed: %s", e)
+            return []
+        build = getattr(setting, 'console_menu', None) if setting is not None else None
+        if build is None:
+            return []
+        try:
+            return list(build())
+        except Exception as e:
+            logger.error("Building the mirror console menu failed: %s", e)
+            return []
+
+    def _open_settings_window(self):
+        self.open_browser('http://127.0.0.1:{}/'.format(Setting.get_port()))
+
+    def _open_mirror_console(self):
+        setting = self.plugin_manager.mirror_setting()
+        if setting is None:
+            self.notification(_('Error'), _('Screen Mirror is not available.'))
+            return
+        opener = getattr(setting, 'on_open_console_clicked', None)
+        if opener is not None:
+            opener(None)
 
     def _load_enabled_protocols(self):
         """Read the enabled-protocol list, migrating the old single value.
@@ -1138,9 +1310,15 @@ class Macast(App):
 
     def update_service_status(self):
         if Setting.is_service_running():
-            self.toggle_menuitem.text = _('Stop Cast')
+            if self.toggle_menuitem is not None:
+                self.toggle_menuitem.text = _('Stop Cast')
+            status = _('Macast 正在运行')
         else:
-            self.toggle_menuitem.text = _('Start Cast')
+            if self.toggle_menuitem is not None:
+                self.toggle_menuitem.text = _('Start Cast')
+            status = _('Macast 已停止')
+        if self.window is not None:
+            self.window.set_status(status)
         self.update_menu()
 
     def service_start(self):
@@ -1183,11 +1361,15 @@ class Macast(App):
             ip_text = "/".join([ip for ip, _ in Setting.get_ip()])
             port = Setting.get_port()
             self.ip_menuitem.text = "{}:{}".format(ip_text, port)
-        self.version_menuitem.text = "{} v{}".format(Setting.get_friendly_name(), Setting.get_version())
+        if self.version_menuitem is not None:
+            self.version_menuitem.text = "{} v{}".format(
+                Setting.get_friendly_name(), Setting.get_version())
         self.update_menu()
 
     def renderer_av_stop(self):
         logger.info("renderer_av_stop")
+        if self.mode == 'headless':
+            return
         if self.copy_menuitem:
             self.remove_menu_item_by_id(self.copy_menuitem.id)
         self.copy_menuitem = None
@@ -1197,6 +1379,8 @@ class Macast(App):
 
     def renderer_av_uri(self, uri):
         logger.info("renderer_av_uri: " + uri)
+        if self.mode == 'headless':
+            return
         if self.copy_menuitem is not None:
             self.copy_menuitem.callback = lambda _: pyperclip.copy(uri)
             return
@@ -1288,6 +1472,8 @@ class Macast(App):
             self.call_on_main_thread(self._rebuild_menu)
 
     def _rebuild_menu(self):
+        if self.setting_menuitem is None:
+            return
         self.setting_menuitem.children = self.build_setting_menu()
         self.set_menu(self.menu)
 
@@ -1344,7 +1530,77 @@ class Macast(App):
     def quit(self, item):
         if Setting.is_service_running():
             self.stop_cast()
-        super(Macast, self).quit(item)
+        # The normal UI is a separate Tk process. Stopping CherryPy is the
+        # process lifecycle boundary; there is no in-process Tk root to close.
+
+    def _check_update_from_window(self, verbose=True):
+        threading.Thread(target=self.check_update, kwargs={'verbose': bool(verbose)},
+                         daemon=True, name='CHECKUPDATE_WINDOW').start()
+
+    def start(self):
+        """Always launch the one standalone configuration window."""
+        process = launch_config_window()
+        if process is None:
+            logger.error('configuration window runtime is unavailable')
+            return
+        self._config_process = process
+        threading.Thread(target=self._watch_config_window,
+                         args=(process,), daemon=True,
+                         name='CONFIG_WINDOW_WATCH').start()
+        logger.info('configuration window started with pid %s', process.pid)
+
+    def _watch_config_window(self, process):
+        """Stop the service if the only configuration window disappears."""
+        try:
+            process.wait()
+        except Exception as exc:
+            logger.error('configuration window wait failed: %s', exc)
+        if Setting.is_service_running():
+            self.quit(None)
+
+
+def launch_config_window():
+    """Start the one standalone Tk configuration window."""
+    candidates = ('/opt/homebrew/bin/python3', '/usr/local/bin/python3',
+                  '/usr/bin/python3')
+    probe = ('import tkinter; v = tuple(int(p) for p in '
+             'str(tkinter.TkVersion).split(".")[:2]); '
+             'raise SystemExit(0 if v >= (8, 6) else 1)')
+    interpreter = None
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        try:
+            result = subprocess.run(
+                [candidate, '-c', probe],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            interpreter = candidate
+            break
+    module = os.path.join(os.path.dirname(__file__), 'config_window.py')
+    if interpreter is None or not os.path.exists(module):
+        logger.error('No Python with Tk 8.6+ is available for the configuration window')
+        return None
+    env = dict(os.environ)
+    env['MACAST_CONFIG_API'] = 'http://127.0.0.1:{}'.format(Setting.get_port())
+    env['MACAST_CONFIG_TOKEN'] = api_token()
+    env['MACAST_CONFIG_DIR'] = SETTING_DIR
+    try:
+        os.makedirs(SETTING_DIR, exist_ok=True)
+        handle = open(os.path.join(SETTING_DIR, 'config_window.log'), 'ab')
+        try:
+            return subprocess.Popen([interpreter, module], env=env,
+                                    stdin=subprocess.DEVNULL,
+                                    stdout=handle, stderr=handle,
+                                    close_fds=True)
+        finally:
+            handle.close()
+    except OSError as exc:
+        logger.error('configuration window failed: %s', exc)
+        return None
 
 
 def gui(renderer=None, protocol=None, lang=gettext.gettext):

@@ -164,6 +164,47 @@ On macOS only `IINA Renderer`, `Web Renderer`, `Live Renderer` and
 PIFMRDS (Linux) must still be **listed** with `"available": false`. A plugin
 missing from the list entirely means it was stripped from the bundle.
 
+## Verify the screen-mirror console ships
+
+`macast/mirror_console.py` — the desktop window that drives the Screen Mirror
+plugin — is loaded **by path** at runtime (`Macast.run_mirror_console`), so the
+same blind spot applies: no dependency scanner follows that import. It has one
+dependency the plugins do not, either: a python that can do Tk.
+
+```bash
+APP=/Applications/Macast.app     # or dist/Macast.app
+ls "$APP/Contents/Resources/lib/python3.12/macast/mirror_console.py"
+
+# The .app deliberately ships no Tk (the reason is commented in setup_py2app.py),
+# so the window opens under a Tk-capable python that is already installed.
+# Ask the same candidates the launcher's ladder asks -- and ask them the same
+# question: Tk 8.6 or newer, because `import tkinter` alone also answers "yes"
+# for the 8.5.9 that draws nothing but native buttons.
+for p in /usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+  [ -x "$p" ] && "$p" -c 'import sys, tkinter; sys.exit(
+    0 if tuple(int(x) for x in str(tkinter.TkVersion).split("."))[:2] >= (8, 6)
+    else 1)' 2>/dev/null && echo "Tk 8.6+: $p"
+done
+```
+
+Nothing printed means the menu item opens no window and the notification says
+what to install (`brew install python-tk`) — that is a supported outcome, not a
+broken artefact. Note that `/usr/bin/python3` is a shim that launches the Command
+Line Tools installer when the tools are absent, which is why the ladder checks
+`/Library/Developer/CommandLineTools` before offering it -- and that its Tk is
+8.5.9, so on a Mac without `python-tk` the honest answer is usually *none*.
+
+The PyInstaller artefacts (Linux, Windows) carry the file **twice**: `--add-data`
+puts a runnable `.py` next to the executable for a system python to run, and
+`--hidden-import=macast.mirror_console` freezes it so `macast.exe
+--mirror-console` works on a machine that has no python installed at all. Both
+lines belong to every one of the three jobs, and Part 35 of
+`verify_cast_airplay.py` goes red if any job loses either copy.
+
+The window's own output goes to `mirror_console.log` next to `macast.log` — a Tk
+traceback exists nowhere else — and a child that dies immediately is reported as
+a notification carrying its exit code plus that log's last line.
+
 ## Why py2app and not PyInstaller
 
 The original project uses `py2app` (visible in `setup_py2app.py`,
