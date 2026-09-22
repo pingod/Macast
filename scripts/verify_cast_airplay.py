@@ -5774,6 +5774,27 @@ done
         setting23.build_menu()
         check("a full renderer list does not search on every redraw",
               _searches23 == [], str(_searches23))
+        # The bug this guards: on a LAN where discovery finds nothing the list
+        # stayed empty, so build_menu re-kicked the search on every open and the
+        # submenu could only ever read「搜索中…再展开一次菜单」. A completed
+        # search has to turn that into a dated「没有发现」and stop re-searching,
+        # while the very first (still-running) look is the only「搜索中」left.
+        mirror._dlna_devices = []
+        mirror._dlna_searched_at = time.time()
+        _searches23[:] = []
+        _labels23fresh = _menu_texts23(setting23.build_menu())
+        check("a completed empty search reads as a dated「没有发现」and is not "
+              "re-run on every open",
+              _searches23 == []
+              and not any('搜索中' in t for t in _labels23fresh)
+              and any(t.startswith('没有发现 DLNA 电视（搜于 ')
+                      for t in _labels23fresh), str(_labels23fresh))
+        mirror._dlna_searched_at = 0.0
+        mirror._dlna_searching = True
+        _labels23first = _menu_texts23(setting23.build_menu())
+        check("only the very first, still-running search says「搜索中」",
+              any('搜索中' in t for t in _labels23first), str(_labels23first))
+        mirror._dlna_searching = False
         utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
         utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
         utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Profile)

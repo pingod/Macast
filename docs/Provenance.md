@@ -6,7 +6,7 @@
 > `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
 > 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
 
-<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=30780 -->
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=52 upstream=3 vendored=6 mixed=12 ours=31 upstream_lines=6650 our_lines=30893 -->
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
@@ -68,16 +68,16 @@
 |---|---:|---:|---:|---:|
 | 核心接收端 `macast/**`（不含内置插件） | 3076 | 5496 | 17 | 64.1% |
 | 内置插件 `macast/plugins/**`（vendored，来自上游合集 `Macast-plugins`） | 2885 | 0 | 6 | 0.0% |
-| 内置插件 `macast/plugins/**`（本 fork 自研并内置，含 3 个空 `__init__.py`） | 0 | 9881 | 12 | 100.0% |
+| 内置插件 `macast/plugins/**`（本 fork 自研并内置，含 3 个空 `__init__.py`） | 0 | 9973 | 12 | 100.0% |
 | mpv 渲染器 `macast_renderer/**` | 573 | 102 | 2 | 15.1% |
 | 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 215 | 4 | 64.9% |
-| 工具与验证 `scripts/*.py` | 0 | 15086 | 11 | 100.0% |
-| **合计** | **6650** | **30780** | **52** | **82.2%** |
+| 工具与验证 `scripts/*.py` | 0 | 15107 | 11 | 100.0% |
+| **合计** | **6650** | **30893** | **52** | **82.3%** |
 
 两个读数要点：
 
-- **占比 82.2% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10714 行
-  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 68.8%；只看**运行时真正加载的**代码
+- **占比 82.3% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 10735 行
+  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 70.4%；只看**运行时真正加载的**代码
   （核心接收端 + mpv 渲染器）是 60.5%，也就是说应用本体还有约 3649 行是上游的。
 - **"看声明头"会把这件事估反**：按文件头里有没有 `by xfangfang` 数，会得出"21623 行是上游的"
   ——因为上游的头贴在了一堆**代码早被我们重写干净**的文件上（`macast/discovery.py`、

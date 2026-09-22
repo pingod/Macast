@@ -276,6 +276,13 @@ SSDP_PORT = 1900
 
 _devices = []
 _searching = False
+#: wall clock of the last completed Chromecast search; 0.0 = never. The menu
+#: reads it to tell「still looking」from「looked, found nothing」-- without it
+#: a LAN with no device to find made the menu read「搜索中」on every open.
+_searched_at = 0.0
+#: Opening the menu again inside this window reuses the cached answer instead
+#: of kicking another multicast search (see `_search_due`).
+SEARCH_REFRESH_SECONDS = 15.0
 _search_lock = threading.Lock()
 #: cached result of `ffmpeg -encoders`, because the menu must never spawn it
 _hw_encoder_cache = {}
@@ -337,7 +344,7 @@ def start_search():
 
 
 def _search():
-    global _devices, _searching
+    global _devices, _searching, _searched_at
     try:
         found = discover()
         if found:
@@ -345,6 +352,27 @@ def _search():
     finally:
         with _search_lock:
             _searching = False
+            _searched_at = time.time()
+
+
+def _search_due(searched_at, now):
+    """Whether an empty device list warrants a fresh multicast search.
+
+    Never searched counts as due, so the first open always looks. A completed
+    search younger than SEARCH_REFRESH_SECONDS does not -- and that is what
+    stops `build_menu` from restarting the search on every single open, which
+    is how the menu came to read「搜索中…再展开一次菜单」forever on a LAN
+    that has no device to find.
+    """
+    return searched_at == 0.0 or (now - searched_at) >= SEARCH_REFRESH_SECONDS
+
+
+def _searched_suffix(searched_at):
+    """「（搜于 08:47:31）」 once a search has completed, '' before the first."""
+    if not searched_at:
+        return ''
+    return '（搜于 {}）'.format(
+        time.strftime('%H:%M:%S', time.localtime(searched_at)))
 
 
 class SettingProperty(Enum):
@@ -2852,6 +2880,8 @@ def discover_renderers(timeout=3.0):
 
 _dlna_devices = []
 _dlna_searching = False
+#: wall clock of the last completed DLNA search; 0.0 = never (see _searched_at).
+_dlna_searched_at = 0.0
 
 
 def start_renderer_search():
@@ -2863,7 +2893,7 @@ def start_renderer_search():
         _dlna_searching = True
 
     def _run():
-        global _dlna_devices, _dlna_searching
+        global _dlna_devices, _dlna_searching, _dlna_searched_at
         try:
             found = discover_renderers()
             if found:
@@ -2871,6 +2901,7 @@ def start_renderer_search():
         finally:
             with _search_lock:
                 _dlna_searching = False
+                _dlna_searched_at = time.time()
 
     threading.Thread(target=_run, daemon=True,
                      name="SCREEN_MIRROR_DLNA_SEARCH").start()
@@ -3934,6 +3965,12 @@ class ScreenMirrorRenderer(Renderer):
     def start(self):
         super(ScreenMirrorRenderer, self).start()
         start_search()
+        # The「输出目标」submenu reads the DLNA renderer list when a TV is the
+        # target -- the Chromecast search above does not fill it. Warming it
+        # here is what keeps the first open of that submenu from having to say
+        #「搜索中…再展开一次菜单」while it waits.
+        if output_kind() == 'dlna':
+            start_renderer_search()
 
     def set_media_url(self, url, start="0"):
         """A phone pushed something: mirror stops and the pushed url plays.
@@ -4492,9 +4529,16 @@ class ScreenMirrorSetting(RendererSetting):
 
     def build_menu(self):
         kind = output_kind()
-        if kind in ('cast', 'caststream') and not _devices:
+        now = time.time()
+        # Only look when there is nothing to show AND the last answer has gone
+        # stale -- otherwise a menu opened a second apart re-ran the multicast
+        # search each time and could never report what it had already found.
+        if (kind in ('cast', 'caststream') and not _devices
+                and not _searching and _search_due(_searched_at, now)):
             start_search()
-        if kind == 'dlna' and not _dlna_devices:
+        if (kind == 'dlna' and not _dlna_devices
+                and not _dlna_searching
+                and _search_due(_dlna_searched_at, now)):
             start_renderer_search()
         renderer = self._renderer()
         mirroring = bool(renderer and renderer.is_mirroring())
@@ -4571,8 +4615,16 @@ class ScreenMirrorSetting(RendererSetting):
                                      checked=(device_control == control),
                                      data=(device_name, device_control)))
         if not children:
-            children.append(MenuItem('搜索中…再展开一次菜单' if _dlna_searching
-                                     else '没有发现 DLNA 电视', enabled=False))
+            #「搜索中」is only honest while the very first look is in flight:
+            # once a search has completed, an empty list is a fact to state
+            # (with the time it was established), not a reason to claim the
+            # search is still running.
+            if _dlna_searching and not _dlna_searched_at:
+                children.append(MenuItem('搜索中…再展开一次菜单', enabled=False))
+            else:
+                children.append(MenuItem(
+                    '没有发现 DLNA 电视' + _searched_suffix(_dlna_searched_at),
+                    enabled=False))
         children.append(MenuItem('重新搜索', self.on_refresh))
         return children
 
@@ -4593,8 +4645,12 @@ class ScreenMirrorSetting(RendererSetting):
                                      checked=(target == current),
                                      data=(name, target)))
         if not children:
-            children.append(MenuItem('搜索中…再展开一次菜单' if _searching
-                                     else '没有发现 Chromecast', enabled=False))
+            if _searching and not _searched_at:
+                children.append(MenuItem('搜索中…再展开一次菜单', enabled=False))
+            else:
+                children.append(MenuItem(
+                    '没有发现 Chromecast' + _searched_suffix(_searched_at),
+                    enabled=False))
         children.append(MenuItem('重新搜索', self.on_refresh))
         return children
 
