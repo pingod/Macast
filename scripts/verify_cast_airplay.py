@@ -2678,7 +2678,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 # Part 13: the yt-dlp downloader shipped as an online plugin
 #
-# plugins/macast_ytdlp.py is the first entry in the (previously empty) index:
+# macast/plugins/renderer/macast_ytdlp.py is a bundled built-in plugin (it used to be offered through the online index):
 # it turns "cast this Bilibili / YouTube / m3u8 url" into "download it", which
 # is the one thing the built-in mpv renderer cannot do with a page URL.
 #
@@ -6683,7 +6683,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 # Part 25: the local file caster
 #
-# plugins/cast_local_file.py is the sender half of this plugin family: it serves
+# macast/plugins/renderer/cast_local_file.py is the sender half of this plugin family: it serves
 # the user's own files over HTTP and orders a Chromecast or a DLNA television to
 # fetch them. Two things make this part worth its length.
 #
@@ -8201,7 +8201,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 # Part 26: the AirPlay screen mirror supervisor
 #
-# plugins/airplay_mirror.py does not implement AirPlay mirroring; it keeps
+# macast/plugins/protocol/airplay_mirror.py does not implement AirPlay mirroring; it keeps
 # uxplay running with an option file that carries the Macast name. Everything
 # worth testing is therefore either the option file (uxplay's config format has
 # no escaping rules that a friendly name with a space satisfies by accident) or
@@ -9752,7 +9752,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 # Part 30: what an online plugin is allowed to import
 #
-# `plugins/*.py` are single files the app downloads and execs at runtime, so a
+# `macast/plugins/*.py` are bundled built-in plugins loaded at startup, so a
 # third-party import in one of them is a promise nobody is holding: the built
 # artefacts carry exactly what `requirements/` declares (AGENTS.md §4.3/§4.4),
 # and a user who installs a bare .py gets whatever their machine happens to
