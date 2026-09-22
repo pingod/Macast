@@ -1,5 +1,10 @@
 appdirs
 cherrypy
+# macast/plugins/protocol/nirvana.py subclasses cheroot.server.HTTPRequest and
+# cheroot.server.HTTPConnection directly. cherrypy drags cheroot in, but betting
+# on that is the same transitive-dependency bet requirements/darwin.txt refuses
+# to make for pyperclip and pyobjc -- so it is named here as well.
+cheroot
 lxml
 pillow
 requests

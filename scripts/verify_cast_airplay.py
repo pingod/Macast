@@ -9771,7 +9771,7 @@ except Exception as e:
 
 
 # --------------------------------------------------------------------------
-# Part 30: what an online plugin is allowed to import
+# Part 30: what a bundled plugin is allowed to import
 #
 # `macast/plugins/*.py` are bundled built-in plugins loaded at startup, so a
 # third-party import in one of them is a promise nobody is holding: the built
@@ -9783,7 +9783,7 @@ except Exception as e:
 # pyobjc in requirements/darwin.txt instead of inheriting it from rumps, which is
 # the first thing these checks hold the two files to.
 # --------------------------------------------------------------------------
-print("\n=== Part 30: online plugin imports ===")
+print("\n=== Part 30: bundled plugin imports ===")
 try:
     import ast as _ast30
     import re as _re30
@@ -9880,6 +9880,81 @@ try:
               _norm30(_dist) in _declared_in(_rfile),
               str(sorted(_declared_in(_rfile))))
 
+    # The other kind of platform-conditional name: one that no build ships at
+    # all, allowed because the plugin that reaches for it still works without
+    # it. `potplayer` uses win32api/win32con only to read PotPlayer's install
+    # path out of the Windows registry -- and it says so itself: "Absent key,
+    # missing pywin32, or a path that no longer exists: all mean 'ask the next
+    # source', not 'fail'", falling back to the user-configured path and then
+    # the two default install locations. No build installs pywin32 (the Windows
+    # job's pip line does not name it, and there is no windows requirements
+    # file), so listing it in `_PLATFORM_OPTIONAL` above would mean pointing at
+    # a requirements file no job ever installs -- §4.3's mistake with the sign
+    # flipped.
+    #
+    # This table is a claim about the code, so the code is held to it: an entry
+    # only counts if the import really is reached through a `try/except
+    # ImportError` that binds the name to None. Without that, the table would
+    # be a way to import anything by declaring nothing.
+    _OPTIONAL_BY_FALLBACK = {
+        'win32api': ('pywin32', 'renderer/potplayer.py'),
+        'win32con': ('pywin32', 'renderer/potplayer.py'),
+    }
+
+    def _degrades_without(source, mod):
+        """True iff every `import mod` here is guarded by an ImportError.
+
+        Answers "can this file still load without the module": the import has to
+        sit inside a `try` whose handlers catch ImportError and bind the name to
+        None. potplayer's module-level try is the shape this encodes.
+        """
+        for _try in _ast30.walk(_ast30.parse(source)):
+            if not isinstance(_try, _ast30.Try):
+                continue
+            if not any(isinstance(h.type, _ast30.Name)
+                       and h.type.id == 'ImportError' for h in _try.handlers):
+                continue
+            _inside = set()
+            for _child in _ast30.walk(_try):
+                if isinstance(_child, _ast30.Import):
+                    _inside.update(a.name.split('.')[0] for a in _child.names)
+                elif (isinstance(_child, _ast30.ImportFrom)
+                      and _child.level == 0 and _child.module):
+                    _inside.add(_child.module.split('.')[0])
+            if mod not in _inside:
+                continue
+            if any(isinstance(_a, _ast30.Assign)
+                   and any(isinstance(t, _ast30.Name) and t.id == mod
+                           for t in _a.targets)
+                   and isinstance(_a.value, _ast30.Constant)
+                   and _a.value.value is None
+                   for _h in _try.handlers for _a in _ast30.walk(_h)):
+                return True
+        return False
+
+    _hard30 = []
+    for _mod, (_dist, _rel) in _OPTIONAL_BY_FALLBACK.items():
+        with open(os.path.join(MACAST, "plugins", _rel), encoding="utf-8") as fh:
+            _src30 = fh.read()
+        if not _degrades_without(_src30, _mod):
+            _hard30.append('{} ({})'.format(_mod, _rel))
+    check("a module no build ships is allowed in a plugin only if the plugin "
+          "degrades without it",
+          not _hard30, str(_hard30))
+
+    # ... and prove _degrades_without separates the two cases, so the check
+    # above cannot pass by being unable to see an unguarded import.
+    check("an unguarded import of such a module is what the rule above catches",
+          _degrades_without("try:\n    import win32api\n"
+                            "except ImportError:\n    win32api = None\n",
+                            'win32api')
+          and not _degrades_without("import win32api\n", 'win32api'),
+          "guarded=%s bare=%s" % (
+              _degrades_without("try:\n    import win32api\n"
+                                "except ImportError:\n    win32api = None\n",
+                                'win32api'),
+              _degrades_without("import win32api\n", 'win32api')))
+
     try:
         from importlib.metadata import packages_distributions as _pdd30
         _mapped = {m for m, ds in _pdd30().items()
@@ -9887,6 +9962,7 @@ try:
     except ImportError:  # pragma: no cover - Python < 3.8
         _mapped = set()
     _allowed30 = (set(sys.stdlib_module_names) | _mapped | set(_PLATFORM_OPTIONAL)
+                  | set(_OPTIONAL_BY_FALLBACK)
                   | {'macast', 'macast_renderer'})
 
     def _illegal30(source):
@@ -9905,7 +9981,7 @@ try:
             _offenders = _illegal30(fh.read())
         if _offenders:
             _bad30[_fname] = _offenders
-    check("no online plugin imports a third-party module Macast does not declare",
+    check("no bundled plugin imports a third-party module Macast does not declare",
           not _bad30, str(_bad30))
     # The other way round: prove the rule above is not vacuous, and that it
     # allows what it should allow. A plugin adding `import aiortc` is exactly
