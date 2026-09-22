@@ -31,6 +31,13 @@
 #
 # `FORK_POINT` marks the boundary; its parent chain is upstream's history.
 #
+# What a row is a picture *of*: the file list is the index, line counts of a
+# file this fork created (or never touched, or vendored in) are counted off the
+# disk, and line counts of a file both sides still share are counted off HEAD by
+# `git blame`. So commit first and re-measure second: numbers read beside an
+# uncommitted edit describe the *previous* commit for exactly those mixed files,
+# which is how a ledger that matched the suite an hour ago fails a clean tree.
+#
 # Output shapes: a table for humans (default), `--json` for the regression suite
 # (Part 34, so docs/Provenance.md cannot drift away from the history it
 # describes), `--check` to exit non-zero on notice drift, and `--stamp --apply`
@@ -177,11 +184,12 @@ def is_upstream_bytes(path):
 
 
 def blame_lines(path, before):
-    """(upstream_lines, our_lines) for the file **as it stands on disk**.
+    """(upstream_lines, our_lines) for the file **as it stands in HEAD**.
 
-    `git blame HEAD -- path` reads the working tree, so uncommitted edits count
-    here immediately -- and a line that is not committed yet has no attribution,
-    which puts it in `our_lines` even when the edit *removed* an upstream line.
+    Naming a revision makes blame read the committed blob, so an uncommitted
+    edit to a file that already existed at the fork point is invisible here.
+    The other branches of `classify()` count lines off the **disk** instead --
+    see the note on `ledger()`, and run `--check` against a committed tree.
     """
     counts = [0, 0]
     for line in git("blame", "--line-porcelain", "HEAD", "--", path).splitlines():
@@ -248,7 +256,14 @@ def classify(path, before):
 
 
 def ledger():
-    """The whole repository, one row per tracked .py file."""
+    """The whole repository, one row per tracked .py file.
+
+    Two different moments feed one row, and neither is "the tree as it stands":
+    the file list is the index (`git ls-files`), `vendored`/`ours`/untouched
+    `upstream` rows are counted off the disk, and `mixed` rows off HEAD. So the
+    numbers move when you commit -- which is why `docs/Provenance.md` is
+    re-measured *after* the commit that changes code, not before it.
+    """
     tracked = git("ls-files", "*.py").split()
     paths = [p for p in tracked if os.path.exists(os.path.join(REPO_ROOT, p))]
     before = upstream_commits()

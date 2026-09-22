@@ -15,7 +15,7 @@ from cherrypy.process.plugins import Monitor
 
 from .utils import Setting, XMLPath, SettingProperty, SETTING_DIR
 from .plugin import ProtocolPlugin, RendererPlugin, SSDPPlugin
-from .protocol import DLNAProtocol, Protocol, DLNAHandler
+from .protocol import Protocol
 
 logger = logging.getLogger("server")
 logger.setLevel(logging.DEBUG)
@@ -280,7 +280,7 @@ class Service:
             # of just disabling this one channel. (OptionalServer above is the
             # second line of defence for the failures we cannot pre-flight,
             # such as the port being taken.)
-            import cheroot.ssl.builtin  # noqa: F401
+            __import__('cheroot.ssl.builtin')
             https_server = OptionalServer()
             https_server.bind_addr = ('0.0.0.0', https_port)
             https_server.ssl_module = 'builtin'

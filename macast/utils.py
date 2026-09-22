@@ -328,7 +328,7 @@ class Setting:
         for i in interfaces:
             try:
                 iface = ni.ifaddresses(i)
-            except ValueError as e:
+            except ValueError:
                 continue
             if ni.AF_INET in iface:
                 for j in iface[ni.AF_INET]:

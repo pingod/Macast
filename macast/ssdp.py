@@ -78,18 +78,21 @@ class Sock:
         # on a different VLAN / behind an AP that decrements the TTL, so
         # bump it to 4 to comfortably cross a few router hops.
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+        # Keep unicast SSDP replies on this LAN interface. Windows can choose a
+        # different source interface when Wi-Fi, Ethernet and virtual adapters
+        # are active together.
+        try:
+            self.sock.bind((self.ip, 0))
+        except OSError as e:
+            logger.warning("SSDP cannot bind sender to %s: %s", self.ip, e)
 
     def send_it(self, response, destination):
         try:
             self.sock.sendto(response.format(self.ip).encode(), destination)
-        except (AttributeError, socket.error) as msg:
+        except (AttributeError, socket.error):
             logger.warning("failure sending out data: from {} to {}".format(self.ip, destination))
 
     def close(self):
-        try:
-            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP,  self.ssdp_addr + self.interface)
-        except Exception:
-            pass
         self.sock.close()
 
 
@@ -102,6 +105,8 @@ class SSDPServer:
         self.known = {}  # registered devices (per-instance, NOT shared!)
         self.ip_list = []
         self.sock_list = []
+        self.sock_by_ip = {}
+        self.memberships = []
         self.sock = None
         self.running = False
         self.ssdp_thread = None
@@ -135,10 +140,13 @@ class SSDPServer:
         if self.running:
             self.running = False
             # Wake up the socket, this will speed up exiting ssdp thread.
+            wake = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'', (SSDP_ADDR, SSDP_PORT))
-            except Exception as e:
+                wake.sendto(b'', (SSDP_ADDR, SSDP_PORT))
+            except Exception:
                 pass
+            finally:
+                wake.close()
         # Join whenever a thread is still alive, not only when self.running was
         # set: otherwise a stop() that races with an already-exiting thread
         # would return immediately and the following start() could flip
@@ -181,29 +189,42 @@ class SSDPServer:
         # the casting phone or TV.
         self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
 
+        # Bind before joining multicast groups. Windows may accept
+        # IP_ADD_MEMBERSHIP before bind but then not deliver M-SEARCH packets
+        # to the socket bound to UDP/1900 on a multi-NIC host.
+        try:
+            self.sock.bind(('0.0.0.0', SSDP_PORT))
+        except Exception as e:
+            logger.error(e)
+            cherrypy.engine.publish("app_notify", "Macast", "SSDP Can't start")
+            threading.Thread(target=lambda: Setting.stop_service(),
+                             name="SSDP_STOP_THREAD").start()
+            return
+        self.sock.settimeout(1)
+
         self.ip_list = list(Setting.get_ip())
-        if sys.platform == 'win32':
-            self.ip_list.append(('192.168.137.1', '255.255.255.0'))
         self.sock_list = []
-        joined = False
+        self.sock_by_ip = {}
+        self.memberships = []
+        joined_any = False
         for ip, mask in self.ip_list:
             try:
                 logger.debug('add membership {}'.format(ip))
-                # On macOS 14+ (Tahoe), joining 239.255.255.250 with a
-                # specific interface address in ip_mreq (e.g. 192.168.1.3)
-                # silently fails to deliver incoming M-SEARCH / NOTIFY
-                # packets to the socket. Joining with INADDR_ANY (0.0.0.0)
-                # is the documented workaround and binds the membership to
-                # whichever interface the kernel ends up using.
-                # The membership is a *host*-level property: once joined
-                # on the host, repeat joins with the same address return
-                # EADDRINUSE — harmless, just log and move on.
-                if not joined:
-                    mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton('0.0.0.0')
-                    self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                    joined = True
+                # Windows needs one membership per LAN interface; INADDR_ANY
+                # commonly joins only the default interface. macOS keeps the
+                # INADDR_ANY workaround for its shared SSDP socket.
+                if sys.platform != 'darwin' or not joined_any:
+                    interface_ip = '0.0.0.0' if sys.platform == 'darwin' else ip
+                    mreq = (socket.inet_aton(SSDP_ADDR)
+                            + socket.inet_aton(interface_ip))
+                    self.sock.setsockopt(socket.IPPROTO_IP,
+                                         socket.IP_ADD_MEMBERSHIP, mreq)
+                    self.memberships.append(mreq)
+                    joined_any = True
                 try:
-                    self.sock_list.append(Sock(ip))
+                    sender = Sock(ip)
+                    self.sock_list.append(sender)
+                    self.sock_by_ip[ip] = sender
                 except Exception as se:
                     # Skip virtual / unsupported adapters (e.g. 192.168.137.1
                     # ICS/hotspot) that can't take an IP_MULTICAST_IF; a single
@@ -212,15 +233,6 @@ class SSDPServer:
             except Exception as e:
                 logger.error(e)
 
-        try:
-            self.sock.bind(('0.0.0.0', SSDP_PORT))
-        except Exception as e:
-            logger.error(e)
-            cherrypy.engine.publish("app_notify", "Macast", "SSDP Can't start")
-            threading.Thread(target=lambda: Setting.stop_service(), name="SSDP_STOP_THREAD").start()
-            return
-        self.sock.settimeout(1)
-
         while self.running:
             try:
                 data, addr = self.sock.recvfrom(1024)
@@ -228,15 +240,16 @@ class SSDPServer:
             except socket.timeout:
                 continue
         self.shutdown()
-        for ip, mask in self.ip_list:
-            # The multicast membership is joined host-wide (0.0.0.0), so a
-            # per-interface drop is best-effort and often not-joined; avoid
-            # spamming ERROR for virtual adapters.
+        for mreq in self.memberships:
             try:
-                mreq = socket.inet_aton(SSDP_ADDR) + socket.inet_aton(ip)
                 self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_DROP_MEMBERSHIP, mreq)
             except Exception:
                 continue
+        self.memberships = []
+        for sender in self.sock_list:
+            sender.close()
+        self.sock_list = []
+        self.sock_by_ip = {}
         self.sock.close()
         self.sock = None
 
@@ -359,10 +372,16 @@ class SSDPServer:
                     logger.debug('send discovery response delayed by %ds for %s to %r' % (delay, usn, destination))
                     # logger.debug(response)
                     # asyncio.sleep(delay)
+                    sent = False
                     for ip, mask in self.ip_list:
                         if self.get_subnet_ip(ip, mask) == self.get_subnet_ip(host, mask):
-                            self.sock.sendto('\r\n'.join(response).format(ip).encode(), destination)
+                            sender = self.sock_by_ip.get(ip)
+                            if sender is not None:
+                                sender.send_it('\r\n'.join(response), destination)
+                                sent = True
                             break
+                    if not sent:
+                        logger.warning('No SSDP sender for discovery source %s', host)
 
     def do_notify(self, usn):
         """Do notification"""

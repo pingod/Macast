@@ -6,7 +6,7 @@
 > `env -u PYTHONPATH .venv/bin/python scripts/provenance.py --check --stamp` →
 > 更新本文件的表 → 跑套件。少做一步，Part 34 就会变红。
 
-<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=54 upstream=3 vendored=6 mixed=12 ours=33 upstream_lines=6636 our_lines=34112 -->
+<!-- provenance-ledger: fork=19879235ef98a64b813de968306bc91a0d663518 files=54 upstream=3 vendored=6 mixed=12 ours=33 upstream_lines=6610 our_lines=33763 -->
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
@@ -30,8 +30,10 @@
 
 ## 1. 怎么度量的
 
-`scripts/provenance.py` 回答一个可以机械核对的问题：这个文件**现在磁盘上的每一行**，
-最后一次被修改发生在 fork 起点之前还是之后？（未提交的行没有归属，一律算"我们的"。）
+`scripts/provenance.py` 回答一个可以机械核对的问题：这个文件**的每一行**，
+最后一次被修改发生在 fork 起点之前还是之后？一条台账行是**两个时刻的混合**（见 §2 第三条要点）：
+文件列表来自索引，"这个 fork 一行都没写过 / 一行都没动过 / vendored 进来的"三类文件按**磁盘**数行，
+而两边都还在的 `mixed` 文件按 **HEAD 里的那份内容**跑 blame。
 
 - fork 起点 = `19879235ef98a64b813de968306bc91a0d663518`（2026-09-03，本 fork 作者的第一条提交）。
   它的父提交链 = 上游历史，共 **215** 条提交（`xfangfang` 209 条，其余 6 位贡献者 6 条）。
@@ -44,7 +46,7 @@
 | 改名 / 挪位置的文件 | blame 不跨重命名，历史被截断在同一行 | 比对 blob SHA：内容若与上游提交过的某个 blob **逐字节相同**，就是上游的，不管现在叫什么名字（少于 5 行的文件不参与，空文件的 blob 全世界都一样） |
 
 四条快速路径（新文件、未改动文件）走 `cat-file` / `diff --quiet`，只对真正动过的老文件跑 blame，
-所以全仓 52 个 `.py` 一遍 1.8 秒。
+所以全仓 54 个 `.py` 一遍 1.7 秒。
 
 四个状态就是声明必须对齐的四种事实：
 
@@ -66,32 +68,35 @@
 
 | 域 | 上游行 | 本 fork 行 | 文件数 | ours 占比 |
 |---|---:|---:|---:|---:|
-| 核心接收端 `macast/**`（不含内置插件） | 3062 | 6526 | 19 | 68.1% |
+| 核心接收端 `macast/**`（不含内置插件） | 3037 | 6234 | 19 | 67.2% |
 | 内置插件 `macast/plugins/**`（vendored，来自上游合集 `Macast-plugins`） | 2885 | 0 | 6 | 0.0% |
 | 内置插件 `macast/plugins/**`（本 fork 自研并内置，含 3 个空 `__init__.py`） | 0 | 10823 | 12 | 100.0% |
 | mpv 渲染器 `macast_renderer/**` | 573 | 102 | 2 | 15.1% |
-| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 116 | 284 | 4 | 71.0% |
-| 工具与验证 `scripts/*.py` | 0 | 16377 | 11 | 100.0% |
-| **合计** | **6636** | **34112** | **54** | **83.7%** |
+| 入口与打包 `Macast.py` / `setup*.py` / `hook-pystray.py` | 115 | 219 | 4 | 65.6% |
+| 工具与验证 `scripts/*.py` | 0 | 16385 | 11 | 100.0% |
+| **合计** | **6610** | **33763** | **54** | **83.6%** |
 
 三个读数要点：
 
-- **占比 83.7% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 11986 行
-  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 72.8%；只看**运行时真正加载的**代码
-  （核心接收端 + mpv 渲染器）是 64.6%，也就是说应用本体还有约 3635 行是上游的。
-- **清单来自索引，行数来自磁盘 —— 这两件事在不同时刻分叉。** `ledger()` 的文件列表是
-  `git ls-files *.py`（**索引**），而每行的归属是 `git blame --line-porcelain HEAD -- <path>`
-  读**工作树里的那份文件**：没提交的增删当场反映，未提交的行归属是 `0000…`（"Not Committed Yet"），
-  落不进 fork 点之前 ⇒ **一律算我们的**。实测：把 `screen_mirror.py` 里六行预览逻辑临时删掉重跑
-  套件，`our_lines` 从 34107 变成 34101。由此两条推论：① 一张"对得上套件"的表**不等于**
-  对得上某条提交，它对的是此刻的磁盘；② 把上游的一行改成我们的写法，在未提交时就已经被记成
-  我们的行了 —— 这方向偏得还算保守（不会替我们冒领上游的代码），但**反过来不行**：
-  删掉两个文件（`git rm` 进索引）会让 `files` 立刻短两条，而新写的文件不 `git add` 就不进账。
-  本轮撞上的正是这一条：Tk 层的删除已暂存、文档还带着删除前的数字，Part 34 当场红。
-  （投屏控制台窗口 `macast/mirror_console.py` 与 `macast/config_window.py` 已经删掉，
-  设置页的「电脑投屏」页签是它们唯一的后继；`macast/mirror_view.py` 是新的派生层。）
-  所以判据是：**`--check --stamp` 在 `git add` 之后跑，提交之后再跑一次确认**，
-  两次数字不同就是暂存漏了文件。
+- **占比 83.6% 是被测试撑起来的**：`scripts/verify_cast_airplay.py` 一个文件就占 11986 行
+  （`scripts/` 里还包括本工具自己）。把 `scripts/` 摘掉是 72.4%；只看**运行时真正加载的**代码
+  （核心接收端 + mpv 渲染器）是 63.7%，也就是说应用本体还有约 3610 行是上游的。
+- **一条台账行混着两个时刻：列表来自索引，行数一半来自磁盘、一半来自 HEAD。**
+  `ledger()` 的文件列表是 `git ls-files *.py` ⇒ 暂存当场生效（`git rm` 掉的文件立刻短一条，
+  新建的文件不 `git add` 就不进账）。行数则分两条路：`ours` / `vendored` / 未改动的 `upstream`
+  走 `counted_lines()`，读**磁盘**；`mixed` 走 `git blame --line-porcelain HEAD -- <path>` ——
+  **点了名的 rev 让 blame 读那条提交的 blob，工作树里没提交的改动它根本看不见**。
+  两边都实测过：SSDP 多网卡那次改动还挂在 `macast/ssdp.py`（`mixed`）的工作树里时（磁盘 435 行），
+  台账仍报 278+138=416（= `git show HEAD:macast/ssdp.py` 的行数），脏工作树与 `224d6d6`
+  的干净 worktree 逐行报出完全相同的 54 行；`screen_mirror.py`（`ours`）则相反 ——
+  A/B 里临时删掉六行预览逻辑，`our_lines` 当场从 34107 掉到 34101。
+- **于是有一个方向吃了亏还不自知：提交之前量出来的表，描述的是上一条提交。**
+  本轮的真实经过是 —— P7 的改动还没提交时 `--json` 报 6636/34112，文档照这个数改完、连同改动一起提交；
+  提交之后同一条命令在**两个树里**都报 6632/33707，Part 34 那两条"文档 == 历史"的用例当场红，
+  红的正是这次删 Tk 层动到的四个 `mixed` 文件（`macast/protocol.py`、`macast/macast.py`、
+  `macast/gui.py`、`Macast.py`）。判据因此只有一条：**先提交，再量，再改文档**（想在提交前验，
+  就 `git worktree add -d <tmp> <rev>` 跑一份干净树），并且改动 `.py` 归属之后必须重跑
+  `provenance.py --check --stamp` —— 它只加声明，从不删除。
 - **"看声明头"会把这件事估反**：按文件头里有没有 `by xfangfang` 数，会得出"21623 行是上游的"
   ——因为上游的头贴在了一堆**代码早被我们重写干净**的文件上（`macast/discovery.py`、
   `protocol_cast.py`、`protocol_group.py`、`protocol_airplay.py`、`scripts/verify_cast_airplay.py`
@@ -105,15 +110,15 @@
 
 | 文件 | 状态 | 上游行 | 我们的行 | 备注 |
 |---|---|---:|---:|---|
-| `macast/protocol.py` | mixed | 1000 | 1193 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
-| `macast/macast.py` | mixed | 448 | 1171 | 菜单栏与插件热插拔 |
-| `macast/utils.py` | mixed | 401 | 289 | `Setting` 与环境准备 |
-| `macast/gui.py` | mixed | 356 | 249 | 跨平台菜单层（rumps / pystray）＋主线程派发与通知 |
-| `macast/ssdp.py` | mixed | 278 | 138 | **三层归属**，见 §4 |
-| `macast/server.py` | mixed | 184 | 213 | 上游文件本来没有头 ⇒ 补的是 `Derived from` 而不是编造版权行 |
+| `macast/protocol.py` | mixed | 1000 | 1190 | DLNA 接收端骨架是上游的，一半以上已经是我们写的 |
+| `macast/macast.py` | mixed | 445 | 1035 | 菜单栏与插件热插拔 |
+| `macast/utils.py` | mixed | 400 | 290 | `Setting` 与环境准备 |
+| `macast/gui.py` | mixed | 356 | 55 | 跨平台菜单层（rumps / pystray）＋主线程派发与通知；删掉那个 Tk 控制台窗口之后只剩这一点了 |
+| `macast/ssdp.py` | mixed | 258 | 177 | **三层归属**，见 §4 |
+| `macast/server.py` | mixed | 183 | 214 | 上游文件本来没有头 ⇒ 补的是 `Derived from` 而不是编造版权行 |
 | `macast/plugin.py` | mixed | 175 | 14 | 渲染器基类：队列里第 1 位 |
 | `macast_renderer/mpv.py` | mixed | 573 | 102 | 与 mpv 的 IPC 契约 |
-| `Macast.py` | mixed | 53 | 229 | 入口 |
+| `Macast.py` | mixed | 52 | 164 | 入口 |
 | `macast/plugins/protocol/nirvana.py` | vendored | 1822 | 0 | 「哔哩必连」，来自 `Macast-plugins` |
 | `macast/plugins/renderer/iina.py` | vendored | 282 | 0 | 同上 |
 | `macast/plugins/renderer/live.py` | vendored | 250 | 0 | 同上（原先没有任何头 ⇒ 补 `Copied from`） |
@@ -148,17 +153,20 @@ FangYuecheng** 的版权行和一句 `Licensed under the MIT license`。这些�
 | 顺位 | 模块 | 上游行 | 为什么先/后 | 完成后额外要动的地方 |
 |---|---|---:|---|---|
 | 1 | `macast/plugin.py` + `macast/renderer.py` | 387 | 渲染器基类是所有插件的地基，它越薄，后面每一步越安全 | `docs/Development.md` 的插件接口段 |
-| 2 | `macast/ssdp.py` | 278 | DLNA 发现的核心；**注意 §4 的 MIT 行不随上游行归零** | `AGENTS.md` §3、§4.1 |
+| 2 | `macast/ssdp.py` | 258 | DLNA 发现的核心；**注意 §4 的 MIT 行不随上游行归零** | `AGENTS.md` §3、§4.1 |
 | 3 | `macast/protocol.py` | 1000 | 全仓最大的一块上游代码，也是 XML 状态变量的真值来源 | Part 6/12/13 的用例要跟着重写，不能只改实现 |
-| 4 | `macast/utils.py` | 401 | `Setting` 的副作用（§4.2 第一条坑）就住在这里 | `module_settings.py` 的标签表 |
+| 4 | `macast/utils.py` | 400 | `Setting` 的副作用（§4.2 第一条坑）就住在这里 | `module_settings.py` 的标签表 |
 | 5 | `macast/gui.py` | 356 | rumps/pystray 适配层，接口窄、最好换 | `BUILDING.md` 的 pystray 说明 |
-| 6 | `macast/server.py` | 184 | CherryPy 装配；和 §4.10 的日志红线同一条链 | `logsplit.py` 的注释 |
+| 6 | `macast/server.py` | 183 | CherryPy 装配；和 §4.10 的日志红线同一条链 | `logsplit.py` 的注释 |
 | 7 | `macast_renderer/mpv.py` | 573 | mpv IPC 契约（`--input-ipc-server`、事件名）——这一层的行为规格在 mpv 那边，不在我们这边，净室可做 | `AGENTS.md` §5 排障手法 |
 [该行引用了内部规划文档，已移除]
 | — | `macast/plugins/**`（vendored） | 2885 | **不在队列里**：这些是上游插件合集的完整作品，"重写"的正当形式是另写一个插件放进 `plugins/`，而不是原地替换后声称不是抄的 | — |
 
-每一步的收尾动作（顺序错了 Part 34 会红）：改代码 → `provenance.py --check --stamp` →
-更新 §2/§3 的表与 `provenance-ledger` 行 → 跑套件 → 提交并推送。
+每一步的收尾动作（顺序错了 Part 34 会红）：改代码 → **先提交** → `provenance.py --check --stamp`
+量一次 → 更新 §2/§3 的表与 `provenance-ledger` 行 → 跑套件 → 提交这一次文档改动。
+（急着在提交前看到绿，就 `git worktree add -d <tmp> <rev>` 跑干净树，或者用不带 rev 的
+`git blame --line-porcelain -- <path>` 预量 —— 未提交的行报 `0000…`，落不进上游集合，
+和它提交之后被记成本 fork 的行是同一个数。）
 
 ## 6. 明确不做
 
