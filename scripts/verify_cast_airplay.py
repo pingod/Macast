@@ -6027,8 +6027,17 @@ done
                          args=(_watch23, _url_w23, _sess_w23,
                                mir23._generation), daemon=True).start()
         check("a renderer that fell out of PLAYING gets the URL pushed again",
+              # Not `_dlna_state == 'PAUSED_PLAYBACK'`: the fake answers PLAYING
+              # the moment it is handed a Play -- as a real renderer does -- so
+              # that value is back to PLAYING within one poll, and asserting it
+              # is asserting a race (it lost the moment the re-push needed two
+              # polls instead of one). The claim is the re-push, and a re-push
+              # is a URI *and* a Play: the second wait is the proof the Play
+              # reached the device.
               _wait_until(lambda: _pushes23() > _before23, timeout=8)
-              and mir23._dlna_state == 'PAUSED_PLAYBACK', str(mir23._dlna_state))
+              and _wait_until(lambda: _taps23['state'] == 'PLAYING', timeout=5),
+              'pushes=%d state=%s' % (_pushes23() - _before23,
+                                      mir23._dlna_state))
         _taps23['state'] = 'PLAYING'
         _taps23['rel'] = 0
         check("recovery is recognised, and no advice is shouted on the way",
@@ -6055,6 +6064,77 @@ done
         check("a stale generation stops the watchdog without another push",
               _stale_thread23.is_alive() is False and _pushes23() == _before23,
               str(_pushes23()))
+
+        # -- a live stream that is being read is playing ---------------------
+        # Both halves of this are measured, on a push to another Macast on the
+        # same LAN: 52 s of clean playback (mpv reporting vo-configured, MPEG-2
+        # at 720x576, position advancing 15 s per 15 s), a single momentary
+        # STOPPED in the middle of it, and the old watchdog restarted the
+        # picture over that one answer.
+        #
+        # A fresh renderer and watcher of its own: the checks above share
+        # `mir23` and leave threads behind, and borrowing their state is how
+        # this test would pass or fail for reasons that have nothing to do
+        # with what it claims.
+        class _LiveWatch23(mirror.ScreenMirrorRenderer):
+            @property
+            def protocol(self):
+                return _rec23
+
+        class _Reading23(object):
+            """A session whose bytes are moving, i.e. someone is watching."""
+
+            def __init__(self):
+                self.bytes = 0
+
+            def clients(self):
+                return 1
+
+        _saved_poll_live23 = mirror.DLNA_POLL_SECONDS
+        mirror.DLNA_POLL_SECONDS = 0.05
+        _reader23 = _Reading23()
+        _live23w = _LiveWatch23()
+        _live23w._fail = lambda message, generation: None
+        _live23w._server = types.SimpleNamespace(broadcaster=_reader23)
+        _taps23['state'] = 'STOPPED'
+        _taps23['rel'] = 0
+        _before_live23 = _pushes23()
+
+        def _grow_live23():                      # a client reading the stream
+            for _ in range(80):
+                time.sleep(0.02)
+                _reader23.bytes += 8192
+
+        threading.Thread(target=_grow_live23, daemon=True).start()
+        _sender_live23 = mirror._DlnaSender(_control23)
+        threading.Thread(target=_live23w._watch_dlna,
+                         args=(_sender_live23, _url_w23, _sess_w23,
+                               _live23w._generation), daemon=True).start()
+        time.sleep(mirror.DLNA_POLL_SECONDS * 8)
+        check("bytes being consumed count as alive, without waiting for PLAYING",
+              _pushes23() == _before_live23
+              and _live23w._dlna_state == 'STOPPED',
+              'a reading client outranks the renderer: %d extra pushes,'
+              ' state=%s' % (_pushes23() - _before_live23,
+                             _live23w._dlna_state))
+
+        # And one non-PLAYING answer is not a verdict either. The client stops
+        # reading here, so this is the same renderer with nothing to rescue it.
+        _taps23['state'] = 'TRANSITIONING'
+        time.sleep(mirror.DLNA_POLL_SECONDS * 1.2)
+        _taps23['state'] = 'PLAYING'
+        _taps23['rel'] = 3
+        _before_once23 = _pushes23()
+        time.sleep(mirror.DLNA_POLL_SECONDS * 3)
+        check("a single non-PLAYING poll does not restart a starting stream",
+              _pushes23() == _before_once23
+              and _live23w._dlna_state == 'PLAYING',
+              'pushes=%d state=%s' % (_pushes23() - _before_once23,
+                                      _live23w._dlna_state))
+        with _live23w._lock:
+            _live23w._generation += 1
+        _sender_live23.close()
+        mirror.DLNA_POLL_SECONDS = _saved_poll_live23
         mirror.DLNA_POLL_SECONDS = _saved_poll23
         mirror.DLNA_MAX_REPUSHES = _saved_rep23
 

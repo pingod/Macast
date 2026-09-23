@@ -5705,14 +5705,42 @@ class ScreenMirrorRenderer(Renderer):
         every few seconds is the only window into that; the success proof is
         `RelTime` actually moving, because a renderer will happily report
         PLAYING while it sits on a frozen frame.
+
+        Two things count as alive, and only the first of them is the renderer's
+        own word:
+
+          * PLAYING with `RelTime` moving -- what this has always checked;
+          * bytes being consumed. A live stream that a client is reading *is*
+            playing, whatever the transport state says. Measured pushing to
+            another Macast on the same LAN: 52 seconds of clean playback (mpv
+            reporting vo-configured, MPEG-2 at 720x576, position advancing),
+            one momentary STOPPED in the middle, and this watchdog restarted
+            the picture over it.
+
+        So a single non-PLAYING answer is not a verdict -- a renderer reports
+        STOPPED for a moment while its player opens the stream -- and a re-push
+        now needs two polls in a row that say so.
         """
         misses = 0
         last_position = None
+        last_bytes = None
         while True:
             with self._lock:
                 if generation != self._generation:
                     return
             time.sleep(DLNA_POLL_SECONDS)
+            with self._lock:
+                server = self._server
+            consumed = 0
+            if server is not None:
+                try:
+                    consumed = int(getattr(server.broadcaster, 'bytes', 0))
+                except Exception:                              # noqa: BLE001
+                    consumed = 0
+            previous = last_bytes
+            reading = previous is not None and consumed > previous
+            read_now = consumed - previous if previous is not None else 0
+            last_bytes = consumed
             try:
                 state = sender.transport_state()
                 position = sender.position()
@@ -5726,13 +5754,26 @@ class ScreenMirrorRenderer(Renderer):
             if state == 'PLAYING':
                 if position and position != last_position:
                     last_position = position
-                    misses = 0
                 with self._lock:
                     self._dlna_state = state
+                misses = 0
+                continue
+            if reading:
+                # Someone is reading this stream right now. The bytes are the
+                # proof and they outrank a renderer caught between states.
+                logger.debug('renderer says %s while %d bytes were being read;'
+                             ' leaving it alone', state, read_now)
+                with self._lock:
+                    self._dlna_state = state
+                misses = 0
                 continue
             with self._lock:
                 self._dlna_state = state
             misses += 1
+            if misses < 2:
+                logger.info('renderer is %s; waiting for one more poll before'
+                            ' pushing again', state)
+                continue
             if misses >= DLNA_MAX_REPUSHES:
                 self._give_up(sender, '电视连续 {} 次没有播起来'.format(misses))
                 return
