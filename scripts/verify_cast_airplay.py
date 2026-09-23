@@ -5336,8 +5336,14 @@ done
               and 'video/vnd.dlna.mpeg-tts' in mirror.protocol_info(_h26423),
               mirror.protocol_info(_h26423))
         check("contentFeatures travels on its own header too",
-              mirror.content_features(_pal23).startswith('DLNA.ORG_OP=01')
-              and 'DLNA.ORG_PN' not in mirror.content_features(_pal23),
+              # And it names the same profile the DIDL promised. It used to
+              # carry only the flags, which is what a renderer that validates
+              # the *response* against the profile name it was promised has
+              # nothing to compare against: a TCL television downloaded 26 MB
+              # through eight connections and never reached PLAYING (Part 42).
+              'DLNA.ORG_PN={}'.format(_pal23.org_pn)
+              in mirror.content_features(_pal23)
+              and 'DLNA.ORG_OP=01' in mirror.content_features(_pal23),
               mirror.content_features(_pal23))
 
         _didl23 = mirror.build_didl('http://10.0.0.2:9/stream/aa.mpg',
@@ -13740,6 +13746,148 @@ try:
           'a console is only a defect where one pops up on its own')
 finally:
     utils.Setting.setting = {}
+
+
+# --------------------------------------------------------------------------
+# Part 42: a DLNA renderer that downloads and still refuses
+#
+# Shipped as v0.8.6, the mirror to a real TCL 85T8G measured this: the
+# television opened eight connections to our stream port, read 26 MB across
+# them (~5 Mbps, so it was genuinely pulling), closed them again, and its player
+# stayed in TRANSITIONING for eight watchdog cycles -- it never reached PLAYING.
+# Nothing in the log said why, because the exchange is recorded at DEBUG (which
+# the module log does not keep) and a renderer that fails looks exactly like one
+# that played. So this part pins the three things that failure turned on:
+#
+#   1. the response must name the same DLNA.ORG_PN the DIDL promised -- ours
+#      sent only the flags, so a renderer checking the *response* for its
+#      profile name found none,
+#   2. an exchange has to be readable in the log a user actually keeps, bounded
+#      so a retrying renderer cannot flood it,
+#   3. our half of a connection the renderer closed has to be noticed, or the
+#      sockets pile up in CLOSE_WAIT (seven of them, measured).
+# --------------------------------------------------------------------------
+print("\n=== Part 42: DLNA exchange evidence ===")
+import traceback as _traceback42
+
+_tmp42 = _tempfile.mkdtemp(prefix="macast-dlna42-")
+mirror42 = None
+try:
+    utils.SETTING_DIR = _tmp42
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp42, "macast_setting.json")
+    mirror42 = _load_plugin("screen_mirror_plugin_v42", "screen_mirror.py")
+    m42 = mirror42
+
+    # -- 1. the two places that name the profile must agree ----------------
+    _ps42 = m42.dlna_profile('ps-pal')
+    _features42 = m42.content_features(_ps42)
+    check("the answer names the profile the DIDL promised",
+          'DLNA.ORG_PN={}'.format(_ps42.org_pn) in _features42
+          and 'DLNA.ORG_PN={}'.format(_ps42.org_pn)
+          in m42.protocol_info(_ps42),
+          _features42)
+    check("and a profile with no PN does not emit a dangling one",
+          all('DLNA.ORG_PN=' not in m42.content_features(prof)
+              for prof in m42.DLNA_PROFILES.values() if not prof.org_pn),
+          'the MKV shape has no standard PN; inventing one is worse')
+
+    # -- 2. a real request through the real handler, watched in the log ----
+    import http.client as _http42
+    import logging as _logging42
+    import threading as _threading42
+    from http.server import ThreadingHTTPServer as _Server42
+
+    class _Grab42(_logging42.Handler):
+        def __init__(self):
+            _logging42.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append(record.getMessage())
+
+    _grab42 = _Grab42()
+    _plugin_logger42 = _logging42.getLogger(m42.logger.name)
+    _plugin_logger42.addHandler(_grab42)
+    _old_level42 = _plugin_logger42.level
+    _plugin_logger42.setLevel(_logging42.DEBUG)
+
+    _session42 = m42._Session('browser')
+    _server42 = _Server42(('127.0.0.1', 0), m42._StreamHandler)
+    _server42.session = _session42
+    _server42.daemon_threads = True
+    _port42 = _server42.server_address[1]
+    _threading42.Thread(target=_server42.serve_forever, daemon=True).start()
+    try:
+        _conn42 = _http42.HTTPConnection('127.0.0.1', _port42, timeout=20)
+        _conn42.request('GET', '/browser?token={}'.format(
+            _session42.page_token))
+        _answer42 = _conn42.getresponse()
+        _answer42.read()
+        check("a served request is counted as an exchange",
+              _answer42.status == 200 and _session42.exchanges == 1,
+              'status={} exchanges={}'.format(_answer42.status,
+                                              _session42.exchanges))
+        check("and the exchange is readable in the normal log",
+              any('exchange 1' in line and '-> 200' in line
+                  for line in _grab42.lines),
+              _grab42.lines[-1] if _grab42.lines else '(nothing logged)')
+
+        # A request for something that is not the stream or the page is not an
+        # exchange we care about -- and a rejected token is still an answer.
+        _conn42.request('GET', '/nope')
+        _conn42.getresponse().read()
+        _conn42.request('GET', '/browser?token=wrong')
+        _bad42 = _conn42.getresponse()
+        _bad42.read()
+        check("a rejected token is recorded too, and junk paths are not",
+              _bad42.status == 403 and _session42.exchanges == 2,
+              'status={} exchanges={} (the /nope miss must not count)'.format(
+                  _bad42.status, _session42.exchanges))
+
+        # The bound: the counter keeps climbing, the log stops at the limit.
+        # Counted on 'exchange ' lines only -- the handler's own DEBUG request
+        # lines land in the same handler, and counting those measured nothing.
+        _limit42 = m42._StreamHandler.EXCHANGE_LOG_LIMIT
+
+        def _ex_lines42():
+            return [line for line in _grab42.lines
+                    if line.startswith('exchange ')]
+
+        _logged42 = len(_ex_lines42())
+        for _ in range(_limit42 + 2):
+            _conn42.request('GET', '/browser?token=wrong')
+            _conn42.getresponse().read()
+        _conn42.close()
+        check("every answer is counted but only the first few are described",
+              _session42.exchanges == 2 + _limit42 + 2
+              and _logged42 == 2 and len(_ex_lines42()) == _limit42,
+              'exchanges={} logged={} (limit {}, needs a renderer that retries)'
+              .format(_session42.exchanges, len(_ex_lines42()), _limit42))
+    finally:
+        _server42.shutdown()
+        _server42.server_close()
+        _plugin_logger42.removeHandler(_grab42)
+        _plugin_logger42.setLevel(_old_level42)
+
+    # -- 3. noticing that the renderer closed its half ---------------------
+    import socket as _socket42
+    _left42, _right42 = _socket42.socketpair()
+    _fake42 = type('H42', (), {'connection': _left42})()
+    check("an open connection is not mistaken for a closed one",
+          m42._StreamHandler._peer_gone(_fake42) is False,
+          'a non-blocking peek on a live socket says nothing at all')
+    _right42.close()
+    time.sleep(0.2)
+    check("a closed one is noticed without consuming a byte",
+          m42._StreamHandler._peer_gone(_fake42) is True,
+          'this is what left seven sockets in CLOSE_WAIT')
+    _left42.close()
+finally:
+    if mirror42 is None:
+        print('Part 42 setup error: %s' % _traceback42.format_exc())
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp42, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

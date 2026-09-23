@@ -5,7 +5,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.14</macast.version>
+# <macast.version>0.15</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
@@ -117,7 +117,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.14'
+PLUGIN_VERSION = '0.15'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -786,9 +786,21 @@ def protocol_info(profile):
 
 def content_features(profile):
     """The `contentFeatures.dlna.org` response header. Renderers that sniff it
-    refuse the stream when it is missing, so it travels with every answer."""
-    return ('DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS={}'.format(
-        DLNA_ORG_FLAGS))
+    refuse the stream when it is missing, so it travels with every answer.
+
+    It carries the same DLNA.ORG_PN the DIDL `protocolInfo` advertises. Sending
+    only the flags was the one place the two disagreed: a renderer that checks
+    the *response* for the profile name it was promised sees a stream with no
+    name at all, and a TCL television measured here opened up to eight
+    connections, downloaded 26 MB, and never reached PLAYING.
+    """
+    parts = []
+    if profile.org_pn:
+        parts.append('DLNA.ORG_PN={}'.format(profile.org_pn))
+    parts.append('DLNA.ORG_OP=01')
+    parts.append('DLNA.ORG_CI=0')
+    parts.append('DLNA.ORG_FLAGS={}'.format(DLNA_ORG_FLAGS))
+    return ';'.join(parts)
 
 
 def build_didl(url, title, profile, size, duration):
@@ -2825,8 +2837,77 @@ def parse_range(header):
 class _StreamHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.0'
 
+    #: How many request/response exchanges of one session reach the normal log.
+    #: A renderer that will not play our stream makes its whole case out of
+    #: retries -- the television measured here opened eight connections and read
+    #: 26 MB across them -- so the first few exchanges are the evidence, and all
+    #: of them would be noise. The rest are still counted.
+    EXCHANGE_LOG_LIMIT = 6
+
     def log_message(self, fmt, *args):
         logger.debug("stream http: " + fmt % args)
+
+    # -- what the client asked for, and what we answered -------------------
+    # None of this is inferable after the fact: the plugin logs requests at
+    # DEBUG (which the module log does not keep) and a renderer that fails is
+    # indistinguishable in the log from one that played. These three hooks
+    # record the exchange at the level a user's log file actually holds.
+    def handle_one_request(self):
+        self._exchange_status = None
+        self._exchange_headers = {}
+        return super().handle_one_request()
+
+    def send_response_only(self, code, message=None):
+        self._exchange_status = code
+        return super().send_response_only(code, message)
+
+    def send_header(self, keyword, value):
+        name = keyword.lower()
+        if name in ('content-length', 'content-range', 'content-type',
+                    'transfermode.dlna.org', 'accept-ranges'):
+            self._exchange_headers[name] = value
+        return super().send_header(keyword, value)
+
+    def end_headers(self):
+        summary = super().end_headers()
+        path = self.path.partition('?')[0]
+        if not (path.startswith(STREAM_PREFIX) or path == BROWSER_PATH):
+            return summary
+        session = getattr(self.server, 'session', None)
+        if session is None:
+            return summary
+        session.exchanges += 1
+        if session.exchanges <= self.EXCHANGE_LOG_LIMIT:
+            logger.info(
+                'exchange %d: %s %s -> %s len=%s range=%s from=%s ua=%s',
+                session.exchanges, self.command,
+                'dlna-file' if getattr(session, 'bytelog', None) else 'live',
+                self._exchange_status,
+                self._exchange_headers.get('content-length', '-'),
+                self.headers.get('Range') or '(none)',
+                self.headers.get('transferMode.dlna.org') or '(none)',
+                (self.headers.get('User-Agent') or '-')[:40])
+        return summary
+
+    def _peer_gone(self):
+        """True once the peer has closed its half.
+
+        A renderer reads, closes, and opens another connection -- eight of them
+        in one measured attempt -- and this side would sit in `log.read()`
+        waiting for the encoder to produce the next chunk, which is how seven
+        sockets were left in CLOSE_WAIT. A non-blocking peek finds the FIN
+        without consuming a byte.
+        """
+        try:
+            import select
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            if not readable:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b''
+        except (OSError, ValueError):
+            return True
+        except Exception:                                      # noqa: BLE001
+            return False
 
     @property
     def session(self):
@@ -2983,7 +3064,13 @@ class _StreamHandler(BaseHTTPRequestHandler):
                     # Unbounded means "play until I say stop": block for as
                     # long as the encoder is alive, because a short body makes
                     # the renderer think the file ended and tear down.
-                    data, complete = log.read(absolute, want)
+                    # Wait in one-second slices, and between them look for the
+                    # peer's FIN: a television that gave up on this connection
+                    # closes it, and nothing else here would ever notice.
+                    data, complete = log.read(absolute, want,
+                                              deadline=time.time() + 1.0)
+                    if not data and not complete and self._peer_gone():
+                        return
                     if not data and not complete:
                         return          # the session closed
                 else:
@@ -3059,6 +3146,12 @@ class _Session(object):
         self.profile = None
         self.bytelog = False
         self.file_anchor = None
+        #: How many stream/player requests this session has answered. The first
+        #: few are written to the log (see _StreamHandler.EXCHANGE_LOG_LIMIT):
+        #: a renderer that refuses the stream makes its case by retrying, and
+        #: that count is the difference between "one clean fetch" and "eight
+        #: connections that each gave up".
+        self.exchanges = 0
         if self.kind == 'dlna':
             self.profile = profile or dlna_profile()
             self.suffix = self.profile.suffix

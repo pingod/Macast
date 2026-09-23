@@ -6,4 +6,4 @@
 # The pyproject.toml build backend (setuptools>=61) prefers a real Python
 # attribute, so this tiny module is the new canonical source; `.version` is
 # kept as a fallback for any third-party tooling that still greps for it.
-__version__ = "0.8.6"
+__version__ = "0.8.7"
