@@ -5121,6 +5121,12 @@ done
                 return {'kind': 'browser', 'clients': 2, 'chunks': 40,
                         'bytes': 500000, 'drops': 3, 'mbps': 4.2, 'seconds': 65}
 
+            # The card that lights a 兼容档位 asks *this* renderer which rung it
+            # is on, because the run's ladder and the stored setting can disagree.
+            # It is part of the renderer's face, so a stand-in has to have it too.
+            def dlna_profile_display(self):
+                return mirror.dlna_profile_id(mirror.dlna_profile())
+
         fake22 = _FakeMirror22()
         mirror._devices = [('Living Room TV', '192.0.2.7', 8009)]
         setting22 = mirror.ScreenMirrorSetting()
@@ -5409,11 +5415,11 @@ done
         _tsh23 = mirror.build_ffmpeg_command('ffmpeg', _cap23, 720, 5000000,
                                              kind='dlna', profile=_h26423,
                                              encoder='hardware')
-        check("the TS/H.264 shape keeps the hardware encoder and a 1 s GOP",
+        check("the TS/H.264 shape keeps the hardware encoder and the live GOP",
               'h264_videotoolbox' in _tsh23
               and 'mpegts' in _tsh23
               and _tsh23[_tsh23.index('-muxdelay') - 1] == 'mpegts'
-              and _tsh23[_tsh23.index('-g') + 1] == '25'
+              and _tsh23[_tsh23.index('-g') + 1] == str(mirror.live_gop(25))
               and 'mpeg2video' not in _tsh23, str(_tsh23))
         check("the H.264 shapes are rate-capped, MPEG-2 keeps its CBR triplet",
               '-maxrate' in _tsh23 and '-bufsize' in _tsh23
@@ -5441,13 +5447,42 @@ done
         check("a machine with no audio tap sends video only",
               '-an' in _ps23 and '-c:a' not in _ps23, str(_ps23))
 
+        # An unknown stored value is not an error, it means "this install never
+        # chose one that exists", and the answer is the default *for the shape
+        # being served* -- which stopped being one profile for both shapes when
+        # the PS/TS measurement landed in `default_dlna_profile_id`.
+        _live_default23 = mirror.DLNA_PROFILES[mirror.LIVE_DEFAULT_DLNA_PROFILE]
+        check("the two defaults are the two containers, not one guess for both",
+              mirror.default_dlna_profile_id(mirror.DLNA_SHAPE_LIVE)
+              == mirror.LIVE_DEFAULT_DLNA_PROFILE
+              and mirror.default_dlna_profile_id(mirror.DLNA_SHAPE_FILE)
+              == mirror.DEFAULT_DLNA_PROFILE
+              and mirror.LIVE_DEFAULT_DLNA_PROFILE != mirror.DEFAULT_DLNA_PROFILE
+              and 'mpegts' in _live_default23.muxer
+              and 'vob' in mirror.DLNA_PROFILES[mirror.DEFAULT_DLNA_PROFILE].muxer,
+              '%s / %s' % (mirror.LIVE_DEFAULT_DLNA_PROFILE,
+                           mirror.DEFAULT_DLNA_PROFILE))
         check("an unknown stored profile falls back instead of failing",
-              mirror.dlna_profile('no-such-shape') is _pal23
-              and mirror.dlna_profile() is _pal23)
-        check("the watchdog's suggestion order starts after the current one",
-              mirror.profile_order()[:2] == ['ps-ntsc', 'ts-mpeg2']
+              mirror.dlna_profile('no-such-shape') is _live_default23
+              and mirror.dlna_profile() is _live_default23, '')
+        check("and the shape-aware fallback answers from the live shape here",
+              mirror.dlna_shape() == mirror.DLNA_SHAPE_LIVE
+              and mirror.dlna_profile_id(None)
+              == mirror.LIVE_DEFAULT_DLNA_PROFILE
+              # Reading the default must not record it (AGENTS.md 4.2): the one
+              # fact `default_dlna_profile_id` depends on is whether the user
+              # ever chose, and a `Setting.get` here would erase it.
+              and not mirror.Setting.has(mirror.SettingProperty.Mirror_Dlna_Profile)
+              and not mirror.Setting.has(mirror.SettingProperty.Mirror_Dlna_Shape),
+              'asking which profile to use wrote a setting')
+        mirror.Setting.set(mirror.SettingProperty.Mirror_Dlna_Shape,
+                           mirror.DLNA_SHAPE_FILE)
+        check("under the file shape the same question is a DVD again",
+              mirror.dlna_profile() is _pal23
+              and mirror.profile_order()[:2] == ['ps-ntsc', 'ts-mpeg2']
               and len(mirror.profile_order()) == len(mirror.DLNA_PROFILES) - 1,
               str(mirror.profile_order()))
+        mirror.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Shape)
         utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Profile, 'ts-h264')
         check("so switching the profile moves the whole list forward",
               mirror.profile_order()[0] == 'mkv-h264'
@@ -5751,7 +5786,17 @@ done
         check("a live answer names no length and promises no ranges",
               'Content-Length' not in _lhd23
               and _lhd23['Accept-Ranges'] == 'none'
-              and _lhd23['Content-Type'] == 'video/mpeg', str(_lhd23))
+              and _lhd23['Content-Type'] == _live23.profile.content_type,
+              str(_lhd23))
+        check("and the shape-aware default puts the fast container on the wire",
+              # Not 'video/mpeg': the live shape's default stopped being MPEG-PS
+              # when the measurement in `default_dlna_profile_id` landed, and the
+              # type the answer carries is how a reader can tell that without
+              # opening the encoder's command line.
+              _live23.profile is mirror.DLNA_PROFILES[
+                  mirror.LIVE_DEFAULT_DLNA_PROFILE]
+              and _lhd23['Content-Type'] == 'video/vnd.dlna.mpeg-tts',
+              str(_lhd23))
         check("and keeps the two DLNA headers the firmware sniffs",
               _lhd23['transferMode.dlna.org'] == 'Streaming'
               and 'DLNA.ORG_OP=00' in _lhd23['contentFeatures.dlna.org'],
@@ -5760,7 +5805,8 @@ done
         check("a HEAD says the same: no length, no ranges, just the type",
               _lst_h23 == 200 and 'Content-Length' not in _lhd_h23
               and _lhd_h23['Accept-Ranges'] == 'none'
-              and _lhd_h23['Content-Type'] == 'video/mpeg', str(_lhd_h23))
+              and _lhd_h23['Content-Type'] == _live23.profile.content_type,
+              str(_lhd_h23))
         check("the DIDL claims no size and no duration in this shape",
               'size=' not in mirror.build_didl('http://x/s.mpg', 'T',
                                                _live23.profile)
@@ -5897,7 +5943,14 @@ done
                     _taps23['state'] = 'STOPPED'
                     self._reply(action, [])
                 elif action == 'Play':
-                    _taps23['state'] = 'PLAYING'
+                    # A television that opens the URL and cannot read what the
+                    # shape offers does not sit in PLAYING: its player quits, and
+                    # the transport state says so. `refuse` is how that fixture
+                    # keeps saying it -- writing `state = 'STOPPED'` once between
+                    # the pushes would be a lie, because our own re-push answers
+                    # Play and a cooperative device then goes to PLAYING.
+                    _taps23['state'] = ('STOPPED' if _taps23.get('refuse')
+                                        else 'PLAYING')
                     self._reply(action, [])
                 elif action == 'Stop':
                     _taps23['state'] = 'STOPPED'
@@ -5910,7 +5963,8 @@ done
                                          ('CurrentTransportStatus', 'OK'),
                                          ('CurrentSpeed', '1')])
                 elif action == 'GetPositionInfo':
-                    _taps23['rel'] = _taps23.get('rel', 0) + 1
+                    if not _taps23.get('refuse'):
+                        _taps23['rel'] = _taps23.get('rel', 0) + 1
                     self._reply(action, [('RelTime',
                                           '0:00:{:02d}'.format(_taps23['rel']
                                                                % 60))])
@@ -6044,10 +6098,13 @@ done
               _wait_until(lambda: mir23._dlna_state == 'PLAYING', timeout=8)
               and _failures23 == [], str(mir23._dlna_state))
         _taps23['drop'] = True
+        _next23 = mirror.DLNA_PROFILES[mirror.next_profile_id(
+            mirror.dlna_profile())]
         check("giving up is a message that names the next profile to try",
               _wait_until(lambda: bool(_failures23), timeout=15)
               and '兼容档位' in _failures23[0]
-              and 'NTSC' in _failures23[0], str(_failures23))
+              and '换成「{}」再试一次'.format(_next23.label) in _failures23[0],
+              '%s / next=%s' % (_failures23, _next23.label))
         _taps23['drop'] = False
         _watch23.close()
 
@@ -6081,8 +6138,16 @@ done
             def protocol(self):
                 return _rec23
 
-        class _Reading23(object):
-            """A session whose bytes are moving, i.e. someone is watching."""
+        class _Producing23(object):
+            """The encoder side of a session: bytes produced, a client attached.
+
+            This object is here to be *ignored*. The watchdog used to ask it how
+            many bytes it had seen, which is a question about ffmpeg: after a
+            viewer opens the stream, fails to parse it, and quits, production
+            keeps going at full rate, and the answer says "alive" over a black
+            screen. What it asks now is what left on a socket --
+            `_Session.written`.
+            """
 
             def __init__(self):
                 self.bytes = 0
@@ -6092,7 +6157,7 @@ done
 
         _saved_poll_live23 = mirror.DLNA_POLL_SECONDS
         mirror.DLNA_POLL_SECONDS = 0.05
-        _reader23 = _Reading23()
+        _reader23 = _Producing23()
         _live23w = _LiveWatch23()
         _live23w._fail = lambda message, generation: None
         _live23w._server = types.SimpleNamespace(broadcaster=_reader23)
@@ -6104,6 +6169,7 @@ done
             for _ in range(80):
                 time.sleep(0.02)
                 _reader23.bytes += 8192
+                _sess_w23.note_written(8192)
 
         threading.Thread(target=_grow_live23, daemon=True).start()
         _sender_live23 = mirror._DlnaSender(_control23)
@@ -6111,7 +6177,7 @@ done
                          args=(_sender_live23, _url_w23, _sess_w23,
                                _live23w._generation), daemon=True).start()
         time.sleep(mirror.DLNA_POLL_SECONDS * 8)
-        check("bytes being consumed count as alive, without waiting for PLAYING",
+        check("bytes being delivered count as alive, without waiting for PLAYING",
               _pushes23() == _before_live23
               and _live23w._dlna_state == 'STOPPED',
               'a reading client outranks the renderer: %d extra pushes,'
@@ -6134,7 +6200,336 @@ done
         with _live23w._lock:
             _live23w._generation += 1
         _sender_live23.close()
+
+        # Production is not delivery, and the gap between them is the black
+        # screen this used to paper over. The shape of the failure measured
+        # against the file shape and mpv: the player opens the URL, is answered,
+        # cannot read what it was given, and quits -- while ffmpeg keeps
+        # encoding at full rate. A watchdog that asks the producer "did bytes
+        # move" calls that alive forever.
+        _saved_shape23 = mirror.dlna_shape
+        mirror.dlna_shape = lambda: mirror.DLNA_SHAPE_LIVE
+        try:
+            _idle23 = mirror._Session('dlna', has_audio=True, title='T')
+            mirror.dlna_shape = lambda: mirror.DLNA_SHAPE_FILE
+            _ref23 = mirror._Session('dlna', has_audio=True, title='T')
+        finally:
+            mirror.dlna_shape = _saved_shape23
+        check("only the file shape answers byte offsets",
+              _idle23.bytelog is False and _ref23.bytelog is True,
+              '%s / %s' % (_idle23.bytelog, _ref23.bytelog))
+        _producer_only23 = _Producing23()
+        _idle23w = _LiveWatch23()
+        _idle23w._fail = lambda message, generation: None
+        _idle23w._server = types.SimpleNamespace(broadcaster=_producer_only23)
+        _taps23['state'] = 'STOPPED'
+        _before_prod23 = _pushes23()
+
+        def _grow_prod23():                     # ffmpeg working, nobody watching
+            for _ in range(60):
+                time.sleep(0.02)
+                _producer_only23.bytes += 8192
+
+        threading.Thread(target=_grow_prod23, daemon=True).start()
+        _sender_prod23 = mirror._DlnaSender(_control23)
+        threading.Thread(target=_idle23w._watch_dlna,
+                         args=(_sender_prod23, _url_w23, _idle23,
+                               _idle23w._generation), daemon=True).start()
+        time.sleep(mirror.DLNA_POLL_SECONDS * 6)
+        _prod_pushes23 = _pushes23() - _before_prod23
+        with _idle23w._lock:
+            _idle23w._generation += 1
+        _sender_prod23.close()
+        check("bytes the encoder produced are not bytes somebody watched",
+              _prod_pushes23 > 0 and _idle23.written == 0,
+              '%d re-pushes over a producer running at full rate,'
+              ' delivered=%d' % (_prod_pushes23, _idle23.written))
+
+        # And a player that fetches the URL and reads none of it is refusing the
+        # *shape*, so eight identical re-pushes of a deterministic failure is
+        # 40 seconds spent telling the user nothing. The message has to name the
+        # knob that can actually turn: 「投屏形状」, not the container list.
+        _refused23 = []
+        _refwatch23 = _LiveWatch23()
+        _refwatch23._fail = lambda message, generation: _refused23.append(message)
+        _refwatch23._server = types.SimpleNamespace(broadcaster=_Producing23())
+        _taps23['state'] = 'STOPPED'
+        _taps23['refuse'] = True         # Play is answered, then nothing plays
+        _before_ref23 = _pushes23()
+
+        def _fetch_nothing23():                 # requested, answered, unread
+            for _ in range(400):
+                time.sleep(0.01)
+                _ref23.exchanges += 1
+
+        threading.Thread(target=_fetch_nothing23, daemon=True).start()
+        _sender_ref23 = mirror._DlnaSender(_control23)
+        threading.Thread(target=_refwatch23._watch_dlna,
+                         args=(_sender_ref23, _url_w23, _ref23,
+                               _refwatch23._generation), daemon=True).start()
+        _wait_until(lambda: bool(_refused23), timeout=8)
+        _ref_pushes23 = _pushes23() - _before_ref23
+        with _refwatch23._lock:
+            _refwatch23._generation += 1
+        _sender_ref23.close()
+        _taps23['refuse'] = False
+        check("a stream that is fetched and read by nobody stops being re-pushed",
+              len(_refused23) == 1 and _ref_pushes23 < mirror.DLNA_MAX_REPUSHES
+              and '投屏形状' in _refused23[0]
+              and mirror.DLNA_SHAPES[mirror.DLNA_SHAPE_LIVE][0] in _refused23[0],
+              'give-ups=%d pushes=%d/%d last state the TV answered=%s words=%s'
+              % (len(_refused23), _ref_pushes23, mirror.DLNA_MAX_REPUSHES,
+                 _refwatch23._dlna_state, _refused23))
         mirror.DLNA_POLL_SECONDS = _saved_poll_live23
+
+        # The other shape's answer stays the one this has always given: with a
+        # live stream there is no fabricated size to hunt an index inside of, so
+        # the container is the only knob, and pointing at the shape would send
+        # the user to a setting that is already on the right value.
+        _words_live23 = []
+        _giveup23 = mirror.ScreenMirrorRenderer()
+        _giveup23._fail = lambda message, generation: _words_live23.append(message)
+        _giveup23._give_up(None, '电视连续 8 次没有播起来', _idle23)
+        _words_file23 = []
+        _giveup23._fail = lambda message, generation: _words_file23.append(message)
+        _giveup23._give_up(None, '电视取走了地址', _ref23)
+        check("the advice follows the shape, and each names one knob",
+              _words_live23 and '兼容档位' in _words_live23[0]
+              and '投屏形状' not in _words_live23[0]
+              and _words_file23 and '投屏形状' in _words_file23[0]
+              and '兼容档位' not in _words_file23[0],
+              '%s | %s' % (_words_live23, _words_file23))
+
+        # -- the ladder the watchdog walks by itself ---------------------------
+        # Five shapes exist because the first one gets refused, and since v0.5
+        # the switching has been the user's job -- on a screen mirror the user is
+        # looking at the television, not at the settings page. So the watchdog
+        # walks the list itself now, and these are the cases that make that
+        # promise true rather than merely written: the walk, its three limits
+        # (never the file shape, never more than once per other shape, never into
+        # the user's settings), and the ordering that keeps the encoder we are
+        # about to kill from being reported as「采集中断」.
+        _keys23 = list(mirror.DLNA_PROFILES)
+        _rungs23 = [mirror.next_profile_id(mirror.DLNA_PROFILES[k])
+                    for k in _keys23]
+        check("the ladder reaches every shape and comes back around",
+              _rungs23 == _keys23[1:] + _keys23[:1], str(_rungs23))
+        check("and it refuses to rotate into a shape it cannot name",
+              mirror.next_profile_id(None) is None
+              and mirror.next_profile_id(object()) is None, '')
+        check("one run may leave its starting shape once per other shape",
+              mirror.DLNA_MAX_PROFILE_TRIES == len(mirror.DLNA_PROFILES) - 1,
+              str(mirror.DLNA_MAX_PROFILE_TRIES))
+
+        class _Ladder23(mirror.ScreenMirrorRenderer):
+            """A renderer whose「重启」is a counter.
+
+            `_rotate_dlna_profile` ends in `start_mirror(keep_ladder=True)`, and
+            performing that here would mean the fake ffmpeg, a port and seconds
+            per rung. What is being claimed is which shape the next session is
+            built with, that the restart was asked to *keep* the ladder, and that
+            the teardown happened after the generation was bumped -- so the
+            restart is recorded, and the teardown records what it could see.
+            """
+
+            def __init__(self):
+                mirror.ScreenMirrorRenderer.__init__(self)
+                self.teardowns = []
+                self.restarts = []
+
+            def _teardown(self):
+                self.teardowns.append(self._generation)
+
+            def start_mirror(self, keep_ladder=False):
+                self.restarts.append(keep_ladder)
+                return True
+
+        # Two sessions whose starting shape is stated, not inherited from a
+        # default: a ladder test whose first rung depends on which default is in
+        # force fails for a reason the reader cannot see.
+        mirror.Setting.set(mirror.SettingProperty.Mirror_Dlna_Profile, 'ps-pal')
+        _saved_shape23l = mirror.dlna_shape
+        mirror.dlna_shape = lambda: mirror.DLNA_SHAPE_LIVE
+        _lad_live23 = mirror._Session('dlna', has_audio=True, title='T')
+        mirror.dlna_shape = lambda: mirror.DLNA_SHAPE_FILE
+        _lad_file23 = mirror._Session('dlna', has_audio=True, title='T')
+        mirror.dlna_shape = _saved_shape23l
+        check("the two ladder subjects really are the two shapes",
+              _lad_live23.profile is mirror.DLNA_PROFILES['ps-pal']
+              and not _lad_live23.bytelog and _lad_file23.bytelog,
+              '%s bytelog=%s/%s' % (mirror.dlna_profile_id(_lad_live23.profile),
+                                    _lad_live23.bytelog, _lad_file23.bytelog))
+
+        _lad23 = _Ladder23()
+        _notified23l = []
+        _saved_notify23l = mirror.notify
+        mirror.notify = lambda message, sound=True: _notified23l.append(message)
+        _walk23 = [mirror.dlna_profile_id(_lad_live23.profile)]
+        try:
+            check("the file shape is never rotated: its fix is the shape",
+                  _lad23._rotate_dlna_profile(_lad_file23, '电视取走了地址') is False
+                  and _lad23._profile_id is None
+                  and _lad23._profile_tries == 0
+                  and _lad23.restarts == [], str(_lad23.restarts))
+            _subject23 = _lad_live23
+            for _ in range(mirror.DLNA_MAX_PROFILE_TRIES + 2):
+                if not _lad23._rotate_dlna_profile(_subject23, '电视不播'):
+                    break
+                # The next session encodes what the ladder now says, which is
+                # what makes this a walk rather than four retries of one rung.
+                _subject23 = types.SimpleNamespace(
+                    bytelog=False, profile=_lad23.active_dlna_profile())
+                _walk23.append(mirror.dlna_profile_id(_subject23.profile))
+        finally:
+            mirror.notify = _saved_notify23l
+        check("a live session the TV refuses walks the whole list on its own",
+              _walk23 == _keys23 and _lad23._profile_tries == mirror.DLNA_MAX_PROFILE_TRIES
+              and _lad23._rotate_dlna_profile(_subject23, '再来一次') is False,
+              str(_walk23))
+        check("every rung is one restart, and every restart keeps the ladder",
+              _lad23.restarts == [True] * (len(_keys23) - 1),
+              str(_lad23.restarts))
+        check("the encoder is retired after the generation moves, not before",
+              # AGENTS.md 4.8: bumping first is what stops the pump from
+              # reporting the encoder we are about to kill as「采集中断」. Teardown
+              # here records the generation it could see, so an early teardown
+              # would read 0, 1, 2, 3 instead of 1, 2, 3, 4.
+              _lad23.teardowns == list(range(1, len(_keys23)))
+              and _lad23._generation == len(_keys23) - 1,
+              '%s vs generation=%d' % (_lad23.teardowns, _lad23._generation))
+        check("and the ladder never once edits the user's choice",
+              str(mirror.Setting.get(mirror.SettingProperty.Mirror_Dlna_Profile,
+                                     '') or '') == 'ps-pal'
+              and _lad23._profile_id == 'mkv-h264',
+              'setting=%s ladder=%s' % (mirror.Setting.get(
+                  mirror.SettingProperty.Mirror_Dlna_Profile, ''),
+                  _lad23._profile_id))
+        check("what it tells the user names the rung, the new shape and the fact "
+              "that their own setting is untouched",
+              len(_notified23l) == len(_keys23) - 1
+              and '第 2/{} 档'.format(len(_keys23)) in _notified23l[0]
+              and mirror.DLNA_PROFILES['ps-ntsc'].label in _notified23l[0]
+              and '没有改动' in _notified23l[0], str(_notified23l[:2]))
+
+        # A spent ladder changes the sentence, not merely its tone:「换成下一档」
+        # is advice the watchdog has already followed four times, and repeating it
+        # sends the user around a loop that ran.
+        _words_spent23 = []
+        _spent23 = _Ladder23()
+        _spent23._fail = lambda message, generation: _words_spent23.append(message)
+        _spent23._profile_id = 'mkv-h264'
+        _spent23._profile_tries = mirror.DLNA_MAX_PROFILE_TRIES
+        _spent23._give_up(None, '电视连续 8 次没有播起来', _subject23)
+        check("once the ladder is spent the advice stops repeating itself",
+              _words_spent23 and '已经自动换过 {} 档'.format(
+                  mirror.DLNA_MAX_PROFILE_TRIES) in _words_spent23[0]
+              and '换成「{}」再试一次'.format(
+                  mirror.DLNA_PROFILES['ps-pal'].label) not in _words_spent23[0]
+              and mirror.DLNA_SHAPES[mirror.DLNA_SHAPE_FILE][0] in _words_spent23[0],
+              str(_words_spent23))
+
+        class _Fresh23l(mirror.ScreenMirrorRenderer):
+            """A start that does not start: the claim is only about the ladder.
+
+            Clearing `_starting` is the real `_mirror`'s job, and without it the
+            second `start_mirror` below would be refused for the wrong reason.
+            """
+
+            def _mirror(self, generation):
+                with self._lock:
+                    self._starting = False
+
+        _fresh23l = _Fresh23l()
+        _fresh23l._profile_id = 'ts-h264'
+        _fresh23l._profile_tries = 3
+        _fresh23l.start_mirror(keep_ladder=True)
+        check("a restart from the ladder keeps its place",
+              (_fresh23l._profile_id, _fresh23l._profile_tries)
+              == ('ts-h264', 3), '%s / %s' % (_fresh23l._profile_id,
+                                              _fresh23l._profile_tries))
+        _fresh23l._profile_id = 'ts-h264'
+        _fresh23l._profile_tries = 3
+        _wait_until(lambda: not _fresh23l._starting)
+        _fresh23l.start_mirror()
+        check("but a click from the user is a new question",
+              _fresh23l._profile_id is None and _fresh23l._profile_tries == 0,
+              '%s / %s' % (_fresh23l._profile_id, _fresh23l._profile_tries))
+
+        # The page has to light the rung that is actually being encoded, or it is
+        # pointing at a knob nothing obeys.
+        _show23 = _Ladder23()
+        check("while nothing runs the card shows the stored choice",
+              _show23.dlna_profile_display() == 'ps-pal',
+              _show23.dlna_profile_display())
+        _show23._profile_id = 'ts-h264'
+        _show23._mirroring = True
+        check("while a ladder is running it shows the rung, not the setting",
+              _show23.dlna_profile_display() == 'ts-h264'
+              and _show23.active_dlna_profile()
+              is mirror.DLNA_PROFILES['ts-h264'], _show23.dlna_profile_display())
+        _show23._mirroring = False
+        _show23._starting = True
+        check("and the same while a session is still coming up",
+              _show23.dlna_profile_display() == 'ts-h264', '')
+        _show23._starting = False
+        check("once the run is over the rung is forgotten, because it was never "
+              "the user's answer",
+              _show23.dlna_profile_display() == 'ps-pal'
+              and _show23._profile_id == 'ts-h264', '')
+
+        # The other half of the same zombie: `_fail` puts the page back to
+        #「未镜像」, and until `_retire_session` nothing took the encoder with it.
+        _zombie23 = _Ladder23()
+        _zombie23._retire_session()
+        check("a watchdog with no encoder to retire says nothing and does nothing",
+              _zombie23.teardowns == [] and _zombie23._proc is None,
+              str(_zombie23.teardowns))
+        _zombie23._proc = object()
+        _zombie23._retire_session()
+        check("but a run that gave up stops capturing",
+              _zombie23.teardowns == [_zombie23._generation],
+              str(_zombie23.teardowns))
+
+        # Two of the ladder's red lines are invisible to every check above: they
+        # are about which *call site* asks the question, and a future edit that
+        # re-adds a second ask passes all of them. So ask the source text.
+        _psrc23 = open(mirror.__file__, encoding='utf-8').read()
+        _body23 = lambda name: _psrc23.split(          # noqa: E731
+            'def {}('.format(name), 1)[1].split('\n    def ', 1)[0]
+
+        def _code23(name):
+            """What a method *does*, as opposed to what it says about itself.
+
+            The prose has to come out before either check: `_run_mirror`'s
+            comment names the old double ask, and `_rotate_dlna_profile`'s
+            docstring names `Mirror_Dlna_Profile` in the sentence that forbids
+            touching it. A guard that reads those would fail on the very reason
+            it exists.
+            """
+            text = _body23(name)[_body23(name).index('\n') + 1:]
+            if text.lstrip().startswith('"""'):
+                open_quote = text.index('"""')
+                text = text[text.index('"""', open_quote + 3) + 3:]
+            return '\n'.join(_line.split('#', 1)[0]
+                             for _line in text.splitlines())
+
+        # `active_dlna_profile(` *contains* `dlna_profile(`, so the one ask that
+        # is allowed would fail the check for a second one unless the first is
+        # set aside by name.
+        _run_code23 = _code23('_run_mirror').replace('active_dlna_profile(',
+                                                     'THE_ASK(')
+        check("one session, one container: the run asks the ladder once and "
+              "hands that answer to both the session and ffmpeg",
+              _run_code23.count('THE_ASK()') == 1
+              and 'dlna_profile(' not in _run_code23,
+              'a second ask is how a session and its encoder argv part ways')
+        _ladder_code23 = _code23('_rotate_dlna_profile')
+        check("and the ladder itself has no way to write the user's choice",
+              'Setting.set(' not in _ladder_code23
+              and 'Setting.unset(' not in _ladder_code23
+              and 'Mirror_Dlna_Profile' not in _ladder_code23,
+              'the run\'s ladder must not outlive the run')
+        mirror.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Profile)
 
         # The line the user reads carries both facts. A renderer that says
         # STOPPED while a client is reading is the exact case this whole change
@@ -6287,8 +6682,14 @@ done
                   _pushed_url23.startswith('http://127.0.0.1:')
                   and '/stream/' in _pushed_url23
                   and _pushed_url23.endswith('.mpg'), _pushed_url23)
-            check("the start message says how late this target is",
-                  any('小电视' in str(n) and '秒延迟' in str(n) for n in _notify23),
+            check("the start message says how late this target is, in the "
+                  "seconds this shape really pays",
+                  # 「先预填约 N 秒」 is the file shape's debt and the only one
+                  # this session adds itself; the live shape's own words are
+                  # checked below, at the session that never hoards anything.
+                  any('小电视' in str(n) and '档位' in str(n)
+                      and mirror.DLNA_SHAPES[mirror.DLNA_SHAPE_FILE][0]
+                      in str(n) and '预填约' in str(n) for n in _notify23),
                   str(_notify23))
             _where23 = _pushed_url23.split('//', 1)[1]
             _conn23 = http.client.HTTPConnection(
@@ -6381,6 +6782,16 @@ done
                         'profile': 'ps-pal', 'state': 'PLAYING',
                         'buffered': 20971520}
 
+            def dlna_profile_display(self):
+                """The rung this fake's session is actually encoding.
+
+                The page asks the renderer rather than reading the setting back,
+                because with a watchdog ladder running the two are different
+                containers -- a fixture that just echoed the setting would hide
+                the only question this card asks.
+                """
+                return mirror.dlna_profile_id(mirror.dlna_profile())
+
         fake23 = _FakeMirror23()
         setting23 = mirror.ScreenMirrorSetting()
         _saved_renderer_fn23 = setting23._renderer
@@ -6401,8 +6812,17 @@ done
         check("the console offers four targets and names the running one",
               _st23['output']['kind'] == 'dlna'
               and len(_st23['output']['options']) == 4
-              and any(o['key'] == 'dlna' and 'MPEG-PS' in o['label']
-                      for o in _st23['output']['options']), str(_st23['output']))
+              and any(o['key'] == 'dlna' and '老电视' in o['label'] for o in
+                      _st23['output']['options']), str(_st23['output']))
+        check("a target row names the device, never the container inside it",
+              # This row used to say MPEG-PS. That stopped being true the day the
+              # live shape began defaulting to TS: the container is the profile's
+              # business, and a target that advertises one is a lie about four of
+              # the five rows beneath it.
+              all('MPEG' not in o['label'] and 'H.264' not in o['label']
+                  and 'Matroska' not in o['label']
+                  for o in _st23['output']['options']),
+              str([o['label'] for o in _st23['output']['options']]))
         check("a DLNA target lists the renderers discovery found",
               '厨房的小电视 · 192.0.2.40' in _labels23
               and '客厅 · 192.0.2.41' in _labels23
@@ -6414,9 +6834,25 @@ done
               and '档位 ps-pal' in _st23['status_line']
               and '电视 PLAYING' in _st23['status_line']
               and '缓冲 20 MiB' in _st23['status_line'], _st23['status_line'])
-        check("all five compatibility profiles are offered",
-              len(_st23['profiles']['options']) == len(mirror.DLNA_PROFILES)
-              and _st23['profiles']['current'] == 'ps-pal', str(_st23['profiles']))
+        check("all five compatibility profiles are offered, each with what it "
+              "costs",
+              [o['key'] for o in _st23['profiles']['options']]
+              == list(mirror.DLNA_PROFILES)
+              and _st23['profiles']['current'] == mirror.LIVE_DEFAULT_DLNA_PROFILE
+              and all(o['cost'].startswith('首帧 ') and '落后' in o['cost']
+                      and '—' not in o['cost']
+                      for o in _st23['profiles']['options']),
+              str(_st23['profiles']))
+        check("and the card says what those seconds were measured against",
+              # The ranking is the useful half of this card, and so is its limit:
+              # every number here came from this repository's own receiver, and
+              # the sentence that presents them has to say so rather than let a
+              # user read them as a promise about their television.
+              mirror.DLNA_PROFILE_LATENCY_SCOPE in _st23['profiles']['note']
+              and '不是真老电视' in _st23['profiles']['note']
+              and all(mirror.DLNA_PROFILES[key].label.split('（')[0].strip()
+                      in _st23['profiles']['note'] for key in mirror.DLNA_PROFILES),
+              _st23['profiles']['note'])
         check("a DLNA mirror has no address to copy",
               not _st23['viewer']['available'], str(_st23['viewer']))
         _sections23 = _mc.sections_for(_st23)
@@ -6434,17 +6870,22 @@ done
               'requirements' not in _sections23
               or _sections23.index('requirements')
               == _sections23.index('devices') + 1, str(_sections23))
-        setting23.console_action('set-profile', {'value': 'ts-h264'})
+        _pick23 = mirror.next_profile_id(mirror.dlna_profile())
+        setting23.console_action('set-profile', {'value': _pick23})
         check("choosing a profile stores it and restarts the running stream",
-              mirror.dlna_profile_id(mirror.dlna_profile()) == 'ts-h264'
+              mirror.dlna_profile_id(mirror.dlna_profile()) == _pick23
               and fake23.stops == 1 and fake23.starts == 1, str(fake23.stops))
         fake23.stops = fake23.starts = 0
-        setting23.console_action('set-profile', {'value': 'ts-h264'})
+        setting23.console_action('set-profile', {'value': _pick23})
         check("choosing the profile that is already chosen changes nothing",
-              fake23.stops == 0 and fake23.starts == 0)
+              fake23.stops == 0 and fake23.starts == 0,
+              'the pill the page lights is the answer to this click, so clicking '
+              'it again has to say「已经是」rather than restart onto the same '
+              'container')
         check("and a profile that is not on the list is refused",
               setting23.console_action('set-profile', {'value': 'vp9'})['code'] == 1
-              and mirror.dlna_profile_id(mirror.dlna_profile()) == 'ts-h264', '')
+              and mirror.dlna_profile_id(mirror.dlna_profile()) == _pick23, '')
+        utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Profile)
         setting23.console_action('set-dlna-target',
                                  {'name': '客厅',
                                   'control': 'http://192.0.2.41:49152/x'})
@@ -12364,6 +12805,9 @@ try:
     _live35 = types.SimpleNamespace(is_mirroring=lambda: True,
                                     is_starting=lambda: False,
                                     stats=lambda: {},
+                                    dlna_profile_display=lambda:
+                                    mirror35.dlna_profile_id(
+                                        mirror35.dlna_profile()),
                                     viewer_url=lambda: '')
     _protocol_file35 = open(protocol.__file__, encoding='utf-8').read()
     _patch35(_grab_snapshot=_preview_grab35,
@@ -12495,6 +12939,21 @@ try:
           '连不上 Macast' in _tab35 and 'mirror_offline' in _tab35,
           "banner_for() gave that sentence up to the page; if the page never had "
           "it either, a stopped app would read as a broken panel")
+    check("the compatibility card shows each pill's cost and the note that "
+          "explains it",
+          # The plugin computes both; the page has to bind them, or the measured
+          # seconds never reach the one screen a user chooses a container on.
+          ':title="p.cost"' in _tab35
+          and '{{ mirror_state.profiles.note }}' in _tab35,
+          'a pill that only restarts the mirror is a guess between five rows')
+    check("and it promises the automatic fallback in the same words the "
+          "watchdog uses",
+          # `_rotate_dlna_profile`'s notification says the ladder is this run's
+          # and leaves the setting alone. The page has to say the same before the
+          # user clicks, and a rewrite on one side only is the drift this catches.
+          '本次会话' in _tab35 and '不改你选的档位' in _tab35
+          and '本次会话' in _plugin_src35 and '没有改动' in _plugin_src35,
+          '「自动换档」without「不改你的设置」is a surprise waiting for the next start')
     check("the preview fields the page reads are ones the plugin reports",
           {'has_frame', 'reason', 'at', 'busy'} <= set(mirror35.snapshot_state())
           and 'frame' not in mirror35.snapshot_state(),
@@ -13031,6 +13490,53 @@ try:
               * m37.DLNA_PREFILL_SECONDS // 8)
           and m37.DLNA_PROFILES['ps-pal'].total_bitrate == 4500000 + 192000,
           str(m37.DLNA_PROFILES['ps-pal'].total_bitrate))
+
+    # -- how long a joiner waits for an IDR ---------------------------------
+    #
+    # `-g` used to be one second on every DLNA shape, on the theory that a
+    # seeker wants a whole second of seek granularity. On a *live* stream nobody
+    # is seeking; what waits for the next keyframe is a television that has just
+    # been handed the URL, and on Matroska the cluster holding that picture
+    # cannot be published before the next IDR arrives. Measured against this
+    # repository's own receiver, first picture on screen: `mkv-h264` 3.31/3.26 s
+    # at -g 25 against 2.47/2.44 s at -g 6 on VideoToolbox (2.88/2.88 against
+    # 2.52/2.44 on x264), `ts-h264` 2.97x3 against 2.50x3 on x264 and a wash on
+    # VideoToolbox (2.05 against 2.04). Cost: 6% more bytes on x264 and 9% on
+    # VideoToolbox, SSIM flat to the fourth decimal, steady lag unmoved. So the
+    # H.264 shapes take a quarter-second and the MPEG-2 shapes keep what DVD
+    # firmware expects -- which is exactly the split the two checks below name.
+    _cmdcap37 = m37._Capture('test', [['-f', 'test', '-i', 'x']])
+
+    def _g37(profile_key):
+        _c37 = m37.build_ffmpeg_command(
+            'ffmpeg', _cmdcap37, 720, 6000000, kind='dlna',
+            profile=m37.DLNA_PROFILES[profile_key], encoder='software')
+        return int(_c37[_c37.index('-g') + 1])
+
+    check("the live H.264 shapes keyframe often enough that a joiner is not "
+          "waiting a second for a picture",
+          all(_g37(k) == m37.live_gop(m37.DLNA_PROFILES[k].fps)
+              and 0.1 <= m37.live_gop(m37.DLNA_PROFILES[k].fps)
+              / float(m37.DLNA_PROFILES[k].fps) <= 0.4
+              for k in ('ts-h264', 'mkv-h264')),
+          str([(k, _g37(k)) for k in ('ts-h264', 'mkv-h264')]))
+    check("and the MPEG-2 shapes keep the figure their firmware expects, "
+          "untouched by this measurement",
+          all(_g37(k) == p.fps * 3 // 5
+              for k, p in m37.DLNA_PROFILES.items() if p.video_args),
+          str([(k, _g37(k)) for k, p in m37.DLNA_PROFILES.items()
+               if p.video_args]))
+    check("a short GOP is not allowed to fall under two frames, whatever "
+          "frame rate a future profile advertises",
+          all(m37.live_gop(f) >= 2 for f in (1, 5, 12, 24, 25, 30, 60))
+          and m37.live_gop(25) == 6 and m37.live_gop(24) == 6,
+          str([(f, m37.live_gop(f)) for f in (1, 5, 24, 25, 30, 60)]))
+    check("the browser and Chromecast targets were not measured here, so "
+          "their cadence is still the one that was",
+          m37.gop_size('browser') == m37.FPS // 2
+          and all(m37.gop_size(k) == m37.FPS for k in m37.OUTPUTS
+                  if k != 'browser'),
+          str([(k, m37.gop_size(k)) for k in m37.OUTPUTS]))
 
     # -- which encoder an untouched install picks ---------------------------
     _SP37 = m37.SettingProperty
@@ -13826,9 +14332,15 @@ done
           and 'diagnostics' not in _mc39.sections_for(_idle39))
 
     _diag39 = m39._session_diagnostics(
-        kind='browser', capture=_cap39, command=['ffmpeg', '-f', 'x', 'pipe:1'],
+        kind='browser', capture=_cap39,
+        command=['ffmpeg', '-f', 'x', '-pix_fmt', 'yuv420p', '-g', '9',
+                 '-r', '25', 'pipe:1'],
         encoder='software', height=720, bitrate=4000000,
-        session=type('S39', (), {'profile': None})())
+        # A real session, not a stub with the two attributes this card happened
+        # to read when it was written: the diagnostics dict grew a `bytelog`
+        # question afterwards, and a fake that only carries what an older card
+        # asked for turns every honest addition into a phantom failure.
+        session=m39._Session('browser', has_audio=True, title='x'))
     _live39 = {'mirroring': True, 'version': '0.13', 'platform': 'darwin',
                'available': True, 'console_version': _mc39.VIEW_VERSION,
                'capture': {'probed': True}, 'audio': {'line': ''},
@@ -13845,6 +14357,22 @@ done
           and '关键帧间隔' in _flat39 and '编码器' in _flat39
           and '实测码率' in _flat39 and '丢块' in _flat39,
           str(sorted(_flat39)))
+    # The two rows above are the ones a DLNA session used to get wrong: the card
+    # recomputed them from the target's defaults (`FPS`, `gop_size(kind)`) while
+    # the encoder was being told something else by its profile. `-g 9 -r 25`
+    # matches none of the defaults on purpose, so a regression to recomputing
+    # them shows up here rather than as a plausible-looking number.
+    check("帧率 and 关键帧间隔 are read out of the argv, not guessed from the target",
+          _flat39.get('帧率') == '25 fps'
+          and _flat39.get('关键帧间隔') == '9 帧 · 0.4 秒',
+          '{} / {}'.format(_flat39.get('帧率'), _flat39.get('关键帧间隔')))
+    check("and a command that carries neither is reported as unknown, "
+          "not as the default",
+          m39._int_flag(['ffmpeg', 'pipe:1'], '-g') is None
+          and m39._int_flag(['ffmpeg', '-g'], '-g') is None
+          and m39._int_flag(['ffmpeg', '-g', '25.000'], '-g') is None
+          and m39._int_flag(['ffmpeg', '-g', '6', '-r', '25'], '-g') == 6,
+          'a half-parsed number is a lie with a number in it')
     check("it says what the sender holds in front of a viewer, in seconds",
           any('发送队列' in k and '秒' in v for k, v in _rows39),
           str([r for r in _rows39 if '队列' in r[0]]))
@@ -13869,10 +14397,23 @@ done
           'the mirror stream id and the page token are credentials (AGENTS 4.7)')
 
     # The DLNA shape reports its own budget instead of a queue it does not have.
+    # Two real sessions again, one per shape: which budget a session has *is* the
+    # thing under test, so a stub that carries a `profile` and not the shape can
+    # only ever prove the card was written against the stub.
+    utils.Setting.set(m39.SettingProperty.Mirror_Dlna_Shape, m39.DLNA_SHAPE_FILE)
+    _file_sess39 = m39._Session('dlna', has_audio=True, title='x',
+                                profile=_pf39)
+    utils.Setting.set(m39.SettingProperty.Mirror_Dlna_Shape, m39.DLNA_SHAPE_LIVE)
+    _live_sess39 = m39._Session('dlna', has_audio=True, title='x',
+                                profile=_pf39)
+    utils.Setting.unset(m39.SettingProperty.Mirror_Dlna_Shape)
+    check("and only the file shape owns a byte-addressed log",
+          _file_sess39.bytelog is True and _live_sess39.bytelog is False,
+          '%s / %s' % (_file_sess39.bytelog, _live_sess39.bytelog))
     _dlna_diag39 = m39._session_diagnostics(
         kind='dlna', capture=_cap39, command=['ffmpeg', 'pipe:1'],
         encoder='software', height=720, bitrate=4000000,
-        session=type('S39b', (), {'profile': _pf39})())
+        session=_file_sess39)
     _dlna_rows39 = dict(_mc39.diagnostics_rows(dict(
         _live39, output={'kind': 'dlna'},
         stats=dict({'diag': _dlna_diag39}, mbps=4.5, clients=1, bytes=1 << 20,
@@ -13883,6 +14424,19 @@ done
           and '发送队列（延迟来源）' not in _dlna_rows39
           and _dlna_rows39.get('DLNA 档位') == 'ps-pal',
           str(sorted(_dlna_rows39)))
+    _livedia39 = m39._session_diagnostics(
+        kind='dlna', capture=_cap39, command=['ffmpeg', 'pipe:1'],
+        encoder='software', height=720, bitrate=4000000,
+        session=_live_sess39)
+    _liverow39 = dict(_mc39.diagnostics_rows(dict(
+        _live39, output={'kind': 'dlna'},
+        stats=dict({'diag': _livedia39}, mbps=4.5, clients=1, bytes=1 << 20,
+                   chunks=256, drops=0, seconds=12, state='PLAYING',
+                   buffered=0))))
+    check("while the live shape shows the queue and no prefill it never paid",
+          '发送队列（延迟来源）' in _liverow39
+          and '预填缓冲（延迟来源）' not in _liverow39,
+          str(sorted(_liverow39)))
     check("and the console exposes the discovery trace it is drawn from",
           'search_trace' in _src39
           and "'search_trace': {'dlna': dlna_trace()}" in _src39,
@@ -14288,6 +14842,291 @@ finally:
         print('Part 42 setup error: %s' % _traceback42.format_exc())
     utils.Setting.setting = {}
     _shutil.rmtree(_tmp42, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Part 43: a live Matroska stream a second viewer can join
+#
+# The mkv-h264 profile was a live shape this plugin advertises as low-latency
+# (measured on this machine, hardware encoder: 2.44 s first picture / 2.11 s
+# steady lag, against 5.67 / 5.10 s for the then-default ps-pal -- ts-h264 is
+# still the fastest at 2.03 / 1.94 s, which is why it holds the live default;
+# `DLNA_PROFILE_LATENCY` is the table these numbers went into) and it did not
+# work at all: pointing mpv at a live `mkv-h264` session produced one clean 200,
+# `EBML header parsing failed`, and a player that never retries the probe. Two
+# separate causes, both inside this file's framing rules -- the one-time header
+# was queued among droppable fragments and never rewritten onto a new
+# connection, and the bytes after it started in the middle of a Cluster, which
+# Matroska has no packet marker to recover from (MPEG-TS does).
+#
+# The input here is a real encoder pipe, not a hand-written byte string, for the
+# reason AGENTS.md 4.2 last bullet spells out: a parser and its tests once
+# shared a format that never existed, and every real Mac failed while the suite
+# was green. `scripts/fixtures/make-live-mkv.py` records how the fixture was
+# made, and the element tree is re-read below with a *separate* parser so the
+# fixture cannot agree with the implementation by construction.
+# --------------------------------------------------------------------------
+print("\n=== Part 43: joining a live Matroska stream ===")
+import traceback as _traceback43
+
+_tmp43 = _tempfile.mkdtemp(prefix="macast-mkv43-")
+mirror43 = None
+try:
+    utils.SETTING_DIR = _tmp43
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp43, "macast_setting.json")
+    mirror43 = _load_plugin("screen_mirror_plugin_v43", "screen_mirror.py")
+    m43 = mirror43
+
+    _fixture_path43 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'fixtures', 'live-mkv-h264.bin')
+    _mkv43 = open(_fixture_path43, 'rb').read()
+
+    # -- an EBML reader that is not the plugin's -----------------------------
+    # Written from the spec, 20 lines, deliberately dumb: it only has to say
+    # "these bytes are a top-level element tree" for the checks below to mean
+    # something the implementation cannot talk itself into.
+    def _ebml_read43(buf, pos):
+        first = buf[pos]
+        for bit, length in ((0x80, 1), (0x40, 2), (0x20, 3), (0x10, 4)):
+            if first & bit:
+                if pos + length > len(buf):
+                    raise ValueError('ID cut short at %d' % pos)
+                ident = bytes(buf[pos:pos + length])
+                pos += length
+                break
+        else:
+            raise ValueError('%r at %d cannot start an element ID'
+                             % (bytes(buf[pos:pos + 1]), pos))
+        marker, width = 0x80, 1
+        while not buf[pos] & marker:
+            marker >>= 1
+            width += 1
+            if width > 8 or pos + width > len(buf):
+                raise ValueError('unreadable length at %d' % pos)
+        value = buf[pos] & (marker - 1)
+        for byte in buf[pos + 1:pos + width]:
+            value = (value << 8) | byte
+        pos += width
+        if value == (1 << (7 * width)) - 1:
+            return ident, None, pos            # "to the end of my container"
+        return ident, value, pos
+
+    def _ebml_tree43(buf):
+        """The top-level elements of a live pipe: Segment is open, so its
+        children sit at the same level."""
+        out, pos = [], 0
+        while pos < len(buf):
+            ident, size, pos = _ebml_read43(buf, pos)
+            head = pos
+            if size is not None:
+                if head + size > len(buf):
+                    raise ValueError('%s at %d claims %d, %d left'
+                                     % (ident.hex(), head - 1, size,
+                                        len(buf) - head))
+                pos = head + size
+            out.append((ident, size))
+        return out
+
+    _CLUSTER43 = b'\x1f\x43\xb6\x75'
+    _tree43 = _ebml_tree43(_mkv43)
+    check("the fixture is a real live Matroska pipe, read by a second parser",
+          _tree43[0][0] == b'\x1a\x45\xdf\xa3'
+          and _tree43[1][0] == b'\x18\x53\x80\x67' and _tree43[1][1] is None
+          and sum(1 for i, _s in _tree43 if i == _CLUSTER43) >= 3,
+          '%d elements, %d clusters' % (len(_tree43),
+                                        sum(1 for i, _ in _tree43
+                                            if i == _CLUSTER43)))
+    check("an open-ended Segment is what a live muxer writes, so the framer has "
+          "to descend into it rather than skip it",
+          all(size is None for _id, size in _tree43[1:2])
+          and all(size is not None for _id, size in _tree43[2:]),
+          'every element after Segment states its length; only Segment does not')
+
+    def _frame43(data, chunk=m43.CHUNK):
+        fr = m43._Clusters()
+        units = []
+        for i in range(0, len(data), chunk):
+            units += fr.feed(data[i:i + chunk])
+            if fr.broken:
+                break
+        else:
+            units += fr.flush()
+        return fr, units
+
+    _fr43, _units43 = _frame43(_mkv43)
+    _head43 = [u for is_media, u in _units43 if not is_media]
+    _media43 = [u for is_media, u in _units43 if is_media]
+    check("framing a whole real pipe never loses sync",
+          not _fr43.broken, '%d units' % len(_units43))
+    check("and the units are byte-for-byte the stream that went in",
+          b''.join(_head43 + _media43) == _mkv43,
+          '%d head, %d media' % (len(_head43), len(_media43)))
+    check("exactly one unit is the header, and every media unit is a whole "
+          "Cluster",
+          len(_head43) == 1 and len(_media43) >= 3
+          and all(u[:4] == _CLUSTER43 for u in _media43),
+          '%d clusters, %d of them aligned'
+          % (len(_media43), sum(1 for u in _media43 if u[:4] == _CLUSTER43)))
+    check("the header carries what a joiner can never recover: the Tracks "
+          "element and the Segment it lives in",
+          b'\x16\x54\xae\x6b' in _head43[0] and b'\x18\x53\x80\x67' in _head43[0]
+          and _head43[0][:4] == b'\x1a\x45\xdf\xa3',
+          '%d bytes' % len(_head43[0]))
+
+    # The claim of the whole change, tested on the bytes a second viewer would
+    # actually receive: header, then clusters from wherever it joined.
+    _join43 = _head43[0] + b''.join(_media43[2:])
+    try:
+        _ebml_tree43(_join43)
+        _joined = 'parses'
+    except ValueError as _e43:
+        _joined = str(_e43)
+    check("a viewer that joins at a later Cluster gets a readable stream",
+          _joined == 'parses', _joined)
+    # ... and the same test on the shape the old framing produced: the same
+    # bytes, cut at a chunk boundary instead of an element one. If this passed
+    # too, the case above would be measuring nothing.
+    #
+    # The first version of this line flipped the stream's last byte to 0x00, and
+    # measured nothing for a reason worth writing down: that byte sits inside the
+    # last Cluster's payload, and a walk of top-level elements never looks
+    # inside a payload -- it only adds up headers. Flipping a byte there cannot
+    # fail, so the check could never have passed. Cutting a Cluster in half is
+    # what a stream resumed at a chunk boundary actually looks like, and the
+    # inequality below asks, out loud, whether the mutant is even a different
+    # stream.
+    _cut43 = _join43[:len(_join43) - (len(_media43[-1]) // 2)]
+    try:
+        _ebml_tree43(_cut43)
+        _misaligned = 'parses'
+    except ValueError as _e43:
+        _misaligned = str(_e43)
+    check("the same bytes cut mid-Cluster are rejected, so the case above has "
+          "teeth",
+          _cut43 != _join43 and _misaligned != 'parses',
+          '%d bytes removed; a parser that accepts anything cannot prove '
+          'alignment' % (len(_join43) - len(_cut43)))
+
+    # -- what the broadcaster does with those units -------------------------
+    _b43 = m43._Broadcaster(init_marker=m43.MKV_FIRST_CLUSTER, maxsize=2)
+    check("a live Matroska session frames its bytes",
+          isinstance(_b43._framer, m43._Clusters), repr(_b43._framer))
+    _late43 = _b43.subscribe(replay=True)
+    for _chunk in [_mkv43[i:i + m43.CHUNK]
+                   for i in range(0, len(_mkv43), m43.CHUNK)]:
+        _b43.feed(_chunk)
+    _q43 = []
+    while True:
+        try:
+            _q43.append(_late43.get_nowait())
+        except Exception:
+            break
+    check("a slow viewer's queue only ever holds whole Clusters, so dropping "
+          "for it cannot cut one in half",
+          _q43 and all(x[:4] == _CLUSTER43 for x in _q43),
+          '%d queued: %s' % (len(_q43), [x[:4] for x in _q43]))
+    check("the header is kept for replay and never rung as media, so a late "
+          "joiner gets it once",
+          _b43.init_segment == _head43[0]
+          and all(_head43[0] not in unit for unit in _b43.tail()),
+          'init=%d bytes, ring=%d units' % (len(_b43.init_segment),
+                                            len(_b43.tail())))
+    check("and a session that is not fragmented at all still has no framer",
+          m43._Broadcaster(init_marker=None)._framer is None
+          and m43._Broadcaster(init_marker=b'moof')._framer.__class__
+          is m43._Fragments, 'the browser target must not change shape here')
+
+    # -- the two ways framing can fail --------------------------------------
+    _fr43 = m43._Clusters()
+    _noise43 = b'GIF89a' + b'\x00' * 4000
+    _out43 = _fr43.feed(_noise43)
+    check("bytes that are not Matroska say so before anything is handed out",
+          _fr43.broken and _fr43.restartable and _out43 == [],
+          '%d units' % len(_out43))
+    check("and they are still all in the backlog, so the caller can frame them "
+          "the old way instead of stalling",
+          _fr43.backlog == _noise43, '%d bytes' % len(_fr43.backlog))
+
+    _b43b = m43._Broadcaster(init_marker=m43.MKV_FIRST_CLUSTER)
+    _q43b = _b43b.subscribe()
+    _b43b.feed(_noise43)
+    _fell43 = []
+    while not _q43b.empty():
+        _fell43.append(_q43b.get_nowait())
+    check("a non-Matroska stream falls back to plain bytes rather than blocking "
+          "the encoder",
+          b''.join(_fell43) == _noise43, '%d units' % len(_fell43))
+
+    # Out of sync *after* the first cluster is a different case: the viewer is
+    # watching, and re-sending what they already have is worse than a stream
+    # that stopped being joinable.
+    _cut43 = len(_head43[0]) + len(_media43[0])
+    _fr43c = m43._Clusters()
+    _fr43c.feed(_mkv43[:_cut43 - 8])
+    _out43c = _fr43c.feed(_mkv43[_cut43 - 8:_cut43] + b'\x00' * 5000)
+    check("mid-stream junk hands over the bytes and does not restart framing",
+          _fr43c.broken and not _fr43c.restartable
+          and [u[1][:4] for u in _out43c] == [b'\x1a\x45\xdf\xa3', _CLUSTER43,
+                                              b'\x00\x00\x00\x00'],
+          '%s' % [u[1][:4] for u in _out43c])
+    _b43c = m43._Broadcaster(init_marker=m43.MKV_FIRST_CLUSTER)
+    _q43c = _b43c.subscribe()
+    _b43c.feed(_mkv43[:_cut43 - 8])
+    _b43c.feed(_mkv43[_cut43 - 8:_cut43] + b'\x00' * 5000)
+    _seen43c = []
+    while not _q43c.empty():
+        _seen43c.append(_q43c.get_nowait())
+    check("and the caller does not replay the backlog into a viewer's stream",
+          sum(u.count(_CLUSTER43) for u in _seen43c) <= 2,
+          '%d cluster headers on the wire after one cluster'
+          % sum(u.count(_CLUSTER43) for u in _seen43c))
+
+    # -- which session gets which treatment ---------------------------------
+    mirror43.Setting.unset(mirror43.SettingProperty.Mirror_Dlna_Shape)
+    _s43 = m43._Session('dlna', has_audio=True, title='x',
+                        profile=m43.DLNA_PROFILES['mkv-h264'],
+                        bitrate=6128000)
+    check("the live Matroska session is the one that asks for a retained header",
+          _s43.init_marker == m43.MKV_FIRST_CLUSTER and _s43.send_init
+          and not _s43.replay,
+          'replay stays off: a television handed a backlog sits behind it for '
+          'the rest of the session')
+    _s43b = m43._Session('dlna', has_audio=True, title='x',
+                         profile=m43.DLNA_PROFILES['ts-h264'],
+                         bitrate=6128000)
+    check("a self-synchronising profile asks for nothing, so nothing is held "
+          "back in front of it",
+          _s43b.init_marker is None and not _s43b.send_init
+          and m43._Broadcaster(init_marker=_s43b.init_marker)._framer is None,
+          'the TS and PS shapes must keep the byte-per-read behaviour they had')
+    mirror43.Setting.set(mirror43.SettingProperty.Mirror_Dlna_Shape,
+                         m43.DLNA_SHAPE_FILE)
+    _s43c = m43._Session('dlna', has_audio=True, title='x',
+                         profile=m43.DLNA_PROFILES['mkv-h264'],
+                         bitrate=6128000)
+    check("a byte log cannot serve a container that has to be read from its "
+          "header, so the file shape gives way to the live one",
+          _s43c.shape_forced and not _s43c.bytelog
+          and _s43c.init_marker == m43.MKV_FIRST_CLUSTER,
+          'otherwise the setting says "file" and the picture never appears')
+    check("and the page is told which of the two the session is actually doing",
+          '伪装成文件' in m43.dlna_shape_words(_s43c)
+          and '直播流' in m43.dlna_shape_words(_s43c),
+          m43.dlna_shape_words(_s43c))
+    _s43d = m43._Session('dlna', has_audio=True, title='x',
+                         profile=m43.DLNA_PROFILES['ps-pal'],
+                         bitrate=4692000)
+    check("the shape that the file target exists for still gets a byte log",
+          _s43d.bytelog and not _s43d.shape_forced
+          and '预填' in m43.dlna_shape_words(_s43d),
+          m43.dlna_shape_words(_s43d))
+    mirror43.Setting.unset(mirror43.SettingProperty.Mirror_Dlna_Shape)
+finally:
+    if mirror43 is None:
+        print('Part 43 setup error: %s' % _traceback43.format_exc())
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp43, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------

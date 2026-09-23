@@ -818,11 +818,14 @@
                             <div class="mirror-pills">
                                 <span class="mirror-pill" :class="{sel: p.key === mirror_state.profiles.current}"
                                       v-for="p in mirror_state.profiles.options" :key="p.key"
+                                      :title="p.cost"
                                       @click="mirror_run('set-profile', {value: p.key})">{{ p.label }}</span>
                             </div>
                             <div class="hint" style="margin-top:8px;">
                                 换档位会立刻重启镜像：摆出五种封装就是因为第一种常被电视拒掉。
+                                电视连续拒收时，镜像会自己在本次会话里往下换档（不改你选的档位）。
                             </div>
+                            <div class="hint" style="margin-top:6px;">{{ mirror_state.profiles.note }}</div>
                         </div>
 
                         <div class="status-card" v-if="sec === 'quality'" key="quality">

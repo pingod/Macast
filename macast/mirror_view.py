@@ -51,7 +51,7 @@ SECTION_ORDER = ('channels', 'devices', 'requirements', 'shape', 'profiles',
 OUTPUT_FALLBACK = {
     'cast': 'Chromecast / Google TV',
     'caststream': 'Chromecast 低延迟（实验 · 此通道无声音）',
-    'dlna': 'DLNA 电视（老电视，MPEG-PS）',
+    'dlna': 'DLNA 电视（老电视，无需在电视上装东西）',
     'browser': '浏览器（打开网址即可看）',
 }
 
@@ -337,7 +337,16 @@ def diagnostics_rows(state):
         add('实测码率', '{:.2f} Mbps'.format(stats['mbps']))
     if stats.get('clients') is not None:
         add('观看端', '{} 个'.format(stats['clients']))
-    add('累计发送', _mib(stats.get('bytes')))
+    # Two numbers that used to be one row. `bytes` is what the encoder wrote
+    # into the pipe: it keeps climbing at full rate over a black screen, because
+    # nobody told ffmpeg to stop. `delivered` is what actually left a socket,
+    # which is the only one of the two that answers「有人在观看吗」-- the
+    # watchdog used to read the first and restart a stream the television had
+    # already refused. The row was labelled 累计发送 while it carried the encoder's
+    # number, which is how that got believed.
+    add('编码器产出', _mib(stats.get('bytes')))
+    if stats.get('delivered') is not None:
+        add('实际送达', _mib(stats.get('delivered')))
     add('分块', stats.get('chunks'))
     add('丢块', stats.get('drops'))
     if stats.get('seconds') is not None:

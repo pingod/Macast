@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.16</macast.version>
+# <macast.version>0.17</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows uses a dshow *loopback recording device* (「立体声混音」/ Stereo Mix) when one is enabled, and names that device -- or says which door to open when there is none -- instead of claiming to be picture-only. The first-frame budget is per platform since 0.14: gdigrab has to open the desktop before the dshow input is even opened, so a 3-second macOS budget was killing captures whose sound device had already negotiated stereo, and the message a Windows session got sent it to macOS's microphone pane. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding (default: auto, which takes hardware once an encoder probe has answered), and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; since 0.12 the menu bar holds no mirror rows at all, only the notifications, and stopping goes through the tab,「停止接受投屏」or switching renderer -- all three end in the same teardown. Drops for a slow viewer now land on container boundaries (whole MP4 fragments, whole 188-byte TS packets), queue depth is budgeted in seconds of picture rather than bytes, and the console says whether system sound actually reaches the capture tap instead of only that a tap exists. Since 0.13 an audio tap this process may not read no longer costs the mirror: a capture that returns no frame retries without it, and both the degraded success and the final failure name the permission door and the restart they need.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows uses a dshow *loopback recording device* (「立体声混音」/ Stereo Mix) when one is enabled, and names that device -- or says which door to open when there is none -- instead of claiming to be picture-only. The first-frame budget is per platform since 0.14: gdigrab has to open the desktop before the dshow input is even opened, so a 3-second macOS budget was killing captures whose sound device had already negotiated stereo, and the message a Windows session got sent it to macOS's microphone pane. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding (default: auto, which takes hardware once an encoder probe has answered), and a DLNA watchdog that re-pushes when the TV falls out of PLAYING. Since 0.17 that watchdog can act on its own advice: a live session the television refuses walks the five compatibility profiles by itself, one restart per rung, at most four per run, never in the「伪装成文件」shape (where the fix is the shape, not the container) and never into your settings -- the next manual start begins from the profile you picked. The default profile now follows the shape too, because the two are measured apart: MPEG-TS plus H.264 answers in about 1.9 s steady against a live stream, MPEG-PS in about 5.1 s, so a live mirror starts on ts-h264 and only the file shape still starts on the DVD-era ps-pal. Those numbers are on the settings page now, next to each profile, with the measurement scope written beside them. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; since 0.12 the menu bar holds no mirror rows at all, only the notifications, and stopping goes through the tab,「停止接受投屏」or switching renderer -- all three end in the same teardown. Drops for a slow viewer now land on container boundaries (whole MP4 fragments, whole 188-byte TS packets), queue depth is budgeted in seconds of picture rather than bytes, and the console says whether system sound actually reaches the capture tap instead of only that a tap exists. Since 0.13 an audio tap this process may not read no longer costs the mirror: a capture that returns no frame retries without it, and both the degraded success and the final failure name the permission door and the restart they need.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -46,15 +46,31 @@
 #     deliberately *not* replayed, because a TV would then have a backlog to
 #     drain and would sit seconds behind for the rest of the session;
 #   * the DLNA target is the awkward one, because a ten-year-old MediaRenderer
-#     has no notion of "live": it is handed a URL that pretends to be a finite
-#     file. So the stream is served as one -- Content-Length under 2 GiB (some
-#     firmware does signed 32-bit arithmetic there), Accept-Ranges plus
-#     transferMode/contentFeatures.dlna.org on every answer, a bounded sniff
-#     answered with *exactly* the bytes asked for (MPEG-PS padding, never a
-#     short read), and reconnects served by absolute byte offset out of a ring
-#     that is 48 MiB deep instead of the drop-oldest queue the other targets
-#     use. The URL is only pushed once the ring holds ~20 MiB, which is where
-#     this target's 20-ish seconds of latency comes from;
+#     has no notion of "live", so it answers in one of two shapes. 「直播流」says
+#     what the bytes are -- no length, no ranges, nothing to seek inside -- and
+#     is the default because it is the only shape measured to play.
+#     「伪装成文件」is the older trick for firmware that will only fetch a finite
+#     file: Content-Length under 2 GiB (some of it does signed 32-bit arithmetic
+#     there), Accept-Ranges plus transferMode/contentFeatures.dlna.org on every
+#     answer, a bounded sniff answered with *exactly* the bytes asked for
+#     (MPEG-PS padding, never a short read), and reconnects served by absolute
+#     byte offset out of a ring 48 MiB deep rather than the drop-oldest queue the
+#     other targets use. Only that shape hoards before handing the URL over, and
+#     the seconds that costs are said out loud in the start message; the live
+#     shape says 不预填 because it has nothing to pre-fill;
+#   * the container inside those bytes is chosen *per shape*, because a
+#     measurement said so: same machine, same receiver, same encoder, a
+#     byte-equivalent MPEG-2/AC-3 payload -- MPEG-PS costs 5.86 s to the first
+#     picture against 2.47 s for MPEG-TS, and stays ~3 s behind for the rest of
+#     the session (see `default_dlna_profile_id` for the two mechanisms and for
+#     the third suspect that was falsified). So the live shape defaults to
+#     TS + H.264 and the file shape keeps MPEG-PS, which is what DVD-era
+#     firmware -- that shape's only audience -- was built to find. And when a
+#     live renderer refuses what it was handed, the watchdog walks the five
+#     profiles itself instead of leaving that to a user who is looking at the
+#     television: one rung per refusal, at most once per other profile, never in
+#     the file shape, and never into `Mirror_Dlna_Profile`. See
+#     `_rotate_dlna_profile`;
 #   * the Cast sequence is the sender-side one: deviceauth CHALLENGE ->
 #     CONNECT receiver-0 -> LAUNCH(CC1AD845) -> CONNECT <transportId> ->
 #     LOAD with streamType LIVE. Framing is reused from
@@ -118,7 +134,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.16'
+PLUGIN_VERSION = '0.17'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -210,15 +226,56 @@ FPS = 24
 
 
 def gop_size(kind):
-    """Frames between keyframes for one target.
+    """Frames between keyframes for the browser and Chromecast targets.
 
     A fragmented-MP4 fragment ends when the *next* `moof` shows up, so on the
     browser target the GOP is not just a seek granularity, it is the floor on
     how long a finished picture sits in the encoder before the viewer can have
-    it -- half a second there is half a second of latency bought back. A TV
-    seeking into a pretend-file wants the whole second.
+    it -- half a second there is half a second of latency bought back. The
+    MPEG-TS targets are not framed by keyframes at all, so their figure is only
+    a seek granularity and a second of it is affordable; the DLNA target, which
+    *is* joined mid-stream by a television, uses `live_gop` instead.
     """
     return FPS // 2 if kind == 'browser' else FPS
+
+
+#: How long a live DLNA stream may go without an IDR, in seconds. At the 25 fps
+#: both H.264 profiles advertise that is `-g 6`.
+LIVE_GOP_SECONDS = 0.25
+
+
+def live_gop(fps):
+    """Frames between keyframes on a stream a television joins at will.
+
+    Two mechanisms, measured on this machine against its own receiver, and both
+    about the *first picture* rather than the running delay -- steady lag did not
+    move in a single one of these runs:
+
+      * Matroska closes a Cluster when the next keyframe arrives, and the
+        broadcaster cannot publish a cluster whose end it has not seen. On
+        `mkv-h264` the GOP therefore *is* the publish cadence: with `-g 25` the
+        first picture waited for the next IDR 2.88 / 2.88 s (CPU) and
+        3.31 / 3.26 s (VideoToolbox); with `-g 6`, 2.52 / 2.44 s and
+        2.47 / 2.44 s.
+      * A demuxer whose probe window runs past the opening IDR has to wait for
+        the next one, which costs up to a GOP. On `ts-h264` with the CPU
+        encoder `-g 25` measured 2.97 / 2.97 / 2.97 s against 2.50 / 2.49 /
+        2.50 s for `-g 6`; VideoToolbox is fast enough to be on screen before
+        the probe ends, and there the same change is worth nothing
+        (2.05 / 2.05 against 2.04 / 2.05).
+
+    What it costs is bandwidth, not quality: 6% on x264 (6.61 -> 7.02 Mbps) and
+    9% on VideoToolbox (5.66 -> 6.19 Mbps) on high-motion test material at these
+    profiles' own rate control, with SSIM flat across the fourth decimal (0.9983
+    against 0.9982, and 0.9985 against 0.9986). Four times as many I-frames, and
+    the picture does not visibly pay for them.
+
+    The MPEG-2 profiles keep the `-g` inside `_mpeg2` (`fps * 3 // 5`): PS and
+    TS re-synchronise on their own packet headers, neither mechanism above
+    applies, and that figure was chosen for DVD-era decoders rather than
+    measured here.
+    """
+    return max(2, int(round(fps * LIVE_GOP_SECONDS)))
 
 
 #: output kind -> (menu label, HTTP suffix, Content-Type, muxer args)
@@ -240,7 +297,8 @@ OUTPUTS = {
     #: this target -- container, codec, even the file extension in the URL --
     #: comes from the compatibility profile rather than from here. The muxer
     #: slot is None for exactly that reason.
-    'dlna': ('DLNA 电视（老电视，MPEG-PS）', 'mpg', 'video/mpeg', None),
+    'dlna': ('DLNA 电视（老电视，无需在电视上装东西）', 'mpg',
+             'video/mpeg', None),
 }
 DEFAULT_OUTPUT = 'cast'
 BROWSER_PATH = '/browser'
@@ -340,7 +398,90 @@ DLNA_PROFILES = {
         'mkv', 'video/x-matroska', None, None, _AUDIO[1],
         0, 720, 25, 6000000, 128000),
 }
+#: What an install that never touched「兼容档位」gets, per answer shape -- see
+#: `default_dlna_profile_id`. `ps-pal` is the historical one and stays the
+#: answer for the file shape; the live shape is served by `ts-h264`.
 DEFAULT_DLNA_PROFILE = 'ps-pal'
+LIVE_DEFAULT_DLNA_PROFILE = 'ts-h264'
+#: The element a Matroska file stops being a header at: the first Cluster.
+#: Everything before it (EBML header + Segment + SeekHead + Info + Tracks) is
+#: written exactly once, at the head of the stream -- 1717 bytes measured.
+#:
+#: That is fatal for a live joiner. MPEG-PS and MPEG-TS re-synchronise on their
+#: own packet headers, so a viewer that connects mid-stream can read them; a
+#: Matroska reader that never saw the Tracks element cannot name a single codec.
+#: Measured against this repository's own receiver: pointing mpv at a live
+#: `mkv-h264` session produced 3.7 MB of *later* bytes, one clean `200 GET`,
+#: `matroska,webm: EBML header parsing failed`, and a player that sits idle for
+#: the rest of the session -- it does not retry the probe. Waiting before the
+#: push does not help either (same command, receiver started 0.5-4 s later, with
+#: up to 3.7 MB already produced: every case fails). So the header has to be
+#: held back and written onto every connection, which is what the browser
+#: target already does for its fMP4 init segment -- see `_Broadcaster._retain`.
+#:
+#: Retaining the header is necessary and, on its own, not enough: measured
+#: again with it in place, a viewer that joined 10 s into the session was handed
+#: a stream `ffprobe` parsed as Matroska with both tracks (so the header
+#: half-worked) and still sat in mpv's demuxer probe forever. The other half is
+#: that the bytes after the header started in the *middle* of a Cluster, and
+#: Matroska has no packet marker to re-synchronise on -- see `_Clusters`.
+MKV_FIRST_CLUSTER = b'\x1f\x43\xb6\x75'
+#: The container every other top-level element lives inside. A live muxer gives
+#: it no size of its own (measured: `Segment` with the all-ones length), which
+#: is why the framer descends into it instead of skipping past it.
+MKV_SEGMENT = b'\x18\x53\x80\x67'
+
+
+def profile_needs_header(profile):
+    """Does this container have to start with a one-time header to be readable?
+
+    The DVD-era shapes are self-synchronising and the answer is no; Matroska is
+    the one profile in `DLNA_PROFILES` where the answer is yes.
+    """
+    return 'matroska' in (profile.muxer or ())
+
+
+def _ebml_id(buf, pos=0):
+    """The element ID at `pos`, and how many bytes it is: 1-4, by its own high
+    bits. `(None, 0)` when the buffer does not hold a whole ID."""
+    if pos >= len(buf):
+        return None, 0
+    for bit, length in ((0x80, 1), (0x40, 2), (0x20, 3), (0x10, 4)):
+        if buf[pos] & bit:
+            if pos + length > len(buf):
+                return None, -length
+            return bytes(buf[pos:pos + length]), length
+    return None, 0
+
+
+def _ebml_size(buf, pos):
+    """The element's data length, in Matroska's self-describing integers: the
+    marker bit that ends the leading zeros says how many bytes follow.
+
+    Returns `(value, length)`, `('unknown', length)` for the all-ones value a
+    streaming muxer writes when it has no idea how long the element will run,
+    and a `length` of 0 (unreadable) or a negative one (still arriving).
+    """
+    if pos >= len(buf):
+        return None, 0
+    first = buf[pos]
+    if not first:
+        return None, 0
+    length, mask = 1, 0x80
+    while not first & mask:
+        mask >>= 1
+        length += 1
+        if length > 8:
+            return None, 0
+    if pos + length > len(buf):
+        return None, -length
+    value = first & (mask - 1)
+    for byte in buf[pos + 1:pos + length]:
+        value = (value << 8) | byte
+    if value == (1 << (7 * length)) - 1:
+        return 'unknown', length
+    return value, length
+
 #: How much of the stream the TV gets before we hand it the URL, **in seconds
 #: of picture**. The renderer's first move is a bounded sniff, and the point of
 #: prefilling is that the answer comes from memory instead of stalling on the
@@ -397,6 +538,25 @@ DLNA_SNIFF_TIMEOUT = 10.0
 #: forever, and the TV is better off starting laggy than never starting.
 DLNA_PREFILL_TIMEOUT = 45.0
 DLNA_MAX_REPUSHES = 8
+#: How many re-pushes may be spent on a renderer that fetched the URL and then
+#: read nothing of it. Fewer than `DLNA_MAX_REPUSHES` by design: those eight are
+#: budgeted for a television that keeps stopping on its own, where a fresh
+#: `SetAVTransportURI` is a genuine second chance. A player that opened the
+#: stream, was answered, and took no byte has already told us what it thinks of
+#: the shape we chose, and the identical URL will get the identical refusal --
+#: measured with the file shape against mpv, which spent all eight re-pushes
+#: (~40 s) on a `Range` hunt it lost every single time.
+DLNA_MAX_REFUSALS = 2
+#: How many times one mirror run may change the compatibility shape on its own.
+#: The page has always offered all five shapes and the console has always named
+#: the next one, but a user who is not sitting at the settings page -- the whole
+#: point of a mirror -- was left watching a refusal they could not see. So the
+#: watchdog now spends a rung when the evidence says the *container* is what was
+#: refused, and says out loud which one it moved to. Bounded, because every step
+#: restarts the encoder and costs the seconds a re-push would not.
+#: `len(DLNA_PROFILES) - 1` is the honest ceiling: starting from any rung, that
+#: many switches visits every other one exactly once.
+DLNA_MAX_PROFILE_TRIES = len(DLNA_PROFILES) - 1
 DLNA_SERVICE = 'urn:schemas-upnp-org:service:AVTransport:1'
 DLNA_SEARCH_TARGETS = ('urn:schemas-upnp-org:device:MediaRenderer:1',
                        DLNA_SERVICE)
@@ -738,18 +898,88 @@ def encoder_kind():
             else 'software')
 
 
+def default_dlna_profile_id(shape=None):
+    """The compatibility shape an install that never chose one gets.
+
+    This is not one value any more, and the reason is a measurement rather than
+    a taste. Same machine, same receiver, same live shape, same encoder, 20 s
+    each, alternating twice (the numbers below are the recorded rows; the
+    repeat spread is a few hundredths of a second):
+
+        ps-pal     first picture 5.86 s   steady lag 5.08 s   (mpv holds ~1.2 s of cache)
+        ts-mpeg2   first picture 2.47 s   steady lag 2.15 s   (mpv holds 0 s)
+
+    -- and `ts-mpeg2` carries a byte-for-byte equivalent MPEG-2 + AC-3 payload
+    (same `-c:v mpeg2video`, same CBR shape, same `-vf`, same 25 fps and 720x576;
+    see `build_dlna_command`). So the codec is not the difference and neither is
+    the audio: the container costs 3.4 s of the receiver's start-up and it keeps
+    that debt for the whole session, because a stream that begins 3.4 s late is
+    3.4 s behind forever -- the position advances at exactly 1.00x in both.
+    `DLNA_PROFILE_LATENCY` is the sweep over all five profiles on this same
+    receiver, and it is what the settings page shows; these two rows are the A/B
+    that decided the default, and they rank the same way.
+
+    Two mechanisms, one of them ours:
+
+      * `-preload` (the vob muxer's "initial demux-decode delay", default
+        500000 us) is stamped into the stream: `ffprobe` reports
+        `start_time 0.534667` as shipped and `0.034667` with `-preload 0`, and
+        the live measurement moves 5.86 -> 5.30 s. That half-second is ours to
+        take back -- see why we deliberately do not below.
+      * The rest is MPEG-PS being hard to *identify*: `ffprobe -show_entries
+        format=probe_score` on the two files this function's own command builds
+        gives **26** for PS and **100** for TS. A receiver that is not sure what
+        it is holding keeps reading before it commits, which is exactly the
+        1.1-1.4 s of demuxer cache the PS row shows and the TS row does not.
+
+    `-muxrate` was the obvious third suspect -- the VOB path resolves it to the
+    DVD constant 10080 kbps, which would stamp an arrival model 2.15x faster
+    than our 4.692 Mbps really is -- and it is **falsified**: 10080000 written
+    out loud landed on top of as-shipped (5.85/5.00 against 5.86/5.08), as did
+    the true rate (5.72/4.93) and 20160 kbps. The muxer's stamps are not what a
+    receiver here obeys.
+
+    Why the default still depends on the *shape*: a renderer that needs the file
+    shape is, by that setting's own description, an old television, and DVD-era
+    firmware is the one audience MPEG-PS exists for -- measured here against mpv,
+    on a machine with no old TV in the room. The live shape is the opposite
+    audience: it is chosen because modern clients refuse a fabricated size, and
+    those same clients read TS without hunting for a PS pack header. So PS keeps
+    the file shape, TS + H.264 -- the fastest thing measured on this receiver,
+    2.03 s first / 1.94 s steady with the hardware encoder -- takes the live one,
+    and `next_profile_id` plus the watchdog's ladder mean a wrong guess
+    self-corrects instead of sitting there for the whole session.
+
+    Reading through `dlna_shape()` is only safe because that function asks with
+    `Setting.has`; a `Setting.get` here would write a default into an untouched
+    install and destroy the very fact this depends on. See `dlna_profile`.
+    """
+    if shape is None:
+        shape = dlna_shape()
+    return (LIVE_DEFAULT_DLNA_PROFILE if shape == DLNA_SHAPE_LIVE
+            else DEFAULT_DLNA_PROFILE)
+
+
 def dlna_profile(profile_id=None):
     """The compatibility shape in use for the DLNA target.
 
-    Unknown or missing values fall back to the default rather than failing:
-    the menu writes these, and a stale setting from a rolled-back plugin must
-    not make the mirror refuse to start.
+    Unknown or missing values fall back to the default for the shape being
+    served rather than failing: the menu writes these, and a stale setting from
+    a rolled-back plugin must not make the mirror refuse to start.
+
+    Asking is not allowed to answer. `Setting.get(key, default)` *stores* the
+    default when the key is absent (AGENTS.md 4.2), so reading the profile once
+    used to pin `ps-pal` into an untouched install's settings -- which is the
+    same thing as erasing the one fact a later default has to know: whether the
+    user ever chose. Same reason `dlna_shape()` reads through `Setting.has`.
     """
+    fallback = DLNA_PROFILES[default_dlna_profile_id()]
     if profile_id is None:
-        profile_id = str(Setting.get(SettingProperty.Mirror_Dlna_Profile,
-                                     DEFAULT_DLNA_PROFILE)
-                         or DEFAULT_DLNA_PROFILE)
-    return DLNA_PROFILES.get(profile_id, DLNA_PROFILES[DEFAULT_DLNA_PROFILE])
+        if not Setting.has(SettingProperty.Mirror_Dlna_Profile):
+            return fallback
+        profile_id = str(Setting.get(SettingProperty.Mirror_Dlna_Profile, '')
+                         or '')
+    return DLNA_PROFILES.get(profile_id, fallback)
 
 
 def dlna_profile_id(profile):
@@ -758,7 +988,25 @@ def dlna_profile_id(profile):
     for key, value in DLNA_PROFILES.items():
         if value is profile:
             return key
-    return DEFAULT_DLNA_PROFILE
+    return default_dlna_profile_id()
+
+
+def next_profile_id(profile):
+    """One rung up the compatibility ladder from `profile`, wrapping around.
+
+    The list is ordered "most likely to work on an old TV" first, so the rung
+    above is always a more modern container -- which is the direction a renderer
+    that refused the DVD shape is asking for. None when `profile` is not one of
+    the five, so a caller cannot rotate into a shape it cannot name: this asks
+    by *identity* rather than through `dlna_profile_id` on purpose, because that
+    one answers an unknown object with the default, and "the default's next rung"
+    is a rotation nobody was asked for.
+    """
+    keys = list(DLNA_PROFILES)
+    for key, value in DLNA_PROFILES.items():
+        if value is profile:
+            return keys[(keys.index(key) + 1) % len(keys)]
+    return None
 
 
 #: How the DLNA target answers a renderer.
@@ -797,10 +1045,77 @@ def dlna_shape():
     return chosen if chosen in DLNA_SHAPES else DLNA_SHAPE_LIVE
 
 
-def profile_order():
-    """Profiles in "try this next" order, starting after the current one."""
+#: What each shape costs, measured on the same machine, same live shape, same
+#: hardware encoder, 20 s each: seconds until the first picture, and how far
+#: behind the wall the picture then stays. See `default_dlna_profile_id` for the
+#: mechanism and for what this sample does **not** cover.
+DLNA_PROFILE_LATENCY = {
+    'ts-h264': ('2.0', '1.9'),
+    'mkv-h264': ('2.4', '2.1'),
+    'ts-mpeg2': ('2.5', '2.2'),
+    'ps-pal': ('5.7', '5.1'),
+    'ps-ntsc': ('5.7', '5.0'),
+}
+
+#: The receiver in that sentence is another Macast on this LAN, not a television.
+#: Saying so is the whole point of keeping the table next to the page text: the
+#: ordering (TS before PS by ~3 s) is a property of reading a container that
+#: identifies itself weakly, which every receiver does, but the sizes are this
+#: one receiver's numbers.
+DLNA_PROFILE_LATENCY_SCOPE = ('实测：同一台 Mac、直播形状、硬件编码，'
+                              '接收端是本机另一台 mpv/Macast（不是真老电视）')
+
+
+def dlna_profile_note():
+    """The paragraph under「兼容档位」: the five shapes, ranked by what they cost.
+
+    The card used to say only "换档位会立刻重启镜像", which is the mechanics and
+    no help in choosing. A user staring at a 5-second mirror should be able to
+    see that the container is worth about 3 seconds of that -- and see it in the
+    same honest units the measurement has, rather than a claim about televisions
+    nobody has in the room.
+    """
+    parts = ['{}：首帧 {} 秒 · 落后 {} 秒'.format(
+        DLNA_PROFILES[key].label.split('（')[0].strip(), first, steady)
+        for key, (first, steady) in sorted(
+            DLNA_PROFILE_LATENCY.items(),
+            key=lambda item: float(item[1][0]))]
+    why = ('PS 比 TS 慢的那 3 秒是容器自己要的：它的包头顶不住 TS 每 188 字节'
+           '一次的自同步，接收端要多探一秒多才敢开始放，然后整场都欠着这笔时间；'
+           '但只有 DVD 时代的老电视认 PS，所以「伪装成文件」这一条仍然默认 PS。')
+    return '{}。{}。{}'.format(DLNA_PROFILE_LATENCY_SCOPE, '；'.join(parts), why)
+
+
+def dlna_shape_words(session):
+    """What this session's shape costs the picture, for the start-up message.
+
+    Only the file shape pays a prefill, and it cannot avoid it: the TV is about
+    to read by absolute offset, so what it sniffs has to exist already. The live
+    shape used to be announced with that same number anyway, which told the
+    user to expect seconds of delay that this session never added.
+    """
+    if session.bytelog:
+        return '伪装成文件，先预填约 {} 秒'.format(
+            dlna_prefill_seconds(session.profile))
+    if getattr(session, 'shape_forced', False):
+        # The setting says one thing and the session does another, so the
+        # sentence has to carry both -- and the reason, or the next user reads
+        # it as the software ignoring them.
+        return '直播流，不预填（「伪装成文件」读不到这一档位的文件头，已按直播流处理）'
+    return '直播流，不预填'
+
+
+def profile_order(profile=None):
+    """Profiles in "try this next" order, starting after `profile`.
+
+    `profile` defaults to the stored choice, because this is the *manual*
+    advice: what to point a user at on the page. The watchdog's own walk uses
+    `next_profile_id` on the session's profile, which is a different thing --
+    with a ladder running, the stored choice and the bytes on the wire are not
+    the same container.
+    """
     keys = list(DLNA_PROFILES)
-    current = dlna_profile_id(dlna_profile())
+    current = dlna_profile_id(profile or dlna_profile())
     return keys[keys.index(current) + 1:] + keys[:keys.index(current)]
 
 
@@ -1315,10 +1630,12 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
         cmd += profile.video_args
     else:
         # The H.264 shapes: same encoder path as the other targets, with the
-        # frame rate the profile advertises and a one-second GOP so a TV that
-        # joins mid-file finds an IDR quickly.
+        # frame rate the profile advertises and a quarter-second GOP -- the
+        # picture a television can start on is the one after an IDR, and on
+        # Matroska the cluster holding it cannot be published before that IDR
+        # arrives. See `live_gop` for what that buys and what it costs.
         cmd += encoder_args(encoder)
-        cmd += ['-pix_fmt', 'yuv420p', '-g', str(profile.fps),
+        cmd += ['-pix_fmt', 'yuv420p', '-g', str(live_gop(profile.fps)),
                 '-r', str(profile.fps), '-b:v', str(profile.bitrate)]
         cmd += rate_caps(profile.bitrate)
     cmd += profile.muxer + ['pipe:1']
@@ -2516,7 +2833,12 @@ class _Fragments(object):
         self._open = b''
         self._started = False
         #: Set once, on the very first header, when this is not a box stream.
+        #: Never after the first fragment -- `_take` resynchronises by handing
+        #: the whole buffer over instead, so there is no mid-stream loss here.
         self.broken = False
+        #: See `_Clusters.restartable`. Always True for this framer, because the
+        #: only way it breaks is before it has emitted anything.
+        self.restartable = True
         #: Every byte handed in, so the caller can restart from scratch.
         self.backlog = b''
 
@@ -2585,6 +2907,167 @@ class _Fragments(object):
         return out
 
 
+#: What `_Clusters._take` answers when the bytes at the front of the buffer are
+#: not a Matroska element header at all -- a different thing from "not yet".
+_CLUSTERS_LOST = object()
+
+
+class _Clusters(object):
+    """Re-frame a live Matroska pipe into whole Clusters.
+
+    The same job `_Fragments` does for fragmented MP4, for two reasons Matroska
+    earns on its own. Everything this broadcaster does to shed load removes
+    *units*, and a unit that is half a Cluster leaves the viewer holding an
+    element header whose size no longer matches the bytes -- with no packet
+    marker to re-synchronise on, unlike MPEG-TS. And a late joiner cannot start
+    anywhere but a Cluster boundary, so the one-time header is kept back here
+    and handed out per connection.
+
+    Where the MP4 framer reads fixed-width box headers, this one reads Matroska's
+    self-describing ones, so a boundary is *computed* rather than searched for:
+    scanning for the four Cluster bytes would also find them inside the H.264
+    data. (Measured on a real capture: 54 hits in 3 MB, every one of them a true
+    cluster, spaced 50-60 KB -- which is how long a scanner would get away with
+    it before the one false hit that ends the session.)
+
+    The price is the browser target's price: a cluster goes out whole, so the
+    live edge sits one cluster behind the encoder. Measured here that is 50-60 KB
+    at these bitrates, about 0.07 s -- not a GOP, because this muxer rolls a
+    cluster far more often than the keyframe interval would suggest.
+    """
+
+    #: An element claiming more than this is not an element: it is a byte we
+    #: mistook for a header, and waiting for it to arrive would stall a live
+    #: stream for minutes.
+    MAX_UNIT = 1 << 26
+
+    def __init__(self):
+        #: Bytes not yet handed out, always starting at an element boundary.
+        self._buf = bytearray()
+        #: Elements seen since the last Cluster: the file header at the head of
+        #: the stream, stray elements (`Void`, `Tags`) between clusters later.
+        #: These ride at the front of the next unit so the byte stream a viewer
+        #: reassembles stays an unbroken element sequence.
+        self._pending = bytearray()
+        self._started = False
+        #: Set once, when the bytes stop being a parseable element tree. Framing
+        #: is over; what happens next depends on `restartable`.
+        self.broken = False
+        #: Whether the caller may throw this framer away and start over from
+        #: `backlog`. True only while nothing has been handed to a viewer: once
+        #: the first cluster is on the wire, replaying the backlog would put that
+        #: cluster there twice.
+        self.restartable = True
+        #: Every byte handed in, so the caller can restart from scratch.
+        self.backlog = b''
+
+    def feed(self, chunk):
+        """Return `[(is_media, unit)]` for the clusters these bytes complete."""
+        self.backlog += chunk
+        self._buf += chunk
+        out = []
+        while not self.broken:
+            element = self._take()
+            if element is None:
+                break                         # the next element is still arriving
+            if element is _CLUSTERS_LOST:
+                self._lost_sync(out)
+                break
+            ident, body = element
+            if ident != MKV_FIRST_CLUSTER:
+                self._pending += body         # header, or a stray element
+                continue
+            prefix = bytes(self._pending)
+            del self._pending[:]
+            if not self._started:
+                self._started = True
+                self.restartable = False
+                if prefix:
+                    # Everything before the first cluster names the codecs, and
+                    # `_hold` keeps a `is_media=False` unit out of the replay
+                    # ring: it is written onto each connection instead.
+                    out.append((False, prefix))
+            elif prefix:
+                out.append((True, prefix))    # media, in front of this cluster
+            out.append((True, body))
+        return out
+
+    def _take(self):
+        """One whole top-level element, or None while the pipe is short of one.
+
+        `_CLUSTERS_LOST` is the answer that says "this stopped being a Matroska
+        element tree", which is a different thing from "not yet".
+        """
+        while True:
+            buf = self._buf
+            if not buf:
+                # Nothing at all, which is "not yet" -- an element ended exactly
+                # on this read boundary. `_ebml_id` cannot tell that apart from
+                # an unreadable first byte, so it has to be asked before it.
+                return None
+            ident, ilen = _ebml_id(buf, 0)
+            if ident is None:
+                return None if ilen < 0 else _CLUSTERS_LOST
+            if ilen == len(buf):
+                return None                   # the ID is whole, its size is not
+            size, slen = _ebml_size(buf, ilen)
+            if slen < 0:
+                return None                   # ... and so is the rest of it
+            if slen == 0:
+                return _CLUSTERS_LOST
+            head = ilen + slen
+            if size == 'unknown':
+                if ident != MKV_SEGMENT:
+                    # Unknown size means "to the end of my container", and a live
+                    # pipe never says where that is. `Segment` is the one element
+                    # a streaming muxer is allowed to leave like that, and its
+                    # children follow immediately -- so descend into it, and treat
+                    # anything else as the end of framing.
+                    return _CLUSTERS_LOST
+                # The bytes of the header we are descending past still have to
+                # reach a late joiner: a Cluster outside a `Segment` is not a
+                # stream. They ride at the front of the pending header, in order.
+                self._pending += bytes(buf[:head])
+                del self._buf[:head]
+                continue
+            if size > self.MAX_UNIT:
+                return _CLUSTERS_LOST
+            if len(buf) < head + size:
+                return None                   # the element is still in the pipe
+            body = bytes(buf[:head + size])
+            del self._buf[:head + size]
+            return ident, body
+
+    def _lost_sync(self, out):
+        """The front of the buffer is not an element header. Say what it means."""
+        self.broken = True
+        junk = bytes(self._pending) + bytes(self._buf)
+        del self._pending[:]
+        del self._buf[:]
+        if self._started:
+            # Out of sync with a viewer already watching. The choices are a
+            # stalled live pipe or a unit that is not a whole element, and a
+            # viewer that stops getting bytes is the worse report to the user --
+            # so hand them over and let `_retain` stop framing for the run.
+            if junk:
+                out.append((True, junk))
+        # Before the first cluster this is "not the container we were promised",
+        # and `backlog` holds every byte of it. `_retain` restarts framing from
+        # there without this framer, which for the live DLNA shape means the
+        # plain marker search and for a pipe means the bytes as they came.
+
+    def flush(self):
+        """The pipe ended; a cluster that never completed is still a picture."""
+        head = bytes(self._pending) + bytes(self._buf)
+        del self._pending[:]
+        del self._buf[:]
+        if not head:
+            return []
+        # Never started: what is left is a header with no picture in it, and it
+        # belongs to `init_segment`, not to the replay ring.
+        return [(False if not self._started else True, head)]
+
+
 class _Broadcaster(object):
     """Fan out encoder output to every connected client; drop for the slow."""
 
@@ -2598,12 +3081,20 @@ class _Broadcaster(object):
                  packet_align=None):
         self._ring_limit = ring_bytes
         #: bytes of the container header (fMP4: everything before the first
-        #: `moof`). A late joiner needs it or MSE cannot start at all.
+        #: `moof`; Matroska: everything before the first `Cluster`). A late
+        #: joiner needs it or neither MSE nor a demuxer can start at all.
         self._init_marker = init_marker
-        #: Only the fragmented-MP4 target frames its bytes: it is the one
-        #: consumer whose replay *and* whose drops have to land on fragment
-        #: edges. MPEG-TS self-synchronises and the DLNA log is byte-addressed.
-        self._framer = _Fragments() if init_marker == b'moof' else None
+        #: Only the two containers that cannot be read any other way frame their
+        #: bytes. Fragmented MP4 is the consumer whose replay *and* whose drops
+        #: have to land on fragment edges; a live Matroska pipe additionally
+        #: cannot be *joined* except on a Cluster boundary. MPEG-TS and the
+        #: DVD-era shapes self-synchronise, and the DLNA log is byte-addressed.
+        if init_marker == b'moof':
+            self._framer = _Fragments()
+        elif init_marker == MKV_FIRST_CLUSTER:
+            self._framer = _Clusters()
+        else:
+            self._framer = None
         #: Unframed but never unaligned: where we drop for a slow consumer, the
         #: hole has to end on a container packet boundary. Cutting inside a
         #: 188-byte TS packet leaves the reader resynchronising on a stream whose
@@ -2707,10 +3198,21 @@ class _Broadcaster(object):
                 for is_media, unit in units:
                     self._hold(is_media, unit)
                 return [unit for _, unit in units]
-            # Not boxes after all. Nothing has been handed out yet -- the first
-            # header is the only thing that can say so -- so falling back to the
-            # marker search restarts exactly rather than half-restarted.
-            chunk, self._framer = self._framer.backlog, None
+            if self._framer.restartable:
+                # Not this container after all, and nothing has been handed out
+                # yet -- the first header is the only thing that can say so -- so
+                # falling back to the marker search restarts exactly rather than
+                # half-restarted.
+                chunk, self._framer = self._framer.backlog, None
+            else:
+                # Out of sync mid-stream. The framer has already put the bytes it
+                # was holding into `units`; re-feeding the backlog would put them
+                # on the wire a second time, so keep what was framed and stop
+                # framing for the rest of the run.
+                self._framer = None
+                for is_media, unit in units:
+                    self._hold(is_media, unit)
+                return [unit for _, unit in units]
         if not self._init_ready.is_set():
             self._init += chunk
             cut = self._init.find(self._init_marker)
@@ -3065,12 +3567,14 @@ class _StreamHandler(BaseHTTPRequestHandler):
 
     def _serve_stream(self, head_only=False):
         broadcaster = self.server.broadcaster
-        # A browser cannot decode a fragment without the container header that
-        # precedes it, and it can never ask for that again -- so the header is
-        # written here, once, on this connection, rather than being queued up
-        # among droppable fragments behind a tab that stopped reading.
+        # A viewer cannot decode a container without the header that precedes
+        # it, and it can never ask for that again -- so the header is written
+        # here, once, on this connection, rather than being queued up among
+        # droppable fragments behind a tab that stopped reading. This is not a
+        # browser-only courtesy: a live Matroska profile without it is
+        # unopenable by anything, see `MKV_FIRST_CLUSTER`.
         init = (broadcaster.await_init()
-                if self.session.replay and not head_only else b'')
+                if self.session.send_init and not head_only else b'')
         queue = broadcaster.subscribe(replay=self.session.replay)
         try:
             self._no_delay()
@@ -3089,6 +3593,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
             if init:
                 self.wfile.write(init)
                 self.wfile.flush()
+                self.session.note_written(len(init))
             while True:
                 try:
                     chunk = queue.get(timeout=5.0)
@@ -3096,6 +3601,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
                     continue
                 self.wfile.write(chunk)
                 self.wfile.flush()
+                self.session.note_written(len(chunk))
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -3181,6 +3687,12 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 time.time() + DLNA_SNIFF_TIMEOUT
             while written < length:
                 want = min(length - written, 1 << 20)
+                #: How much of this response is content. Padding is a fabricated
+                #: answer to an offset the encoder has not reached, and the
+                #: watchdog asks `note_written` whether anyone is watching --
+                #: counting invented bytes there would report a picture over a
+                #: player that is only probing the tail of the fake file.
+                content = 0
                 if not bounded:
                     # Unbounded means "play until I say stop": block for as
                     # long as the encoder is alive, because a short body makes
@@ -3196,12 +3708,14 @@ class _StreamHandler(BaseHTTPRequestHandler):
                         return          # the session closed
                 else:
                     data, complete = log.read(absolute, want, deadline=deadline)
-                    if not complete:
-                        data += log.pad(want - len(data))
+                content = len(data)
+                if bounded and not complete:
+                    data += log.pad(want - content)
                 if not data:
                     return
                 self.wfile.write(data)
                 self.wfile.flush()
+                session.note_written(content)
                 written += len(data)
                 absolute += len(data)
                 if bounded and written >= length:
@@ -3268,6 +3782,7 @@ class _Session(object):
         #: and keep the live-edge semantics.
         self.profile = None
         self.bytelog = False
+        self.shape_forced = False
         self.file_anchor = None
         #: How many stream/player requests this session has answered. The first
         #: few are written to the log (see _StreamHandler.EXCHANGE_LOG_LIMIT):
@@ -3275,6 +3790,15 @@ class _Session(object):
         #: that count is the difference between "one clean fetch" and "eight
         #: connections that each gave up".
         self.exchanges = 0
+        #: Bytes actually handed to a socket, counted where they leave -- the
+        #: two handlers. This is the only number that answers "is anyone
+        #: watching this", and neither of the two byte counters below can stand
+        #: in for it: `_Broadcaster.bytes` and `_ByteLog.bytes` count what the
+        #: *encoder* produced, which keeps growing at full rate after a viewer
+        #: opened the stream, failed to parse it, and quit. A watchdog reading
+        #: those sees "alive" over a black screen.
+        self.written = 0
+        self._written_lock = threading.Lock()
         if self.kind == 'dlna':
             self.profile = profile or dlna_profile()
             self.suffix = self.profile.suffix
@@ -3285,6 +3809,23 @@ class _Session(object):
             #: a `_ByteLog` has no `subscribe`, so getting this wrong is not a
             #: slow mirror but a handler that throws on the first request.
             self.bytelog = dlna_shape() == DLNA_SHAPE_FILE
+            #: ... unless this profile's container cannot be read that way. A
+            #: byte log starts the advertised file `prefill` bytes behind the
+            #: live edge, so the bytes that name the codecs are in no range a
+            #: renderer can ask for. MPEG-PS and MPEG-TS ride that out because
+            #: any packet decodes on its own; Matroska does not -- measured, a
+            #: viewer that joined one mid-file sat in mpv's demuxer probe
+            #: forever. The shape that *can* hand over a header wins, and says
+            #: so (`dlna_shape_words`) rather than leaving the user to notice
+            #: that the setting they chose is not what is happening.
+            self.shape_forced = self.bytelog and profile_needs_header(
+                self.profile)
+            if self.shape_forced:
+                self.bytelog = False
+                logger.warning(
+                    'screen_mirror: %s is a container that must be read from '
+                    'its header, so the "pretend to be a file" shape is served '
+                    'as a live stream instead', dlna_profile_id(self.profile))
             self.file_size = self.file_duration = None
             if self.bytelog:
                 self.file_size, self.file_duration = advertised_file(
@@ -3295,6 +3836,14 @@ class _Session(object):
         #: inherit a backlog and sit seconds behind for the rest of the session.
         self.replay = self.kind == 'browser'
         self.init_marker = b'moof' if self.kind == 'browser' else None
+        #: The one-time container header, written onto *every* connection.
+        #: Distinct from `replay`: a late joiner must get the header without
+        #: also getting a backlog. Only the live shapes need it -- and only the
+        #: containers that cannot be read without it (see `MKV_FIRST_CLUSTER`).
+        if (self.kind == 'dlna' and not self.bytelog
+                and profile_needs_header(self.profile)):
+            self.init_marker = MKV_FIRST_CLUSTER
+        self.send_init = self.init_marker is not None
         self.stream_id = secrets.token_hex(8)
         #: Both credentials are per-session secrets and both die with the
         #: mirror. Deliberately *not* the app's stable management token: that
@@ -3316,6 +3865,19 @@ class _Session(object):
 
     def stream_path(self):
         return '{}{}'.format(STREAM_PREFIX, self.stream_name())
+
+    def note_written(self, count):
+        """Record bytes that actually left on a socket.
+
+        Called from the two stream handlers, never from the encoder side. This
+        is what the DLNA watchdog asks about when it wants to know whether
+        anyone is watching: production keeps going at full rate after a viewer
+        opened the stream, failed to parse it, and quit, so only the bytes that
+        reached a peer say something about the picture on the television.
+        """
+        if count:
+            with self._written_lock:
+                self.written += count
 
 
 def live_queue_chunks(bitrate):
@@ -3364,6 +3926,22 @@ def page_url(server):
         server.session.page_token)
 
 
+def _int_flag(command, flag):
+    """The integer that follows `flag` in an argv list, or None.
+
+    No exception escapes: a command that carries `-g` as its last token, or a
+    value that is not a bare number (`-r 25.000` would do), answers None --
+    which is what the「统计信息」card wants. A missing fact is displayable; a
+    half-parsed one is a lie with a number in it.
+    """
+    if flag in command:
+        try:
+            return int(command[command.index(flag) + 1])
+        except (IndexError, TypeError, ValueError):
+            return None
+    return None
+
+
 def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
                          session, audio_expected=True, refused=''):
     """The raw facts of one session, for the「统计信息」card.
@@ -3380,6 +3958,13 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
     always going to be 4 s behind on this target").
     """
     queue_chunks = live_queue_chunks(bitrate) if bitrate else None
+    #: Which of the two DLNA shapes this session answers with decides what the
+    #: sender's own delay *is*: the live shape serves out of the queue in front
+    #: of the encoder, the file shape holds a prefill back before the TV is
+    #: given the URL at all. Reporting the queue for both and the prefill only
+    #: where it is actually paid keeps the「统计信息」card from naming a budget
+    #: this session never spent.
+    live_queue = not session.bytelog
     info = {
         'kind': kind,
         'capture': capture.label,
@@ -3389,30 +3974,35 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
         'encoder': encoder,
         'height': height,
         'bitrate': bitrate,
-        'fps': FPS,
-        'gop': gop_size(kind),
+        #: Both of these are read out of the argv that is actually running
+        #: rather than recomputed from the target's defaults. A DLNA session is
+        #: framed by its profile -- `_mpeg2` and the H.264 branch each write
+        #: their own `-r` and `-g` -- so a card that quoted `FPS` and
+        #: `gop_size(kind)` would name a cadence this encoder was never told to
+        #: keep, which is the one thing this dict exists to be honest about.
+        'fps': _int_flag(command, '-r') or FPS,
+        'gop': _int_flag(command, '-g'),
         'command': ' '.join(command),
         'cast_refused': str(refused or ''),
+        'queue_chunks': queue_chunks if live_queue else None,
+        #: How much picture the sender's own queue may hold before the
+        #: slowest viewer starts losing fragments -- the sender's share of
+        #: the delay, in seconds so it can be read next to the rest.
+        'queue_seconds': (round(queue_chunks * CHUNK * 8.0 / bitrate, 2)
+                          if live_queue and queue_chunks and bitrate else None),
+        #: Only the browser target replays a backlog; the other live targets
+        #: follow the live edge or are byte-addressed by the TV itself.
+        'replay_bytes': REPLAY_BYTES if kind == 'browser' else 0,
     }
     if kind == 'dlna':
         profile = session.profile
         info.update({
             'profile': dlna_profile_id(profile),
             'profile_bitrate': profile.total_bitrate,
-            'prefill_bytes': dlna_prefill_bytes(profile),
-            'prefill_seconds': dlna_prefill_seconds(profile),
-        })
-    else:
-        info.update({
-            'queue_chunks': queue_chunks,
-            #: How much picture the sender's own queue may hold before the
-            #: slowest viewer starts losing fragments -- the sender's share of
-            #: the delay, in seconds so it can be read next to the rest.
-            'queue_seconds': (round(queue_chunks * CHUNK * 8.0 / bitrate, 2)
-                              if queue_chunks and bitrate else None),
-            #: Only the browser target replays anything; the other two follow
-            #: the live edge or are byte-addressed by the TV itself.
-            'replay_bytes': REPLAY_BYTES if kind == 'browser' else 0,
+            'prefill_bytes': (dlna_prefill_bytes(profile)
+                              if session.bytelog else 0),
+            'prefill_seconds': (dlna_prefill_seconds(profile)
+                                if session.bytelog else 0),
         })
     return info
 
@@ -5223,6 +5813,14 @@ class ScreenMirrorRenderer(Renderer):
         #: this run. The answer does not change between sessions, and asking
         #: again costs the viewer seconds of black before the picture starts.
         self._audio_refused = False
+        #: Which compatibility shape *this run* is on, when the watchdog moved
+        #: it, and how many moves it has spent. Both belong to the run rather
+        #: than to the setting: `Mirror_Dlna_Profile` is the user's choice, and
+        #: an automatic ladder that wrote it would quietly replace what someone
+        #: picked for a television it has never met. `start_mirror` clears them
+        #: because a new click is a new question. See `_rotate_dlna_profile`.
+        self._profile_id = None
+        self._profile_tries = 0
         #: The running session's own raw facts for the「统计信息」card: what
         #: ffmpeg was actually asked to do, which tap and encoder the probe
         #: chose, and the budgets the end-to-end delay is assembled from.
@@ -5294,6 +5892,17 @@ class ScreenMirrorRenderer(Renderer):
         #: *why* the delay is what it is.
         if diag:
             info['diag'] = diag
+        #: Delivered, as opposed to the `bytes` above: what left on a socket vs
+        #: what the encoder made. They part company the moment a viewer quits,
+        #: and a statistics card that only shows the second one describes a
+        #: mirror nobody is watching as if someone were.
+        #:
+        #: Only the HTTP targets can answer it, and only they answer it: the
+        #: low-latency channel pushes UDP datagrams with no receive window and no
+        #: retransmission, so "delivered" there would be `bytes` in a different
+        #: shirt -- exactly the claim this field exists to avoid making.
+        if server is not None:
+            info['delivered'] = server.session.written
         if kind == 'caststream':
             info['frames'] = sink.frames
             info['in_flight'] = sink.in_flight()
@@ -5405,16 +6014,23 @@ class ScreenMirrorRenderer(Renderer):
 
     # -- mirror control (console window) ----------------------------------------
 
-    def start_mirror(self):
+    def start_mirror(self, keep_ladder=False):
         """Begin a mirror; False when one is running or already being set up.
 
         The setup takes seconds (probe, encoder, prefill), and during it
         `_mirroring` is still False -- so five clicks on「开始镜像」used to bump
         the generation five times and leave the fifth attempt racing the first.
+
+        `keep_ladder` is how `_rotate_dlna_profile` asks for the *next shape*
+        without losing its place: every other start is a fresh question from the
+        user, and the answer to the previous one is not theirs to inherit.
         """
         with self._lock:
             if self._mirroring or self._starting:
                 return False
+            if not keep_ladder:
+                self._profile_id = None
+                self._profile_tries = 0
             self._starting = True
             self._audio_dropped = False
             self._generation += 1
@@ -5422,6 +6038,28 @@ class ScreenMirrorRenderer(Renderer):
         threading.Thread(target=self._mirror, args=(generation,),
                          daemon=True, name="SCREEN_MIRROR").start()
         return True
+
+    def active_dlna_profile(self):
+        """The compatibility shape a session started right now would use.
+
+        The run's ladder position wins over the setting, and both resolve
+        through `dlna_profile` so an unknown stored value still lands on the
+        default.
+        """
+        return dlna_profile(self._profile_id)
+
+    def dlna_profile_display(self):
+        """The rung the page should highlight, which is not always the setting.
+
+        While a session is up or coming up it is the one that is actually being
+        encoded -- a card that still lit the stored `ps-pal` after the watchdog
+        moved to TS was pointing at a knob nothing was obeying. While nothing is
+        running it is the setting, because that is what the next click starts
+        from: the ladder belongs to a run, and a run has ended.
+        """
+        if self._mirroring or self._starting:
+            return dlna_profile_id(self.active_dlna_profile())
+        return dlna_profile_id(dlna_profile())
 
     def is_starting(self):
         """A session is in flight but has not produced a frame yet."""
@@ -5522,10 +6160,15 @@ class ScreenMirrorRenderer(Renderer):
                 logger.warning('Cast Streaming refused (%s); using LOAD', e)
                 refused = str(e) or e.__class__.__name__
                 kind = 'cast'
+        # One profile object for the whole attempt. The session and the argv
+        # used to each ask `dlna_profile()`, which was fine while nothing could
+        # answer differently between the two calls -- with a watchdog that moves
+        # the ladder, a session on rung 3 and an encoder still on rung 2 is a
+        # black screen with two confident logs about it.
+        profile = self.active_dlna_profile() if kind == 'dlna' else None
         session = _Session(kind, has_audio=bool(capture.audio_map),
                            title=socket.gethostname() or 'Macast',
-                           profile=dlna_profile() if kind == 'dlna' else None,
-                           bitrate=bitrate)
+                           profile=profile, bitrate=bitrate)
         handed = False
         try:
             server = None if stream is not None else start_stream_server(session)
@@ -5533,7 +6176,8 @@ class ScreenMirrorRenderer(Renderer):
             # argv is what the「统计信息」card shows, and building it twice was
             # two chances for the logged command to differ from the run one.
             command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
-                                           kind=kind, encoder=encoder)
+                                           kind=kind, encoder=encoder,
+                                           profile=profile)
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -5597,7 +6241,14 @@ class ScreenMirrorRenderer(Renderer):
                 raise RuntimeError(no_frame_words(detail))
             if proc.poll() is not None or generation != self._generation:
                 raise _Aborted()
-            if kind == 'dlna':
+            if kind == 'dlna' and server.session.bytelog:
+                # Only the pretend-file shape pays for a prefill. It has to:
+                # the TV is about to read this by absolute offset, so what it
+                # sniffs must already be there. The live shape is a plain
+                # endless stream -- the reader starts at the live edge and no
+                # amount of waiting buys it anything, which is why holding the
+                # URL back here used to cost 4-8 seconds of startup on a
+                # session that otherwise shows its first picture in two.
                 self._prefill(server, proc, generation)
                 if generation != self._generation:
                     raise _Aborted()
@@ -5660,9 +6311,8 @@ class ScreenMirrorRenderer(Renderer):
             threading.Thread(target=self._watch_dlna,
                              args=(sender, url, session, generation),
                              daemon=True, name="SCREEN_MIRROR_DLNA_WATCH").start()
-            message = '已开始镜像到 {}（档位 {}，约 {} 秒延迟）'.format(
-                name, session.profile.label,
-                dlna_prefill_seconds(session.profile))
+            message = '已开始镜像到 {}（档位 {}，{}）'.format(
+                name, session.profile.label, dlna_shape_words(session))
         elif kind == 'browser':
             message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
         elif kind == 'caststream':
@@ -5739,12 +6389,18 @@ class ScreenMirrorRenderer(Renderer):
         own word:
 
           * PLAYING with `RelTime` moving -- what this has always checked;
-          * bytes being consumed. A live stream that a client is reading *is*
-            playing, whatever the transport state says. Measured pushing to
+          * bytes being **delivered**. A live stream that a client is reading
+            *is* playing, whatever the transport state says. Measured pushing to
             another Macast on the same LAN: 52 seconds of clean playback (mpv
             reporting vo-configured, MPEG-2 at 720x576, position advancing),
             one momentary STOPPED in the middle, and this watchdog restarted
             the picture over it.
+
+        Delivered, not produced: the encoder runs at full rate whether or not
+        anyone is pulling, so the byte counter on the broadcaster says "the
+        mirror is alive" over a black screen. That is the difference between
+        this signal rescuing a renderer caught between states and it excusing a
+        player that opened the stream, could not parse it, and quit.
 
         So a single non-PLAYING answer is not a verdict -- a renderer reports
         STOPPED for a moment while its player opens the stream -- and a re-push
@@ -5753,19 +6409,20 @@ class ScreenMirrorRenderer(Renderer):
         misses = 0
         last_position = None
         last_bytes = None
+        #: Where this session stood when the last URL went out. Two counters,
+        #: because the two failures need different answers: a television that
+        #: never fetched anything deserves every re-push we have, while one that
+        #: fetched, was answered, and read no byte is refusing the shape -- and
+        #: saying so early is the difference between 10 seconds and 40.
+        asked_at_push = int(session.exchanges)
+        took_at_push = int(session.written)
+        refusals = 0
         while True:
             with self._lock:
                 if generation != self._generation:
                     return
             time.sleep(DLNA_POLL_SECONDS)
-            with self._lock:
-                server = self._server
-            consumed = 0
-            if server is not None:
-                try:
-                    consumed = int(getattr(server.broadcaster, 'bytes', 0))
-                except Exception:                              # noqa: BLE001
-                    consumed = 0
+            consumed = int(session.written)
             previous = last_bytes
             reading = previous is not None and consumed > previous
             read_now = consumed - previous if previous is not None else 0
@@ -5778,6 +6435,7 @@ class ScreenMirrorRenderer(Renderer):
                 misses += 1
                 if misses >= DLNA_MAX_REPUSHES:
                     self._give_up(sender, '电视不再应答（可能已关机，或换了网络）')
+                    self._retire_session()
                     return
                 continue
             if state == 'PLAYING':
@@ -5807,8 +6465,30 @@ class ScreenMirrorRenderer(Renderer):
                             ' pushing again', state)
                 continue
             if misses >= DLNA_MAX_REPUSHES:
-                self._give_up(sender, '电视连续 {} 次没有播起来'.format(misses))
+                if self._rotate_dlna_profile(session, '连续 {} 次没有播起来'
+                                             .format(misses)):
+                    return
+                self._give_up(sender, '电视连续 {} 次没有播起来'.format(misses),
+                              session)
+                self._retire_session()
                 return
+            # Was the last push even fetched? `exchanges` moved but `written`
+            # did not: the player looked at what this shape offers and put it
+            # back. Retire that excuse early and say which of the two settings
+            # the evidence points at.
+            if (session.exchanges > asked_at_push
+                    and int(session.written) <= took_at_push):
+                refusals += 1
+                if refusals >= DLNA_MAX_REFUSALS:
+                    reason = ('电视取走了地址，却一个字节都没有读（连续 {} 次）'
+                              .format(refusals))
+                    if self._rotate_dlna_profile(session, reason):
+                        return
+                    self._give_up(sender, reason, session)
+                    self._retire_session()
+                    return
+            else:
+                refusals = 0
             logger.info('renderer is %s; pushing again (%d/%d)',
                         state, misses, DLNA_MAX_REPUSHES)
             try:
@@ -5817,11 +6497,111 @@ class ScreenMirrorRenderer(Renderer):
                 sender.play()
             except Exception as e:
                 logger.debug('re-push failed: %s', e)
+            asked_at_push = session.exchanges
+            took_at_push = int(session.written)
 
-    def _give_up(self, sender, reason):
-        """Stop blaming the TV one poll at a time and tell the user why."""
-        current = dlna_profile_id(dlna_profile())
-        nxt = profile_order()[0]
+    def _rotate_dlna_profile(self, session, reason):
+        """Spend one rung of the compatibility ladder; True when it worked.
+
+        Five shapes exist because the first one gets refused; until now the
+        watching was the user's job, and the user of a screen mirror is looking
+        at the television, not at the settings page. So the watchdog walks the
+        list itself -- but only where the evidence points at the *container*,
+        which is two situations and no others: a renderer that will not settle
+        in PLAYING with nobody reading the stream, and one that fetches the URL
+        and reads no byte.
+
+        Three limits, each with a reason:
+
+          * never in the file shape. A byte-refusing player there has been handed
+            a fabricated size it went looking an index inside of; the fix is the
+            shape, and five containers will not supply it -- `_give_up` has said
+            so since that failure was measured, and rotating would bury it.
+          * never more than `DLNA_MAX_PROFILE_TRIES` times per run, because a
+            step is not a re-push: it restarts the encoder and costs the seconds
+            a re-push would not.
+          * never into the user's settings. `Mirror_Dlna_Profile` is their
+            choice, and one session's television is not evidence about the next
+            one; the ladder lives on this instance and `start_mirror` clears it,
+            so the next click starts from what they picked.
+
+        Ordering matters on the way out: bump the generation *before* teardown so
+        the pump cannot report the encoder we are about to kill as「采集中断」
+        (AGENTS.md 4.8), and tear down synchronously so the `start_mirror` that
+        follows cannot find `_starting` still set and quietly do nothing -- which
+        is the failure mode the manual restart path has, and a ladder that
+        silently stops at rung 2 is worse than no ladder.
+        """
+        if session is None or getattr(session, 'bytelog', False):
+            return False
+        with self._lock:
+            if self._profile_tries >= DLNA_MAX_PROFILE_TRIES:
+                return False
+            nxt = next_profile_id(session.profile)
+            if nxt is None:
+                return False
+            self._profile_id = nxt
+            self._profile_tries += 1
+            step = self._profile_tries
+            self._generation += 1
+        logger.info('DLNA renderer refused this shape (%s); switching the '
+                    'compatibility profile from %s to %s (%d/%d this run)',
+                    reason, dlna_profile_id(session.profile), nxt, step,
+                    DLNA_MAX_PROFILE_TRIES)
+        notify('{}：已自动把兼容档位换成「{}」（本次第 {}/{} 档）。'
+               '你在设置页里选的档位没有改动，下次手动开始镜像还是从它起步'.format(
+                   reason, DLNA_PROFILES[nxt].label, step + 1,
+                   len(DLNA_PROFILES)), sound=False)
+        self._teardown()
+        return self.start_mirror(keep_ladder=True)
+
+    def _retire_session(self):
+        """A run that just said「放弃」must not keep capturing the screen.
+
+        `_fail` flips `_mirroring` off, and until here nothing else took the
+        encoder or the HTTP service with it: the page read「未镜像」over a
+        running ffmpeg, which is the same two-answers-for-one-state this plugin
+        keeps having to fix. Guarded on owning a real encoder, because the
+        watchdog is also driven in tests by a renderer that has a stubbed server
+        and no process to retire.
+        """
+        if self._proc is None:
+            return
+        self._teardown()
+
+    def _give_up(self, sender, reason, session=None):
+        """Stop blaming the TV one poll at a time and tell the user why.
+
+        Which of the two DLNA knobs to turn is decided by what the session
+        actually did, not by a fixed script. A byte-refusing player in the file
+        shape has been handed a size it then went looking an index inside of,
+        and the fix is the shape -- five containers will not supply it. For
+        anything else the container inside the stream is the lever, which is
+        what this has always said.
+
+        Reaching here with a ladder already spent changes the sentence, not just
+        its tone:「换成下一档」is advice the watchdog has follow four times
+        already, and repeating it would send the user to re-do a loop that ran.
+        """
+        if session is not None and getattr(session, 'bytelog', False):
+            self._fail('{}：这一条是把直播流「伪装成文件」投给电视的，'
+                       '而它会去文件尾部找并不存在的索引。在「电脑投屏」页的'
+                       '「投屏形状」里换成「{}」再试一次'.format(
+                           reason, DLNA_SHAPES[DLNA_SHAPE_LIVE][0]),
+                       self._generation)
+            return
+        profile = getattr(session, 'profile', None) or dlna_profile()
+        if self._profile_tries:
+            self._fail('{}：本次镜像已经自动换过 {} 档封装（最后一档「{}」），'
+                       '它一种都没有接受。这不是档位能解决的问题：确认电视和这台 Mac'
+                       '在同一个网络，或在「电脑投屏」页把「投屏形状」换成「{}」再试'
+                       .format(reason, self._profile_tries,
+                               DLNA_PROFILES[dlna_profile_id(profile)].label,
+                               DLNA_SHAPES[DLNA_SHAPE_FILE][0]),
+                       self._generation)
+            return
+        current = dlna_profile_id(profile)
+        nxt = next_profile_id(profile) or profile_order()[0]
         self._fail('{}：当前档位是「{}」。在「电脑投屏」页的「兼容档位」里换成「{}」再试一次'.format(
             reason, DLNA_PROFILES[current].label,
             DLNA_PROFILES[nxt].label),
@@ -6526,9 +7306,23 @@ class ScreenMirrorSetting(RendererSetting):
             'search_trace': {'dlna': dlna_trace()},
             'prompt': target_prompt(kind),
             'profiles': {
-                'current': dlna_profile_id(dlna_profile()),
-                'options': [{'key': key, 'label': profile.label}
+                # The rung the page lights is the renderer's answer, not this
+                # object's: with a ladder running it is the shape being encoded,
+                # not the stored choice. The fallback is for the case the suite
+                # hits first -- a `ScreenMirrorSetting()` nobody has installed as
+                # the current renderer -- where the card still has to name what
+                # the next click would start from.
+                'current': (renderer.dlna_profile_display()
+                            if renderer is not None
+                            else dlna_profile_id(dlna_profile())),
+                'options': [{'key': key, 'label': profile.label,
+                             'cost': ' · '.join(
+                                 '{} {} 秒'.format(word, value)
+                                 for word, value in zip(
+                                     ('首帧', '落后'),
+                                     DLNA_PROFILE_LATENCY.get(key, ('—', '—'))))}
                             for key, profile in DLNA_PROFILES.items()],
+                'note': dlna_profile_note(),
             },
             #: How the DLNA target answers the renderer. Live by default, and
             #: the page says so as a choice rather than a hidden default: the
@@ -6789,11 +7583,20 @@ class ScreenMirrorSetting(RendererSetting):
         running stream is wrong the instant the choice changes; it restarts for
         the same reason the menu did -- the point of five shapes is that the TV
         rejects the first one, and asking the user to flip the mirror by hand
-        between each try is busywork."""
+        between each try is busywork.
+
+        The comparison is with `dlna_profile_display()`, not with the stored
+        setting: after the watchdog moved a run to another rung, the pill the
+        page lights *is* the one in effect, and clicking it has to say「已经是」
+        rather than write a setting and restart onto the same container.
+        """
         key = str(args.get('value') or '')
         if key not in DLNA_PROFILES:
             return self._no('没有这个兼容档位：{}'.format(key))
-        if key == dlna_profile_id(dlna_profile()):
+        renderer = self._renderer()
+        shown = (renderer.dlna_profile_display() if renderer is not None
+                 else default_dlna_profile_id())
+        if key == shown:
             return {'code': 0, 'message': '档位已经是{}'.format(DLNA_PROFILES[key].label)}
         Setting.set(SettingProperty.Mirror_Dlna_Profile, key)
         return self._ok('兼容档位：{}'.format(DLNA_PROFILES[key].label),
