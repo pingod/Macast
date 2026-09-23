@@ -9,6 +9,19 @@ import gettext
 import locale
 import logging
 import logging.handlers
+
+#: The packaged Windows .exe is built with `--noconsole` -- a console window
+#: popping up on launch is a defect, not a feature. A windowed process has no
+#: console at all, which means `sys.stdout` and `sys.stderr` are None and the
+#: first stray `print()` (macast/gui.py, macast/protocol.py and the vendored
+#: nirvana.py all have some) would raise AttributeError mid-startup. Point them
+#: somewhere unwritable instead of leaving that landmine; everything worth
+#: keeping already goes to the rotating file in SETTING_DIR.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w')
+
 from macast import Setting, SETTING_DIR
 from macast.utils import LOG_FILE_NAME
 from macast.macast import gui

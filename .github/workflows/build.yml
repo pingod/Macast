@@ -466,7 +466,7 @@ jobs:
       - name: Build with PyInstaller
         shell: bash
         run: |
-          pyinstaller --noconfirm --onefile --name macast.exe \
+          pyinstaller --noconfirm --onefile --noconsole --name macast.exe \
             --add-data "i18n;i18n" \
             --add-data "macast/assets;macast/assets" \
             --add-data "macast/plugins;macast/plugins" \

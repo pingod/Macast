@@ -13613,6 +13613,134 @@ finally:
 
 
 # --------------------------------------------------------------------------
+# Part 41: the Windows .exe must not open a console window
+#
+# The packaged Windows build was a console program, so launching it put a black
+# window on the desktop with nobody's name on it. Two separate things fix that,
+# and neither works alone:
+#
+#   1. `--noconsole`, so Macast itself has no console -- but a windowed process
+#      that starts a *console* helper gives that helper a console window of its
+#      own, and every helper we run is a console program (ffmpeg, ffprobe,
+#      yt-dlp, taskkill, the user's hooks). Ship only this and the single black
+#      window becomes one black box per probe, per mirror and per download.
+#   2. a no-console-window flag on every child, installed once in
+#      `macast/utils.py` instead of at ~30 call sites spread over a dozen
+#      single-file plugins written by different hands.
+#
+# A windowed process also has no `stdout`, so the entry point has to hand
+# `print()` somewhere to go before it imports anything that prints.
+# --------------------------------------------------------------------------
+print("\n=== Part 41: no console window on Windows ===")
+import subprocess as _sp41
+
+try:
+    check("the no-window bit exists only where it means something",
+          utils.NO_WINDOW == (getattr(_sp41, 'CREATE_NO_WINDOW', 0)
+                              if sys.platform == 'win32' else 0),
+          'NO_WINDOW=%r on %s' % (utils.NO_WINDOW, sys.platform))
+
+    check("hidden_flags sets the bit on Windows and nothing elsewhere",
+          utils.hidden_flags(0, platform='win32', no_window=0x08000000)
+          == 0x08000000
+          and utils.hidden_flags(0, platform='darwin', no_window=0) == 0
+          and utils.hidden_flags(0, platform='linux', no_window=0) == 0,
+          'win32 / darwin / linux')
+
+    check("and it merges a caller's own flags instead of replacing them",
+          utils.hidden_flags(0x00000200, platform='win32',
+                             no_window=0x08000000) == 0x08000200,
+          'potplayer.py passes CREATE_NO_WINDOW of its own; others may pass '
+          'CREATE_NEW_PROCESS_GROUP')
+
+    # All four entry points end up in the object patched here: `run` and `call`
+    # build a `Popen` themselves, `check_output` goes through `run`.
+    check("run and call reach the global we patch, check_output via run",
+          'Popen' in _sp41.run.__code__.co_names
+          and 'Popen' in _sp41.call.__code__.co_names
+          and 'run' in _sp41.check_output.__code__.co_names,
+          'measured, not assumed: check_output names run, not Popen')
+
+    # `creationflags` is a Windows keyword: POSIX raises ValueError for any
+    # nonzero value. Two things follow, and both are asserted here -- the bit
+    # must be 0 off Windows, and the installer must therefore not wrap anything
+    # on a platform whose subprocess would reject the flag it injects.
+    _legal41 = None
+    try:
+        _sp41.run(['/bin/echo', 'probe'], stdout=_sp41.PIPE, timeout=20,
+                  creationflags=0x08000000)
+        _legal41 = True
+    except ValueError:
+        _legal41 = False
+    check("the no-window bit is legal exactly where NO_WINDOW sets it",
+          _legal41 == (sys.platform == 'win32'),
+          'POSIX rejects any nonzero creationflags outright')
+
+    class _Recorder41(object):
+        """Stands in for Popen: records what it was called with, spawns nothing."""
+
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    utils.install_hidden_popen(no_window=0x08000000, popen=_Recorder41)
+    _child41 = _Recorder41(['ffmpeg'])
+    check("installing the wrapper reaches a child spawned afterwards",
+          getattr(_Recorder41, '_macast_hidden_console', False) is True
+          and _child41.kwargs.get('creationflags') == 0x08000000,
+          str(_child41.kwargs))
+    _child41b = _Recorder41(['ffmpeg'], creationflags=0x00000200)
+    check("a child spawned with its own flags keeps both",
+          _child41b.kwargs.get('creationflags') == 0x08000200,
+          str(_child41b.kwargs))
+    _after41 = _Recorder41.__init__
+    utils.install_hidden_popen(no_window=0x08000000, popen=_Recorder41)
+    check("installing twice does not nest a second wrapper",
+          _Recorder41.__init__ is _after41,
+          'the marker is what makes a re-install a no-op')
+
+    # The real installer, on this platform, with the real class -- and a real
+    # child through it: the inert path has to be genuinely inert.
+    utils.install_hidden_popen()
+    if sys.platform != 'win32':
+        check("off Windows the installer does not touch subprocess at all",
+              getattr(_sp41.Popen, '_macast_hidden_console', False) is False,
+              'injecting the flag here would raise ValueError in every spawn')
+    _ran41 = _sp41.run(['/bin/echo', 'no-console'], stdout=_sp41.PIPE,
+                       text=True, timeout=20)
+    check("a real child still runs after the installer ran",
+          _ran41.stdout.strip() == 'no-console',
+          'proves the wrapper cannot break subprocess outright')
+
+    # -- the entry point: a windowed process has no stdout -----------------
+    _macastpy41 = open(os.path.join(_root40, 'Macast.py'), encoding='utf-8').read()
+    _guard41 = _macastpy41.find('sys.stdout is None')
+    _import41 = _macastpy41.find('from macast import')
+    check("the entry point gives print() somewhere to go before it imports",
+          _guard41 != -1 and _import41 != -1 and _guard41 < _import41,
+          'gui.py, protocol.py and nirvana.py all print; a windowed build has '
+          'sys.stdout = None and the first one would raise AttributeError')
+    check("and both streams are covered, not just stdout",
+          'sys.stderr is None' in _macastpy41
+          and 'os.devnull' in _macastpy41,
+          'logging still goes to the rotating file in SETTING_DIR')
+    check("the entry point imports the module that installs the wrapper",
+          'from macast.utils import' in _macastpy41,
+          'or the first ffmpeg spawn would flash a box before it is installed')
+
+    # -- the build flag ----------------------------------------------------
+    _winjob41 = _yml40[_yml40.index('build-windows-x86_64'):]
+    _winjob41 = _winjob41[:_winjob41.find('\n  # --') if '\n  # --' in _winjob41
+                          else len(_winjob41)]
+    check("the Windows job builds a windowed executable",
+          '--noconsole' in _winjob41 or '--windowed' in _winjob41,
+          'without this the console window is the app itself, not a child')
+    check("and the macOS/Linux jobs are left as they were",
+          _yml40[:_yml40.index('build-windows-x86_64')].count('--noconsole') == 0,
+          'a console is only a defect where one pops up on its own')
+finally:
+    utils.Setting.setting = {}
+
 
 # --------------------------------------------------------------------------
 

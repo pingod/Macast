@@ -35,6 +35,70 @@ SETTING_DIR = appdirs.user_config_dir('Macast', 'xfangfang')
 PROTOCOL_DIR = 'protocol'
 RENDERER_DIR = 'renderer'
 
+#: On Windows a *console* program started by a GUI process is handed a console
+#: window of its own unless it is told not to, and every helper Macast runs is a
+#: console program: ffmpeg, ffprobe, yt-dlp, taskkill, the user's own hooks. The
+#: packaged .exe is built with `--noconsole` (so Macast itself shows no window),
+#: which is exactly why every one of those calls would flash a black box on the
+#: desktop -- and a probe, a mirror and a download are each made of many of them.
+#: It went unnoticed for as long as the .exe was itself a console program: one
+#: window, inherited by every child.
+NO_WINDOW = (getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+             if sys.platform == 'win32' else 0)
+
+
+def hidden_flags(flags=0, platform=None, no_window=None):
+    """`creationflags` with the no-console-window bit added, never replaced.
+
+    Parameterised on purpose: the suite runs on macOS, where the real bit does
+    not exist, and a pure function is the only half of this that can be tested
+    anywhere.
+    """
+    if no_window is None:
+        no_window = (getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+                     if (platform or sys.platform) == 'win32' else 0)
+    return (flags or 0) | no_window
+
+
+def install_hidden_popen(no_window=None, popen=None):
+    """Make every child of this process invisible on Windows.
+
+    One wrapper rather than a flag at ~30 call sites: the plugins are single
+    files written independently, one of them forgetting the flag is a black box
+    on a user's desktop, and `subprocess.run` / `call` / `check_output` all
+    resolve `Popen` through the module global -- the very object patched here,
+    so one assignment covers every entry point. Explicit `creationflags` are
+    merged with `|`, so callers that pass their own keep them.
+
+    `__init__` is wrapped rather than the class being subclassed: that leaves
+    `subprocess.Popen` itself in place, so `isinstance` checks elsewhere and any
+    code holding a reference to the class keep working.
+
+    Returns the class it wrapped, or the same object untouched when there is
+    nothing to do (every non-Windows platform) or when it was wrapped already.
+    """
+    popen = subprocess.Popen if popen is None else popen
+    if no_window is None:
+        no_window = NO_WINDOW
+    if not no_window or getattr(popen, '_macast_hidden_console', False):
+        return popen
+    original_init = popen.__init__
+
+    def _hidden_init(self, *args, **kwargs):
+        kwargs['creationflags'] = hidden_flags(kwargs.get('creationflags', 0),
+                                               no_window=no_window)
+        original_init(self, *args, **kwargs)
+
+    popen.__init__ = _hidden_init
+    #: Marker for idempotency: a second install would nest a wrapper that does
+    #: nothing the first one has not already done. setattr keeps static checkers
+    #: from objecting to an attribute they have never heard of.
+    setattr(popen, '_macast_hidden_console', True)
+    return popen
+
+
+install_hidden_popen()
+
 
 class SettingProperty(Enum):
     USN = 0
