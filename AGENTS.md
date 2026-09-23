@@ -709,8 +709,10 @@ git add -A && git commit -m "..." && git push origin main
 git tag v0.7.11 && git push origin v0.7.11
 ```
 
-`.github/workflows/build.yml` 会在 tag push 时构建 macOS arm64/x86_64、Linux x86_64/arm64、
-Windows x86_64，并在版本一致性校验通过后创建 Release。
+`.github/workflows/build.yml` 会在 tag push 时构建 macOS arm64、Linux x86_64/arm64、
+Windows x86_64（**没有 macOS Intel**：`macos-13` 那条队列曾排到 30+ 分钟，`f8b3a15` 起
+不再构建，本地要出 Intel 包用 `MACAST_ARCH=x86_64 scripts/setup_py2app.py`），
+并在版本一致性校验通过后创建 Release。
 产物名形如 `Macast-MacOS-arm64-v<版本>.zip`。
 
 > 也可在 GitHub UI → Actions → Build Macast → Run workflow → `release=true`。
@@ -718,8 +720,11 @@ Windows x86_64，并在版本一致性校验通过后创建 Release。
 **发版后必做（CI 绿不代表产物能用，见 §4.3）**：
 
 ```shell
-# 1. 等 CI 跑完，确认 4 个产物都在（本机没有 gh CLI，用 REST API）
-#    https://api.github.com/repos/pingod/Macast/releases/tags/v<版本>
+# 1. 等 CI 跑完，确认 4 个产物都在
+gh run list --workflow=build.yml --limit 3
+gh api repos/pingod/Macast/releases/tags/v<版本> --jq '.assets[].name'
+#    （本机 `/opt/homebrew/bin/gh` 已登录 pingod，scopes 含 repo + workflow；
+#     REST API 同样可用：https://api.github.com/repos/pingod/Macast/releases/tags/v<版本>）
 # 2. 下载 macOS 产物、替换安装（旧包先移废纸篓，不要硬删）
 #    注意下载来的包带 quarantine 属性，需 xattr -dr com.apple.quarantine
 # 3. 真正启动并验证
@@ -729,9 +734,11 @@ curl -s 'http://127.0.0.1:58880/api?query=status' | head -c 200   # 应返回版
 dns-sd -B _googlecast._tcp            # 5 秒后应有 Macast-<主机名>
 ```
 
-**改成了同一版本号重新发布时**：由于无法用 API 删除已发布的 release（本机没有 token），
-做法是把 tag 移到修复提交后强推（`git tag -f v<x> && git push -f origin v<x>`），
-CI 会用同名文件**替换** release 里的产物。用 digest 对比确认真的换了：
+**改成了同一版本号重新发布时**：两个方向都走得通 —— `gh release delete v<x>`（默认只删
+Release、**保留 git tag**，v0.7.15 之前那 14 个 Release 就是这么清的）可以直接把同名
+Release 撤掉；或者不动 Release，把 tag 移到修复提交后强推
+（`git tag -f v<x> && git push -f origin v<x>`），CI 会用同名文件**替换** release 里的产物。
+用 digest 对比确认真的换了：
 
 ```shell
 # GET /releases/tags/v<x> 里每个 asset 的 digest 字段
