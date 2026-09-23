@@ -31,7 +31,12 @@
 #     (Windows), x11grab (Linux/X11). System audio rides along where a tap
 #     exists: macOS needs a BlackHole device (no released FFmpeg can see
 #     system audio natively -- the screencapturekit demuxer never shipped),
-#     Linux uses the PulseAudio `<sink>.monitor`. Windows stays video-only.
+#     Windows needs a dshow *loopback* recording device (Stereo Mix where the
+#     driver ships it, otherwise a virtual cable -- ffmpeg's dshow input reads
+#     whatever the system exposes as an input, so a device that carries the
+#     output is the whole requirement), and Linux uses the PulseAudio
+#     `<sink>.monitor`. On all three the tap is probed for, never created:
+#     a machine without one mirrors video and says which device to switch on.
 #     The probe is cached because the menu must never spawn ffmpeg;
 #   * slow consumers drop whole chunks rather than blocking the reader --
 #     for a live stream a stale frame is worse than a missing one, and a
@@ -131,9 +136,17 @@ LIVE_QUEUE_MAX_CHUNKS = 256
 #: How long ffmpeg may survive before its death is blamed on the
 #: Screen Recording permission instead of a genuine mid-stream failure.
 EARLY_DEATH_SECONDS = 5.0
-#: Rolling tail replayed to a late-joining browser viewer. Enough for a
-#: second of 1080p plus the next keyframe, small enough to not matter.
-REPLAY_BYTES = 8 << 20
+#: Rolling tail replayed to a late-joining browser viewer. Enough for one
+#: fragment plus the keyframe it starts on -- which is the whole requirement,
+#: because a replay that begins mid-fragment is a green smear until the next
+#: keyframe.
+#:
+#: Deliberately small: the replay is a *standing* delay, not a one-off. The
+#: browser decodes everything it is handed before it shows anything, so 8 MiB
+#: of tail meant a viewer that opened the page sat 10 s behind live at these
+#: bitrates and stayed there. 2 MiB is still four GOPs at the highest preset
+#: and cuts that to under three seconds.
+REPLAY_BYTES = 2 << 20
 #: A system-audio tap (BlackHole on macOS, a PulseAudio monitor on Linux) is
 #: clocked by whatever the audio stack feels like, not by ffmpeg. Left alone,
 #: the two clocks slide past each other by a sample at a time and every slip
@@ -333,8 +346,16 @@ DEFAULT_DLNA_PROFILE = 'ps-pal'
 #: encoder -- but the old 20 MiB fixed budget made that cost 27-37 seconds of
 #: latency at these bitrates, which is why the budget is now derived from the
 #: profile's bitrate and clamped.
-DLNA_PREFILL_SECONDS = 6
-DLNA_PREFILL_MIN_BYTES = 3 << 20
+#:
+#: This number is not a startup cost that goes away: the TV starts reading from
+#: the head of what we buffered and never catches up, so the prefill *is* how
+#: far behind live this target runs for the whole session. 6 s measured out to
+#: 5.4 s on ps-pal once the floor clamped it, which is what「投到电视上延迟明显」
+#: is; 4 s with a 2 MiB floor is the same shape with a second and a half less
+#: delay, and still several times a keyframe interval (3-frame GOP), which is
+#: the only thing the sniff actually needs.
+DLNA_PREFILL_SECONDS = 4
+DLNA_PREFILL_MIN_BYTES = 2 << 20
 DLNA_PREFILL_MAX_BYTES = 8 << 20
 
 
@@ -805,10 +826,7 @@ def probe_capture(ffmpeg, platform=None, cursor=None):
     if key in _capture_cache:
         return _capture_cache[key]
     if platform == 'win32':
-        capture = _Capture(
-            'Desktop (GDI)',
-            [['-f', 'gdigrab', '-framerate', str(FPS),
-              '-draw_mouse', '1' if cursor else '0', '-i', 'desktop']])
+        capture = _probe_windows(ffmpeg, cursor=cursor)
     elif platform == 'darwin':
         capture = _probe_avfoundation(ffmpeg, cursor=cursor)
     else:
@@ -948,6 +966,111 @@ def video_only_capture(capture):
         # One input per device (PulseAudio's monitor sink): drop that input.
         del inputs[audio_input:audio_input + 1]
     return _Capture('屏幕 (无系统声音)', inputs, screens=capture.screens)
+
+
+#: What `ffmpeg -f dshow -list_devices true -i dummy` prints on Windows
+#: (verified against ffmpeg 8.1.2 on a real Windows 11 box):
+#:
+#:   [in#0 @ 00000000007c1300] "Astra Pro HD Camera" (video)
+#:   [in#0 @ 00000000007c1300]   Alternative name "@device_pnp_\\?\usb#vid_..."
+#:   [in#0 @ 00000000007c1300] "OBS Virtual Camera" (none)
+#:   [in#0 @ 00000000007c1300] "立体声混音 (Realtek(R) Audio)" (audio)
+#:
+#: The quoted name is what `-i audio=<name>` takes, so that is what is kept.
+#: The marker in parentheses is the only thing on the line that says which list
+#: it belongs to, and the `Alternative name` line is skipped by simply not
+#: matching -- both details are read off real output rather than assumed, the
+#: same mistake §4.2 records for the avfoundation list.
+#:
+#: Note the third marker: a device whose pin category cannot be resolved prints
+#: `(none)` (OBS Virtual Camera did, on that machine). Such a device is not
+#: listed as either video or audio -- deliberately, because the alternative
+#: (guessing "video") is one bad guess away from being handed to `audio=<name>`
+#: and taking the whole capture down. Nothing in this plugin needs a `(none)`
+#: device: the picture comes from gdigrab, and only an audio tap is looked for
+#: here.
+_DSHOW_DEVICE = re.compile(r'"([^"]+)"\s*\((video|audio)\)')
+
+#: Names of Windows recording devices that carry the *output* back to us.
+#:
+#: Windows gives ffmpeg no system-audio tap any more than macOS does: the
+#: sound has to exist as a recording device before any input can read it.
+#: Some drivers ship the built-in 立体声混音 (Stereo Mix); everyone else
+#: installs a virtual cable. Matched on substrings, because the same device
+#: is named differently by every vendor.
+WINDOWS_LOOPBACK_HINTS = ('stereo mix', '立体声混音', 'what u hear',
+                          'wave out mix', 'virtual-audio-capturer',
+                          'cable output', 'voicemeeter', 'loopback',
+                          'soundflower', 'vb-audio')
+
+
+def _dshow_lists(ffmpeg):
+    """(video names, audio names) from the dshow device table.
+
+    `-i dummy` is the documented way to ask for the table: ffmpeg fails to open
+    that input and prints both lists on its way out, so the exit status is
+    ignored here and only the output is read.
+    """
+    try:
+        proc = subprocess.run([ffmpeg, '-hide_banner', '-list_devices', 'true',
+                               '-f', 'dshow', '-i', 'dummy'],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=10)
+        text = proc.stdout.decode('utf-8', 'replace')
+    except Exception as e:
+        logger.error("cannot list dshow devices: %s", e)
+        return [], []
+    return _parse_dshow_devices(text)
+
+
+def _parse_dshow_devices(text):
+    """The two dshow lists, read out of ffmpeg's own log lines."""
+    blocks = {'video': [], 'audio': []}
+    for name, kind in _DSHOW_DEVICE.findall(str(text or '')):
+        name = name.strip()
+        # A name with a double quote in it cannot be handed to ffmpeg as
+        # `audio=<name>` without escaping we do not do, so it is left out
+        # rather than passed on as a broken argument.
+        if not name or '"' in name:
+            continue
+        blocks[kind].append(name)
+    return blocks['video'], blocks['audio']
+
+
+def windows_loopback_device(audios):
+    """The first audio device that mirrors the output, or None.
+
+    The device table's own order decides, so a machine with both Stereo Mix and
+    an installed cable uses whichever its driver lists first -- the user's
+    machine is not ours to re-rank.
+    """
+    for name in audios or []:
+        lowered = name.lower()
+        if any(hint in lowered for hint in WINDOWS_LOOPBACK_HINTS):
+            return name
+    return None
+
+
+def _probe_windows(ffmpeg, cursor=True):
+    """gdigrab for the picture, plus a loopback tap for the sound if one exists.
+
+    Unlike macOS there is no driver to install for us to trigger: either the
+    machine already has a device that carries the output (Stereo Mix, or a
+    virtual cable someone installed), or the mirror is video only and the
+    console says which device to switch on. That is why this probe asks dshow
+    once and never tries to make a device appear.
+    """
+    base = ['-f', 'gdigrab', '-framerate', str(FPS),
+            '-draw_mouse', '1' if cursor else '0']
+    _videos, audios = _dshow_lists(ffmpeg)
+    device = windows_loopback_device(audios)
+    if device is None:
+        return _Capture('Desktop (GDI)', [base + ['-i', 'desktop']])
+    return _Capture(
+        '屏幕 (GDI) + 系统声音 ({})'.format(device),
+        [base + ['-i', 'desktop'],
+         ['-f', 'dshow', '-i', 'audio={}'.format(device)]],
+        audio_map='1:a:0')
 
 
 def _default_pulse_monitor():
@@ -2669,6 +2792,24 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', '0')
         self.end_headers()
 
+    def _no_delay(self):
+        """Turn Nagle off on this connection, once per response.
+
+        The stream is written as many small chunks -- a 4 KiB read per
+        `wfile.write`, with a flush after each -- and Nagle holds a short write
+        back while an earlier one is unacknowledged. Paired with the peer's
+        delayed ACK that delays each chunk by tens of milliseconds, jittering,
+        which is what "画面是清楚的，就是慢半拍" is made of on a LAN that has
+        bandwidth to spare. A live stream is the case Nagle is worst for: it
+        batches in *time*, and time is the thing being streamed. Never fatal --
+        a socket that cannot take the option still streams.
+        """
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP,
+                                       socket.TCP_NODELAY, 1)
+        except (OSError, AttributeError) as e:
+            logger.debug('cannot disable Nagle on this connection: %s', e)
+
     def _authorized(self, suffix):
         """The stream id is the whole credential, so compare it in constant
         time -- a timing oracle on an 8-byte hex id is not worth the risk."""
@@ -2708,6 +2849,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
                 if self.session.replay and not head_only else b'')
         queue = broadcaster.subscribe(replay=self.session.replay)
         try:
+            self._no_delay()
             self.send_response(200)
             self.send_header('Content-Type', self.session.content_type)
             self.send_header('Cache-Control', 'no-store')
@@ -2769,6 +2911,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if bounded:
             last = min(stop, last)
         length = last - start + 1
+        self._no_delay()
         self.send_response(206 if has_range else 200)
         self.send_header('Content-Type', session.content_type)
         self.send_header('Content-Length', str(length))
@@ -2951,6 +3094,59 @@ def page_url(server):
     return 'http://{}:{}{}?token={}'.format(
         advertise_host(), server.server_address[1], BROWSER_PATH,
         server.session.page_token)
+
+
+def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
+                         session, audio_expected=True, refused=''):
+    """The raw facts of one session, for the「统计信息」card.
+
+    Numbers and identifiers only -- what ffmpeg was actually told, which tap and
+    encoder the probe picked, and the budgets whose *sum* is the delay the user
+    feels. The view layer turns these into rows and sentences, so this stays a
+    plain dict the regression suite can assert on with no display and no
+    browser.
+
+    Deliberately not a copy of `stats()`: that one is a live throughput read
+    from the broadcaster, this one is what the session *is*. The card shows
+    both, and they answer different questions ("it is dropping" vs "it was
+    always going to be 4 s behind on this target").
+    """
+    queue_chunks = live_queue_chunks(bitrate) if bitrate else None
+    info = {
+        'kind': kind,
+        'capture': capture.label,
+        'audio': bool(capture.audio_map),
+        'audio_map': capture.audio_map or '',
+        'audio_expected': bool(audio_expected),
+        'encoder': encoder,
+        'height': height,
+        'bitrate': bitrate,
+        'fps': FPS,
+        'gop': gop_size(kind),
+        'command': ' '.join(command),
+        'cast_refused': str(refused or ''),
+    }
+    if kind == 'dlna':
+        profile = session.profile
+        info.update({
+            'profile': dlna_profile_id(profile),
+            'profile_bitrate': profile.total_bitrate,
+            'prefill_bytes': dlna_prefill_bytes(profile),
+            'prefill_seconds': dlna_prefill_seconds(profile),
+        })
+    else:
+        info.update({
+            'queue_chunks': queue_chunks,
+            #: How much picture the sender's own queue may hold before the
+            #: slowest viewer starts losing fragments -- the sender's share of
+            #: the delay, in seconds so it can be read next to the rest.
+            'queue_seconds': (round(queue_chunks * CHUNK * 8.0 / bitrate, 2)
+                              if queue_chunks and bitrate else None),
+            #: Only the browser target replays anything; the other two follow
+            #: the live edge or are byte-addressed by the TV itself.
+            'replay_bytes': REPLAY_BYTES if kind == 'browser' else 0,
+        })
+    return info
 
 
 # -- the browser player page ------------------------------------------------
@@ -3395,6 +3591,84 @@ def _search_source_ip():
     return addrs[0] if addrs else None
 
 
+#: How many local addresses one *empty* search may retry from.
+#:
+#: A Windows box grows an interface per feature -- Hyper-V, WSL, Docker, a
+#: VPN -- and the multicast route the kernel picks for an unbound socket is
+#: not necessarily the one the television is on, which is the same failure
+#: AGENTS.md 4.1 records for the mDNS advertiser. Retrying from each address
+#: that could carry a LAN is what turns「找不到设备」into a device list there.
+#: Four keeps a fruitless search to a few seconds; a single-homed machine
+#: never reaches the second attempt at all.
+MAX_SEARCH_FALLBACKS = 4
+
+#: What the last DLNA search actually tried, as
+#: [{'interface', 'answers', 'error'}] -- raw material for the diagnostics
+#: panel, because "no devices" and "the packet never left" look identical on
+#: screen and are entirely different problems.
+_dlna_trace = []
+
+
+def dlna_trace():
+    """The interfaces the last DLNA search tried, in order."""
+    return list(_dlna_trace)
+
+
+def _search_fallback_interfaces():
+    """Local addresses to retry an empty search from, in order.
+
+    Loopback is left out: a search that only ever answered from this machine
+    would answer from the routed socket too.
+    """
+    try:
+        return [addr for addr in sorted(Setting.get_advertisable_ip())
+                if not str(addr).startswith('127.')][:MAX_SEARCH_FALLBACKS]
+    except Exception:
+        return []
+
+
+def _ask_renderers_everywhere(targets, timeout):
+    """Answers from whichever interface has them, with a trace of what was tried.
+
+    Ordered: the OS-routed attempt first -- which is all a single-homed machine
+    ever needs, and keeps the well-tested path in front -- then one attempt per
+    local address that could reach a LAN. An attempt that already answered ends
+    the sweep, so a working LAN pays nothing for this.
+    """
+    global _dlna_trace
+    trace = []
+    answers = []
+    last_error = None
+    attempts = [None] + _search_fallback_interfaces()
+    seen = set()
+    for interface in attempts:
+        if interface in seen:
+            continue
+        seen.add(interface)
+        try:
+            found = list(_ask_renderers(targets, timeout, interface=interface))
+            error = None
+        except DiscoveryError as e:
+            found, error = [], e
+        except Exception as e:                      # pragma: no cover - defensive
+            found, error = [], e
+        trace.append({'interface': interface or '自动（内核路由）',
+                      'answers': len(found),
+                      'error': '' if error is None else str(error)})
+        if found:
+            answers, last_error = found, None
+            break
+        if error is not None:
+            last_error = error
+    _dlna_trace = trace
+    if not answers and last_error is not None \
+            and all(row['error'] for row in trace):
+        # Every attempt failed to even send: that is a discovery failure, not
+        # an empty LAN, and the console has a different sentence for it.
+        raise last_error
+    return answers
+
+
 def _ssdp_search(st, timeout=SSDP_SEARCH_TIMEOUT, interface=None):
     """(LOCATION, answering ip) pairs for one SSDP search target."""
     request = '\r\n'.join([
@@ -3589,8 +3863,7 @@ def discover_renderers(timeout=SSDP_SEARCH_TIMEOUT):
     # "only this Mac answered" for a search that never ran.
     _self_alone['dlna'] = 0
     _dlna_unreadable = 0
-    answers = _ask_renderers(DLNA_SEARCH_TARGETS, timeout,
-                             interface=_search_source_ip())
+    answers = _ask_renderers_everywhere(DLNA_SEARCH_TARGETS, timeout)
     others = [answer for answer in answers if answer[1] not in ours]
     _self_alone['dlna'] = len({answer[1] for answer in answers} & ours)
     answers = others                            # do not mirror to ourselves
@@ -4663,6 +4936,12 @@ class ScreenMirrorRenderer(Renderer):
         #: This session had to drop the system-audio tap to get a frame at all;
         #: see AUDIO_DROPPED_SUFFIX.
         self._audio_dropped = False
+        #: The running session's own raw facts for the「统计信息」card: what
+        #: ffmpeg was actually asked to do, which tap and encoder the probe
+        #: chose, and the budgets the end-to-end delay is assembled from.
+        #: Written once per attempt, read by `stats()`; empty while nothing is
+        #: running, so a stopped mirror cannot show a stale command.
+        self._diag = {}
         self.renderer_setting = ScreenMirrorSetting()
         # The surface asks *this* renderer about the session, not the bus's
         # "whoever is playing": see `ScreenMirrorSetting._owner`.
@@ -4707,6 +4986,7 @@ class ScreenMirrorRenderer(Renderer):
         """
         with self._lock:
             server, sink, kind = self._server, self._sink, self._kind
+            diag = dict(self._diag)
         #: Every target counts bytes the same way; only the low-latency one has
         #: no HTTP server holding a broadcaster to count them with.
         source = server.broadcaster if server is not None else sink
@@ -4722,6 +5002,11 @@ class ScreenMirrorRenderer(Renderer):
                 'mbps': round(source.bytes * 8 / 1000000.0 / seconds, 2),
                 'seconds': int(time.time() - self._started_at)
                 if self._started_at else 0}
+        #: The session's own configuration, kept apart from the live numbers
+        #: above: the「统计信息」card shows both, and only this half explains
+        #: *why* the delay is what it is.
+        if diag:
+            info['diag'] = diag
         if kind == 'caststream':
             info['frames'] = sink.frames
             info['in_flight'] = sink.in_flight()
@@ -4942,15 +5227,21 @@ class ScreenMirrorRenderer(Renderer):
         handed = False
         try:
             server = None if stream is not None else start_stream_server(session)
+            # Built once and reused for the spawn and for the log line: the same
+            # argv is what the「统计信息」card shows, and building it twice was
+            # two chances for the logged command to differ from the run one.
+            command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
+                                           kind=kind, encoder=encoder)
             proc = subprocess.Popen(
-                build_ffmpeg_command(ffmpeg, capture, height, bitrate,
-                                     kind=kind, encoder=encoder),
+                command,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 env=_clean_env())
-            command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
-                                           kind=kind, encoder=encoder)
             logger.info('screen capture command: %s', ' '.join(command))
+            diagnostics = _session_diagnostics(
+                kind=kind, capture=capture, command=command, encoder=encoder,
+                height=height, bitrate=bitrate, session=session,
+                audio_expected=with_audio, refused=refused)
             with self._lock:
                 if generation != self._generation:
                     raise _Aborted()
@@ -4960,6 +5251,7 @@ class ScreenMirrorRenderer(Renderer):
                 self._server = server
                 self._sink = stream
                 self._kind = kind
+                self._diag = diagnostics
                 handed = True
             threading.Thread(
                 target=_pump,
@@ -5257,6 +5549,7 @@ class ScreenMirrorRenderer(Renderer):
             self._sender = self._proc = self._server = None
             self._sink = None
             self._kind = ''
+            self._diag = {}
             self._mirroring = False
             self._starting = False
             # Claim the assert here so a second teardown (the encoder dying
@@ -5414,7 +5707,7 @@ def _drain_stderr(proc, tail):
 #: Bumped when the state/action contract changes; a page from another generation
 #: says so in its banner instead of quietly missing buttons. `mirror_view.VIEW_VERSION`
 #: is the same number on the core's side, and the regression suite pins the two.
-CONSOLE_VERSION = 3
+CONSOLE_VERSION = 4
 
 #: One line of trade-off language per target: the cards in the page have room to
 #: say what choosing this costs, which a menu label never did.
@@ -5494,7 +5787,7 @@ def _probe_items(probe):
 
 
 def _search_words(devices, searching, searched_at, error, nothing='', alone=0,
-                  unreadable=0):
+                  unreadable=0, trace=None):
     """One phrase: what the last search of this protocol actually concluded.
 
     「正在搜索」is only ever true of a first look still in flight -- a completed
@@ -5511,6 +5804,12 @@ def _search_words(devices, searching, searched_at, error, nothing='', alone=0,
     spoken. A user told「没有发现 DLNA 电视」about a TV that *did* answer looks for
     a device that is not there, when the thing to do is wake it or turn its
     DLNA on. Every empty branch here ends in the next step, not just a verdict.
+
+    `trace` is how many interfaces the search actually tried (see
+    `_ask_renderers_everywhere`). It only ever adds a clause: on the last-resort
+    branch, "nothing answered" and "we asked from five different NICs and none
+    of them was heard" are different facts, and only the second one means the
+    user should look at which adapter is on the TV's network.
     """
     if devices:
         if unreadable:
@@ -5532,9 +5831,12 @@ def _search_words(devices, searching, searched_at, error, nothing='', alone=0,
         return ('有 {} 台设备应答了发现，但都读不到描述：通常是它在休眠，'
                 '或者固件不报 AVTransport。唤醒它或在它上面打开 DLNA/投屏，'
                 '然后点「重搜设备」' + _searched_suffix(searched_at))
-    return (nothing + '；如果设备就在这台 Mac 的同一个网络里，'
-            '检查它是否开机、再点「重搜设备」'
-            + _searched_suffix(searched_at))
+    words = (nothing + '；如果设备就在这台 Mac 的同一个网络里，'
+             '检查它是否开机、再点「重搜设备」')
+    if trace and len(trace) > 1:
+        words += ('（已从 {} 个网卡分别发过发现，都没有应答：确认电视和这台电脑'
+                  '在同一个网段，或在上面的网络设置里指定网卡）'.format(len(trace)))
+    return words + _searched_suffix(searched_at)
 
 
 def _probe_chosen(probe):
@@ -5583,7 +5885,8 @@ def channels_state(current=None):
         words = '' if not probe else _search_words(
             items, searching, searched_at, error,
             PROBE_LABELS.get(probe, ('', '没有发现设备'))[1],
-            alone=_probe_alone(probe), unreadable=_probe_unreadable(probe))
+            alone=_probe_alone(probe), unreadable=_probe_unreadable(probe),
+            trace=dlna_trace() if probe == 'dlna' else None)
         out.append({'key': key,
                     'label': OUTPUTS[key][0],
                     'hint': OUTPUT_HINTS.get(key, ''),
@@ -5866,6 +6169,11 @@ class ScreenMirrorSetting(RendererSetting):
                             for key, _probe in CHANNELS],
             },
             'channels': channels_state(kind),
+            #: Which interfaces the last DLNA search tried, and what each one
+            #: answered. Raw, because "电视没开" and "发现包根本没从对的网卡出去"
+            #: are the same sentence on screen ("没有发现") and completely
+            #: different problems to fix.
+            'search_trace': {'dlna': dlna_trace()},
             'prompt': target_prompt(kind),
             'profiles': {
                 'current': dlna_profile_id(dlna_profile()),
@@ -6294,7 +6602,14 @@ class ScreenMirrorSetting(RendererSetting):
         if sys.platform == 'darwin':
             return '系统声音：未启用（可一键安装 BlackHole）'
         if sys.platform == 'win32':
-            return '系统声音：Windows 下仅画面'
+            # Windows 的回环录音设备不是我们装的：要么驱动自带「立体声混音」，
+            # 要么用户自己装了虚拟声卡。所以这里必须给出去哪打开它，而不是
+            # 只说一句「仅画面」—— 那正是「Windows 投屏没声音」的原始答案。
+            return ('系统声音：未启用 —— Windows 要把输出录回来需要一个回环录音'
+                    '设备。在「设置 → 系统 → 声音 → 更多声音设置 → 录制」里右键'
+                    '空白处勾选「显示已禁用的设备」，启用「立体声混音 (Stereo '
+                    'Mix)」；驱动没提供就装一块虚拟声卡（VB-Cable / VoiceMeeter），'
+                    '装好后点上面的「重新探测采集」，本次镜像要重启一次。')
         return '系统声音：未启用（需要 PulseAudio）'
 
 

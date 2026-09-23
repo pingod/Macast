@@ -216,6 +216,19 @@
             background: rgba(64, 158, 255, .10);
         }
         .mirror-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
+        /* 「统计信息」：一格一行，长值（ffmpeg 命令行）换行不撑破卡片。 */
+        .diag-list { display: grid; gap: 0; }
+        .diag-row {
+            display: grid; grid-template-columns: minmax(140px, max-content) 1fr;
+            gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--border);
+            font-size: 12px; line-height: 1.55;
+        }
+        .diag-row:last-child { border-bottom: none; }
+        .diag-key { color: var(--text-soft); white-space: nowrap; }
+        .diag-val {
+            color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            word-break: break-all;
+        }
         .mirror-req { padding: 8px 0; border-bottom: 1px solid var(--border); }
         .mirror-req:last-child { border-bottom: none; }
         .mr-label { font-weight: 600; font-size: 13px; }
@@ -708,6 +721,25 @@
                             </div>
                             <div class="hint" v-else-if="mirror_state.preview.reason">
                                 {{ mirror_state.preview.reason }}（显示的是上一帧）
+                            </div>
+                        </div>
+
+                        <div class="status-card" v-if="sec === 'diagnostics'" key="diagnostics">
+                            <h3>统计信息</h3>
+                            <div class="hint" style="margin-bottom:8px;">
+                                投屏的原始数据。端到端延迟就是「延迟来源」那几项相加再算上电视/浏览器的
+                                自身缓冲，所以报「延迟大」时说清哪一项大就够了；复制按钮给的是一整段纯文本。
+                            </div>
+                            <div class="diag-list">
+                                <div class="diag-row" v-for="(row, i) in mirror_view.diagnostics" :key="i">
+                                    <span class="diag-key">{{ row[0] }}</span>
+                                    <span class="diag-val">{{ row[1] }}</span>
+                                </div>
+                            </div>
+                            <div class="mirror-line">
+                                <el-button size="mini" @click="copy_text(mirror_view.diagnostics_text)">
+                                    复制统计信息
+                                </el-button>
                             </div>
                         </div>
 

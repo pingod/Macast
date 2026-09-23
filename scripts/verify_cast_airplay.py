@@ -4202,7 +4202,11 @@ done
         #    argument is the seam, nothing about this process changes) ------
         cap_win21 = mirror.probe_capture(fake_ffmpeg21, 'win32')
         _cmd_win21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap_win21, 720, 5000000)
-        check("windows dispatches to gdigrab, video only",
+        # This fake answers the avfoundation shape, so the dshow device table
+        # comes back empty and Windows is the video-only case -- the audio half
+        # needs a device that carries the output, and Part 39 feeds the parser
+        # a real dshow listing to prove it turns on when one is there.
+        check("windows dispatches to gdigrab, video only with no loopback device",
               'gdigrab' in _cmd_win21 and '-an' in _cmd_win21, str(_cmd_win21))
 
         _saved_disp21 = os.environ.pop('DISPLAY', None)
@@ -13087,6 +13091,405 @@ finally:
         print('Part 38 setup error: %s' % _traceback38.format_exc())
     utils.Setting.setting = {}
     _shutil.rmtree(_tmp38, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Part 39: Windows system audio, DLNA discovery that leaves the machine, and
+# the numbers behind「延迟有点大」
+#
+# Three reports, one theme: each of them is a fact that was invisible from the
+# screen. Windows mirrored picture only and said nothing about why; a DLNA
+# search that found nothing looked identical whether the television was off or
+# the M-SEARCH never left the right adapter; and "the delay is noticeable" had
+# no number attached to it anywhere in the app. So this part measures the
+# device table ffmpeg really prints, the interfaces a search really tries, and
+# the budgets a session really holds -- and it proves the Nagle fix on a real
+# TCP socket rather than by reading the source.
+# --------------------------------------------------------------------------
+print("\n=== Part 39: windows audio, discovery reach, latency budgets ===")
+import traceback as _traceback39
+
+_tmp39 = _tempfile.mkdtemp(prefix="macast-win39-")
+mirror39 = None
+try:
+    utils.SETTING_DIR = _tmp39
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp39, "macast_setting.json")
+    mirror39 = _load_plugin("screen_mirror_plugin_v39", "screen_mirror.py")
+    m39 = mirror39
+    _bin39 = os.path.join(_tmp39, "bin")
+
+    # -- what `ffmpeg -f dshow -list_devices true -i dummy` really prints ----
+    # Not invented: this is the verbatim table ffmpeg 8.1.2 printed on a real
+    # Windows 11 box (AMD-YES), which is the machine that reported "no sound".
+    # The avfoundation parser in this plugin was once written against made-up
+    # output and returned two empty lists on every real Mac (AGENTS.md 4.2), so
+    # the input here is captured rather than imagined. Three details only real
+    # output has: the prefix is `[in#0 @ ...]` not `[dshow @ ...]`, a `(none)`
+    # marker exists for a device whose pin category cannot be resolved, and the
+    # `Alternative name` lines carry a quoted string with no marker at all.
+    _dshow_real = (
+        '[in#0 @ 00000000007c1300] "Astra Pro HD Camera" (video)\n'
+        '[in#0 @ 00000000007c1300]   Alternative name "@device_pnp_\\\\?\\usb#vi'
+        'd_2bc5&pid_0501&mi_00#a&2387c1ff&0&0000#{65e8773d-8f56-11d0-a3b9-00a0'
+        'c9223196}\\global"\n'
+        '[in#0 @ 00000000007c1300] "Smart Connect Camera" (video)\n'
+        '[in#0 @ 00000000007c1300]   Alternative name "@device_pnp_\\\\?\\root#'
+        'camera#0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\\global"\n'
+        '[in#0 @ 00000000007c1300] "OBS Virtual Camera" (none)\n'
+        '[in#0 @ 00000000007c1300]   Alternative name "@device_sw_{860BB310-5D0'
+        '1-11D0-BD3B-00A0C911CE86}\\{A3FCE0F5-3493-419F-958A-ABA1250EC20B}"\n'
+        '[in#0 @ 00000000007c1300] "耳机式麦克风 (HUAWEI Sound Joy-06342)" (audio)\n'
+        '[in#0 @ 00000000007c1300]   Alternative name "@device_cm_{33D9A762-90C'
+        '8-11D0-BD43-00A0C911CE86}\\wave_{1EE13EA6-CD75-4818-AFFD-310B0FA9A5AC}"\n'
+        '[in#0 @ 00000000007c1300] "Virtual Mic (Virtual Mic for AudioRelay)" '
+        '(audio)\n'
+        '[in#0 @ 00000000007c1300] "麦克风 (Steam Streaming Microphone)" (audio)\n'
+        '[in#0 @ 00000000007c1300] "麦克风 (ORBBEC Audio Device)" (audio)\n'
+        '[in#0 @ 00000000007c1300] "麦克风 (Realtek(R) Audio)" (audio)\n'
+        '[in#0 @ 00000000007c1300] "立体声混音 (Realtek(R) Audio)" (audio)\n'
+        'Error opening input file dummy.\n')
+    _v39, _a39 = m39._parse_dshow_devices(_dshow_real)
+    check("the real dshow device table yields both lists",
+          _v39 == ['Astra Pro HD Camera', 'Smart Connect Camera']
+          and _a39[-1] == '立体声混音 (Realtek(R) Audio)'
+          and '耳机式麦克风 (HUAWEI Sound Joy-06342)' in _a39
+          and len(_a39) == 6,
+          '%s / %s' % (_v39, _a39))
+    check("an 'Alternative name' line is not mistaken for a device",
+          not any('device_pnp' in n or 'device_cm' in n or 'device_sw' in n
+                  for n in _v39 + _a39), str(_v39 + _a39))
+    check("this machine's table really does offer a loopback tap to pick",
+          m39.windows_loopback_device(_a39) == '立体声混音 (Realtek(R) Audio)',
+          'the machine that reported no sound has Stereo Mix; it was the -an '
+          'that silenced it, not the hardware: %s' % _a39)
+    # The `(none)` marker: OBS Virtual Camera printed it. It is neither list --
+    # deliberately, because guessing "video" is one bad guess away from being
+    # handed to `audio=<name>` and taking the capture down with it.
+    check("a device whose type ffmpeg cannot resolve is neither list",
+          'OBS Virtual Camera' not in _v39
+          and 'OBS Virtual Camera' not in _a39
+          and m39.windows_loopback_device(['OBS Virtual Camera']) is None,
+          '%s / %s' % (_v39, _a39))
+
+    _quoted39 = m39._parse_dshow_devices(
+        '[dshow @ 0] "Odd \\"quoted\\" device" (audio)\n'
+        '[dshow @ 0] "Fine" (audio)\n')[1]
+    check("a name that could break out of audio=<name> never reaches the argv",
+          'Fine' in _quoted39
+          and not any('"' in name for name in _quoted39),
+          str(_quoted39))
+
+    check("only a device that carries the output counts as a loopback tap",
+          m39.windows_loopback_device(['麦克风阵列', 'Stereo Mix (Realtek(R))'])
+          == 'Stereo Mix (Realtek(R))'
+          and m39.windows_loopback_device(['立体声混音 (Realtek)'])
+          == '立体声混音 (Realtek)'
+          and m39.windows_loopback_device(['CABLE Output (VB-Audio)'])
+          == 'CABLE Output (VB-Audio)'
+          and m39.windows_loopback_device(['麦克风阵列', 'HD WebCam']) is None)
+
+    _win_audio39 = _write_fake(_bin39, "ffmpeg-win-audio", r"""#!/bin/sh
+case "$*" in
+  *dshow*)
+    printf '%s\n' \
+      '[dshow @ 0x1] "HD WebCam" (video)' \
+      '[dshow @ 0x1]   Alternative name "@device_pnp_usb#vid_1bcf"' \
+      '[dshow @ 0x1] "麦克风阵列 (Realtek(R) Audio)" (audio)' \
+      '[dshow @ 0x1] "Stereo Mix (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+    _win_mic39 = _write_fake(_bin39, "ffmpeg-win-mic", r"""#!/bin/sh
+case "$*" in
+  *dshow*)
+    printf '%s\n' \
+      '[dshow @ 0x1] "HD WebCam" (video)' \
+      '[dshow @ 0x1] "麦克风阵列 (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+
+    m39._capture_cache.clear()
+    _cap39 = m39.probe_capture(_win_audio39, 'win32')
+    _cmd39 = m39.build_ffmpeg_command(_win_audio39, _cap39, 720, 5000000)
+    check("a Windows loopback device turns system audio on",
+          _cap39.audio_map == '1:a:0'
+          and 'Stereo Mix (Realtek(R) Audio)' in _cap39.label
+          and '-c:a' in _cmd39 and 'aac' in _cmd39 and '-an' not in _cmd39,
+          '%s / %s' % (_cap39.label, _cmd39))
+    check("the sound is a second input, and the picture stays gdigrab",
+          len(_cap39.inputs) == 2
+          and _cap39.inputs[0][:2] == ['-f', 'gdigrab']
+          and _cap39.inputs[1][:3] == ['-f', 'dshow', '-i']
+          and _cap39.inputs[1][3].startswith('audio='),
+          str(_cap39.inputs))
+    check("and the audio map points at that second input, not input 0",
+          _cap39.audio_map.startswith('1:'), _cap39.audio_map)
+
+    _vo39 = m39.video_only_capture(_cap39)
+    check("giving up the sound on Windows drops the dshow input whole",
+          len(_vo39.inputs) == 1 and _vo39.inputs[0][:2] == ['-f', 'gdigrab']
+          and _vo39.audio_map is None
+          and '-an' in m39.build_ffmpeg_command(_win_audio39, _vo39, 720, 5000000),
+          str(_vo39.inputs))
+
+    m39._capture_cache.clear()
+    _capmic39 = m39.probe_capture(_win_mic39, 'win32')
+    check("no loopback device on Windows stays video only, as before",
+          _capmic39.audio_map is None
+          and '-an' in m39.build_ffmpeg_command(_win_mic39, _capmic39, 720, 5000000),
+          str(_capmic39.inputs))
+
+    # The sentence the user actually reads has to name the device to switch on
+    # and the button to press -- "仅画面" was the whole of the original answer.
+    _saved_platform39 = m39.sys.platform
+    try:
+        m39.sys.platform = 'win32'
+        m39._capture_cache.clear()
+        m39.probe_capture(_win_mic39, 'win32')
+        _line39 = m39.ScreenMirrorSetting._audio_line()
+    finally:
+        m39.sys.platform = _saved_platform39
+        m39._capture_cache.clear()
+    check("the Windows audio line names the device to enable and the retry",
+          '立体声混音' in _line39 and 'Stereo' in _line39
+          and '重新探测采集' in _line39,
+          _line39)
+
+    # -- a DLNA search that does not leave from the right adapter -----------
+    # The routed attempt first (what a single-homed machine needs and what the
+    # rest of this suite has always exercised), then one per local address.
+    _saved_ips39 = m39.Setting.get_advertisable_ip
+    _saved_resolved39 = m39.Setting.resolved_network_interface
+    m39.Setting.resolved_network_interface = staticmethod(lambda: '')
+    m39.Setting.get_advertisable_ip = staticmethod(
+        lambda: ['10.0.0.5', '192.168.99.1', '192.168.1.5'])
+    _saved_ask39 = m39._ask_renderers
+    _calls39 = []
+
+    def _ask39(targets, timeout=None, interface=None):
+        _calls39.append(interface)
+        if interface == '192.168.1.5':
+            return [('http://192.168.1.40:58880/d.xml', '192.168.1.40')]
+        return []
+
+    m39._ask_renderers = _ask39
+    try:
+        _ans39 = m39._ask_renderers_everywhere(['urn:x'], 0.1)
+        _trace39 = m39.dlna_trace()
+        # Sorted, so the sweep is deterministic run to run; which address wins
+        # only decides how long an *empty* search takes, and the answering
+        # attempt ends it either way.
+        check("an empty search is retried from every local address",
+              _calls39 == [None, '10.0.0.5', '192.168.1.5'],
+              'the routed attempt first, then each advertisable address: %s'
+              % _calls39)
+        check("the sweep stops at the interface that answered",
+              _ans39 == [('http://192.168.1.40:58880/d.xml', '192.168.1.40')]
+              and len(_trace39) == 3
+              and [r['answers'] for r in _trace39] == [0, 0, 1],
+              '%s / %s' % (_ans39, _trace39))
+        check("every attempt is recorded for the diagnostics card",
+              _trace39[0]['interface'] == '自动（内核路由）'
+              and _trace39[1]['interface'] == '10.0.0.5'
+              and _trace39[2]['interface'] == '192.168.1.5',
+              str(_trace39))
+
+        _calls39[:] = []
+        m39._ask_renderers = lambda t, timeout=None, interface=None: [
+            ('http://10.0.0.9:1/d.xml', '10.0.0.9')]
+        _one39 = m39._ask_renderers_everywhere(['urn:x'], 0.1)
+        check("a search that already answered is not retried anywhere",
+              _calls39 == [] and len(_one39) == 1
+              and len(m39.dlna_trace()) == 1,
+              'a busy LAN pays nothing for the fallback: %s' % _calls39)
+
+        def _dead39(targets, timeout=None, interface=None):
+            raise m39.DiscoveryError('packet could not be sent')
+        m39._ask_renderers = _dead39
+        _raised39 = False
+        try:
+            m39._ask_renderers_everywhere(['urn:x'], 0.1)
+        except m39.DiscoveryError:
+            _raised39 = True
+        check("a search that never sent anything is still a discovery failure",
+              _raised39 and all(r['error'] for r in m39.dlna_trace()),
+              '「没有发现」and「发不出去」must not become the same sentence')
+    finally:
+        m39._ask_renderers = _saved_ask39
+        m39.Setting.get_advertisable_ip = _saved_ips39
+        m39.Setting.resolved_network_interface = _saved_resolved39
+        m39._dlna_trace = []
+
+    _trace39_words = [{'interface': '自动（内核路由）', 'answers': 0, 'error': ''},
+                      {'interface': '192.168.1.5', 'answers': 0, 'error': ''}]
+    check("an empty search says which interfaces it tried",
+          '2 个网卡' in m39._search_words([], False, time.time(), '', '没有发现',
+                                           trace=_trace39_words),
+          m39._search_words([], False, time.time(), '', '没有发现',
+                            trace=_trace39_words))
+    check("...and a single attempt adds no such clause",
+          '网卡' not in m39._search_words([], False, time.time(), '', '没有发现',
+                                          trace=_trace39_words[:1]),
+          'a single-homed machine must not be lectured about adapters')
+
+    # -- the sender's own slice of the latency -------------------------------
+    _pf39 = m39.DLNA_PROFILES['ps-pal']
+    check("the DLNA prefill no longer sits behind its own floor",
+          m39.dlna_prefill_bytes(_pf39) != m39.DLNA_PREFILL_MIN_BYTES
+          and 3 <= m39.dlna_prefill_seconds(_pf39) <= 4,
+          '%s bytes / %s s (the floor used to dominate: 5.4 s)'
+          % (m39.dlna_prefill_bytes(_pf39), m39.dlna_prefill_seconds(_pf39)))
+    check("the browser replay tail is a few GOPs, not ten seconds of picture",
+          m39.REPLAY_BYTES <= (2 << 20)
+          and m39.REPLAY_BYTES >= (m39.QUALITIES['source'][1] // 8) // 4,
+          '%s bytes' % m39.REPLAY_BYTES)
+
+    # A late joiner must still land on a keyframe, which means the ring keeps
+    # at least one *whole* fragment however small the budget is.
+    _big39 = m39._Broadcaster(maxsize=256, ring_bytes=1024,
+                              init_marker=b'moof')
+    _frag39 = b'moof' + b'\x00' * 8192 + b'mdat' + b'\x00' * 8192
+    _big39.feed(_frag39)
+    check("a replay budget smaller than one fragment still keeps that fragment",
+          len(_big39.tail()) == 1 and len(_big39.tail()[0]) >= len(_frag39) - 1,
+          'a replay that starts mid-fragment is a green smear, not a picture')
+
+    # -- Nagle, on a real socket --------------------------------------------
+    _srv39 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _srv39.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _srv39.bind(('127.0.0.1', 0))
+    _srv39.listen(1)
+    _client39 = socket.create_connection(_srv39.getsockname(), timeout=5)
+    _conn39, _addr39 = _srv39.accept()
+
+    class _Handler39(object):
+        connection = _conn39
+
+    try:
+        _before39 = _conn39.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        m39._StreamHandler._no_delay(_Handler39())
+        _after39 = _conn39.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+        _conn39.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 0)
+        _off39 = _conn39.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+    finally:
+        for _s39 in (_conn39, _client39, _srv39):
+            try:
+                _s39.close()
+            except OSError:
+                pass
+    # Darwin's getsockopt answers with the internal flag (TF_NODELAY = 4), not
+    # the value that was stored, so the honest assertion is "was off, is on,
+    # and 0 still turns it back off" -- measured on this machine rather than
+    # assumed to be 1 the way Linux reports it.
+    check("the live stream turns Nagle off on its own connection",
+          _before39 == 0 and _after39 != 0 and _off39 == 0,
+          'before=%s after=%s off-again=%s: Nagle batches in time, and time is '
+          'what is being streamed' % (_before39, _after39, _off39))
+
+    with open(os.path.join(MACAST, "plugins", "renderer", "screen_mirror.py"),
+              encoding="utf-8") as _fh39:
+        _src39 = _fh39.read()
+    _serve39 = _src39.split('def _serve_stream')[1].split('def _serve_infinite')[0]
+    _file39 = _src39.split('def _serve_infinite_file')[1].split('def _dlna_headers')[0]
+    check("both streaming responses do it, not just the live-edge one",
+          '_no_delay()' in _serve39 and '_no_delay()' in _file39,
+          'a DLNA renderer reads in big chunks but reconnects constantly')
+
+    # -- the statistics card ------------------------------------------------
+    _mc39 = _load("mirror_view39", "mirror_view.py")
+    _idle39 = {'mirroring': False, 'platform': 'darwin', 'available': True,
+               'console_version': _mc39.VIEW_VERSION, 'capture': {'probed': True},
+               'audio': {'line': ''}, 'output': {'kind': 'cast'}, 'stats': {}}
+    check("no session means no statistics card, not an empty one",
+          _mc39.diagnostics_rows(_idle39) == []
+          and _mc39.diagnostics_text(_idle39) == ''
+          and 'diagnostics' not in _mc39.sections_for(_idle39))
+
+    _diag39 = m39._session_diagnostics(
+        kind='browser', capture=_cap39, command=['ffmpeg', '-f', 'x', 'pipe:1'],
+        encoder='software', height=720, bitrate=4000000,
+        session=type('S39', (), {'profile': None})())
+    _live39 = {'mirroring': True, 'version': '0.13', 'platform': 'darwin',
+               'available': True, 'console_version': _mc39.VIEW_VERSION,
+               'capture': {'probed': True}, 'audio': {'line': ''},
+               'output': {'kind': 'browser'},
+               'channels': [{'key': 'browser', 'label': '浏览器',
+                             'words': '不需要设备'}],
+               'search_trace': {'dlna': _trace39_words},
+               'stats': dict({'diag': _diag39}, mbps=3.9, clients=1,
+                             bytes=2 << 20, chunks=512, drops=0, seconds=42)}
+    _rows39 = _mc39.diagnostics_rows(_live39)
+    _flat39 = dict(_rows39)
+    check("the statistics card carries every term the delay is made of",
+          any('延迟来源' in k for k in _flat39)
+          and '关键帧间隔' in _flat39 and '编码器' in _flat39
+          and '实测码率' in _flat39 and '丢块' in _flat39,
+          str(sorted(_flat39)))
+    check("it says what the sender holds in front of a viewer, in seconds",
+          any('发送队列' in k and '秒' in v for k, v in _rows39),
+          str([r for r in _rows39 if '队列' in r[0]]))
+    check("and it shows the actual ffmpeg argv",
+          'ffmpeg' in _flat39.get('ffmpeg 命令', ''),
+          _flat39.get('ffmpeg 命令', ''))
+    check("the card says how many interfaces the DLNA search tried",
+          any(k.startswith('发现尝试') for k in _flat39), str(sorted(_flat39)))
+    check("the card appears exactly when there is a session to debug",
+          'diagnostics' in _mc39.sections_for(_live39)
+          and _mc39.sections_for(_live39)[-1] == 'activity',
+          str(_mc39.sections_for(_live39)))
+    _text39 = _mc39.diagnostics_text(_live39)
+    check("the copied block repeats the card row for row",
+          all('{}: {}'.format(k, v) in _text39 for k, v in _rows39)
+          and '设备发现: 不需要设备' in _text39,
+          _text39[:200])
+    check("nothing secret is in the copied block",
+          'token' not in _text39.lower() and all(
+              'token' not in str(k).lower() and 'token' not in str(v).lower()
+              for k, v in _rows39),
+          'the mirror stream id and the page token are credentials (AGENTS 4.7)')
+
+    # The DLNA shape reports its own budget instead of a queue it does not have.
+    _dlna_diag39 = m39._session_diagnostics(
+        kind='dlna', capture=_cap39, command=['ffmpeg', 'pipe:1'],
+        encoder='software', height=720, bitrate=4000000,
+        session=type('S39b', (), {'profile': _pf39})())
+    _dlna_rows39 = dict(_mc39.diagnostics_rows(dict(
+        _live39, output={'kind': 'dlna'},
+        stats=dict({'diag': _dlna_diag39}, mbps=4.5, clients=1, bytes=1 << 20,
+                   chunks=256, drops=0, seconds=12, state='PLAYING',
+                   buffered=4 << 20))))
+    check("the DLNA shape shows its prefill, not a live queue",
+          '预填缓冲（延迟来源）' in _dlna_rows39
+          and '发送队列（延迟来源）' not in _dlna_rows39
+          and _dlna_rows39.get('DLNA 档位') == 'ps-pal',
+          str(sorted(_dlna_rows39)))
+    check("and the console exposes the discovery trace it is drawn from",
+          'search_trace' in _src39
+          and "'search_trace': {'dlna': dlna_trace()}" in _src39,
+          'the card reads it, so it has to be in the state the page fetches')
+
+    check("the plugin header version matches the constant it advertises",
+          '<macast.version>{}'.format(m39.PLUGIN_VERSION) in _src39,
+          'PLUGIN_VERSION=%s' % m39.PLUGIN_VERSION)
+finally:
+    if mirror39 is None:
+        print('Part 39 setup error: %s' % _traceback39.format_exc())
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp39, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
