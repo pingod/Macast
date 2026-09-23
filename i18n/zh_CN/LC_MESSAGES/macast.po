@@ -176,3 +176,36 @@ msgstr "检查更新"
 
 msgid "New Update {}"
 msgstr "有新版本 {}"
+
+msgid "Open Settings Page"
+msgstr "打开设置页"
+
+msgid "Play History"
+msgstr "投屏历史"
+
+msgid "Clear Play History"
+msgstr "清除投屏历史"
+
+msgid "Now playing: {}"
+msgstr "正在播放：{}"
+
+msgid "Stop Playback"
+msgstr "停止播放"
+
+msgid "Stop playback failed"
+msgstr "停止播放失败"
+
+msgid "Cast failed"
+msgstr "投屏失败"
+
+msgid "Plugins updated."
+msgstr "插件已更新。"
+
+msgid "At least one protocol must stay enabled."
+msgstr "至少要保留一个启用的协议。"
+
+msgid "Enabled"
+msgstr "已启用"
+
+msgid "Disabled"
+msgstr "已停用"

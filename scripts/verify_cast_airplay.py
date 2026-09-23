@@ -4619,15 +4619,27 @@ done
               and 'pipe:1' in _mp22 and 'mpegts' not in _mp22, str(_mp22))
         check("the Chromecast target still muxes MPEG-TS",
               'mpegts' in _ts22 and 'mp4' not in _ts22, str(_ts22))
-        check("one keyframe a second is what makes both of them joinable",
-              _mp22[_mp22.index('-g') + 1] == str(mirror.FPS)
+        check("the browser opens a keyframe twice a second, the TVs once",
+              _mp22[_mp22.index('-g') + 1] == str(mirror.FPS // 2)
               and _ts22[_ts22.index('-g') + 1] == str(mirror.FPS), str(_mp22))
+        check("the shorter GOP is bought only where a viewer joins live",
+              mirror.gop_size('browser') == mirror.FPS // 2
+              and all(mirror.gop_size(k) == mirror.FPS
+                      for k in ('cast', 'dlna', 'caststream')),
+              str([(k, mirror.gop_size(k)) for k in mirror.OUTPUTS]))
 
         # -- quality presets -------------------------------------------------
         check("the four presets name a height and a bitrate",
-              mirror.QUALITIES['360'] == (360, 2500000)
-              and mirror.QUALITIES['1080'] == (1080, 10000000)
+              mirror.QUALITIES['360'] == (360, 2000000)
+              and mirror.QUALITIES['1080'] == (1080, 6000000)
               and mirror.QUALITIES['source'][0] == 0, str(mirror.QUALITIES))
+        check("no preset outruns a Wi-Fi link, because an uncapped bitrate is "
+              "the latency the user complains about and a blurred picture",
+              max(rate for _h, rate in mirror.QUALITIES.values()) <= 8000000
+              and all(mirror.rate_caps(rate) == [
+                  '-maxrate', str(int(rate * 1.5)), '-bufsize', str(rate)]
+                  for _h, rate in mirror.QUALITIES.values()),
+              str(mirror.QUALITIES))
         check("the source preset asks for no scaling at all",
               '-vf' not in mirror.build_ffmpeg_command('ffmpeg', _cap22, 0,
                                                        12000000))
@@ -4736,10 +4748,11 @@ done
         bc22.feed(b'moofBBBB')
         _late22 = bc22.subscribe(replay=True)
         _live22 = bc22.subscribe(replay=False)
-        check("a late joiner is handed the header, then the tail",
-              _late22.get_nowait() == b'ftypisomxx'
-              and _late22.get_nowait() == b'moofAAAA'
-              and _late22.get_nowait() == b'moofBBBB')
+        check("a late joiner is handed the tail, and the header separately",
+              _late22.get_nowait() == b'moofAAAA'
+              and _late22.get_nowait() == b'moofBBBB'
+              and bc22.await_init(timeout=1) == b'ftypisomxx',
+              "{} / {}".format(bc22.init_segment, _late22.qsize()))
         _joined22 = False
         try:
             _live22.get_nowait()
@@ -4765,6 +4778,88 @@ done
         _noinit22.feed(b'raw')
         check("a container with no header keeps its bytes in the tail",
               _noinit22.tail() == [b'raw'] and _noinit22.init_segment == b'')
+
+        # -- framing: a shed unit has to be a whole fragment -----------------
+        #
+        # stdout is read 4 KiB at a time, so a read boundary is essentially
+        # never a box boundary. Both ways this server sheds load -- ring
+        # eviction and a slow viewer's overflow -- remove units, and until the
+        # framer a unit could be half an `mdat`. What a viewer then holds is a
+        # byte stream whose box headers are wrong from that byte on, forever:
+        # the measured shape of "black page, byte counter still climbing" was
+        # 152 KiB of tail behind the header before the first whole `moof`.
+        def _box22(kind, body=b''):
+            return struct.pack('>I', 8 + len(body)) + kind + body
+
+        def _fragment22(n):
+            return (_box22(b'moof', b'.' * 24)
+                    + _box22(b'mdat', bytes([48 + n % 10]) * 400))
+
+        _head22 = _box22(b'ftyp', b'isom') + _box22(b'moov', b'm' * 60)
+        _frag22 = 440
+        _mp4_22 = _head22 + b''.join(_fragment22(i) for i in range(9))
+        for _cut in (4096, 7, 1):
+            # Every read size the pipe can produce: the bug is a property of
+            # where the reads land, not of one particular size.
+            _fr22 = mirror._Fragments()
+            _units22 = []
+            for _i in range(0, len(_mp4_22), _cut):
+                _units22 += _fr22.feed(_mp4_22[_i:_i + _cut])
+            _units22 += _fr22.flush()
+            check("framing is exact at every read boundary ({} B)".format(_cut),
+                  b''.join(u for _, u in _units22) == _mp4_22
+                  and not _fr22.broken,
+                  "{} of {} bytes handed out".format(
+                      sum(len(u) for _, u in _units22), len(_mp4_22)))
+        _fr22 = mirror._Fragments()
+        _units22 = _fr22.feed(_mp4_22)
+        check("one unit handed out is one whole fragment, and the header is "
+              "the first thing out",
+              _units22[0] == (False, _head22)
+              and all(u[4:8] == b'moof' for m22, u in _units22[1:])
+              and len(_units22) == 9,
+              "{} / {}".format(len(_units22), [u[4:8] for _, u in _units22][:3]))
+        _bc22 = mirror._Broadcaster(init_marker=b'moof', ring_bytes=900)
+        for _i in range(9):
+            _bc22.feed(_fragment22(_i))
+        _q22 = _bc22.subscribe(replay=True)
+        _tail22 = []
+        while not _q22.empty():
+            _tail22.append(_q22.get_nowait())
+        check("the replay tail begins at a fragment edge, not mid-box",
+              bool(_bc22.tail()) and all(u[4:8] == b'moof' for u in _tail22)
+              and sum(len(u) for u in _tail22) <= 2 * _frag22,
+              str([u[:8] for u in _tail22]))
+        _bc22 = mirror._Broadcaster(init_marker=b'moof', maxsize=2)
+        _bc22.feed(_head22 + _fragment22(0))
+        _q22 = _bc22.subscribe(replay=True)
+        for _i in range(1, 9):
+            _bc22.feed(_fragment22(_i))
+        _kept22 = []
+        while not _q22.empty():
+            _kept22.append(_q22.get_nowait())
+        check("a slow viewer loses whole fragments and stays parseable",
+              _bc22.drops > 0 and bool(_kept22)
+              and all(u[4:8] == b'moof' for u in _kept22),
+              "drops={} kept={}".format(_bc22.drops, len(_kept22)))
+        check("the header is not queued up among the droppable fragments",
+              all(not u.startswith(b'ftyp') for u in _kept22)
+              and _bc22.init_segment == _head22,
+              str([u[:12] for u in _kept22][:2]))
+        _bc22 = mirror._Broadcaster(init_marker=b'moof')
+        _bc22.feed(b'this is plainly not an mp4 at all')
+        check("bytes that are not boxes fall back to the marker search",
+              _bc22._framer is None, str(_bc22._framer))
+        _bc22.feed(b'ftypisomxxmoofZZZZ')
+        check("and the fallback still serves the header plus the tail, junk and "
+              "all -- the marker search never promised the prefix was a header",
+              _bc22.init_segment == b'this is plainly not an mp4 at allftypisomxx'
+              and _bc22.tail() == [b'moofZZZZ'],
+              "{} / {}".format(_bc22.init_segment, _bc22.tail()))
+        check("a framed queue is bounded in fragments, not in 4 KiB reads",
+              mirror._Broadcaster(init_marker=b'moof')._maxsize
+              == mirror._Broadcaster.FRAMED_QUEUE
+              and mirror._Broadcaster()._maxsize == 256)
 
         # -- the browser endpoint over a real socket -------------------------
         _server22 = mirror.start_stream_server(_sess_b22)
@@ -5031,19 +5126,19 @@ done
               '已镜像 1:05' in _st22['status_line']
               and '4.2 Mbps' in _st22['status_line']
               and '丢块 3' in _st22['status_line'], _st22['status_line'])
-        _door22 = lambda: [i.text for i in macast_mod.Macast._mirror_menu_rows(
-            types.SimpleNamespace(
-                plugin_manager=types.SimpleNamespace(
-                    mirror_setting=lambda: setting22),
-                on_open_mirror_page_clicked=lambda item: None))]
-        check("the menu bar kept a single door, and a way out of a live capture",
-              _door22() == ['电脑投屏…', '停止电脑投屏'], str(_door22()))
-        check("...so nothing else about mirroring is reachable from the menu",
-              _st22['status_line']
-              and not any(_st22['status_line'] in text
-                          for text in _door22()),
-              'the readout lives in the page; a second copy in the menu is '
-              'how the two came to disagree')
+        # The menu bar used to carry a 电脑投屏 door and a stop row. It does not
+        # any more -- the whole mirror surface is the settings page, and Part 36
+        # is what proves nothing about mirroring is spliced into the menu. What
+        # stays true here is that the page is the only readout: a second copy of
+        # `status_line` in a menu is how the two came to disagree.
+        check("the console keeps the only copy of the mirror readout",
+              'status_line' not in dir(macast_mod.Macast)
+              and not hasattr(macast_mod.Macast, '_mirror_menu_rows')
+              and not hasattr(macast_mod.Macast, 'on_open_mirror_page_clicked'),
+              'the app must not grow a second place that renders it')
+        check("...and the page still renders it, because that is where it lives",
+              _st22['status_line'] and '已镜像 1:05' in _st22['status_line'],
+              _st22['status_line'])
 
         utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
         _st22 = setting22.console_state()
@@ -5276,9 +5371,26 @@ done
                                              encoder='hardware')
         check("the TS/H.264 shape keeps the hardware encoder and a 1 s GOP",
               'h264_videotoolbox' in _tsh23
-              and _tsh23[_tsh23.index('pipe:1') - 1] == 'mpegts'
+              and 'mpegts' in _tsh23
+              and _tsh23[_tsh23.index('-muxdelay') - 1] == 'mpegts'
               and _tsh23[_tsh23.index('-g') + 1] == '25'
               and 'mpeg2video' not in _tsh23, str(_tsh23))
+        check("the H.264 shapes are rate-capped, MPEG-2 keeps its CBR triplet",
+              '-maxrate' in _tsh23 and '-bufsize' in _tsh23
+              and _tsh23[_tsh23.index('-maxrate') + 1] == '9000000'
+              and _tsh23[_tsh23.index('-bufsize') + 1] == '6000000'
+              and '-minrate' not in _tsh23
+              and _ps23[_ps23.index('-minrate') + 1]
+              == _ps23[_ps23.index('-maxrate') + 1]
+              == _ps23[_ps23.index('-b:v') + 1], str(_tsh23) + str(_ps23))
+        check("only the DVD muxer keeps ffmpeg's interleaving delay, "
+              "because a zero one underflows MPEG-PS's own VRV model",
+              '-muxdelay' not in _ps23
+              and '-muxdelay' in _tsh23
+              and '-muxdelay' in mirror.build_ffmpeg_command(
+                  'ffmpeg', _cap23, 720, 5000000, kind='dlna',
+                  profile=mirror.DLNA_PROFILES['mkv-h264']),
+              str(_ps23))
         check("the aspect-preserving shapes scale by height only",
               _tsh23[_tsh23.index('-vf') + 1] == 'scale=-2:720,setdar=16/9',
               str(_tsh23))
@@ -5773,8 +5885,8 @@ done
         mirror.DLNA_MAX_REPUSHES = _saved_rep23
 
         # -- prefill, the honest reason this target lags ----------------------
-        _saved_prefill23 = mirror.DLNA_PREFILL_BYTES
-        mirror.DLNA_PREFILL_BYTES = 4096
+        _saved_prefill23 = mirror.dlna_prefill_bytes
+        mirror.dlna_prefill_bytes = lambda profile: 4096
         _server23c = mirror.start_stream_server(mirror._Session('dlna'))
         _server23d = mirror.start_stream_server(mirror._Session('dlna'))
         try:
@@ -5797,7 +5909,7 @@ done
                 _s23c.broadcaster.close()
                 _s23c.shutdown()
                 _s23c.server_close()
-            mirror.DLNA_PREFILL_BYTES = _saved_prefill23
+            mirror.dlna_prefill_bytes = _saved_prefill23
 
         # -- the whole thing, end to end --------------------------------------
         mir23b = _Mirror23()
@@ -5809,7 +5921,7 @@ done
         mirror._keep_awake = lambda: 'awake'
         mirror._stop_awake = lambda handle: _taps23.setdefault(
             'sleep', []).append(handle)
-        mirror.DLNA_PREFILL_BYTES = 24576
+        mirror.dlna_prefill_bytes = lambda profile: 24576
         mirror.DLNA_POLL_SECONDS = 0.1
         utils.Setting.set(mirror.SettingProperty.Mirror_Output, 'dlna')
         utils.Setting.set(mirror.SettingProperty.Mirror_Dlna_Control, _control23)
@@ -5884,7 +5996,7 @@ done
         finally:
             mirror._keep_awake = _saved_keep23
             mirror._stop_awake = _saved_drop23
-            mirror.DLNA_PREFILL_BYTES = _saved_prefill23
+            mirror.dlna_prefill_bytes = _saved_prefill23
             mirror.DLNA_POLL_SECONDS = _saved_poll23
             utils.Setting.unset(mirror.SettingProperty.Mirror_Output)
             utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
@@ -6041,7 +6153,9 @@ done
               "re-run on every poll",
               _searches23 == []
               and not _empty23['searching']
-              and _empty23['words'].startswith('没有发现 DLNA 电视（搜于 '),
+              and _empty23['words'].startswith('没有发现 DLNA 电视；')
+              and '（搜于 ' in _empty23['words']
+              and '重搜设备' in _empty23['words'],
               str(_empty23))
         check("and that verdict stays off the other protocol's row",
               _channel(setting23.console_state(), 'cast')['words']
@@ -11264,12 +11378,13 @@ try:
         mirror35._hw_encoder_cache.clear()
         mirror35._hw_encoder_cache.update(_saved_hw35)
 
-    # -- the door in the menu bar, whichever renderer is playing -------------
+    # -- which renderer owns the console, whichever one is playing -----------
     #
     # v2 moved 电脑投屏 out of the renderer's own `build_menu()`: the app only
     # asks *that* of the selected renderer, so opening the console used to mean
     # selecting Screen Mirror, clicking the door, then selecting the real player
-    # back. These three cases are the detachment, and they never start anything.
+    # back. So the console is found from the plugin catalog instead, and finding
+    # it never starts anything.
     class _NoConsole35(object):
         """A renderer that owns no console must contribute no menu row."""
 
@@ -11301,25 +11416,11 @@ try:
           and _owner35.plugin_instance is not None
           and _owner35.plugin_instance._proc is None,
           'instantiating is not selecting: no bus topic is taken, no media routed')
-    def _door35(manager):
-        """Row texts the app would put in the menu bar for this plugin manager."""
-        return [item.text for item in
-                macast_mod.Macast._mirror_menu_rows(
-                    types.SimpleNamespace(
-                        plugin_manager=manager,
-                        on_open_mirror_page_clicked=lambda item: None))]
-
-    def _boom35():
-        raise RuntimeError('boom')
-
-    check("with no console anywhere the app offers no extra row",
-          _door35(types.SimpleNamespace(mirror_setting=lambda: None)) == [],
-          'every other renderer keeps the menu it always had')
-    check("with the console plugin loaded the menu gains exactly one door",
-          _door35(_mgr35b) == ['电脑投屏…'], str(_door35(_mgr35b)))
-    check("and a plugin that cannot answer is a missing row, not a dead menu",
-          _door35(types.SimpleNamespace(mirror_setting=_boom35)) == [],
-          'the menu bar is built on the UI thread; nothing there may raise')
+    # There is no door in the menu bar to test any more, and that is the point:
+    # the settings page is the only console, and a plugin that cannot answer for
+    # itself is now the page's problem (checked below, where it says so on the
+    # card) rather than something the UI thread has to survive. Part 36 is what
+    # keeps 电脑投屏 out of the menu.
 
     # The cards fall back to these names when the app answers without a catalog
     # -- which is what it does when Screen Mirror is not the current renderer.
@@ -11376,8 +11477,11 @@ try:
           'a second look has an earlier verdict behind it, and says so')
     check("a completed empty search stays dated",
           mirror35._search_words([], False, 1.0, '', '没有发现 Chromecast')
-          == '没有发现 Chromecast' + mirror._searched_suffix(1.0),
-          "otherwise a list that has always been empty looks alive")
+          == '没有发现 Chromecast；如果设备就在这台 Mac 的同一个网络里，'
+             '检查它是否开机、再点「重搜设备」'
+             + mirror._searched_suffix(1.0),
+          "otherwise a list that has always been empty looks alive -- and an "
+          "answer with no next step in it is a dead end, not a diagnosis")
     check("an empty search that only saw this machine says who it did see",
           '这台 Mac 自己' in mirror35._search_words(
               [], False, 1.0, '', '没有发现 DLNA 电视', alone=1)
@@ -11385,6 +11489,15 @@ try:
                                      alone=2) == '发现 1 台',
           'a TV that is switched off and a search that is broken read the same '
           'until the page names the answers it dropped')
+    check("an answer that spoke SSDP and then served no description is not 没有发现",
+          '读不到描述' in mirror35._search_words([], False, 1.0, '',
+                                                 '没有发现 DLNA 电视',
+                                                 unreadable=1)
+          and '读不到描述' in mirror35._search_words(
+              ['x'], False, 1.0, '', '没有发现', unreadable=2)
+          and '发现 1 台' in mirror35._search_words(
+              ['x'], False, 1.0, '', '没有发现', unreadable=2),
+          'the TV answered; sending the user off to check the cable is wrong')
 
     # …and the counter behind that phrase really is filled by the filter, or the
     # wording above is dead code that no LAN can ever trigger.
@@ -11396,28 +11509,37 @@ try:
     _keep35 = (mirror35.Setting, mirror35._ask_renderers,
                mirror35.describe_renderer)
     mirror35.Setting = _SelfOnly35
-    mirror35._ask_renderers = lambda targets, timeout=None: [
+    mirror35._ask_renderers = lambda targets, timeout=None, interface=None: [
         ('http://10.0.0.5:58880/d.xml', '10.0.0.5'),
         ('http://10.0.0.5:58998/d.xml', '10.0.0.5'),
         ('http://10.0.0.7:58880/d.xml', '10.0.0.7'),
         ('http://10.0.0.9:58880/d.xml', '10.0.0.9')]
     mirror35.describe_renderer = lambda location, peer: (
-        'TV', 'http://{}/AVTransport/action'.format(peer))
+        None if peer == '10.0.0.9'
+        else ('TV', 'http://{}/AVTransport/action'.format(peer)))
     try:
         _found35 = mirror35.discover_renderers()
         check("the DLNA search counts the answers it dropped as its own",
-              [host for _, _, host in _found35] == ['10.0.0.7', '10.0.0.9']
+              [host for _, _, host in _found35] == ['10.0.0.7']
               and mirror35._self_alone['dlna'] == 1,
               '%s / alone=%s' % (_found35, mirror35._self_alone['dlna']))
+        check("and counts the ones that answered discovery but no description",
+              mirror35._dlna_unreadable == 1,
+              '10.0.0.9 answered SSDP and then failed the GET: that is the '
+              'standby-TV case, and it has to be sayable')
     finally:
         (mirror35.Setting, mirror35._ask_renderers,
          mirror35.describe_renderer) = _keep35
         mirror35._self_alone['dlna'] = 0
+        mirror35._dlna_unreadable = 0
     check("a search that could not run says that instead of 没有发现",
           mirror35._search_words([], False, 1.0, '组播被防火墙挡了')
           == '组播被防火墙挡了',
           'the user goes looking for a TV that is fine when this machine is the '
           'problem')
+    check("and it does not leave last round's verdict standing",
+          mirror35._dlna_unreadable == 0 and mirror35._self_alone['dlna'] == 0,
+          'a round that failed early must not be described by the round before')
     check("and a protocol with nothing to search has no verdict to give",
           [r for r in mirror35.channels_state('browser')
            if r['key'] == 'browser'][0]['words'] == '',
@@ -12025,7 +12147,659 @@ finally:
 
 
 # --------------------------------------------------------------------------
-# Summary
+# Part 36: the menu bar has a menu again.
+#
+# Deleting the Tk console (224d6d6) also replaced `build_app_menu()` with `[]`
+# in the call that constructs the tray app, so the status-bar icon stopped
+# having any menu at all -- and nothing caught it, because until this Part no
+# check ever built one. So: build the real top level from the real methods and
+# say what belongs in it. The service switch, the playback rows, the door to
+# the settings page, the replay history. And no 电脑投屏 row anywhere -- that
+# surface lives in the page now, which is the user's own ruling, not an
+# oversight: 「打开设置页」is one click and the page stops a live capture.
+# --------------------------------------------------------------------------
+print("\n=== Part 36: the menu bar's own contents ===")
+
+_saved_setting36 = (utils.Setting.setting, utils.Setting.setting_path)
+_saved_getip36 = utils.Setting.__dict__['get_ip']
+_saved_clip36 = getattr(macast_mod, 'pyperclip', None)
+_tmp36 = _tempfile.mkdtemp(prefix="macast-menu-")
+_notify36 = []
+_notify36_rec = lambda *a, **k: _notify36.append(a)          # noqa: E731
+
+
+class _PlayerSetting36(object):
+    """The renderer's own submenu -- the app splices it in, contents aside."""
+
+    def build_menu(self):
+        return [macast_mod.MenuItem('Player Size')]
+
+
+class _Renderer36(object):
+    def __init__(self):
+        self.stops = 0
+        self.broken = False
+        self.renderer_setting = _PlayerSetting36()
+
+    def set_media_stop(self):
+        if self.broken:
+            raise RuntimeError('ipc socket gone')
+        self.stops += 1
+
+
+class _Protocol36(object):
+    """Enough of a protocol for the menu: a title to show, a uri to re-cast."""
+
+    def __init__(self, title=u'示例影片'):
+        self.title = title
+        self.cast = []
+
+    def get_state_title(self):
+        return self.title
+
+    def cast_uri(self, uri, title=''):
+        self.cast.append((uri, title))
+
+
+class _App36(object):
+    """A `Macast` without a tray backend, a player or a CherryPy tree.
+
+    Every menu method on it *is* the real one, lifted off `Macast` by name, so
+    this exercises the app's menu code rather than a paraphrase of it. What is
+    stood in is rumps (there is no Cocoa run loop to build a native menu on)
+    and mpv.
+    """
+
+    def __init__(self, **over):
+        self.playing_uri = ''
+        self.mode = 'tray'
+        self.service = types.SimpleNamespace(renderer=_Renderer36(),
+                                             protocol=_Protocol36())
+        self.plugin_manager = types.SimpleNamespace(
+            renderer_list=[types.SimpleNamespace(title=t)
+                           for t in ('MPV', 'IINA')],
+            protocol_list=[types.SimpleNamespace(title=t)
+                           for t in ('DLNA', 'Chromecast')])
+        self.enabled_protocols = ['DLNA']
+        self.setting_renderer = 'MPV'
+        self.setting_menubar_icon = 0
+        self.setting_check = 1
+        self.setting_start_at_login = 0
+        self.menu = []
+        self.rebuilds = 0
+        self.opened = []
+        self.deferred = []
+        self.toggles = 0
+        self.quits = 0
+        for _k, _v in over.items():
+            setattr(self, _k, _v)
+
+    # -- the tray backend, as far as these methods use it --------------------
+    def set_menu(self, menu):
+        self.menu = menu
+        self.rebuilds += 1
+
+    def update_menu(self):
+        pass
+
+    def call_on_main_thread(self, fn):
+        self.deferred.append(fn)
+        fn()
+
+    def open_browser(self, url):
+        self.opened.append(url)
+
+    def notification(self, title, msg, sound=True):
+        cherrypy.engine.publish('app_notify', title, msg)
+
+    # -- what the App base class would supply --------------------------------
+    def quit(self, item=None):
+        self.quits += 1
+
+    # -- callbacks the menu only needs to exist to be wired ------------------
+    def on_toggle_service_click(self, item):
+        self.toggles += 1
+
+    def on_renderer_change_click(self, item):
+        pass
+
+    def on_protocol_toggle_click(self, item):
+        pass
+
+    def on_menubar_icon_change_click(self, item):
+        pass
+
+    def on_auto_check_update_click(self, item):
+        pass
+
+    def on_start_at_login_click(self, item):
+        pass
+
+    def on_open_config_click(self, item):
+        pass
+
+    def on_check_click(self, item):
+        pass
+
+    def on_about_click(self, item):
+        pass
+
+
+for _n36 in ('build_app_menu', 'build_setting_menu', '_playback_menu_rows',
+             'build_history_menu', '_refresh_app_menu', '_apply_app_menu',
+             'renderer_av_uri', 'renderer_av_stop', 'on_open_page_click',
+             'on_stop_playback_click', 'on_copy_uri_click', 'on_history_click',
+             'on_clear_history_click', 'update_service_status'):
+    setattr(_App36, _n36, getattr(macast_mod.Macast, _n36))
+#: A staticmethod object, not the bare function: assigning the function to a
+#: class would turn `self` into its first argument.
+_App36._short_label = macast_mod.Macast.__dict__['_short_label']
+
+
+def _rows36(items, depth=0):
+    """(depth, text, enabled) for every row in a built menu, recursively."""
+    out = []
+    for item in items:
+        if item is None:
+            continue
+        out.append((depth, item.text, item.enabled))
+        if getattr(item, 'children', None):
+            out.extend(_rows36(item.children, depth + 1))
+    return out
+
+
+def _top36(app):
+    return [t for d, t, _e in _rows36(app.menu) if d == 0]
+
+
+def _all36(app):
+    return [t for _d, t, _e in _rows36(app.menu)]
+
+
+def _history_rows36(app):
+    """The live children of the 投屏历史 submenu, separators dropped."""
+    for item in app.menu:
+        if item is not None and item.text == 'Play History':
+            return [i for i in item.children if i is not None]
+    return []
+
+
+class _Clip36(object):
+    def __init__(self):
+        self.copied = []
+
+    def copy(self, text):
+        self.copied.append(text)
+
+
+try:
+    utils.SETTING_DIR = _tmp36
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp36, "macast_setting.json")
+    utils.Setting.get_ip = staticmethod(lambda: [('192.0.2.7', 'en0')])
+    cherrypy.engine.subscribe('app_notify', _notify36_rec)
+
+    _app36 = _App36()
+    _app36._apply_app_menu()
+
+    check("the status-bar icon has a menu at all",
+          len(_app36.menu) > 0 and _app36.rebuilds == 1, str(_top36(_app36)))
+    check("the service switch still leads and 退出 still follows the settings",
+          _top36(_app36)[0] == ('Stop Cast' if utils.Setting.is_service_running()
+                                else 'Start Cast')
+          and _top36(_app36)[-1] == 'Quit'
+          and 'Setting' in _top36(_app36), str(_top36(_app36)))
+    check("the door to the settings page is on the top level, not buried",
+          'Open Settings Page' in _top36(_app36), str(_top36(_app36)))
+    _app36.on_open_page_click(None)
+    check("...and it opens this app's own port on the loopback interface",
+          _app36.opened == ['http://127.0.0.1:{}'.format(
+              macast_mod.Setting.get_port())],
+          str(_app36.opened))
+
+    # -- the empty-menu regression itself -----------------------------------
+    with open(os.path.join(REPO, "macast", "macast.py"), encoding="utf-8") as _f36:
+        _src36 = _f36.read()
+    _init36 = _re35.search(r"super\(Macast, self\)\.__init__\(.*?\)", _src36,
+                           _re35.S)
+    check("the menu is built when the app is constructed, not after a toggle",
+          _init36 is not None and 'build_app_menu()' in _init36.group(0),
+          _init36.group(0) if _init36 else 'no super().__init__ call found')
+    check("and no call hands the tray an empty list again",
+          'icon_path, [], template' not in _src36
+          and ', [], template)' not in _src36,
+          'that is how the menu bar lost its menu in 224d6d6')
+
+    # -- the playback rows ---------------------------------------------------
+    check("while nothing is playing there is nothing to stop or copy",
+          'Stop Playback' not in _all36(_app36)
+          and 'Copy Video URI' not in _all36(_app36)
+          and not any(t.startswith('Now playing') for t in _all36(_app36)),
+          str(_all36(_app36)))
+    _before36 = len(_app36.deferred)
+    _app36.renderer_av_uri('http://192.0.2.7:58880/movie.mp4')
+    check("media arriving puts the title, a stop and a copy on the menu",
+          'Stop Playback' in _all36(_app36)
+          and 'Copy Video URI' in _all36(_app36)
+          and 'Now playing: 示例影片' in _all36(_app36), str(_all36(_app36)))
+    check("the rebuild is marshalled to the thread that owns the menu",
+          len(_app36.deferred) == _before36 + 1
+          and getattr(_app36.deferred[-1], '__name__', '') == '_apply_app_menu',
+          'the player reports media on its own IPC thread; AppKit must not be '
+          'touched from there (AGENTS.md 4.2)')
+    _before36 = len(_app36.deferred)
+    _app36.renderer_av_uri('http://192.0.2.7:58880/movie.mp4')
+    check("the same media twice does not rebuild the menu again",
+          len(_app36.deferred) == _before36, str(len(_app36.deferred)))
+    _app36.renderer_av_uri('http://192.0.2.7:58880/next.mkv')
+    check("a track change rebuilds it, because the label carries the media",
+          len(_app36.deferred) == _before36 + 1
+          and _app36.playing_uri.endswith('next.mkv'), str(len(_app36.deferred)))
+    _app36.on_stop_playback_click(None)
+    check("「停止播放」tells the player to stop",
+          _app36.service.renderer.stops == 1, str(_app36.service.renderer.stops))
+    _notify36[:] = []
+    _app36.service.renderer.broken = True
+    _app36.on_stop_playback_click(None)
+    check("and when the player cannot hear it, that is said out loud",
+          len(_notify36) == 1 and _notify36[0][0] == 'Error'
+          and _notify36[0][1] == 'Stop playback failed', str(_notify36))
+    _app36.service.renderer.broken = False
+    _clip36 = _Clip36()
+    macast_mod.pyperclip = _clip36
+    _app36.on_copy_uri_click(None)
+    check("「复制视频链接」copies what is actually playing",
+          _clip36.copied == ['http://192.0.2.7:58880/next.mkv'],
+          str(_clip36.copied))
+    _app36.renderer_av_stop()
+    check("when the media ends the rows go away with it",
+          _app36.playing_uri == ''
+          and 'Stop Playback' not in _all36(_app36)
+          and 'Copy Video URI' not in _all36(_app36), str(_all36(_app36)))
+
+    # -- the replay history --------------------------------------------------
+    check("with no history the submenu is absent, not empty",
+          'Play History' not in _top36(_app36), str(_top36(_app36)))
+    check("...because reading the key must not create it",
+          'Play_History' not in utils.Setting.setting,
+          'Setting.get() writes its default into the settings -- AGENTS.md 4.2')
+    utils.Setting.setting['Play_History'] = [
+        {'uri': 'http://a/one.mp4', 'title': u'第一部', 'time': 3},
+        {'uri': 'http://a/two.mp4', 'title': u'第二部', 'time': 2},
+        {'uri': 'http://a/three.mp4', 'time': 1},
+    ]
+    _app36._apply_app_menu()
+    _hist36 = _history_rows36(_app36)
+    check("the last few casts come back as rows, newest first",
+          [i.text for i in _hist36][:3] == [u'第一部', u'第二部',
+                                            'http://a/three.mp4'],
+          str([i.text for i in _hist36]))
+    check("an entry without a title falls back to its url, not to blank",
+          _hist36[2].data == 'http://a/three.mp4', str(_hist36[2].text))
+    _app36.on_history_click(_hist36[0])
+    check("clicking one casts it again, through the protocol that owns casting",
+          _app36.service.protocol.cast == [('http://a/one.mp4', '')],
+          str(_app36.service.protocol.cast))
+
+    _long36 = u'影片' * 40
+    utils.Setting.setting['Play_History'] = [
+        {'uri': 'http://a/long.mp4', 'title': _long36, 'time': 9}]
+    _app36._apply_app_menu()
+    _hist36 = _history_rows36(_app36)
+    _label36 = _hist36[0].text
+    check("a sender-provided title is bounded to one line",
+          len(_label36) <= 57 and '\n' not in _label36 and _label36.endswith('…'),
+          '{} chars: {!r}'.format(len(_label36), _label36[:70]))
+    check("...but the row still casts the real uri",
+          _hist36[0].data == 'http://a/long.mp4', _label36)
+
+    utils.Setting.setting['Play_History'] = [
+        {'uri': 'http://a/{}.mp4'.format(n), 'title': u'同名影片', 'time': n}
+        for n in range(20)]
+    _app36._apply_app_menu()
+    _many36 = _history_rows36(_app36)
+    check("the menu offers a window onto the history, not all of it",
+          len([j for j in _many36 if j.data]) == macast_mod.HISTORY_MENU_LIMIT,
+          str(len([j for j in _many36 if j.data])))
+    check("two entries with the same title stay two rows",
+          len(set(j.text for j in _many36 if j.data))
+          == len([j for j in _many36 if j.data])
+          and len(set(j.data for j in _many36 if j.data))
+          == len([j for j in _many36 if j.data]),
+          'rumps keys a menu by title, so equal labels would silently merge -- '
+          + str([j.text for j in _many36]))
+
+    _clear36 = [j for j in _many36 if j.text == 'Clear Play History'][0]
+    check("the submenu ends with a way to empty it",
+          _clear36 is not None, str([j.text for j in _many36]))
+    _app36.on_clear_history_click(_clear36)
+    check("and it really empties the stored history, then re-makes the menu",
+          utils.Setting.setting['Play_History'] == []
+          and 'Play History' not in _top36(_app36), str(_top36(_app36)))
+
+    # -- what must NOT be in the menu ---------------------------------------
+    utils.Setting.setting['Play_History'] = []
+    _app36.playing_uri = 'http://a/one.mp4'
+    _app36._apply_app_menu()
+    # The console's own vocabulary. Any of these on a menu row means the mirror
+    # surface crept back out of the settings page.
+    _console36 = (u'镜像', u'投屏方式', u'画质', u'低延迟', u'观看地址', u'采集')
+    check("电脑投屏 is not in the menu bar at all, playing or not",
+          not any(w in t for t in _all36(_app36) for w in _console36),
+          str(_all36(_app36)))
+    check("the only 投屏 rows left are the replay history's",
+          not any(u'投屏' in t for t in _all36(_app36)
+                  if t not in ('Play History', 'Clear Play History')),
+          str(_all36(_app36)))
+    check("the app keeps no mirror-menu code to drift back from",
+          not hasattr(macast_mod.Macast, '_mirror_menu_rows')
+          and not hasattr(macast_mod.Macast, 'on_open_mirror_page_clicked')
+          and 'mirror_setting' not in _src36.split('def build_setting_menu')[1]
+                                                .split('    def ')[0],
+          'the Setting submenu must not reach for the console again')
+    check("removing those rows did not eat the switches beside them",
+          'Renderers' in _all36(_app36) and 'Protocols' in _all36(_app36)
+          and 'Menubar Icon' in _all36(_app36)
+          and 'Advanced Setting' in _all36(_app36), str(_all36(_app36)))
+
+    # -- the translations the menu shows ------------------------------------
+    _used36 = set(_re35.findall(r"_\(\s*'((?:[^'\\]|\\.)*)'\s*\)", _src36))
+    _used36 |= set(_re35.findall(r'_\(\s*"((?:[^"\\]|\\.)*)"\s*\)', _src36))
+    with open(os.path.join(REPO, "i18n", "zh_CN", "LC_MESSAGES", "macast.po"),
+              encoding="utf-8") as _f36b:
+        _po36 = _f36b.read()
+    _have36 = set(_re35.findall(r'^msgid "(.*)"', _po36, _re35.M))
+    _lettered36 = {u for u in _used36 if any(c.isalpha() for c in u)}
+    check("every string the menu can show has a Chinese translation",
+          not (_lettered36 - _have36),
+          'missing: {}'.format(sorted(_lettered36 - _have36)))
+    check("and the po file still compiles",
+          not any(l.startswith('msgstr') and l.endswith('" "')
+                  for l in _po36.splitlines()),
+          'a msgid/msgstr pair that msgfmt would reject also breaks the build')
+except Exception as _e36:
+    import traceback
+    traceback.print_exc()
+    check("the menu bar builds", False, "{}: {}".format(type(_e36).__name__, _e36))
+finally:
+    try:
+        cherrypy.engine.unsubscribe('app_notify', _notify36_rec)
+    except Exception:
+        pass
+    utils.Setting.get_ip = _saved_getip36
+    if _saved_clip36 is not None:
+        macast_mod.pyperclip = _saved_clip36
+    utils.Setting.setting, utils.Setting.setting_path = _saved_setting36
+    _shutil.rmtree(_tmp36, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Part 37: the live pipe's own arithmetic.
+#
+# The 2026-09-23 reports were「延迟大」「有杂音」「不开硬件编码几乎看不见」. All three
+# are numbers or placements inside this one plugin -- how much of the stream a
+# queue may hold, where a drop is allowed to cut, how long a TV is fed nothing
+# before it gets the URL, and which encoder an untouched install picks -- so
+# they are measured here instead of argued about.
+print("\n=== Part 37: the live pipe's arithmetic ===")
+import traceback as _traceback37
+
+_tmp37 = _tempfile.mkdtemp(prefix="macast-pipe-")
+mirror37 = None
+_saved37 = {}
+try:
+    utils.SETTING_DIR = _tmp37
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp37, "macast_setting.json")
+    mirror37 = _load_plugin("screen_mirror_plugin_v37", "screen_mirror.py")
+    m37 = mirror37
+
+    # -- the sender's own slice of the latency ------------------------------
+    _held = lambda b: m37.live_queue_chunks(b) * m37.CHUNK * 8.0 / b
+    check("a viewer's queue is budgeted in seconds of picture, not in bytes",
+          all(0.45 <= _held(b) <= 1.1 for b in
+              [rate for _h, rate in m37.QUALITIES.values()]),
+          str([(b, _held(b)) for b in [r for _h, r in m37.QUALITIES.values()]]))
+    _rates37 = sorted(r for _h, r in m37.QUALITIES.values())
+    check("a bigger preset holds more bytes, so the queue is a byte budget "
+          "only after it was derived from seconds",
+          [m37.live_queue_chunks(b) for b in _rates37]
+          == sorted(m37.live_queue_chunks(b) for b in _rates37)
+          and m37.live_queue_chunks(_rates37[-1])
+          > m37.live_queue_chunks(_rates37[0]),
+          str([(b, m37.live_queue_chunks(b)) for b in _rates37]))
+    check("and an unknown bitrate keeps the old ceiling rather than dividing by 0",
+          m37.live_queue_chunks(None) == m37.LIVE_QUEUE_MAX_CHUNKS
+          and m37.live_queue_chunks(0) == m37.LIVE_QUEUE_MAX_CHUNKS, '')
+
+    # -- where a drop is allowed to cut -------------------------------------
+    _align_q = m37._Broadcaster(maxsize=256, packet_align=m37.TS_PACKET)
+    _subs37 = _align_q.subscribe()
+    for _i37 in range(3):
+        _align_q.feed(b'z' * 4096)
+    _units37 = []
+    while not _subs37.empty():
+        _units37.append(_subs37.get_nowait())
+    check("a drop on an MPEG-TS pipe never ends inside a 188-byte packet",
+          all(len(u) % m37.TS_PACKET == 0 for u in _units37)
+          and sum(len(u) for u in _units37)
+          == 3 * 4096 - (3 * 4096) % m37.TS_PACKET,
+          str([len(u) for u in _units37]))
+    _before_eof37 = _align_q.bytes
+    _align_q.flush()
+    _tail37 = []
+    while not _subs37.empty():
+        _tail37.append(_subs37.get_nowait())
+    check("...and the encoder's last partial packet is handed over at EOF "
+          "instead of stranded in the aligner",
+          sum(len(u) for u in _tail37) == (3 * 4096) % m37.TS_PACKET
+          and _before_eof37 < 3 * 4096 and _align_q.bytes == 3 * 4096,
+          str([len(u) for u in _tail37]))
+    _align_q.unsubscribe(_subs37)
+
+    _b37 = m37.start_stream_server(m37._Session('cast', bitrate=6000000))
+    _f37 = m37.start_stream_server(m37._Session('browser', bitrate=6000000))
+    try:
+        check("the cast target is the one that gets packet-aligned, at its "
+              "preset's queue depth",
+              _b37.broadcaster._align == m37.TS_PACKET
+              and _b37.broadcaster._maxsize == m37.live_queue_chunks(6000000),
+              '%s / %s' % (_b37.broadcaster._align, _b37.broadcaster._maxsize))
+        check("the browser target is framed by fragment instead, so alignment "
+              "would fight the framer",
+              _f37.broadcaster._align is None
+              and _f37.broadcaster._framer is not None, '')
+    finally:
+        for _s37 in (_b37, _f37):
+            _s37.shutdown()
+            _s37.server_close()
+
+    # -- how long a TV waits for the URL ------------------------------------
+    _clamped37 = lambda rate: m37.dlna_prefill_bytes(
+        types.SimpleNamespace(total_bitrate=rate))
+    check("the DLNA prefill is seconds of picture, clamped at both ends",
+          all(m37.DLNA_PREFILL_MIN_BYTES
+              <= m37.dlna_prefill_bytes(p) <= m37.DLNA_PREFILL_MAX_BYTES
+              for p in m37.DLNA_PROFILES.values())
+          and _clamped37(1000000) == m37.DLNA_PREFILL_MIN_BYTES
+          and _clamped37(100000000) == m37.DLNA_PREFILL_MAX_BYTES
+          and m37.dlna_prefill_bytes(m37.DLNA_PROFILES['ps-pal'])
+          < m37.dlna_prefill_bytes(m37.DLNA_PROFILES['mkv-h264'])
+          and 1 <= m37.dlna_prefill_seconds(
+              m37.DLNA_PROFILES['ts-h264']) <= 10,
+          str([(k, m37.dlna_prefill_bytes(p))
+               for k, p in m37.DLNA_PROFILES.items()]))
+    check("it is derived from the bitrate the profile actually runs at, "
+          "audio included",
+          m37.dlna_prefill_bytes(m37.DLNA_PROFILES['ps-pal'])
+          == (m37.DLNA_PROFILES['ps-pal'].total_bitrate
+              * m37.DLNA_PREFILL_SECONDS // 8)
+          and m37.DLNA_PROFILES['ps-pal'].total_bitrate == 4500000 + 192000,
+          str(m37.DLNA_PROFILES['ps-pal'].total_bitrate))
+
+    # -- which encoder an untouched install picks ---------------------------
+    _SP37 = m37.SettingProperty
+    m37.Setting.unset(_SP37.Mirror_Encoder)
+    _hw37 = dict(m37._hw_encoder_cache)
+    try:
+        m37._hw_encoder_cache.clear()
+        check("with nothing probed yet, auto means software: the probe spawns "
+              "ffmpeg and this runs on the UI thread",
+              m37.encoder_kind() == 'software', m37.encoder_kind())
+        m37._hw_encoder_cache[(m37.find_ffmpeg(), 'darwin')] = True
+        check("once a probe has answered, an untouched install takes "
+              "VideoToolbox -- x264 cannot keep a Retina desktop watchable",
+              m37.encoder_kind() == ('hardware' if sys.platform == 'darwin'
+                                     else 'software'), m37.encoder_kind())
+        m37._hw_encoder_cache[(m37.find_ffmpeg(), 'darwin')] = False
+        m37.Setting.set(_SP37.Mirror_Encoder, 'hardware')
+        check("an explicit wish is still honoured, and a machine that turns out "
+              "not to have it falls back at start, not here",
+              m37.encoder_kind() == ('hardware' if sys.platform == 'darwin'
+                                     else 'software'), m37.encoder_kind())
+        m37.Setting.set(_SP37.Mirror_Encoder, 'nvidia')
+        check("a stored value this plugin does not know is software, not a crash",
+              m37.encoder_kind() == 'software', m37.encoder_kind())
+    finally:
+        m37._hw_encoder_cache.clear()
+        m37._hw_encoder_cache.update(_hw37)
+        m37.Setting.unset(_SP37.Mirror_Encoder)
+
+    # -- the audio tap and the sound that is actually routed into it --------
+    if sys.platform == 'darwin':
+        _keep37 = (m37._default_output, m37._device_uid)
+        try:
+            m37._default_output = lambda: 77
+            for _uid, _want in ((m37.MACAST_AGGREGATE_UID, True),
+                                ('BlackHole2ch_uid', True),
+                                ('BuiltInSpeakerDevice', False),
+                                ('', None)):
+                m37._device_uid = lambda device_id, _u=_uid: _u
+                check("the console can tell「已启用」from「有声音进来」 "
+                      "(%s)" % (_uid or 'unknown'),
+                      m37.system_audio_routed() is _want,
+                      str(m37.system_audio_routed()))
+            m37._device_uid = lambda device_id: 'BuiltInSpeakerDevice'
+            _cap37 = m37._capture_cache
+            _keep_cap37 = dict(_cap37)
+            _cap37.clear()
+            _cap37['x'] = m37._Capture('BlackHole 2ch', [['-f', 'avfoundation']],
+                                        audio_map='1:a:0')
+            try:
+                check("and says so on the 系统声音 line, because a silent "
+                      "mirror otherwise reads as an encoder bug",
+                      '静音' in m37.ScreenMirrorSetting._audio_line(),
+                      m37.ScreenMirrorSetting._audio_line())
+            finally:
+                _cap37.clear()
+                _cap37.update(_keep_cap37)
+        finally:
+            m37._default_output, m37._device_uid = _keep37
+
+    # -- which interface the search leaves on -------------------------------
+    _keep_iface37 = (m37.Setting.resolved_network_interface,
+                     m37.Setting.get_advertisable_ip)
+    try:
+        m37.Setting.resolved_network_interface = staticmethod(lambda: '')
+        m37.Setting.get_advertisable_ip = staticmethod(
+            lambda: ['192.168.99.1', '192.168.1.20'])
+        check("without a pinned interface the kernel routes the search -- "
+              "guessing here is how a VM bridge captures it",
+              m37._search_source_ip() is None, str(m37._search_source_ip()))
+        m37.Setting.resolved_network_interface = staticmethod(lambda: 'en0')
+        check("with one, the search leaves from that interface's address",
+              m37._search_source_ip() == '192.168.1.20',
+              str(m37._search_source_ip()))
+    finally:
+        (m37.Setting.resolved_network_interface,
+         m37.Setting.get_advertisable_ip) = _keep_iface37
+
+    class _Sock37(object):
+        def __init__(self, log):
+            self.log = log
+
+        def settimeout(self, _t):
+            pass
+
+        def bind(self, _a):
+            self.log.append(('bind', _a))
+
+        def setsockopt(self, *a):
+            self.log.append(('sockopt', a[1]))
+
+        def sendto(self, data, addr):
+            self.log.append(('send', addr))
+
+        def recvfrom(self, _n):
+            raise socket.timeout
+
+        def close(self):
+            self.log.append(('close',))
+
+    _log37 = []
+    _mod37 = m37.socket
+
+    class _FakeSocketMod(object):
+        """Just the surface `_ssdp_search` touches, so the search sequence --
+        not the network -- is what this measures."""
+
+        AF_INET = socket.AF_INET
+        SOCK_DGRAM = socket.SOCK_DGRAM
+        timeout = socket.timeout
+        IPPROTO_IP = 0
+        IP_MULTICAST_IF = 12
+
+        @staticmethod
+        def inet_aton(a):
+            return socket.inet_aton(a)
+
+        def socket(self, *_a):
+            return _Sock37(_log37)
+
+    try:
+        m37.socket = _FakeSocketMod()
+        m37._ssdp_search('urn:schemas-upnp-org:device:MediaRenderer:1',
+                         timeout=0.6)
+        _sends37 = [e for e in _log37 if e[0] == 'send']
+        check("one M-SEARCH is not one search: a renderer that just woke has "
+              "not joined the multicast group yet",
+              len(_sends37) == 2 and not any(e[0] == 'bind' for e in _log37),
+              str(_log37))
+        _log37[:] = []
+        m37._ssdp_search('urn:schemas-upnp-org:device:MediaRenderer:1',
+                         timeout=0.4, interface='192.168.1.20')
+        check("and a pinned interface is set as the multicast egress, not only "
+              "as a source address",
+              ('sockopt', _FakeSocketMod.IP_MULTICAST_IF) in _log37
+              and ('bind', ('192.168.1.20', 0)) in _log37, str(_log37))
+    finally:
+        m37.socket = _mod37
+
+    # -- the low-latency channel says what it is ----------------------------
+    _src37 = open(os.path.join(MACAST, "plugins", "renderer",
+                               "screen_mirror.py"), encoding='utf-8').read()
+    check("the menu names the low-latency channel's silence, and the hint "
+          "names the fallback that has audio",
+          '此通道无声音' in m37.OUTPUTS['caststream'][0]
+          and '回落' in m37.OUTPUT_HINTS['caststream'],
+          '%s / %s' % (m37.OUTPUTS['caststream'][0],
+                       m37.OUTPUT_HINTS['caststream']))
+    check("a refused handshake is reported as the fallback it is, in the "
+          "message the user sees",
+          "设备拒绝了低延迟通道" in _src37 and "这一路有声音" in _src37,
+          'the report that the channel is silent was the complaint; the '
+          'session that starts instead has audio')
+    check("the DLNA and cast hints quote the sender's own numbers, not the "
+          "ones this file no longer implements",
+          '20 MiB' not in m37.OUTPUT_HINTS['dlna']
+          and '2–4 秒' not in m37.OUTPUT_HINTS['cast'], str(m37.OUTPUT_HINTS))
+finally:
+    print('Part 37 setup error: %s' % _traceback37.format_exc()
+          if mirror37 is None else '')
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp37, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)

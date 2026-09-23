@@ -48,7 +48,7 @@ SECTION_ORDER = ('channels', 'devices', 'requirements', 'profiles', 'quality',
 #: label. The regression suite pins each one against the plugin's own `OUTPUTS`.
 OUTPUT_FALLBACK = {
     'cast': 'Chromecast / Google TV',
-    'caststream': 'Chromecast 低延迟（实验 · 无声音）',
+    'caststream': 'Chromecast 低延迟（实验 · 此通道无声音）',
     'dlna': 'DLNA 电视（老电视，MPEG-PS）',
     'browser': '浏览器（打开网址即可看）',
 }

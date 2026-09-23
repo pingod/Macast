@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.11</macast.version>
+# <macast.version>0.12</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding, and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; the menu bar keeps only start, stop and the notifications.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding (default: auto, which takes hardware once an encoder probe has answered), and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; since 0.12 the menu bar holds no mirror rows at all, only the notifications, and stopping goes through the tab,「停止接受投屏」or switching renderer -- all three end in the same teardown. Drops for a slow viewer now land on container boundaries (whole MP4 fragments, whole 188-byte TS packets), queue depth is budgeted in seconds of picture rather than bytes, and the console says whether system sound actually reaches the capture tap instead of only that a tap exists.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -112,7 +112,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.11'
+PLUGIN_VERSION = '0.12'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -120,18 +120,51 @@ MIRROR_APP_ID = '0F5096E8'
 NS_WEBRTC = 'urn:x-cast:com.google.cast.webrtc'
 STREAM_PREFIX = "/stream/"
 CHUNK = 4096
+#: One MPEG-TS packet. Where a slow consumer is being dropped for, the queue
+#: unit is a whole number of these -- see `_Broadcaster(packet_align=...)`.
+TS_PACKET = 188
+#: Seconds of slack a live consumer gets in front of it, and the clamp on how
+#: many 4 KiB reads that is -- see `live_queue_chunks`.
+LIVE_QUEUE_SECONDS = 0.75
+LIVE_QUEUE_MIN_CHUNKS = 64
+LIVE_QUEUE_MAX_CHUNKS = 256
 #: How long ffmpeg may survive before its death is blamed on the
 #: Screen Recording permission instead of a genuine mid-stream failure.
 EARLY_DEATH_SECONDS = 5.0
 #: Rolling tail replayed to a late-joining browser viewer. Enough for a
 #: second of 1080p plus the next keyframe, small enough to not matter.
 REPLAY_BYTES = 8 << 20
+#: A system-audio tap (BlackHole on macOS, a PulseAudio monitor on Linux) is
+#: clocked by whatever the audio stack feels like, not by ffmpeg. Left alone,
+#: the two clocks slide past each other by a sample at a time and every slip
+#: comes out as a click -- the「杂音」this stream used to have on the Chromecast
+#: and DLNA targets. `async=1` tells the resampler to absorb the drift by
+#: repeating or dropping input samples instead of passing the gap through.
+AUDIO_RESAMPLE = ['-af', 'aresample=async=1']
 
 #: height -> (label, video bitrate). height 0 means "do not scale".
-QUALITIES = {'360': (360, 2500000),
-             '720': (720, 5000000),
-             '1080': (1080, 10000000),
-             'source': (0, 12000000)}
+#:
+#: These are rates for 24 fps of *desktop*, not for film: a mostly-static
+#: screen costs very little, and the bandwidth a frame asks for beyond what the
+#: link can deliver in the moment does not buy quality -- it buys a full queue,
+#: a dropped block (a hole in the audio) and a viewer that is further behind
+#: every second. `rate_caps` bounds the same burst from the other side.
+QUALITIES = {'360': (360, 2000000),
+             '720': (720, 4000000),
+             '1080': (1080, 6000000),
+             'source': (0, 8000000)}
+
+
+def rate_caps(bitrate):
+    """Constrained VBV: a 1.5x peak inside a one-second buffer.
+
+    Without a ceiling, one frame that redraws the whole screen (a window drag,
+    a video, a terminal scroll) is emitted at whatever size it wants. Every
+    consumer downstream is sized for the average, so that one frame is exactly
+    what overflows the queue -- and the drop is audible, not just visible.
+    """
+    return ['-maxrate', str(int(bitrate * 1.5)),
+            '-bufsize', str(int(bitrate))]
 
 
 def quality_preset(key=None):
@@ -152,27 +185,42 @@ def quality_key():
     key = str(Setting.get(SettingProperty.Mirror_Quality, '720') or '720')
     return key if key in QUALITIES else '720'
 
-QUALITY_LABELS = {'360': '360p · 2.5 Mbps（省带宽）',
-                  '720': '720p · 5 Mbps（默认）',
-                  '1080': '1080p · 10 Mbps（更吃带宽）',
-                  'source': '原始分辨率 · 12 Mbps（不缩放）'}
+QUALITY_LABELS = {'360': '360p · 2 Mbps（省带宽）',
+                  '720': '720p · 4 Mbps（默认）',
+                  '1080': '1080p · 6 Mbps（更吃带宽）',
+                  'source': '原始分辨率 · 8 Mbps（不缩放）'}
 #: The console lists the presets in this order, cheapest bandwidth first.
 QUALITY_ORDER = ('360', '720', '1080', 'source')
-#: keyframe / fragment cadence in seconds. One per second keeps the browser's
-#: MSE join latency and the TV's seek behaviour both honest.
+#: frames per second, and with `-g` below the keyframe cadence in seconds.
 FPS = 24
+
+
+def gop_size(kind):
+    """Frames between keyframes for one target.
+
+    A fragmented-MP4 fragment ends when the *next* `moof` shows up, so on the
+    browser target the GOP is not just a seek granularity, it is the floor on
+    how long a finished picture sits in the encoder before the viewer can have
+    it -- half a second there is half a second of latency bought back. A TV
+    seeking into a pretend-file wants the whole second.
+    """
+    return FPS // 2 if kind == 'browser' else FPS
+
 
 #: output kind -> (menu label, HTTP suffix, Content-Type, muxer args)
 OUTPUTS = {
+    #: `-muxdelay 0 -muxpreload 0`: the TS muxer's default interleave delay is
+    #: what a live pipe has to give back -- see the same pair on the DLNA TS
+    #: profiles, and why the MPEG-PS shapes do *not* carry it there.
     'cast': ('Chromecast / Google TV', 'ts', 'video/mp2t',
-             ['-f', 'mpegts', 'pipe:1']),
+             ['-f', 'mpegts', '-muxdelay', '0', '-muxpreload', '0', 'pipe:1']),
     'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
                 ['-f', 'mp4', '-movflags',
                  'frag_keyframe+empty_moov+default_base_moof', 'pipe:1']),
     #: Not a different device: the same Chromecast, driven by its mirroring app
     #: instead of by LOAD. No HTTP suffix and no Content-Type because nothing is
     #: served -- these bytes are pushed to a UDP port.
-    'caststream': ('Chromecast 低延迟（实验 · 无声音）', 'h264', None,
+    'caststream': ('Chromecast 低延迟（实验 · 此通道无声音）', 'h264', None,
                    ['-f', 'h264', 'pipe:1']),
     #: A DLNA TV is told it is downloading a finite file, so everything about
     #: this target -- container, codec, even the file extension in the URL --
@@ -196,7 +244,8 @@ class _DlnaProfile(object):
     """
 
     def __init__(self, label, muxer, suffix, content_type, org_pn,
-                 video_args, audio_args, width, height, fps, bitrate):
+                 video_args, audio_args, width, height, fps, bitrate,
+                 audio_bitrate):
         self.label = label
         self.muxer = muxer                      # ffmpeg args, minus pipe:1
         self.suffix = suffix
@@ -211,6 +260,14 @@ class _DlnaProfile(object):
         self.height = height
         self.fps = fps
         self.bitrate = bitrate
+        #: AC3 is 192k and AAC is 128k, and the advertised file size is the
+        #: *total* rate: a TV that cross-checks size against duration sees a
+        #: lie of ~4% if only the video rate goes into the arithmetic.
+        self.audio_bitrate = audio_bitrate
+
+    @property
+    def total_bitrate(self):
+        return self.bitrate + self.audio_bitrate
 
     def video_filter(self):
         """Anamorphic on purpose: the PS shapes squeeze a 16:9 desktop into a
@@ -233,41 +290,65 @@ def _mpeg2(fps, bitrate):
 #: profile id -> shape. Ordered from "most likely to work on an old TV" to
 #: "modern renderer that only speaks TS/MKV"; the watchdog walks this list
 #: forward when the TV keeps refusing.
+#:
+#: The muxer lists carry `-muxdelay 0 -muxpreload 0` on the TS and MKV shapes
+#: only: measured against this ffmpeg build, MPEG-PS (`vob`) *underflows its own
+#: VRV model* with a zero delay and warns on every stream, so the DVD muxer
+#: keeps its default interleaving delay.
+_AC3 = ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2']
+_AAC = ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
+#: Every one of these shapes ends with the drift correction in
+#: `AUDIO_RESAMPLE`: see there.
+_AUDIO = [list(one) + AUDIO_RESAMPLE for one in (_AC3, _AAC)]
 DLNA_PROFILES = {
     'ps-pal': _DlnaProfile(
         'MPEG-PS · PAL 576p（老电视首选）', ['-f', 'vob'], 'mpg', 'video/mpeg',
-        'MPEG_PS_PAL', _mpeg2(25, 4500000),
-        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
-        720, 576, 25, 4500000),
+        'MPEG_PS_PAL', _mpeg2(25, 4500000), _AUDIO[0],
+        720, 576, 25, 4500000, 192000),
     'ps-ntsc': _DlnaProfile(
         'MPEG-PS · NTSC 480p（北美/日本老电视）', ['-f', 'vob'], 'mpg',
-        'video/mpeg', 'MPEG_PS_NTSC', _mpeg2(30, 4500000),
-        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
-        720, 480, 30, 4500000),
+        'video/mpeg', 'MPEG_PS_NTSC', _mpeg2(30, 4500000), _AUDIO[0],
+        720, 480, 30, 4500000, 192000),
     'ts-mpeg2': _DlnaProfile(
-        'MPEG-TS · MPEG-2 576p（认 TS 不认 PS 的电视）', ['-f', 'mpegts'],
+        'MPEG-TS · MPEG-2 576p（认 TS 不认 PS 的电视）',
+        ['-f', 'mpegts', '-muxdelay', '0', '-muxpreload', '0'],
         'ts', 'video/vnd.dlna.mpeg-tts', 'MPEG_TS_SD_EU',
-        _mpeg2(25, 5000000),
-        ['-c:a', 'ac3', '-b:a', '192k', '-ar', '48000', '-ac', '2'],
-        720, 576, 25, 5000000),
+        _mpeg2(25, 5000000), _AUDIO[0],
+        720, 576, 25, 5000000, 192000),
     'ts-h264': _DlnaProfile(
-        'MPEG-TS · H.264 720p（较新的电视，清晰度更高）', ['-f', 'mpegts'],
-        'ts', 'video/vnd.dlna.mpeg-tts', None, None,
-        ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2'],
-        0, 720, 25, 6000000),
+        'MPEG-TS · H.264 720p（较新的电视，清晰度更高）',
+        ['-f', 'mpegts', '-muxdelay', '0', '-muxpreload', '0'],
+        'ts', 'video/vnd.dlna.mpeg-tts', None, None, _AUDIO[1],
+        0, 720, 25, 6000000, 128000),
     'mkv-h264': _DlnaProfile(
-        'Matroska · H.264 720p（只认 MKV 的电视/Kodi）', ['-f', 'matroska'],
-        'mkv', 'video/x-matroska', None, None,
-        ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2'],
-        0, 720, 25, 6000000),
+        'Matroska · H.264 720p（只认 MKV 的电视/Kodi）',
+        ['-f', 'matroska', '-muxdelay', '0', '-muxpreload', '0'],
+        'mkv', 'video/x-matroska', None, None, _AUDIO[1],
+        0, 720, 25, 6000000, 128000),
 }
 DEFAULT_DLNA_PROFILE = 'ps-pal'
-#: How much of the ring the TV is allowed to be behind before we push the URL.
-#: The advertised file is "already 20 MiB long", so the renderer's first big
-#: probe is served from memory instead of stalling on the encoder. This is
-#: where the ~20-25 s of latency on this target comes from -- the price of an
-#: old TV being willing to play a live stream at all.
-DLNA_PREFILL_BYTES = 20 << 20
+#: How much of the stream the TV gets before we hand it the URL, **in seconds
+#: of picture**. The renderer's first move is a bounded sniff, and the point of
+#: prefilling is that the answer comes from memory instead of stalling on the
+#: encoder -- but the old 20 MiB fixed budget made that cost 27-37 seconds of
+#: latency at these bitrates, which is why the budget is now derived from the
+#: profile's bitrate and clamped.
+DLNA_PREFILL_SECONDS = 6
+DLNA_PREFILL_MIN_BYTES = 3 << 20
+DLNA_PREFILL_MAX_BYTES = 8 << 20
+
+
+def dlna_prefill_bytes(profile):
+    """The prefill budget for one DLNA shape, in bytes."""
+    return int(max(DLNA_PREFILL_MIN_BYTES,
+                   min(DLNA_PREFILL_MAX_BYTES,
+                       profile.total_bitrate * DLNA_PREFILL_SECONDS // 8)))
+
+
+def dlna_prefill_seconds(profile):
+    """What that budget costs the user, in seconds -- the start message says so."""
+    return max(1, dlna_prefill_bytes(profile) * 8 // profile.total_bitrate)
+
 #: Ring size: 48 MiB of produced bytes stay addressable by absolute offset.
 DLNA_RING_BYTES = 48 << 20
 #: The advertised file must stay under 2 GiB. Some firmware does signed 32-bit
@@ -596,13 +677,33 @@ def output_kind():
     return kind if kind in OUTPUTS else DEFAULT_OUTPUT
 
 
+#: What an untouched install holds. VideoToolbox is a *better* default on a Mac
+#: -- x264 at `ultrafast` cannot keep a Retina desktop at a watchable frame rate,
+#: which is what "不开硬件就几乎看不到画面" was -- but the choice has to be
+#: resolved from a probe that may not have answered yet, so `auto` means
+#: "hardware if something already proved it exists, otherwise software".
+ENCODER_AUTO = 'auto'
+
+
 def encoder_kind():
-    """'software' | 'hardware'; hardware only means anything on macOS."""
-    kind = str(Setting.get(SettingProperty.Mirror_Encoder, 'software')
-               or 'software')
-    if kind != 'hardware' or sys.platform != 'darwin':
+    """'software' | 'hardware'; hardware only means anything on macOS.
+
+    Never spawns ffmpeg: this is consulted while the menu and the console are
+    being built, so `auto` may only read a probe answer that a mirror start (or
+    `selfcheck.py`) already produced. A user who picks 硬件编码 explicitly gets
+    that wish stored, and `_mirror` falls back to x264 with a warning when the
+    binary turns out not to offer it.
+    """
+    kind = str(Setting.get(SettingProperty.Mirror_Encoder, ENCODER_AUTO)
+               or ENCODER_AUTO).strip().lower()
+    if kind == 'hardware':
+        return 'hardware' if sys.platform == 'darwin' else 'software'
+    if kind != ENCODER_AUTO:
         return 'software'
-    return 'hardware'
+    if sys.platform != 'darwin':
+        return 'software'
+    return ('hardware' if _hw_encoder_cache.get((find_ffmpeg(), 'darwin'))
+            else 'software')
 
 
 def dlna_profile(profile_id=None):
@@ -642,6 +743,10 @@ def advertised_file(bitrate):
     renderer that cross-checks them sees a broken file. The size is capped
     below 2 GiB because some firmware treats Content-Length as a signed 32-bit
     integer and asks for `bytes=0-18446744072566584319`.
+
+    `bitrate` is the *total* rate (video + audio): the video-only figure made
+    the advertised duration about 4% short of the bytes actually produced, and
+    a TV that seeks from the end notices.
     """
     size = min(bitrate * 3600 // 8, DLNA_MAX_ADVERTISED_SIZE)
     seconds = max(1, size * 8 // bitrate)
@@ -894,6 +999,7 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     if capture.audio_map and kind != 'caststream':
         cmd += ['-map', capture.audio_map,
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
+        cmd += AUDIO_RESAMPLE
     else:
         # The mirroring app takes video only until its audio stream is wired
         # up, which is why the menu label for this target says 无声音 out loud.
@@ -920,7 +1026,9 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
         # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
         cmd += ['-vf', 'scale=-2:{}'.format(height)]
     cmd += encoder_args(encoder)
-    cmd += ['-pix_fmt', 'yuv420p', '-g', str(FPS), '-b:v', str(bitrate)]
+    cmd += ['-pix_fmt', 'yuv420p', '-g', str(gop_size(kind)),
+            '-b:v', str(bitrate)]
+    cmd += rate_caps(bitrate)
     # Encoder private options only resolve after -c:v, so they ride at the end.
     cmd += extra
     cmd += OUTPUTS[kind][3]
@@ -947,6 +1055,7 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
         cmd += encoder_args(encoder)
         cmd += ['-pix_fmt', 'yuv420p', '-g', str(profile.fps),
                 '-r', str(profile.fps), '-b:v', str(profile.bitrate)]
+        cmd += rate_caps(profile.bitrate)
     cmd += profile.muxer + ['pipe:1']
     return cmd
 
@@ -1139,6 +1248,47 @@ def _create_aggregate(uids):
         logger.error('AudioHardwareCreateAggregateDevice failed: %d', status)
         return None
     return out.value
+
+
+def _device_uid(device_id):
+    """One device's UID, or '' when this machine will not say."""
+    import ctypes
+    ca = _coreaudio()
+    addr = _address(ca, b'deui')
+    value = ctypes.c_void_p(0)
+    size = ctypes.c_uint32(8)
+    if ca.AudioObjectGetPropertyData(int(device_id), ctypes.byref(addr), 0,
+                                     None, ctypes.byref(size),
+                                     ctypes.byref(value)) != 0:
+        return ''
+    return _cf_to_str(value.value) or ''
+
+
+def system_audio_routed():
+    """True / False / None: does this machine's own sound reach the capture tap?
+
+    BlackHole is a wire, not a splitter: it carries what is *sent* to it, which
+    on macOS means the default output has to be the multi-output device the
+    assisted install builds (or one the user made by hand). With the speakers
+    still being the default output, mirroring captures a device nobody writes
+    to -- silence, while the console cheerfully says「系统声音：已启用」. That is
+    the difference this answers.
+
+    None means "asked and could not tell": per-device property reads are
+    refused in some sandboxes, and a shrug is the only honest answer there.
+    """
+    if sys.platform != 'darwin':
+        return None
+    try:
+        out = _default_output()
+        if out is None:
+            return None
+        uid = _device_uid(out)
+    except Exception:
+        return None
+    if not uid:
+        return None
+    return uid == MACAST_AGGREGATE_UID or 'blackhole' in uid.lower()
 
 
 def _device_uids(ffmpeg):
@@ -1986,17 +2136,135 @@ def restore_system_audio(report=lambda message: None):
 # not something to hand to "anything that can open a socket", and a TV cannot
 # present a token -- but it can be given a URL it invented nothing about.
 
+class _Fragments(object):
+    """Re-frame an encoder pipe into whole container fragments.
+
+    stdout is read in fixed-size pieces, so a read boundary is almost never a
+    box boundary. Both ways this server sheds load -- evicting from the replay
+    ring and dropping from a slow viewer's queue -- remove *units*, and a unit
+    that is half an `mdat` leaves the viewer holding a byte stream whose box
+    headers are wrong from that byte on, permanently: MSE sits on a black frame
+    while the byte counter keeps climbing. Grouping the bytes into `moof` plus
+    the `mdat`(s) that follow it is what makes "drop whole blocks" true for this
+    container. The price is that a fragment is sent as a whole, so the browser
+    target lags the encoder by up to one GOP (measured: ~0.5 s).
+    """
+
+    #: A top-level box bigger than this is not a box: an `mdat` of one GOP is
+    #: two orders of magnitude under it, so a header claiming more means either
+    #: the wrong container or a lost sync mark.
+    MAX_UNIT = 1 << 24
+
+    def __init__(self):
+        self._buf = b''
+        self._header = b''
+        self._open = b''
+        self._started = False
+        #: Set once, on the very first header, when this is not a box stream.
+        self.broken = False
+        #: Every byte handed in, so the caller can restart from scratch.
+        self.backlog = b''
+
+    def feed(self, chunk):
+        """Return `[(is_media, unit)]` for the fragments these bytes complete."""
+        self.backlog += chunk
+        out = []
+        self._buf += chunk
+        while True:
+            box = self._take()
+            if box is None:
+                break
+            out.extend(self._accept(box))
+        return out
+
+    def flush(self):
+        """The pipe ended; a fragment that never completed is still a picture."""
+        head, tail = self._open, self._buf
+        self._open = self._buf = b''
+        out = [(True, head)] if head else []
+        if tail:
+            out.append((True, tail))
+        return out
+
+    def _take(self):
+        """One whole top-level box, or None while the buffer is short of one."""
+        if len(self._buf) < 8:
+            return None
+        size = int.from_bytes(self._buf[:4], 'big')
+        if size == 1:                       # 64-bit largesize follows
+            if len(self._buf) < 16:
+                return None
+            size = int.from_bytes(self._buf[8:16], 'big')
+        elif size == 0:                     # "to the end of the file", and a
+            size = len(self._buf)           # live pipe has no such end
+        elif size < 8 or size > self.MAX_UNIT:
+            # Not a header. Before the first fragment this says "not an MP4",
+            # and the caller takes over; after it we are out of sync, and the
+            # least wrong thing is to hand the bytes over whole and look again.
+            if not self._started:
+                self.broken = True
+                return None
+            size = len(self._buf)
+        if size > len(self._buf):
+            return None
+        box, self._buf = self._buf[:size], self._buf[size:]
+        return box
+
+    def _accept(self, box):
+        """One whole box in; the fragments that box completed out."""
+        if box[4:8] != b'moof':
+            if not self._started:
+                self._header += box         # ftyp / moov: the file header
+                return []
+            self._open += box               # the mdat belonging to this one
+            return []
+        out = []
+        if not self._started:
+            self._started = True
+            if self._header:
+                out.append((False, self._header))
+                self._header = b''
+        elif self._open:
+            out.append((True, self._open))
+        self._open = box
+        return out
+
+
 class _Broadcaster(object):
     """Fan out encoder output to every connected client; drop for the slow."""
 
-    def __init__(self, maxsize=256, ring_bytes=REPLAY_BYTES, init_marker=None):
-        self._maxsize = maxsize
+    #: A framed queue entry is a whole fragment -- half a second of picture --
+    #: where an unframed one is one 4 KiB read from the pipe. Eight of them is
+    #: about the same seconds of slack as the old 256 reads, and a third of the
+    #: memory they could cost at a high bitrate.
+    FRAMED_QUEUE = 8
+
+    def __init__(self, maxsize=256, ring_bytes=REPLAY_BYTES, init_marker=None,
+                 packet_align=None):
         self._ring_limit = ring_bytes
         #: bytes of the container header (fMP4: everything before the first
         #: `moof`). A late joiner needs it or MSE cannot start at all.
         self._init_marker = init_marker
+        #: Only the fragmented-MP4 target frames its bytes: it is the one
+        #: consumer whose replay *and* whose drops have to land on fragment
+        #: edges. MPEG-TS self-synchronises and the DLNA log is byte-addressed.
+        self._framer = _Fragments() if init_marker == b'moof' else None
+        #: Unframed but never unaligned: where we drop for a slow consumer, the
+        #: hole has to end on a container packet boundary. Cutting inside a
+        #: 188-byte TS packet leaves the reader resynchronising on a stream whose
+        #: audio frame just lost its middle, which is a click, not a stutter.
+        self._align = packet_align if self._framer is None else None
+        self._carry = b''
+        if self._framer is not None:
+            maxsize = min(maxsize, self.FRAMED_QUEUE)
+        self._maxsize = maxsize
         self._init = b''
-        self._init_done = init_marker is None
+        #: An Event rather than a flag because the handler *waits* for the
+        #: header: it is the one thing a viewer can never recover from losing,
+        #: so it does not sit in a queue that drops -- see `await_init`.
+        self._init_ready = threading.Event()
+        if init_marker is None:
+            self._init_ready.set()
         self._ring = deque()
         self._ring_bytes = 0
         self._subs = set()
@@ -2008,15 +2276,16 @@ class _Broadcaster(object):
     @property
     def init_segment(self):
         with self._lock:
-            return self._init if self._init_done else b''
+            return self._init if self._init_ready.is_set() else b''
+
+    def await_init(self, timeout=10.0):
+        """The container header, or b'' if the encoder never got that far."""
+        self._init_ready.wait(timeout)
+        return self.init_segment
 
     def subscribe(self, replay=False):
         q = Queue(maxsize=self._maxsize)
         if replay:
-            if self._init_marker is not None:
-                init = self.init_segment
-                if init:
-                    q.put_nowait(init)      # fresh subscriber, cannot be full
             for chunk in self.tail():
                 try:
                     q.put_nowait(chunk)
@@ -2035,45 +2304,109 @@ class _Broadcaster(object):
             return list(self._ring)
 
     def feed(self, chunk):
+        if self._align:
+            chunk = self._carry + chunk
+            keep = len(chunk) % self._align
+            self._carry = chunk[len(chunk) - keep:] if keep else b''
+            chunk = chunk[:len(chunk) - keep]
+            if not chunk:
+                return
+        self._emit(chunk)
+
+    def _emit(self, chunk):
         with self._lock:
             self.chunks += 1
             self.bytes += len(chunk)
-            self._retain(chunk)
+            units = self._retain(chunk)
+        self._publish(units)
+
+    def _publish(self, units):
+        with self._lock:
             subs = list(self._subs)
         for q in subs:
-            try:
-                q.put_nowait(chunk)
-            except Exception:
+            for unit in units:
+                while q.full():
+                    # live beats lossless, and now the thing that goes is a
+                    # whole fragment: the viewer's byte stream stays parseable
+                    # across the hole instead of ending inside an `mdat`.
+                    try:
+                        q.get_nowait()
+                        self.drops += 1
+                    except Exception:
+                        break
                 try:
-                    q.get_nowait()      # live beats lossless: drop the oldest
-                    q.put_nowait(chunk)
-                    self.drops += 1
+                    q.put_nowait(unit)
                 except Exception:
                     pass
 
     def _retain(self, chunk):
-        """Keep the header, then a bounded tail. Called under the lock."""
-        if not self._init_done:
+        """Keep the header, then a bounded tail; return what to send.
+
+        Called under the lock. Unframed, the answer is the bytes as they came
+        from the pipe -- which is what a live viewer always got. Framed, it is
+        whole fragments, and a viewer waits out the rest of one.
+        """
+        if self._framer is not None:
+            units = self._framer.feed(chunk)
+            if not self._framer.broken:
+                for is_media, unit in units:
+                    self._hold(is_media, unit)
+                return [unit for _, unit in units]
+            # Not boxes after all. Nothing has been handed out yet -- the first
+            # header is the only thing that can say so -- so falling back to the
+            # marker search restarts exactly rather than half-restarted.
+            chunk, self._framer = self._framer.backlog, None
+        if not self._init_ready.is_set():
             self._init += chunk
             cut = self._init.find(self._init_marker)
             if cut < 0:
                 if len(self._init) > 1 << 21:
                     # No marker in 2 MB: not the container we expect. Stop
                     # hoarding, and let bytes be treated as media from here.
-                    self._init, self._init_done = b'', True
+                    self._init = b''
+                    self._init_ready.set()
                 # Everything held so far is the header, which replay serves
                 # from `init_segment` -- ringing it too would hand a late joiner
                 # the first fragment twice.
-                return
+                return [chunk]
             chunk = self._init[cut:]
             self._init = self._init[:cut]
-            self._init_done = True
+            self._init_ready.set()
+        self._ring_append(chunk)
+        return [chunk]
+
+    def _hold(self, is_media, unit):
+        """Book one framed unit: the header is kept for replay, media is rung."""
+        if is_media:
+            self._ring_append(unit)
+        else:
+            self._init = unit
+            self._init_ready.set()
+
+    def _ring_append(self, chunk):
         if not self._ring_limit:
             return
         self._ring.append(chunk)
         self._ring_bytes += len(chunk)
         while self._ring_bytes > self._ring_limit and len(self._ring) > 1:
             self._ring_bytes -= len(self._ring.popleft())
+
+    def flush(self):
+        """stdout ended: the last picture is still inside the framer."""
+        if self._framer is None:
+            carry, self._carry = self._carry, b''
+            if carry:
+                # The tail of a container packet. It cannot be decoded -- a TS
+                # packet is 188 bytes and this is the rest of one -- but the
+                # encoder is gone, so nothing is coming to complete it. Hand it
+                # over instead of stranding it in a buffer nobody reads again.
+                self._emit(carry)
+            return
+        units = self._framer.flush()
+        with self._lock:
+            for is_media, unit in units:
+                self._hold(is_media, unit)
+        self._publish([unit for _, unit in units])
 
     def clients(self):
         with self._lock:
@@ -2148,13 +2481,15 @@ class _ByteLog(object):
         with self._cond:
             self._readers = max(0, self._readers - 1)
 
-    def anchor(self, prefill=DLNA_PREFILL_BYTES):
+    def anchor(self, prefill):
         """Where the advertised file's offset 0 sits.
 
         `prefill` bytes behind the live edge, so the renderer's opening sniff
         is answered out of memory instead of stalling on the encoder. That
         hoard is also the whole latency of this target: the TV drains it at
-        line rate and then tracks the live edge from ~20 s behind.
+        line rate and then tracks the live edge from that far behind -- which is
+        why the budget is derived from the bitrate (`dlna_prefill_bytes`) rather
+        than being a fixed number of megabytes.
         """
         with self._cond:
             return max(self._start, self._end - prefill)
@@ -2288,6 +2623,12 @@ class _StreamHandler(BaseHTTPRequestHandler):
 
     def _serve_stream(self, head_only=False):
         broadcaster = self.server.broadcaster
+        # A browser cannot decode a fragment without the container header that
+        # precedes it, and it can never ask for that again -- so the header is
+        # written here, once, on this connection, rather than being queued up
+        # among droppable fragments behind a tab that stopped reading.
+        init = (broadcaster.await_init()
+                if self.session.replay and not head_only else b'')
         queue = broadcaster.subscribe(replay=self.session.replay)
         try:
             self.send_response(200)
@@ -2298,6 +2639,9 @@ class _StreamHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if head_only:
                 return
+            if init:
+                self.wfile.write(init)
+                self.wfile.flush()
             while True:
                 try:
                     chunk = queue.get(timeout=5.0)
@@ -2322,7 +2666,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
         log = self.server.broadcaster
         session = self.session
         if session.file_anchor is None:
-            session.file_anchor = log.anchor()
+            session.file_anchor = log.anchor(
+                dlna_prefill_bytes(session.profile))
         requested = parse_range(self.headers.get('Range'))
         if requested is None:
             self._not_found()
@@ -2435,9 +2780,13 @@ class _StreamHandler(BaseHTTPRequestHandler):
 class _Session(object):
     """What this mirror session looks like to the HTTP server."""
 
-    def __init__(self, kind, has_audio=False, title='Macast', profile=None):
+    def __init__(self, kind, has_audio=False, title='Macast', profile=None,
+                 bitrate=None):
         self.kind = kind if kind in OUTPUTS else DEFAULT_OUTPUT
         self.label, self.suffix, self.content_type, _args = OUTPUTS[self.kind]
+        #: The encoder's target video rate, in bits/s. The queue in front of a
+        #: live consumer is sized from it -- see `live_queue_chunks`.
+        self.bitrate = bitrate
         #: The DLNA target answers as a finite file, so it needs a profile
         #: (which container, which codec, which advertised size) and a byte log
         #: instead of the queue broadcaster. The other targets leave both None
@@ -2451,7 +2800,7 @@ class _Session(object):
             self.content_type = self.profile.content_type
             self.bytelog = True
             self.file_size, self.file_duration = advertised_file(
-                self.profile.bitrate)
+                self.profile.total_bitrate)
         #: A browser can only attach to a live fragmented stream at a
         #: keyframe, so replaying the header plus a short tail is what makes
         #: "open the URL a second time" work. A TV is never replayed: it would
@@ -2481,12 +2830,31 @@ class _Session(object):
         return '{}{}'.format(STREAM_PREFIX, self.stream_name())
 
 
+def live_queue_chunks(bitrate):
+    """How many 4 KiB reads a live consumer's queue may hold.
+
+    A fixed chunk count is a fixed number of *bytes*, which at these bitrates
+    is anywhere between half a second and a second and a half of standing
+    latency -- the queue is the sender's own contribution to the delay the user
+    complains about, and it should be budgeted in seconds, not bytes. Clamped
+    at both ends: below ~64 reads a 2 Mbps preset cannot survive one TCP
+    stall, and nothing needs a second and a half of backlog to look smooth.
+    """
+    if not bitrate:
+        return LIVE_QUEUE_MAX_CHUNKS
+    budget = int(bitrate) * LIVE_QUEUE_SECONDS // 8
+    return max(LIVE_QUEUE_MIN_CHUNKS,
+               min(LIVE_QUEUE_MAX_CHUNKS, budget // CHUNK))
+
+
 def start_stream_server(session, broadcaster=None):
     server = ThreadingHTTPServer(('0.0.0.0', 0), _StreamHandler)
     server.session = session
     if broadcaster is None:
         broadcaster = _ByteLog() if session.bytelog else _Broadcaster(
-            init_marker=session.init_marker)
+            init_marker=session.init_marker,
+            maxsize=live_queue_chunks(session.bitrate),
+            packet_align=TS_PACKET if session.kind == 'cast' else None)
     server.broadcaster = broadcaster
     server.daemon_threads = True
     # A client that vanished mid-stream stays in queue.get for seconds;
@@ -2922,9 +3290,32 @@ class _CastSender(object):
 #: and then takes its time over HTTP made the console's first device list arrive
 #: a quarter of a minute after the page opened.
 SSDP_SEARCH_TIMEOUT = 2.5
-DESCRIBE_TIMEOUT = 1.5
+#: A TV that answers the discovery packet and then answers the description GET
+#: slowly is the normal shape of a device coming out of standby, not an error.
+#: 1.5 s was chosen to keep the first page load snappy and instead made those
+#: devices vanish without a trace -- see `_dlna_unreadable`.
+DESCRIBE_TIMEOUT = 3.0
 #: Ceiling on how many descriptions are fetched at once.
 MAX_DESCRIBE = 12
+
+
+def _search_source_ip():
+    """The address to send M-SEARCH from, or None to let the OS route it.
+
+    Only a *pinned* interface changes the answer: `Setting.get_ip()` narrows to
+    that NIC alone then, so any advertisable address belongs where the user
+    asked to look. Without a pin the kernel's route table beats our guess --
+    binding to whichever address sorts first is how a VM bridge (192.168.99.1)
+    ends up carrying the search away from the TV, which is the same failure
+    AGENTS.md 4.1 records for the mDNS advertiser.
+    """
+    try:
+        if not Setting.resolved_network_interface():
+            return None
+        addrs = sorted(Setting.get_advertisable_ip())
+    except Exception:
+        return None
+    return addrs[0] if addrs else None
 
 
 def _ssdp_search(st, timeout=SSDP_SEARCH_TIMEOUT, interface=None):
@@ -2942,15 +3333,32 @@ def _ssdp_search(st, timeout=SSDP_SEARCH_TIMEOUT, interface=None):
     if interface:
         # Binding is how a multi-homed Mac (VPN, bridges) picks which interface
         # the multicast leaves on -- the same worry AGENTS.md 4.1 has for the
-        # mDNS advertiser.
+        # mDNS advertiser. `IP_MULTICAST_IF` is the half that actually selects
+        # the egress for a *multicast* destination; a bound source address alone
+        # still leaves the route lookup to the kernel.
         try:
             sock.bind((interface, 0))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                            socket.inet_aton(interface))
         except OSError as e:
             logger.info('cannot search from %s: %s', interface, e)
     try:
-        sock.sendto(request.encode('ascii'), (SSDP_ADDR, SSDP_PORT))
-        deadline = time.time() + timeout
+        now = time.time()
+        # One M-SEARCH is not one search. A renderer that has just woken has not
+        # joined 239.255.255.250:1900 yet, and SSDP tells clients to repeat for
+        # exactly that reason; a single packet makes the device list depend on
+        # which 100 ms its join happened to land in.
+        sends = [now, now + timeout * 0.45]
+        deadline = now + timeout
         while time.time() < deadline:
+            if sends and time.time() >= sends[0]:
+                sends.pop(0)
+                try:
+                    sock.sendto(request.encode('ascii'),
+                                (SSDP_ADDR, SSDP_PORT))
+                except OSError:
+                    if not found:
+                        raise
             try:
                 data, peer = sock.recvfrom(4096)
             except socket.timeout:
@@ -3049,7 +3457,7 @@ def describe_renderer(url, peer_ip, timeout=DESCRIBE_TIMEOUT):
     return parse_description(raw, url, peer_ip)
 
 
-def _ask_renderers(targets, timeout):
+def _ask_renderers(targets, timeout, interface=None):
     """[(LOCATION, ip)] answered for each target, plus why a target could not ask.
 
     The M-SEARCHes overlap: two targets searched one after the other is what
@@ -3060,7 +3468,8 @@ def _ask_renderers(targets, timeout):
 
     def ask(index, st):
         try:
-            buckets[index] = list(_ssdp_search(st, timeout=timeout))
+            buckets[index] = list(_ssdp_search(st, timeout=timeout,
+                                               interface=interface))
         except Exception as e:
             failures.append(str(e))
             logger.error('ssdp search for %s failed: %s', st, e)
@@ -3092,12 +3501,19 @@ def discover_renderers(timeout=SSDP_SEARCH_TIMEOUT):
     a TV that ignores HTTP holds a slot for the whole timeout -- so those
     requests overlap too, instead of adding up.
     """
+    global _dlna_unreadable
     seen = {}
     try:
         ours = set(Setting.get_advertisable_ip())
     except Exception:
         ours = set()
-    answers = _ask_renderers(DLNA_SEARCH_TARGETS, timeout)
+    # Both verdict counters describe *this* round. Carrying a last-round value
+    # into a round that failed early is how the console kept blaming the same
+    # "only this Mac answered" for a search that never ran.
+    _self_alone['dlna'] = 0
+    _dlna_unreadable = 0
+    answers = _ask_renderers(DLNA_SEARCH_TARGETS, timeout,
+                             interface=_search_source_ip())
     others = [answer for answer in answers if answer[1] not in ours]
     _self_alone['dlna'] = len({answer[1] for answer in answers} & ours)
     answers = others                            # do not mirror to ourselves
@@ -3118,6 +3534,13 @@ def discover_renderers(timeout=SSDP_SEARCH_TIMEOUT):
             name, control = parsed
             host = _url_host(control) or answer[1]
             seen[host] = (name, control, host)
+        else:
+            # None covers "still reading" (the worker outlived its join), "the
+            # GET failed", and "the description has no AVTransport in it". All
+            # three are the same shape to the user -- a device that answers
+            # discovery and then is not there -- and none of them is
+            # 「没有发现」, because something *did* answer.
+            _dlna_unreadable += 1
     return sorted(seen.values())
 
 
@@ -3127,6 +3550,9 @@ _dlna_searching = False
 _dlna_searched_at = 0.0
 #: why the last DLNA search could not run (see _search_error).
 _dlna_search_error = ''
+#: how many answers of the last search spoke SSDP but never served a readable
+#: description. 0 for a protocol that has no descriptions to read.
+_dlna_unreadable = 0
 
 
 def start_renderer_search():
@@ -3279,7 +3705,7 @@ class _DlnaSender(object):
         return values
 
     def set_uri(self, url, title, profile):
-        size, duration = advertised_file(profile.bitrate)
+        size, duration = advertised_file(profile.total_bitrate)
         return self._request('SetAVTransportURI', {
             'CurrentURI': url,
             'CurrentURIMetaData': build_didl(url, title, profile, size,
@@ -4387,6 +4813,7 @@ class ScreenMirrorRenderer(Renderer):
         first_bytes = threading.Event()
         tail = deque(maxlen=20)
         stream = None
+        refused = ''
         if kind == 'caststream':
             # Ask the device first. Its mirroring app is the part of this
             # target we cannot self-prove, and a device that refuses it is
@@ -4400,10 +4827,12 @@ class ScreenMirrorRenderer(Renderer):
                     on_lost=self._stream_lost)
             except Exception as e:
                 logger.warning('Cast Streaming refused (%s); using LOAD', e)
+                refused = str(e) or e.__class__.__name__
                 kind = 'cast'
         session = _Session(kind, has_audio=bool(capture.audio_map),
                            title=socket.gethostname() or 'Macast',
-                           profile=dlna_profile() if kind == 'dlna' else None)
+                           profile=dlna_profile() if kind == 'dlna' else None,
+                           bitrate=bitrate)
         handed = False
         try:
             server = None if stream is not None else start_stream_server(session)
@@ -4512,19 +4941,27 @@ class ScreenMirrorRenderer(Renderer):
                              daemon=True, name="SCREEN_MIRROR_DLNA_WATCH").start()
             message = '已开始镜像到 {}（档位 {}，约 {} 秒延迟）'.format(
                 name, session.profile.label,
-                max(1, DLNA_PREFILL_BYTES * 8 // session.profile.bitrate))
+                dlna_prefill_seconds(session.profile))
         elif kind == 'browser':
             message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
         elif kind == 'caststream':
-            message = '已开始低延迟镜像到 {}（此通道还没有声音）'.format(name)
+            message = '已开始低延迟镜像到 {}（本通道没有声音）'.format(name)
         else:
             message = '已开始镜像到 {}'.format(name)
+            if refused:
+                # The user asked for the low-latency channel and did not get
+                # it. Silence here is what made「无声音」read like a bug: the
+                # session that actually started does have audio, and only the
+                # fallback says why it looks different from what was picked.
+                message = ('设备拒绝了低延迟通道（{}），已改用兼容通道 LOAD，'
+                           '这一路有声音。已开始镜像到 {}'.format(
+                               refused, name))
         notify(message, sound=True)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
 
     def _prefill(self, server, proc, generation):
-        """Hold the URL back until the ring holds `DLNA_PREFILL_BYTES`.
+        """Hold the URL back until the log holds this profile's prefill budget.
 
         The renderer's first move is a bounded sniff of a few megabytes; if we
         have to answer it by waiting on the encoder, the TV concludes the file
@@ -4532,9 +4969,10 @@ class ScreenMirrorRenderer(Renderer):
         this target has, which is why the start message says so.
         """
         log = server.broadcaster
+        budget = dlna_prefill_bytes(server.session.profile)
         deadline = time.time() + DLNA_PREFILL_TIMEOUT
         while time.time() < deadline and generation == self._generation:
-            if log.bytes >= DLNA_PREFILL_BYTES or proc.poll() is not None:
+            if log.bytes >= budget or proc.poll() is not None:
                 break
             time.sleep(0.1)
         else:
@@ -4846,10 +5284,13 @@ CONSOLE_VERSION = 3
 #: One line of trade-off language per target: the cards in the page have room to
 #: say what choosing this costs, which a menu label never did.
 OUTPUT_HINTS = {
-    'cast': '兼容性最好 · 延迟约 2–4 秒 · 有声音',
-    'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 无声音 · '
+    'cast': ('兼容性最好 · 有声音 · 发送端缓冲约 0.8 秒，电视端解码另计'
+             '（这一路的端到端延迟没在真电视上量过）'),
+    'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 本通道无声音 · '
+                   '电视不认这一通道时会自动回落上面的兼容通道，那时是有声音的 · '
                    '未在真电视上验证过'),
-    'dlna': '给没有 Google 栈的老电视 · 先攒 20 MiB 再交给它，约 20–25 秒延迟',
+    'dlna': ('给没有 Google 栈的老电视 · 先攒约 6 秒画面再交给它，'
+             '所以一开始就有秒级延迟'),
     'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
 }
 
@@ -4890,6 +5331,12 @@ def _probe_alone(probe):
     return _self_alone.get(probe, 0)
 
 
+def _probe_unreadable(probe):
+    """How many answers spoke the discovery protocol but never served a
+    readable description. Only DLNA has that second step to fail."""
+    return _dlna_unreadable if probe == 'dlna' else 0
+
+
 def _probe_items(probe):
     """The device rows for one probe, `selected` from the stored choice."""
     if probe == 'cast':
@@ -4911,7 +5358,8 @@ def _probe_items(probe):
     return []
 
 
-def _search_words(devices, searching, searched_at, error, nothing='', alone=0):
+def _search_words(devices, searching, searched_at, error, nothing='', alone=0,
+                  unreadable=0):
     """One phrase: what the last search of this protocol actually concluded.
 
     「正在搜索」is only ever true of a first look still in flight -- a completed
@@ -4922,8 +5370,17 @@ def _search_words(devices, searching, searched_at, error, nothing='', alone=0):
     `alone` is the third case: the search ran, everything that answered was
     this Mac's own receiver, and those are dropped. Saying only「没有发现」here is
     what makes an empty but healthy LAN look like a broken search.
+
+    `unreadable` is the fourth, and was silent until now: a device that answers
+    SSDP and then fails the description GET leaves the list as if it had never
+    spoken. A user told「没有发现 DLNA 电视」about a TV that *did* answer looks for
+    a device that is not there, when the thing to do is wake it or turn its
+    DLNA on. Every empty branch here ends in the next step, not just a verdict.
     """
     if devices:
+        if unreadable:
+            return '发现 {} 台（另有 {} 台应答了发现但读不到描述，已跳过）'\
+                .format(len(devices), unreadable)
         return '发现 {} 台'.format(len(devices))
     if error:
         return error
@@ -4932,9 +5389,17 @@ def _search_words(devices, searching, searched_at, error, nothing='', alone=0):
     if not searched_at:
         return '还没有搜过'
     if alone:
-        return (nothing + '：局域网里只有这台 Mac 自己的接收端，已排除'
+        return (nothing + '：局域网里只有这台 Mac 自己的接收端，已排除；'
+                '电视需要和这台 Mac 连同一个网络才会应答，'
+                '确认后点「重搜设备」'
                 + _searched_suffix(searched_at))
-    return nothing + _searched_suffix(searched_at)
+    if unreadable:
+        return ('有 {} 台设备应答了发现，但都读不到描述：通常是它在休眠，'
+                '或者固件不报 AVTransport。唤醒它或在它上面打开 DLNA/投屏，'
+                '然后点「重搜设备」' + _searched_suffix(searched_at))
+    return (nothing + '；如果设备就在这台 Mac 的同一个网络里，'
+            '检查它是否开机、再点「重搜设备」'
+            + _searched_suffix(searched_at))
 
 
 def _probe_chosen(probe):
@@ -4983,7 +5448,7 @@ def channels_state(current=None):
         words = '' if not probe else _search_words(
             items, searching, searched_at, error,
             PROBE_LABELS.get(probe, ('', '没有发现设备'))[1],
-            alone=_probe_alone(probe))
+            alone=_probe_alone(probe), unreadable=_probe_unreadable(probe))
         out.append({'key': key,
                     'label': OUTPUTS[key][0],
                     'hint': OUTPUT_HINTS.get(key, ''),
@@ -5021,9 +5486,9 @@ def target_prompt(kind=None, with_verdict=False):
         line = '还没有选择「{}」：在「设备」里点一台'.format(name)
         if with_verdict:
             devices, searching, searched_at, error = _probe_answer(probe)
-            line += '（{}）'.format(_search_words(devices, searching, searched_at,
-                                                 error, nothing,
-                                                 alone=_probe_alone(probe)))
+            line += '（{}）'.format(_search_words(
+                devices, searching, searched_at, error, nothing,
+                alone=_probe_alone(probe), unreadable=_probe_unreadable(probe)))
         return line
     return ''
 
@@ -5664,7 +6129,17 @@ class ScreenMirrorSetting(RendererSetting):
         if capture is None:
             return '系统声音：开始镜像后这里会显示'
         if capture.audio_map:
-            return '系统声音：已启用 · {}'.format(capture.label)
+            line = '系统声音：已启用 · {}'.format(capture.label)
+            if system_audio_routed() is False:
+                # "已启用" is a statement about the tap, not about the sound.
+                # Saying only that is what made a silent mirror look like an
+                # encoder bug: the machine's output was never pointed at the
+                # device being captured.
+                line += ('；但系统声音没有路由到它（默认输出不是「{}」），'
+                         '镜像里会是静音。点「一键设置」切换，或在「音频 MIDI '
+                         '设置」里做一个包含它的多输出设备').format(
+                    MACAST_AGGREGATE_NAME)
+            return line
         if sys.platform == 'darwin':
             return '系统声音：未启用（可一键安装 BlackHole）'
         if sys.platform == 'win32':

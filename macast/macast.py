@@ -31,6 +31,10 @@ logger = logging.getLogger("main")
 logger.setLevel(logging.DEBUG)
 _ = gettext.gettext
 
+#: How many cast items the menu offers back. The settings page shows all 50
+#: the history keeps; a menu bar is not a library.
+HISTORY_MENU_LIMIT = 10
+
 
 def _import_plugin_module(dotted):
     """Import a plugin module, re-reading it if we already hold a stale copy.
@@ -886,6 +890,8 @@ class Macast(App):
         self.renderer_menuitem = None
         self.protocol_menuitem = None
         self.advanced_menuitem = None
+        self.open_page_menuitem = None
+        self.history_menuitem = None
 
         self.plugin_manager = MacastPluginManager(
             MacastPlugin(None, format_class_name(renderer), renderer, 'darwin,win32,linux',
@@ -922,14 +928,23 @@ class Macast(App):
             self.plugin_manager.get_renderer(self.setting_renderer),
             self.plugin_manager.build_protocol_group(self.enabled_protocols))
 
-        icon_path = os.path.join(os.path.dirname(__file__), Macast.ICON_MAP[self.setting_menubar_icon])
+        icon_path = os.path.join(os.path.dirname(__file__),
+                                 Macast.ICON_MAP[self.setting_menubar_icon])
         template = None if self.setting_menubar_icon == 0 else True
-        self.copy_menuitem = None
+        #: What the player was last handed, '' when nothing is playing. The
+        #: playback rows of the menu are built from this, so they appear and
+        #: disappear with the media instead of being spliced into a live menu.
+        self.playing_uri = ''
         # Default mode: the menu bar / tray *is* the UI shell, and `App.start()`
         # owns the main thread for it (rumps runs the Cocoa loop on macOS). The
         # rich control surface is the settings page in a browser; the menu keeps
-        # status, the renderer switch, and a way out of a live capture.
-        super(Macast, self).__init__("Macast", icon_path, [], template)
+        # the service switch, the playback controls, the replay history and the
+        # door to that page -- everything you need without a browser open.
+        # Passing `[]` here (as the Tk-console removal did) leaves the icon with
+        # no menu at all, because nothing else builds one until the first
+        # protocol toggle.
+        super(Macast, self).__init__("Macast", icon_path, self.build_app_menu(),
+                                     template)
         cherrypy.engine.subscribe('start', self.service_start)
         cherrypy.engine.subscribe('stop', self.service_stop)
         cherrypy.engine.subscribe('renderer_start', self.renderer_start)
@@ -956,15 +971,99 @@ class Macast(App):
         self._apply_enabled_protocols(rebuild_menu=False)
 
     def build_app_menu(self):
-        self.toggle_menuitem = MenuItem(_("Stop Cast"), self.on_toggle_service_click, key="p")
+        self.toggle_menuitem = MenuItem(
+            _("Stop Cast") if Setting.is_service_running() else _("Start Cast"),
+            self.on_toggle_service_click, key="p")
         self.setting_menuitem = MenuItem(_("Setting"), children=self.build_setting_menu())
         self.quit_menuitem = MenuItem(_("Quit"), self.quit, key="q")
+        self.open_page_menuitem = MenuItem(_("Open Settings Page"),
+                                           self.on_open_page_click, key=",")
+        history_rows = self.build_history_menu()
+        self.history_menuitem = MenuItem(_("Play History"), children=history_rows)
+
+        rows = [self.toggle_menuitem]
+        playback = self._playback_menu_rows()
+        if playback:
+            rows += [None] + playback
+        rows += [None, self.open_page_menuitem]
+        if history_rows:
+            rows.append(self.history_menuitem)
+        rows += [None, self.setting_menuitem, self.quit_menuitem]
+        return rows
+
+    def _playback_menu_rows(self):
+        """The media the player holds, and the two things worth doing to it.
+
+        Built from `playing_uri` rather than spliced into a live menu, so a
+        menu rebuild for any other reason cannot lose them -- and so they are
+        gone the moment the player reports it stopped, instead of lingering
+        until something else happens to refresh the menu.
+        """
+        if not self.playing_uri:
+            return []
+        title = ''
+        try:
+            title = self.service.protocol.get_state_title() or ''
+        except Exception as e:
+            # The title is a label, not a control: a protocol that cannot
+            # answer for it costs a row's wording, never the row.
+            logger.debug("Asking the protocol for a title failed: %s", e)
         return [
-            self.toggle_menuitem,
-            None,
-            self.setting_menuitem,
-            self.quit_menuitem
+            MenuItem(_('Now playing: {}').format(self._short_label(title)
+                                                 or self._short_label(self.playing_uri)),
+                     enabled=False),
+            MenuItem(_("Stop Playback"), self.on_stop_playback_click),
+            MenuItem(_("Copy Video URI"), self.on_copy_uri_click, key="c"),
         ]
+
+    @staticmethod
+    def _short_label(text, limit=56):
+        """One line, bounded -- titles and URLs both arrive from the sender."""
+        text = ' '.join(str(text or '').split())
+        return text if len(text) <= limit else text[:limit - 1].rstrip() + '…'
+
+    def build_history_menu(self):
+        """The last few things cast, so "play that again" needs no browser.
+
+        Read straight from the settings key rather than through the protocol:
+        `Play_History` is written by whichever protocol received the cast, and
+        the group only exposes it through `primary`, which is not necessarily
+        the one that has it.
+        """
+        if not Setting.has(SettingProperty.Play_History):
+            return []
+        history = Setting.get(SettingProperty.Play_History, []) or []
+        rows, seen = [], {}
+        for entry in history[:HISTORY_MENU_LIMIT]:
+            if not isinstance(entry, dict) or not entry.get('uri'):
+                continue
+            label = self._short_label(entry.get('title') or entry['uri'])
+            seen[label] = seen.get(label, 0) + 1
+            if seen[label] > 1:
+                # rumps keys its menu by title, so a second "Movie.mp4" would
+                # silently replace the first rather than sit beside it.
+                label = '{} ({})'.format(label, seen[label])
+            rows.append(MenuItem(label, self.on_history_click, data=entry['uri']))
+        if rows:
+            rows.append(None)
+            rows.append(MenuItem(_("Clear Play History"), self.on_clear_history_click))
+        return rows
+
+    def _refresh_app_menu(self):
+        """Rebuild the whole top level, on the thread that owns the menu.
+
+        Playback starts and stops arrive on the player's IPC thread and the
+        settings page reaches them from a CherryPy worker; AppKit wants none
+        of that (AGENTS.md 4.2), so every structural change comes through here.
+        """
+        self.call_on_main_thread(self._apply_app_menu)
+
+    def _apply_app_menu(self):
+        try:
+            self.menu = self.build_app_menu()
+            self.set_menu(self.menu)
+        except Exception as e:
+            logger.error("Rebuilding the menu failed: %s", e)
 
     def build_setting_menu(self):
         ip_text = "/".join([ip for ip, _ in Setting.get_ip()])
@@ -1043,10 +1142,7 @@ class Macast(App):
         if len(player_settings) > 0:
             player_settings.append(None)
 
-        mirror_rows = self._mirror_menu_rows()
-
         return [self.version_menuitem, self.ip_menuitem] + \
-               ([None] + mirror_rows if mirror_rows else []) + \
                renderer_select + \
                protocol_select + \
                [None] + \
@@ -1055,43 +1151,6 @@ class Macast(App):
                 self.open_config_menuitem, self.advanced_menuitem] + \
                platform_options + \
                [None, self.check_update_menuitem, self.about_menuitem]
-
-    def _mirror_menu_rows(self):
-        """The 电脑投屏 rows: where to control it, and a way out of a live capture.
-
-        Spliced in by the app rather than by the plugin's own `build_menu()`,
-        because that one only exists while the plugin holds the player -- and
-        casting this screen drives its own ffmpeg and its own stream, not a mode
-        of whatever is playing sound. A plugin with no mirror surface contributes
-        nothing, so every other renderer's menu is unchanged.
-
-        「停止电脑投屏」stays in the menu although the page stops it too: a browser
-        tab can be minimised, closed, or left on another machine, and that must
-        never be the only way out of something capturing this desktop.
-        """
-        try:
-            setting = self.plugin_manager.mirror_setting()
-        except Exception as e:
-            logger.error("Asking for the mirror surface failed: %s", e)
-            return []
-        if setting is None:
-            return []
-        rows = [MenuItem('电脑投屏…', self.on_open_mirror_page_clicked)]
-        stop = getattr(setting, 'on_toggle_clicked', None)
-        try:
-            running = bool(setting.mirror_running())
-        except Exception as e:
-            # A surface that cannot answer about itself is still worth the door;
-            # the page says what is wrong, whereas a missing row reads as "off".
-            logger.error("Asking whether 电脑投屏 is running failed: %s", e)
-            running = False
-        if running and stop is not None:
-            rows.append(MenuItem('停止电脑投屏', stop))
-        return rows
-
-    def on_open_mirror_page_clicked(self, item):
-        """Open the settings page on its 电脑投屏 tab (?page= is read by the page)."""
-        self.open_browser('http://127.0.0.1:{}?page=13'.format(Setting.get_port()))
 
     def _load_enabled_protocols(self):
         """Read the enabled-protocol list, migrating the old single value.
@@ -1295,29 +1354,60 @@ class Macast(App):
 
     def renderer_av_stop(self):
         logger.info("renderer_av_stop")
-        if self.mode == 'headless':
-            return
-        if self.copy_menuitem:
-            self.remove_menu_item_by_id(self.copy_menuitem.id)
-        self.copy_menuitem = None
+        if self.playing_uri:
+            self.playing_uri = ''
+            self._refresh_app_menu()
 
     def renderer_start(self):
         pass
 
     def renderer_av_uri(self, uri):
         logger.info("renderer_av_uri: " + uri)
-        if self.mode == 'headless':
-            return
-        if self.copy_menuitem is not None:
-            self.copy_menuitem.callback = lambda _: pyperclip.copy(uri)
-            return
-        self.copy_menuitem = MenuItem(
-            _("Copy Video URI"),
-            key="c",
-            callback=lambda _: pyperclip.copy(uri))
-        self.append_menu_item_after(self.toggle_menuitem.id, self.copy_menuitem)
+        uri = uri or ''
+        if uri != self.playing_uri:
+            # The rows carry the uri in their label, so a track change inside
+            # one session is a menu change too -- and the history submenu gains
+            # an entry with it.
+            self.playing_uri = uri
+            self._refresh_app_menu()
 
     # The followings are the callback function of menu click
+
+    def on_open_page_click(self, item):
+        """The door to the whole control surface, on the menu's top level.
+
+        Screen Mirror lives behind it too: it is deliberately not a menu item,
+        so stopping a live capture of this desktop is one click here rather
+        than a row of its own.
+        """
+        self.open_browser('http://127.0.0.1:{}'.format(Setting.get_port()))
+
+    def on_stop_playback_click(self, item):
+        try:
+            self.service.renderer.set_media_stop()
+        except Exception as e:
+            logger.error("Stopping playback failed: %s", e)
+            cherrypy.engine.publish('app_notify', _('Error'), _('Stop playback failed'))
+
+    def on_copy_uri_click(self, item):
+        try:
+            pyperclip.copy(self.playing_uri)
+        except Exception as e:
+            logger.error("Copying the media uri failed: %s", e)
+
+    def on_history_click(self, item):
+        uri = getattr(item, 'data', None)
+        if not uri:
+            return
+        try:
+            self.service.protocol.cast_uri(uri)
+        except Exception as e:
+            logger.error("Re-casting %r failed: %s", uri, e)
+            cherrypy.engine.publish('app_notify', _('Error'), _('Cast failed'))
+
+    def on_clear_history_click(self, item):
+        Setting.set(SettingProperty.Play_History, [])
+        self._refresh_app_menu()
 
     def on_protocol_toggle_click(self, item):
         """Enable/disable one protocol while the others keep running."""
@@ -1401,17 +1491,16 @@ class Macast(App):
     def _rebuild_menu(self):
         if self.setting_menuitem is None:
             return
-        self.setting_menuitem.children = self.build_setting_menu()
-        self.set_menu(self.menu)
+        self._apply_app_menu()
 
     def on_renderer_change_click(self, item):
         renderer_config = self.plugin_manager.renderer_list[item.data]
         self.service.renderer = renderer_config.get_instance()
         Setting.set(SettingProperty.Macast_Renderer, renderer_config.title)
         self.setting_renderer = renderer_config.title
-        self.setting_menuitem.children = self.build_setting_menu()
-        # reload menu
-        self.set_menu(self.menu)
+        # The renderer owns part of the Setting submenu and the playback rows
+        # describe what it is holding, so the whole top level is rebuilt.
+        self._apply_app_menu()
         cherrypy.engine.publish('app_notify', _('Info'), _('Change Renderer to {}.').format(renderer_config.title))
 
     def on_open_config_click(self, item):

@@ -591,14 +591,14 @@
 
                         <div class="status-card" v-if="sec === 'devices'" key="devices">
                             <h3>设备</h3>
-                            <div class="hint" v-if="!mirror_view.devices.length">
-                                这一轮没有可点的设备。
-                            </div>
                             <div class="mirror-dev" v-for="d in mirror_view.devices" :key="d[0]"
                                  @click="mirror_pick(d)">
                                 <span class="md-name">{{ d[1] }}</span>
                                 <el-tag size="mini" type="success" v-if="d[2]">当前</el-tag>
                             </div>
+                            <!-- 空列表的话归后端说：mirror_view.device_note 就是那一轮搜索的
+                                 结论（发现几台 / 只有自己 / 应答了却读不到描述），页面上再写
+                                 一句「没有可点的设备」只是把同一个答案用没用的话重复一遍。 -->
                             <div class="hint" v-if="mirror_view.device_note">
                                 {{ mirror_view.device_note }}
                             </div>
