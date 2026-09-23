@@ -278,6 +278,172 @@
             .macast-plugins { grid-template-columns: 1fr; }
             .status-table td.k { width: 84px; }
         }
+
+        /* ── 样式刷新 ────────────────────────────────────────────────────
+           同一批选择器，写在后面所以整体盖住上面的初版样式。改动集中在四件事：
+           ① 标签栏从「下划线标签」换成胶囊分段控件；② 卡片圆角/阴影/内边距统一；
+           ③ 一张表/一行不再横跨整页（值列限宽并允许断行，宽内容走网格）；
+           ④ 弹层（帮助、模块编辑）与表单控件跟上同一套圆角与间距。 */
+        :root {
+            --bg: #f3f5fb;
+            --bg-image:
+                radial-gradient(1100px 460px at 12% -8%, #e8ecff 0%, transparent 60%),
+                radial-gradient(900px 420px at 100% 0%, #fdeef6 0%, transparent 55%);
+            --panel: #ffffff;
+            --panel-2: #f8f9fd;
+            --text: #1f2433;
+            --text-soft: #6b7280;
+            --border: #e7e9f2;
+            --border-strong: #d8dced;
+            --accent: #4f6ef7;
+            --accent-soft: #eef1ff;
+            --accent-text: #3b55d9;
+            --track: #eceffa;
+            --shadow-sm: 0 1px 2px rgba(24, 32, 66, .05);
+            --shadow-md: 0 6px 18px -8px rgba(24, 32, 66, .18);
+            --shadow-lg: 0 22px 50px -22px rgba(24, 32, 66, .34);
+            --radius: 16px;
+            --radius-sm: 10px;
+        }
+        body.theme-dark {
+            --bg: #16181f;
+            --bg-image:
+                radial-gradient(1000px 420px at 10% -10%, #232842 0%, transparent 62%),
+                radial-gradient(900px 400px at 100% 0%, #2a2130 0%, transparent 58%);
+            --panel: #1e212a;
+            --panel-2: #232733;
+            --text: #e9ebf5;
+            --text-soft: #a2a8bd;
+            --border: #2e3342;
+            --border-strong: #3b4155;
+            --accent: #8aa2ff;
+            --accent-soft: #262c40;
+            --accent-text: #a9bcff;
+            --track: #2b3040;
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3);
+            --shadow-md: 0 8px 20px -10px rgba(0, 0, 0, .5);
+            --shadow-lg: 0 26px 54px -24px rgba(0, 0, 0, .62);
+        }
+        body {
+            background-color: var(--bg);
+            background-image: var(--bg-image);
+            background-attachment: fixed;
+            font-size: 14px;
+            -webkit-font-smoothing: antialiased;
+        }
+        #app { max-width: 1000px; padding: 18px 20px 72px; }
+        .macast-topbar {
+            position: sticky; top: 0; z-index: 20;
+            margin: 0 -20px 14px; padding: 12px 20px;
+            background: color-mix(in srgb, var(--bg) 78%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+        }
+        .macast-topbar .title { font-size: 17px; letter-spacing: .2px; }
+        .topbar-actions { display: inline-flex; align-items: center; gap: 8px; }
+
+        /* 标签栏 → 胶囊分段控件：七个平级标签在视觉上是一条可点的长条，
+           而不是一排需要读下划线才知道选中了谁的标题。 */
+        .el-tabs__header { margin: 0 0 16px; }
+        .el-tabs__nav-wrap::after { display: none; }
+        .el-tabs__active-bar { display: none; }
+        .el-tabs__nav { display: flex; flex-wrap: wrap; gap: 6px; }
+        .el-tabs__item {
+            height: 32px; line-height: 32px; padding: 0 14px !important;
+            border-radius: 999px; font-size: 13px; color: var(--text-soft);
+            border: 1px solid transparent; transition: all .16s ease;
+        }
+        .el-tabs__item:hover { color: var(--accent-text); background: var(--accent-soft); }
+        .el-tabs__item.is-active {
+            color: #fff; background: var(--accent);
+            box-shadow: var(--shadow-md); border-color: transparent;
+        }
+        body.theme-dark .el-tabs__item.is-active { color: #101423; }
+
+        /* 卡片：统一的圆角、内边距与一层很浅的阴影，悬停时略微抬起。 */
+        .status-card, .cast-box, .pwa-tip {
+            border-radius: var(--radius); border-color: var(--border);
+            box-shadow: var(--shadow-sm);
+            padding: 18px 20px; margin-bottom: 16px;
+            transition: box-shadow .18s ease, transform .18s ease;
+        }
+        .status-card:hover { box-shadow: var(--shadow-md); }
+        .status-card h3 {
+            font-size: 14px; letter-spacing: .3px; margin: 0 0 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .status-card h3::before {
+            content: ''; width: 4px; height: 14px; border-radius: 2px;
+            background: var(--accent); flex: none;
+        }
+
+        /* 「拉得老长」的那一类：键/值表格不再让值横跨整页。给**表格**限宽，
+           而不是给单元格 `max-width` —— 后者对表格布局基本无效（实测：值列照样
+           822px 宽，横跨整张卡片）。 */
+        .status-table { width: 100%; max-width: 780px; }
+        .status-table td { padding: 9px 12px; color: var(--text); }
+        .status-table td.k {
+            width: 132px; min-width: 132px; background: var(--panel-2);
+            border-color: var(--border);
+        }
+        .status-table td:last-child { word-break: break-word; }
+        .status-table tr:first-child td:first-child { border-top-left-radius: var(--radius-sm); }
+        .status-table tr:first-child td:last-child { border-top-right-radius: var(--radius-sm); }
+        .status-table tr:last-child td:first-child { border-bottom-left-radius: var(--radius-sm); }
+        .status-table tr:last-child td:last-child { border-bottom-right-radius: var(--radius-sm); }
+        .module-table .mt-label { width: 200px; }
+        .module-table td { padding: 9px 12px; }
+
+        /* 选项行：投屏方式用等宽卡片（四张放一起才看得出"选哪个"），
+           档位/画质用按内容撑开的胶囊（短标签不该被拉成半页宽）。 */
+        .mirror-cards {
+            display: grid; gap: 9px;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+        }
+        .mirror-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+        .mirror-card, .mirror-pill { border-radius: var(--radius-sm); }
+
+        .el-button { border-radius: 9px; font-weight: 500; }
+        .el-button--primary {
+            background: var(--accent); border-color: var(--accent);
+            box-shadow: var(--shadow-sm);
+        }
+        .el-input__inner, .el-textarea__inner, .el-select .el-input__inner {
+            border-radius: 9px; border-color: var(--border-strong);
+        }
+        .el-tag { border-radius: 999px; }
+        code, .uri {
+            background: var(--accent-soft); color: var(--accent-text);
+            border-radius: 6px; padding: 1px 6px;
+        }
+
+        /* 报告/活动列表不再每行一条通栏分割线。 */
+        .history-item, .mf-item { border-bottom-color: var(--border); }
+        .history-item:last-child, .mf-item:last-child { border-bottom: none; }
+
+        /* 弹层：帮助与模块编辑共用同一副面孔。 */
+        .macast-dialog { border-radius: 18px; box-shadow: var(--shadow-lg); overflow: hidden; }
+        .macast-dialog .el-dialog__header { padding: 18px 22px 6px; }
+        .macast-dialog .el-dialog__title { font-size: 15px; font-weight: 600; }
+        .macast-dialog .el-dialog__body { padding: 8px 22px 18px; }
+        .macast-dialog .el-dialog__footer { padding: 0 22px 20px; }
+        .help-body { max-height: 66vh; overflow: auto; padding-right: 8px; }
+        .help-body h1 { font-size: 19px; margin: 4px 0 10px; }
+        .help-body h2 {
+            font-size: 14px; margin: 20px 0 8px; color: var(--accent-text);
+        }
+        .help-body p, .help-body li { font-size: 13px; line-height: 1.8; color: var(--text); }
+        .help-body ol, .help-body ul { padding-left: 20px; }
+        .help-body code { font-size: 12px; }
+
+        /* 滚动条：细一点，和卡片圆角一个语气。 */
+        .help-body::-webkit-scrollbar, .macast-log::-webkit-scrollbar,
+        .mirror-feed::-webkit-scrollbar { width: 10px; height: 10px; }
+        .help-body::-webkit-scrollbar-thumb, .macast-log::-webkit-scrollbar-thumb,
+        .mirror-feed::-webkit-scrollbar-thumb {
+            background: var(--border-strong); border-radius: 999px;
+            border: 3px solid transparent; background-clip: content-box;
+        }
     </style>
 </head>
 <body>
@@ -285,8 +451,12 @@
 <div id="app">
     <div class="macast-topbar">
         <span class="title">Macast 投屏</span>
-        <el-button size="mini" circle :icon="themeIcon" @click="toggleTheme"
-                   :title="themeTitle"></el-button>
+        <span class="topbar-actions">
+            <el-button size="mini" icon="el-icon-question"
+                       @click="helpVisible = true">帮助</el-button>
+            <el-button size="mini" circle :icon="themeIcon" @click="toggleTheme"
+                       :title="themeTitle"></el-button>
+        </span>
     </div>
     <div v-if="canInstall || (isIOS && !pwaDismissed)" class="pwa-tip">
         <template v-if="canInstall">
@@ -830,7 +1000,8 @@
                     </tr>
                 </table>
             </div>
-            <el-dialog :title="module_edit.label" :visible.sync="module_edit.visible" width="480px">
+            <el-dialog :title="module_edit.label" :visible.sync="module_edit.visible" width="480px"
+                       custom-class="macast-dialog">
                 <div class="hint" style="margin-bottom:6px;">
                     <code>{{ module_edit.key }}</code>（{{ module_edit.group }}）
                 </div>
@@ -909,147 +1080,156 @@
                 </div>
             </div>
         </el-tab-pane>
-        <el-tab-pane label="帮助" name="4">
-
-            <h1>常见问题（FAQ）</h1>
-
-            <el-link type="primary"
-                     href="https://github.com/xfangfang/Macast/wiki/FAQ"
-                     target="_blank">本文档可能不是最新版本，请前往 Macast Wiki 查看最新内容。
-            </el-link>
-
-            <p>Macast 目前仍处于早期开发阶段，在你的设备上可能无法正常使用。遇到这种情况，请尝试
-                <el-link type="primary" href='https://github.com/pingod/Macast/actions'>测试版</el-link>
-                ，或
-                <el-link type="primary" href='https://github.com/pingod/Macast/issues/new/choose'>提交 issue</el-link>
-                帮助我们做得更好。
-            </p>
-            <h2 id='i-dont-know-how-to-use'>不知道怎么用</h2>
-            <p>只需打开本应用，<strong>菜单栏</strong> / <strong>任务栏</strong> / <strong>桌面面板</strong>
-                中就会出现一个小图标，随后你就可以从本地的 DLNA 客户端把媒体文件投送到你的电脑上。<br/>
-            </p>
-            <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>如何使用第三方播放器插件</h2>
-            <ol start=''>
-                <li>Macast 以往需要你自行下载的播放器——IINA、Web、Live、PotPlayer、PIFMRDS 以及
-                    NVA 协议——现在已<strong>内置</strong>在应用中。它们列在<strong>插件</strong>标签页，
-                    可在该页直接启用或停用。
-                </li>
-                <li>若要添加自己的插件：在<strong>插件</strong>标签页安装一个 <strong>[某插件].py</strong>，
-                    或将文件拖入<code>打开配置目录</code>下的 renderer / protocol 目录。
-                </li>
-                <li>无需重启——插件安装后即生效。</li>
-            </ol>
-            <p> 如果找不到想要的插件，可前往
-                <el-link type="primary"
-                         href='https://github.com/xfangfang/Macast/wiki/Custom-Renderer'>此处
-                </el-link>
-                了解如何编写自定义渲染器插件，欢迎提交 Pull Request。
-            </p>
-            <h2 id='unable-to-find-macast-from-your-dlna-client'>DLNA 客户端找不到 Macast</h2>
-            <ul>
-                <li>检查防火墙是否拦截了 Macast。<br/>一个简单的检测方法是：从其他设备访问 Macast
-                    开放的端口（默认为 58880，可在设置菜单中查看）。
-                </li>
-                <li>检查路由器。<br/>应开启 UPnP 并关闭 AP 隔离（AP Isolation）。
-                </li>
-                <li>软件问题。<br/>若使用 iOS 设备，请确保对应 App 的
-                    <strong>「本地网络」查找与连接权限</strong>已开启。<br/>部分应用需要等待 30 秒以上才能发现
-                    Macast，请耐心等待。
-                </li>
-                <li>UDP 组播问题。<br/>有反馈称 Windows 与部分路由器存在适配问题，导致 Windows
-                    无法加入组播。此时需修改 Windows 注册表，强制将 IGMP 版本设为 v2。
-                </li>
-                <li>多网卡或复杂网络环境。<br/>请确保在单网卡、且与 DLNA 客户端处于同一局域网的条件下
-                    Macast 可正常使用；更复杂场景的解决方案仍在完善中。
-                </li>
-
-            </ul>
-            <h2 id='crash-at-startup'>启动时崩溃</h2>
-            <p> Macast 默认开放端口 58880。当你的电脑上该端口被占用时，应用会崩溃。请手动设置应用端口，
-                此后 Macast 会从配置文件中读取你指定的端口。</p>
-            <h2 id='unable-to-close-or-unresponsive'>无法关闭或无响应</h2>
-            <p> 使用第三方播放器插件时，插件通常需要开启更多线程或进程，导致应用退出时出现无响应问题，
-                这通常是由插件本身引起的。</p>
-            <h2 id='where-is-the-configuration-file-located'>配置文件在哪里</h2>
-            <figure>
-                <table>
-                    <thead>
-                    <tr>
-                        <th>平台</th>
-                        <th>路径</th>
-                    </tr>
-                    </thead>
-                    <tbody>
-                    <tr>
-                        <td>MacOS</td>
-                        <td><code>$HOME/Library/Application\ Support/Macast/</code></td>
-                    </tr>
-                    <tr>
-                        <td>Linux</td>
-                        <td><code>$HOME/.config/Macast</code></td>
-                    </tr>
-                    <tr>
-                        <td>Windows</td>
-                        <td><code>%HOMEPATH%\AppData\Local\xfangfang\Macast</code></td>
-                    </tr>
-                    </tbody>
-                </table>
-            </figure>
-            <h2 id='language-support'>语言支持</h2>
-            <p>可参考以下文档中的命令了解多语言支持：
-                <el-link type="primary" href='https://github.com/pingod/Macast/blob/main/docs/i18n.md'>docs/i18n.md
-                </el-link>
-                ，欢迎提交 Pull Request。
-            </p>
-            <h2 id='how-to-set-personal-configurations-to-mpv'>如何为 mpv 设置个人配置</h2>
-            <p> 关于如何设置个人配置，请参考 mpv 手册：
-                <el-link type="primary" href='https://mpv.io/manual/stable/#files'
-                         target='_blank' class='url'>https://mpv.io/manual/stable/#files
-                </el-link>
-            </p>
-            <p> 在以下位置创建配置文件：</p>
-            <figure>
-                <table>
-                    <thead>
-                    <tr>
-                        <th>平台</th>
-                        <th>路径</th>
-                    </tr>
-                    </thead>
-                    <tbody>
-                    <tr>
-                        <td>MacOS</td>
-                        <td><code>~/.config/mpv/mpv.conf</code></td>
-                    </tr>
-                    <tr>
-                        <td>Linux</td>
-                        <td><code>~/.config/mpv/mpv.conf</code></td>
-                    </tr>
-                    <tr>
-                        <td>Windows</td>
-                        <td><code>%HOMEPATH%\AppData\Roaming\mpv\mpv.conf</code></td>
-                    </tr>
-                    </tbody>
-                </table>
-            </figure>
-            <p> 并将一些 mpv 命令行选项写入<strong>配置文件</strong>，例如：</p>
-            <pre><code>fs-screen==1
-</code></pre>
-            <p><em>该选项告诉 mpv 在新视频时全屏到桌面 1。更多 fs-screen 选项详见：
-                <el-link type="primary"
-                         href='https://mpv.io/manual/stable/#options-fs-screen' target='_blank' class='url'>
-                    https://mpv.io/manual/stable/#options-fs-screen
-                </el-link>
-            </em>
-            </p>
-            <p> 同样地，你也可以修改 mpv 播放器的快捷键——只需将
-                <strong>input.conf</strong> 放到同一目录：
-                <el-link type="primary" href='https://mpv.io/manual/stable/#input-conf'
-                         target='_blank' class='url'>https://mpv.io/manual/stable/#input-conf
-                </el-link>
-            </p>
-        </el-tab-pane>
     </el-tabs>
+
+    <!-- 「帮助」不是第七个标签页，而是顶栏上的一个按钮：它是参考资料，
+         不是这一页的一等公民，而七个平级标签让它看起来同等重要。 -->
+    <el-dialog title="帮助" :visible.sync="helpVisible" width="760px"
+               custom-class="macast-dialog help-dialog" append-to-body>
+        <div class="help-body">
+
+                <h1>常见问题（FAQ）</h1>
+
+                <el-link type="primary"
+                         href="https://github.com/xfangfang/Macast/wiki/FAQ"
+                         target="_blank">本文档可能不是最新版本，请前往 Macast Wiki 查看最新内容。
+                </el-link>
+
+                <p>Macast 目前仍处于早期开发阶段，在你的设备上可能无法正常使用。遇到这种情况，请尝试
+                    <el-link type="primary" href='https://github.com/pingod/Macast/actions'>测试版</el-link>
+                    ，或
+                    <el-link type="primary" href='https://github.com/pingod/Macast/issues/new/choose'>提交 issue</el-link>
+                    帮助我们做得更好。
+                </p>
+                <h2 id='i-dont-know-how-to-use'>不知道怎么用</h2>
+                <p>只需打开本应用，<strong>菜单栏</strong> / <strong>任务栏</strong> / <strong>桌面面板</strong>
+                    中就会出现一个小图标，随后你就可以从本地的 DLNA 客户端把媒体文件投送到你的电脑上。<br/>
+                </p>
+                <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>如何使用第三方播放器插件</h2>
+                <ol start=''>
+                    <li>Macast 以往需要你自行下载的播放器——IINA、Web、Live、PotPlayer、PIFMRDS 以及
+                        NVA 协议——现在已<strong>内置</strong>在应用中。它们列在<strong>插件</strong>标签页，
+                        可在该页直接启用或停用。
+                    </li>
+                    <li>若要添加自己的插件：在<strong>插件</strong>标签页安装一个 <strong>[某插件].py</strong>，
+                        或将文件拖入<code>打开配置目录</code>下的 renderer / protocol 目录。
+                    </li>
+                    <li>无需重启——插件安装后即生效。</li>
+                </ol>
+                <p> 如果找不到想要的插件，可前往
+                    <el-link type="primary"
+                             href='https://github.com/xfangfang/Macast/wiki/Custom-Renderer'>此处
+                    </el-link>
+                    了解如何编写自定义渲染器插件，欢迎提交 Pull Request。
+                </p>
+                <h2 id='unable-to-find-macast-from-your-dlna-client'>DLNA 客户端找不到 Macast</h2>
+                <ul>
+                    <li>检查防火墙是否拦截了 Macast。<br/>一个简单的检测方法是：从其他设备访问 Macast
+                        开放的端口（默认为 58880，可在设置菜单中查看）。
+                    </li>
+                    <li>检查路由器。<br/>应开启 UPnP 并关闭 AP 隔离（AP Isolation）。
+                    </li>
+                    <li>软件问题。<br/>若使用 iOS 设备，请确保对应 App 的
+                        <strong>「本地网络」查找与连接权限</strong>已开启。<br/>部分应用需要等待 30 秒以上才能发现
+                        Macast，请耐心等待。
+                    </li>
+                    <li>UDP 组播问题。<br/>有反馈称 Windows 与部分路由器存在适配问题，导致 Windows
+                        无法加入组播。此时需修改 Windows 注册表，强制将 IGMP 版本设为 v2。
+                    </li>
+                    <li>多网卡或复杂网络环境。<br/>请确保在单网卡、且与 DLNA 客户端处于同一局域网的条件下
+                        Macast 可正常使用；更复杂场景的解决方案仍在完善中。
+                    </li>
+
+                </ul>
+                <h2 id='crash-at-startup'>启动时崩溃</h2>
+                <p> Macast 默认开放端口 58880。当你的电脑上该端口被占用时，应用会崩溃。请手动设置应用端口，
+                    此后 Macast 会从配置文件中读取你指定的端口。</p>
+                <h2 id='unable-to-close-or-unresponsive'>无法关闭或无响应</h2>
+                <p> 使用第三方播放器插件时，插件通常需要开启更多线程或进程，导致应用退出时出现无响应问题，
+                    这通常是由插件本身引起的。</p>
+                <h2 id='where-is-the-configuration-file-located'>配置文件在哪里</h2>
+                <figure>
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>平台</th>
+                            <th>路径</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr>
+                            <td>MacOS</td>
+                            <td><code>$HOME/Library/Application\ Support/Macast/</code></td>
+                        </tr>
+                        <tr>
+                            <td>Linux</td>
+                            <td><code>$HOME/.config/Macast</code></td>
+                        </tr>
+                        <tr>
+                            <td>Windows</td>
+                            <td><code>%HOMEPATH%\AppData\Local\xfangfang\Macast</code></td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </figure>
+                <h2 id='language-support'>语言支持</h2>
+                <p>可参考以下文档中的命令了解多语言支持：
+                    <el-link type="primary" href='https://github.com/pingod/Macast/blob/main/docs/i18n.md'>docs/i18n.md
+                    </el-link>
+                    ，欢迎提交 Pull Request。
+                </p>
+                <h2 id='how-to-set-personal-configurations-to-mpv'>如何为 mpv 设置个人配置</h2>
+                <p> 关于如何设置个人配置，请参考 mpv 手册：
+                    <el-link type="primary" href='https://mpv.io/manual/stable/#files'
+                             target='_blank' class='url'>https://mpv.io/manual/stable/#files
+                    </el-link>
+                </p>
+                <p> 在以下位置创建配置文件：</p>
+                <figure>
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>平台</th>
+                            <th>路径</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        <tr>
+                            <td>MacOS</td>
+                            <td><code>~/.config/mpv/mpv.conf</code></td>
+                        </tr>
+                        <tr>
+                            <td>Linux</td>
+                            <td><code>~/.config/mpv/mpv.conf</code></td>
+                        </tr>
+                        <tr>
+                            <td>Windows</td>
+                            <td><code>%HOMEPATH%\AppData\Roaming\mpv\mpv.conf</code></td>
+                        </tr>
+                        </tbody>
+                    </table>
+                </figure>
+                <p> 并将一些 mpv 命令行选项写入<strong>配置文件</strong>，例如：</p>
+                <pre><code>fs-screen==1
+    </code></pre>
+                <p><em>该选项告诉 mpv 在新视频时全屏到桌面 1。更多 fs-screen 选项详见：
+                    <el-link type="primary"
+                             href='https://mpv.io/manual/stable/#options-fs-screen' target='_blank' class='url'>
+                        https://mpv.io/manual/stable/#options-fs-screen
+                    </el-link>
+                </em>
+                </p>
+                <p> 同样地，你也可以修改 mpv 播放器的快捷键——只需将
+                    <strong>input.conf</strong> 放到同一目录：
+                    <el-link type="primary" href='https://mpv.io/manual/stable/#input-conf'
+                             target='_blank' class='url'>https://mpv.io/manual/stable/#input-conf
+                    </el-link>
+                </p>
+        </div>
+        <span slot="footer">
+            <el-button size="small" @click="helpVisible = false">关闭</el-button>
+        </span>
+    </el-dialog>
 
 </div>
 <div class='footer'></div>
@@ -1185,6 +1365,8 @@
         data: {
             currentRoute: window.location.pathname,
             backend_url: '/api',
+            // 帮助是弹层而不是标签页（见模板顶部）。
+            helpVisible: false,
             activeIndex: '1',
             theme: 'light',
 
@@ -1949,7 +2131,10 @@
                         this.load_log_modules().then(() => this.get_log());
                         break;
                     case '4':
-                        this.set_history(page_name);
+                        // 老链接与书签里的 ?page=4：打开同一份帮助，
+                        // 然后把历史记在一个真的存在的页上。
+                        this.helpVisible = true;
+                        this.set_history('1');
                         break;
                     case '10':
                         this.set_history(page_name);
