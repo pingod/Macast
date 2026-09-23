@@ -10,8 +10,7 @@
 
 ## 0. 这份文档存在的理由，以及它不做的两件事
 
-本仓库是 `xfangfang/Macast` 的 fork，并且打算出售解锁档位（见
-[该行引用了内部规划文档，已移除]
+本仓库是 `xfangfang/Macast` 的 fork。"这是 fork"这件事成立的时候，
 署名就不是格式问题而是**陈述**：
 
 - 上游的代码还在文件里，就把上游的声明删掉 —— 这是对代码来源的虚假陈述；
@@ -25,8 +24,6 @@
 作品的衍生作品，重写其中一部分并不改变整体的许可证；真正能脱离的只有**净室实现**
 （不看原代码、只按公开行为规格重写）或**完全独立**的作品。本项目本来就以 GPLv3 发布，
 所以重写队列的目的只有一个：让"我们写了什么"这句话可以被核对。
-
-[该行涉及内部规划，已移除]
 
 ## 1. 怎么度量的
 
@@ -159,7 +156,7 @@ FangYuecheng** 的版权行和一句 `Licensed under the MIT license`。这些�
 | 5 | `macast/gui.py` | 356 | rumps/pystray 适配层，接口窄、最好换 | `BUILDING.md` 的 pystray 说明 |
 | 6 | `macast/server.py` | 183 | CherryPy 装配；和 §4.10 的日志红线同一条链 | `logsplit.py` 的注释 |
 | 7 | `macast_renderer/mpv.py` | 573 | mpv IPC 契约（`--input-ipc-server`、事件名）——这一层的行为规格在 mpv 那边，不在我们这边，净室可做 | `AGENTS.md` §5 排障手法 |
-[该行引用了内部规划文档，已移除]
+| 8 | `macast/macast.py` + `Macast.py` | 497 | 最后动菜单栏宿主：它牵 `App.call_on_main_thread`、插件装载、`install_url` 三处门控点 | `AGENTS.md` §3 |
 | — | `macast/plugins/**`（vendored） | 2885 | **不在队列里**：这些是上游插件合集的完整作品，"重写"的正当形式是另写一个插件放进 `plugins/`，而不是原地替换后声称不是抄的 | — |
 
 每一步的收尾动作（顺序错了 Part 34 会红）：改代码 → **先提交** → `provenance.py --check --stamp`
@@ -176,4 +173,3 @@ FangYuecheng** 的版权行和一句 `Licensed under the MIT license`。这些�
 - 不为了"看起来更干净"把 `macast/plugins/**` 原地改名或搬位置：那只会让 blame 更瞎，
   而内容一个字都没变。
 - 不把重写叙述成摆脱 GPLv3 的路径（§0）。
-[该行涉及内部规划，已移除]

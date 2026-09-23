@@ -578,9 +578,9 @@ PATH 上放假 uxplay 走完 启动→连接→断开→停止→reload 全生�
 
 ### 4.12 署名与来源：`scripts/provenance.py` + `docs/Provenance.md`（Part 34）
 
-[该行涉及内部规划，已移除]
+本仓库是 fork，所以"这段代码是谁写的"是一句**会被读者读到**的陈述。
 已定的做法只有一条：**度量，然后按度量结果只加不减**。用户提的"去掉 fork 与所有原项目
-[该行引用了内部规划文档，已移除]
+信息"这一半不做（细节见 `docs/Provenance.md` §0）。
 
 - **别拿文件头当来源证据，也别拿 `git blame` 单独当证据。** 头标记的是当初的意图：
   `macast/discovery.py`、`protocol_cast.py`、`protocol_group.py`、`protocol_airplay.py`、
@@ -689,8 +689,7 @@ $FF -y -i /tmp/cast_test.mp4 -c copy -f mpegts /tmp/cast_test.ts
 | `docs/Casting-Suite-Plan.md` | **发送端插件族的规划书**：JustStream 需求矩阵、六个参考项目（mkchromecast / MirrorCast / omacast / UxPlay / Castify / Mac-Screencast）的代码级取证与许可判定、P1-P6 阶段计划与「明确不做」。动镜像/投文件/投浏览器相关代码前先读它 |
 | `docs/Casting-Suite.md` | **发送端插件的用户指南**（与上一行分工：规划书给改代码的人，这份给用插件的人）。每个目标的**首次设置流程**：Chromecast 兼容通道 / Chromecast 低延迟（含"上限 4.5 Mbps 是软件加密不是网络"）/ DLNA 老电视（含"约 6 秒预填是设计如此"与五档回退）/ 浏览器（观看地址与 token 的来历）；§1.6 说清画质档位、编码器与延迟预算各是多少；本地文件投屏的"自动"在判什么、音轨字幕为什么各有边界；uxplay 与 shairport-sync 的自备安装配方；macOS 屏幕录制权限与 BlackHole 一键设置。**每一节都写明"这条路真机验证到什么程度"** —— 全族只在打桩测试与自家假设备上验证过 |
 | `docs/reference-projects-review.md` | 参考项目评估（**接收端**视角）：miraclecast / mkchromecast / AirConnect |
-[该行涉及内部规划，已移除]
-[该行引用了内部规划文档，已移除]
+| `docs/Provenance.md` | **来源台账与重写队列**：fork 点与 215 条上游提交、`git blame` 的四态（upstream / vendored / mixed / ours）与它两个盲区（跨仓库粘贴、改名丢 blame）、按域的行数台账（应用本体还有约 3587 行是上游的；"看文件头"会高估成 21623 行，因为上游的头贴在代码早被重写干净的文件上）、`macast/ssdp.py` 里第三方 MIT 作者群那一层、按模块的 8 步重写队列（**完成判据是 `upstream_lines == 0`，可机检**）。**已定边界**：声明只加不减、不在 vendored 文件上署名、不把重写叙述成摆脱 GPLv3 的路径（净室才行）；"去掉 fork 与所有原项目信息"这一半已被拒绝 |
 | `docs/Development.md` | 三平台开发与打包 |
 | `BUILDING.md` | macOS `.app` 构建（py2app）、产物校验、包体裁剪 |
 | `docs/i18n.md` | 翻译流程 |

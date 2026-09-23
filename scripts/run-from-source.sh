@@ -7,5 +7,14 @@
 unset PYTHONPATH
 unset PYTHONDONTWRITEBYTECODE
 
-cd $REPO || exit 1
-exec $REPO/.venv/bin/python Macast.py
+# Resolve the repo root from this script's own location, so the checkout works
+# wherever it lives. (This used to hardcode one developer's home directory,
+# which made the script unusable for anyone else.)
+REPO=$(cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+cd "$REPO" || exit 1
+
+# Prefer the checkout's own virtualenv, else fall back to python3 on PATH.
+if [ -x "$REPO/.venv/bin/python" ]; then
+    exec "$REPO/.venv/bin/python" Macast.py
+fi
+exec python3 Macast.py
