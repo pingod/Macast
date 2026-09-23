@@ -82,6 +82,7 @@
 #     microphone permission, which no download fixes either.
 
 import json
+import locale
 import logging
 import os
 import re
@@ -1020,6 +1021,12 @@ def video_only_capture(capture):
 #: here.
 _DSHOW_DEVICE = re.compile(r'"([^"]+)"\s*\((video|audio)\)')
 
+#: ffmpeg also prints an `Alternative name` for each device -- an ASCII
+#: identifier (`@device_cm_{GUID}\wave_{GUID}`) that looks like the obvious way
+#: to dodge every code-page problem. Measured on the real box: it is not.
+#: ffmpeg 8.1.2 answers `Error opening input file @device_cm_{...}\wave_{...}`
+#: for a tap that works fine when named, so the name -- correctly decoded -- is
+#: what gets handed over. See `_dshow_text`.
 #: Names of Windows recording devices that carry the *output* back to us.
 #:
 #: Windows gives ffmpeg no system-audio tap any more than macOS does: the
@@ -1031,6 +1038,29 @@ WINDOWS_LOOPBACK_HINTS = ('stereo mix', '立体声混音', 'what u hear',
                           'wave out mix', 'virtual-audio-capturer',
                           'cable output', 'voicemeeter', 'loopback',
                           'soundflower', 'vb-audio')
+
+
+def _dshow_text(raw):
+    """ffmpeg's console output, decoded so a device name survives the trip.
+
+    `errors='replace'` is what broke this: on a cp936 console it turns every
+    non-ASCII device name into characters that can never be handed back to
+    ffmpeg -- the bytes are gone, not merely wrong -- and the mangled name was
+    then passed as `audio=<name>`, which ffmpeg can only refuse. The mirror paid
+    for it with a full no-frame budget and a session that came back silent.
+
+    Trying the encodings in order keeps the name intact whichever code page the
+    console is on; UTF-8 goes first because it is the only one that *fails*
+    (rather than silently producing mojibake) when the bytes are not what it
+    expects. Latin-1 never raises, so it is the last resort.
+    """
+    for encoding in ('utf-8', 'mbcs', locale.getpreferredencoding(False),
+                     'cp936', 'latin-1'):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode('utf-8', 'replace')
 
 
 def _dshow_lists(ffmpeg):
@@ -1045,7 +1075,7 @@ def _dshow_lists(ffmpeg):
                                '-f', 'dshow', '-i', 'dummy'],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               timeout=10)
-        text = proc.stdout.decode('utf-8', 'replace')
+        text = _dshow_text(proc.stdout)
     except Exception as e:
         logger.error("cannot list dshow devices: %s", e)
         return [], []
@@ -1098,6 +1128,11 @@ def _probe_windows(ffmpeg, cursor=True):
     return _Capture(
         '屏幕 (GDI) + 系统声音 ({})'.format(device),
         [base + ['-i', 'desktop'],
+         # The name, not the ASCII identifier ffmpeg prints under it: handing
+         # ffmpeg `audio=@device_cm_{...}\wave_{...}` was measured on the real
+         # box -- ffmpeg 8.1.2 answers `Error opening input file` and the tap
+         # delivers nothing, while the name (once decoded correctly, see
+         # `_dshow_text`) gives a first frame in 1.4 s.
          ['-f', 'dshow', '-i', 'audio={}'.format(device)]],
         audio_map='1:a:0')
 

@@ -13329,6 +13329,53 @@ done
           and '重新探测采集' in _line39,
           _line39)
 
+    # -- what ffmpeg is *handed*, versus what the user is shown ---------------
+    # A device name does not survive a console code page that is not UTF-8: the
+    # process launched from the desktop saw the table in the console's encoding,
+    # `errors='replace'` threw the unreadable bytes away, and the mangled name
+    # went back to ffmpeg as `audio=<name>` -- an argument it can only refuse,
+    # which cost the whole no-frame budget before the video-only retry. The
+    # alternative name ffmpeg prints under each device is pure ASCII, so nothing
+    # on the way to ffmpeg depends on a code page.
+    _gbk39 = ('[in#0 @ 1] "立体声混音 (Realtek(R) Audio)" (audio)\n'
+              '[in#0 @ 1] Error opening input').encode('gbk')
+    check("a device table written in a Chinese console code page survives",
+          '立体声混音' in m39._dshow_text(_gbk39),
+          repr(m39._dshow_text(_gbk39)))
+    check("the same table read as UTF-8 decodes to the same names",
+          m39._parse_dshow_devices(m39._dshow_text(_dshow_real.encode(
+              'utf-8')))[1][-1] == '立体声混音 (Realtek(R) Audio)',
+          'whichever code page the console is on, the name is the name')
+
+    _win_alt39 = _write_fake(_bin39, "ffmpeg-win-alt", r"""#!/bin/sh
+case "$*" in
+  *dshow*)
+    printf '%s\n' \
+      '[in#0 @ 0x1] "立体声混音 (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 0x1]   Alternative name "@device_cm_{33D9A762}\wave_{BD7FE901}"' \
+      '[in#0 @ 0x1] Error opening input: Input/output error'
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""")
+    m39._capture_cache.clear()
+    _capalt39 = m39.probe_capture(_win_alt39, 'win32')
+    # The alternative name is the tempting shortcut -- pure ASCII, no code page
+    # anywhere -- and it does not work: measured on the real box, ffmpeg 8.1.2
+    # answers `Error opening input file @device_cm_{...}\wave_{...}` for a tap
+    # that delivers 532 KB in four seconds when named. So the name goes in, and
+    # `_dshow_text` is what keeps it readable.
+    check("the capture command carries the name, never the ascii alternative",
+          _capalt39.audio_map == '1:a:0'
+          and _capalt39.inputs[1][3] == 'audio=立体声混音 (Realtek(R) Audio)'
+          and '立体声混音' in _capalt39.label,
+          'ffmpeg refuses `audio=@device_cm_...` with an I/O error: %s'
+          % (_capalt39.inputs,))
+
     # -- a DLNA search that does not leave from the right adapter -----------
     # The routed attempt first (what a single-homed machine needs and what the
     # rest of this suite has always exercised), then one per local address.
