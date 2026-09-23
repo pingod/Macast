@@ -918,6 +918,38 @@ def _probe_avfoundation(ffmpeg, cursor=True):
                     audio_map='0:a:0', screens=screens)
 
 
+def video_only_capture(capture):
+    """The same screen grab with the system-audio tap removed.
+
+    A tap the process is not allowed to read -- no microphone grant, or a
+    BlackHole nothing is clocking -- does not fail loudly: avfoundation opens
+    the session, delivers nothing at all, and the *video* starves with it. The
+    one visible symptom is a capture that never returns a frame, so the retry
+    has to be able to ask for video alone. Returns None when there is nothing
+    to give up. Cached probes are never mutated.
+    """
+    if capture is None or capture.audio_map is None:
+        return None
+    try:
+        audio_input = int(capture.audio_map.split(':')[0])
+    except (IndexError, ValueError):
+        return None
+    inputs = [list(one) for one in capture.inputs]
+    if audio_input == 0 and inputs:
+        # avfoundation carries screen and sound in a single -i ('1:3'): the
+        # audio half goes back to `none`. Only that exact shape -- x11grab's -i
+        # is a display (`:0+0,0`), and rewriting *that* would break the video
+        # instead of the sound.
+        for pos, arg in enumerate(inputs[0]):
+            if arg == '-i' and pos + 1 < len(inputs[0]) \
+                    and re.match(r'^\d+:\d+$', inputs[0][pos + 1]):
+                inputs[0][pos + 1] = inputs[0][pos + 1].split(':')[0] + ':none'
+    else:
+        # One input per device (PulseAudio's monitor sink): drop that input.
+        del inputs[audio_input:audio_input + 1]
+    return _Capture('屏幕 (无系统声音)', inputs, screens=capture.screens)
+
+
 def _default_pulse_monitor():
     """`<default sink>.monitor`, the PipeWire/PulseAudio system-audio tap."""
     try:
@@ -1067,6 +1099,47 @@ def capture_unavailable_hint():
         return '这个 ffmpeg 构建不支持 gdigrab'
     return ('没有 DISPLAY：x11grab 只认 X11 会话（Wayland 下 ffmpeg 无法截屏，'
             '本插件的三种目标都收不到画面；请切到 XWayland/X11 会话）')
+
+
+#: How long the encoder may stay silent before we call the capture dead. A
+#: denied input exits inside a second; this is the slower half of the same
+#: failure -- a session that opens and never delivers a frame.
+NO_FRAME_SECONDS = 3.0
+
+#: Lines that show up on *working* captures too, so quoting them as the reason
+#: for a failure would be a guess. Measured on this machine: a 6-second grab
+#: that wrote 3.9 MB of H.264 printed both of these.
+FFMPEG_NOISE = re.compile(
+    r"^(objc\[\d+\]: "                             # Apple runtime chatter
+    r"|\[in#0/avfoundation @ \w+\] Stream #0: not enough frames"
+    r"|\[AVFoundation indev @ \w+\] Configuration of video device failed)")
+
+#: macOS 的授权改动只对新启动的进程生效，而 ffmpeg 是我们 spawn 的子进程：
+#: 不重启 Macast，勾了也没有用。每一句"没有画面"都必须说到这一步。
+PERMISSION_DOOR = '请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许 Macast'
+
+#: avfoundation 把系统声音当作**输入**设备，所以它吃的是麦克风授权，不是屏幕录制；
+#: 拿不到麦克风时它不报错，只是整条采集再没有一帧。降级成功的那一句要说出这一点。
+AUDIO_DROPPED_SUFFIX = (
+    '（本次镜像没有系统声音：带上它就一直取不到帧，已改为只采集画面。'
+    '要声音请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Macast，勾选后重启 '
+    'Macast）')
+
+
+def no_frame_words(detail='', platform=None):
+    """The sentence for a capture that opened and never produced a frame.
+
+    `detail` is ffmpeg's own last words, and it is kept as an appendix only:
+    the denied-input case prints objc registration noise that means nothing,
+    and a message that leads with it leaves the user without a door to knock
+    on -- which is the one thing this branch exists to provide.
+    """
+    text = '屏幕采集在 {:g} 秒内没有返回画面'.format(NO_FRAME_SECONDS)
+    if detail:
+        text += '（ffmpeg：{}）'.format(detail)
+    if (platform or sys.platform) == 'darwin':
+        text += '；{}，勾选后重启 Macast'.format(PERMISSION_DOOR)
+    return text
 
 
 # -- macOS 系统声音辅助：一键安装 BlackHole + 多输出设备 -----------------------
@@ -4549,6 +4622,11 @@ class _Aborted(Exception):
     """The generation moved on while _mirror was setting up; stand down."""
 
 
+class _RetryVideoOnly(Exception):
+    """The capture with system audio never produced a frame: unwind this
+    attempt and start a video-only one, without calling it a failure."""
+
+
 class ScreenMirrorRenderer(Renderer):
 
     #: Told to `MacastPluginManager` that this plugin owns the desktop console:
@@ -4578,6 +4656,9 @@ class ScreenMirrorRenderer(Renderer):
         #: second one while the first is still probing, and「已经在镜像了」would
         #: be a lie for the ~3 s the setup takes.
         self._starting = False
+        #: This session had to drop the system-audio tap to get a frame at all;
+        #: see AUDIO_DROPPED_SUFFIX.
+        self._audio_dropped = False
         self.renderer_setting = ScreenMirrorSetting()
         # The surface asks *this* renderer about the session, not the bus's
         # "whoever is playing": see `ScreenMirrorSetting._owner`.
@@ -4753,6 +4834,7 @@ class ScreenMirrorRenderer(Renderer):
             if self._mirroring or self._starting:
                 return False
             self._starting = True
+            self._audio_dropped = False
             self._generation += 1
             generation = self._generation
         threading.Thread(target=self._mirror, args=(generation,),
@@ -4772,15 +4854,24 @@ class ScreenMirrorRenderer(Renderer):
 
     def _mirror(self, generation):
         """Set one session up, and stop saying「正在启动」whichever way it ends."""
+        with_audio = True
         try:
-            self._run_mirror(generation)
+            while self._run_mirror(generation, with_audio):
+                # The video-only attempt is a new session, not a second half of
+                # this one: `_run_mirror` has already retired the generation
+                # that failed, so pick the new number up before it is taken.
+                with self._lock:
+                    generation = self._generation
+                    self._starting = True
+                with_audio = False
         finally:
             with self._lock:
                 # A newer generation owns the flag now; it clears its own.
                 if generation == self._generation:
                     self._starting = False
 
-    def _run_mirror(self, generation):
+    def _run_mirror(self, generation, with_audio=True):
+        """One capture attempt. True means "retry this without system audio"."""
         kind = output_kind()
         host = port = None
         name = ''
@@ -4791,7 +4882,7 @@ class ScreenMirrorRenderer(Renderer):
             # to appear on a page that was already on the browser target.
             # The verdict goes on this copy: one line, no card above it.
             self._fail(target_prompt(kind, with_verdict=True), generation)
-            return
+            return False
         if kind in ('cast', 'caststream'):
             host, port, name = self.target()
         elif kind == 'dlna':
@@ -4800,11 +4891,13 @@ class ScreenMirrorRenderer(Renderer):
         if ffmpeg is None:
             self._fail('找不到 ffmpeg：{}后重试'.format(FFMPEG_WAY.get(
                 sys.platform, '用包管理器安装 ffmpeg')), generation)
-            return
+            return False
         capture = probe_capture(ffmpeg)
         if capture is None:
             self._fail(capture_unavailable_hint(), generation)
-            return
+            return False
+        if not with_audio:
+            capture = video_only_capture(capture) or capture
         height, bitrate = self.quality()
         encoder = encoder_kind()
         if encoder == 'hardware' and not has_hardware_encoder(ffmpeg):
@@ -4870,15 +4963,27 @@ class ScreenMirrorRenderer(Renderer):
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
-            first_bytes.wait(timeout=3.0)
+            first_bytes.wait(timeout=NO_FRAME_SECONDS)
             if not first_bytes.is_set():
+                detail = '；'.join(list(tail)[-3:])
+                if with_audio and capture.audio_map and kind != 'caststream':
+                    # An audio tap this process may not read -- no microphone
+                    # grant, or a BlackHole nothing is clocking -- does not
+                    # complain: the session opens and delivers nothing, video
+                    # included. Give up the sound rather than the mirror.
+                    logger.warning(
+                        'capture with system audio returned no frame in %g s'
+                        ' (%s); retrying video only', NO_FRAME_SECONDS,
+                        detail or 'no stderr from ffmpeg')
+                    # Retire the generation before the process dies, or the
+                    # pump reports our own kill as an interruption.
+                    with self._lock:
+                        self._generation += 1
+                        self._audio_dropped = True
+                    raise _RetryVideoOnly()
                 if proc.poll() is None:
                     proc.terminate()
-                detail = '；'.join(list(tail)[-3:])
-                raise RuntimeError(
-                    '屏幕采集在 3 秒内没有返回画面{}'.format(
-                        '：{}'.format(detail) if detail else
-                        '；请在系统设置 → 隐私与安全性 → 屏幕录制中允许 Macast'))
+                raise RuntimeError(no_frame_words(detail))
             if proc.poll() is not None or generation != self._generation:
                 raise _Aborted()
             if kind == 'dlna':
@@ -4904,6 +5009,11 @@ class ScreenMirrorRenderer(Renderer):
                 _cleanup(None, None, None, stream)
             self._teardown()
             return
+        except _RetryVideoOnly:
+            # Not a failure, so nothing goes on the status line: the video-only
+            # attempt is already under way and will report its own outcome.
+            self._teardown()
+            return True
         except Exception as e:
             if stream is not None and not handed:
                 _cleanup(None, None, None, stream)
@@ -4913,7 +5023,7 @@ class ScreenMirrorRenderer(Renderer):
                 else '浏览器'
             self._fail('镜像到 {} 启动失败：{}'.format(target_label, detail),
                        generation)
-            return
+            return False
         # Spawned outside the lock: a menu click that aborts this session must
         # not queue behind an OS call.
         awake = _keep_awake()
@@ -4956,6 +5066,11 @@ class ScreenMirrorRenderer(Renderer):
                 message = ('设备拒绝了低延迟通道（{}），已改用兼容通道 LOAD，'
                            '这一路有声音。已开始镜像到 {}'.format(
                                refused, name))
+        if self._audio_dropped:
+            # Same rule as the fallback above: the picture arrived, so the
+            # sentence is green -- but the sound the user asked for did not,
+            # and only this line says so and where the door is.
+            message += AUDIO_DROPPED_SUFFIX
         notify(message, sound=True)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
@@ -5100,8 +5215,8 @@ class ScreenMirrorRenderer(Renderer):
                 return
         code = proc.poll()
         if time.time() - started_at < EARLY_DEATH_SECONDS:
-            hint = ('：若是首次使用，请在「系统设置 → 隐私与安全性 → 屏幕录制」'
-                    '中允许 Macast' if sys.platform == 'darwin' else '')
+            hint = ('：若是首次使用，{}，勾选后重启 Macast'.format(PERMISSION_DOOR)
+                    if sys.platform == 'darwin' else '')
             self._fail('屏幕采集启动失败（ffmpeg 退出码 {}）{}'.format(code, hint),
                        generation)
         else:
@@ -5244,6 +5359,13 @@ def _drain_stderr(proc, tail):
         for raw in iter(proc.stderr.readline, b''):
             line = raw.decode('utf-8', 'replace').rstrip()
             if not line:
+                continue
+            if FFMPEG_NOISE.match(line):
+                # Apple's objc runtime prints this on every avfoundation screen
+                # grab, granted or not. It is the only thing a denied capture
+                # ever says, so it must not crowd out the sentence we do want
+                # the user to read -- the log below keeps it.
+                logger.debug('ffmpeg (noise): %s', line)
                 continue
             tail.append(line)
             logger.debug('ffmpeg: %s', line)

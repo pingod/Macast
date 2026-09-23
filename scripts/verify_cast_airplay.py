@@ -12801,6 +12801,224 @@ finally:
 
 
 # --------------------------------------------------------------------------
+# Part 38: the capture that opens and never returns a frame.
+#
+# 2026-09-23, on the installed .app: 「镜像到 浏览器 启动失败：屏幕采集在 3 秒内
+# 没有返回画面：objc[…]: class `NSKVONotifying_AVCaptureScreenInput' not linked
+# into application；…Configuration of video device failed…」. Both of those
+# lines come out of a capture that *works* -- measured on this machine: the same
+# ffmpeg wrote 3.9 MB of H.264 in six seconds -- so they explained nothing.
+# What did explain it: drop the system-audio input and the frames come back. A
+# tap this process may not read (avfoundation treats every audio input as a
+# microphone, so that is the grant it wants) starves the whole session without
+# saying so, which leaves the code three jobs: keep the noise out of the
+# message, name the door in the message, and bring the mirror up without the
+# sound rather than not at all.
+print("\n=== Part 38: a capture that never returns a frame ===")
+import traceback as _traceback38
+
+_tmp38 = _tempfile.mkdtemp(prefix="macast-noframe-")
+mirror38 = None
+try:
+    _saved38 = (utils.Setting.setting, utils.Setting.setting_path,
+                utils.SETTING_DIR)
+    utils.SETTING_DIR = _tmp38
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp38, "macast_setting.json")
+    mirror38 = _load_plugin("screen_mirror_plugin_v38", "screen_mirror.py")
+    m38 = mirror38
+
+    # -- what a *healthy* avfoundation capture prints on stderr --------------
+    _noise38 = [
+        "objc[68946]: class `NSKVONotifying_AVCaptureScreenInput' not linked "
+        "into application",
+        "[AVFoundation indev @ 0x79b100c140] Configuration of video device "
+        "failed, falling back to default.",
+        "[in#0/avfoundation @ 0x7baa804000] Stream #0: not enough frames to "
+        "estimate rate; consider increasing probesize",
+    ]
+    _real38 = '[avfoundation @ 0x1] Input/output error'
+    _noise_script38 = _write_fake(
+        os.path.join(_tmp38, 'binnoise'), 'stderr-noise',
+        '#!/bin/sh\ncat >&2 <<\'NOISE\'\n'
+        + '\n'.join(_noise38 + [_real38]) + '\nNOISE\n')
+    _proc38 = subprocess.Popen([_noise_script38], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE)
+    _tail38 = []
+    m38._drain_stderr(_proc38, _tail38)
+    check("lines a working capture prints too never become the reason given "
+          "for a failure",
+          _tail38 == [_real38], str(_tail38))
+    _proc38.wait(timeout=5)
+
+    # -- the sentence has to end at a door -----------------------------------
+    _words38 = m38.no_frame_words('whatever ffmpeg said', 'darwin')
+    check("「没有返回画面」names the permission and the restart, and keeps "
+          "ffmpeg's own words as an appendix",
+          'whatever ffmpeg said' in _words38
+          and m38.PERMISSION_DOOR in _words38 and '重启' in _words38, _words38)
+    check("a platform with no such door does not invent one",
+          '隐私与安全性' not in m38.no_frame_words('', 'linux'),
+          m38.no_frame_words('', 'linux'))
+
+    # -- giving up the sound, not the mirror ---------------------------------
+    _av38 = m38._Capture('屏幕 + 系统声音 (BlackHole)',
+                         [['-f', 'avfoundation', '-i', '1:3']], '0:a:0',
+                         screens=[(1, 'Capture screen 0')])
+    _drop38 = m38.video_only_capture(_av38)
+    check("avfoundation carries both in one -i, so the retry asks for "
+          "screen:none and the cached probe it came from stays intact",
+          _drop38 is not None and _drop38.inputs ==
+          [['-f', 'avfoundation', '-i', '1:none']]
+          and _drop38.audio_map is None
+          and _av38.inputs[0][-1] == '1:3' and _av38.audio_map == '0:a:0',
+          '%s / %s' % (_drop38.inputs if _drop38 else None, _av38.inputs))
+    _pulse38 = m38._Capture(
+        '屏幕 (X11) + 系统声音 (PulseAudio)',
+        [['-f', 'x11grab', '-i', ':0+0,0'], ['-f', 'pulse', '-i', 'o.monitor']],
+        '1:a:0')
+    check("a second input per device is dropped whole, and the display spec is "
+          "left alone (rewriting `:0+0,0` would break the video, not the sound)",
+          m38.video_only_capture(_pulse38).inputs ==
+          [['-f', 'x11grab', '-i', ':0+0,0']],
+          str(m38.video_only_capture(_pulse38).inputs))
+    check("with no audio in the graph there is nothing to give up",
+          m38.video_only_capture(m38._Capture('x', [['-i', '1:none']])) is None)
+
+    # -- end to end: the stall, the retry, and what the user hears ------------
+    # The fake answers -list_devices with a BlackHole, streams bytes only for a
+    # video-only -i, and otherwise prints the runtime chatter a real stalled
+    # capture prints and goes quiet -- the failure this part exists for.
+    _fake38 = _write_fake(os.path.join(_tmp38, 'bin38'), 'ffmpeg', r"""#!/bin/sh
+case "$*" in
+  *list_devices*)
+    cat <<'DEVICES'
+AVFoundation input device list has 4 items:
+[AVFoundation indev @ 0x1] AVFoundation video devices:
+[AVFoundation indev @ 0x1] [0] FaceTime HD Camera
+[AVFoundation indev @ 0x1] [1] Capture screen 0
+[AVFoundation indev @ 0x1] AVFoundation audio devices:
+[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone
+[AVFoundation indev @ 0x1] [1] BlackHole 2ch
+DEVICES
+    exit 0
+    ;;
+esac
+case "$*" in
+  *":none"*)
+    while true; do
+      head -c 4096 /dev/zero | tr '\0' 'F'
+      sleep 0.05
+    done
+    ;;
+  *)
+    cat >&2 <<'NOISE'
+objc[42]: class `NSKVONotifying_AVCaptureScreenInput' not linked into application
+[AVFoundation indev @ 0x1] Configuration of video device failed, falling back to default.
+NOISE
+    sleep 60
+    ;;
+esac
+""")
+    # `probe_capture` dispatches on the host platform and this machine may be
+    # Linux; the capture shape under test is avfoundation's, so hand it over
+    # directly. Everything after this point spawns the fake for real.
+    _cap38 = m38._Capture(
+        '屏幕 + 系统声音 (BlackHole)',
+        [['-f', 'avfoundation', '-framerate', '24', '-pixel_format', 'uyvy422',
+          '-capture_cursor', '1', '-i', '1:1']], '0:a:0')
+    _notify38 = []
+
+    def _notify38_rec(*args, **kwargs):
+        # publish('app_notify', title, message) -- the sentence the user reads
+        # is the second half, and a check on the first would pass forever.
+        _notify38.append(' '.join(str(one) for one in args))
+
+    cherrypy.engine.subscribe('app_notify', _notify38_rec)
+    _saved38_probe = m38.probe_capture
+    _saved38_find = m38.find_ffmpeg
+    _saved38_awake = m38._keep_awake
+    _saved38_budget = m38.NO_FRAME_SECONDS
+    m38.probe_capture = lambda ffmpeg, *a, **k: _cap38
+    m38.find_ffmpeg = lambda: _fake38
+    m38._keep_awake = lambda *a, **k: None      # no caffeinate in a test
+    m38.NO_FRAME_SECONDS = 0.5                  # the real budget is 3 seconds
+
+    _rec38 = _StateRec()
+
+    class _Mirror38(m38.ScreenMirrorRenderer):
+        @property
+        def protocol(self):
+            return _rec38
+
+    try:
+        utils.Setting.set(m38.SettingProperty.Mirror_Output, 'browser')
+        mir38 = _Mirror38()
+        mir38.start_mirror()
+        check("an unreadable audio tap no longer costs the mirror: the session "
+              "comes up video-only",
+              _wait_until(lambda: mir38.is_mirroring()
+                          or ('error', True) in _rec38.rows, timeout=20),
+              str(_rec38.rows))
+        check("and the killed attempt is not reported as an interruption "
+              "(the generation moves on before we kill it)",
+              ('error', True) not in _rec38.rows, str(_rec38.rows))
+        _said38 = [str(s) for s in _notify38]
+        check("the success line owns up to the sound it dropped, and says "
+              "which door and which restart",
+              any('没有系统声音' in s and '麦克风' in s and '重启' in s
+                  for s in _said38), str(_said38))
+        check("which is the whole of it: no failure, no Apple runtime noise",
+              not any('启动失败' in s or 'objc' in s for s in _said38),
+              str(_said38))
+        _cmd38 = m38.build_ffmpeg_command(_fake38, m38.video_only_capture(_cap38),
+                                          720, 5000000)
+        check("the encoder was asked for video alone: the audio map is gone "
+              "and -an took its place",
+              '-an' in _cmd38 and '0:a:0' not in _cmd38
+              and '-i' in _cmd38 and _cmd38[_cmd38.index('-i') + 1] == '1:none',
+              str(_cmd38))
+        mir38.stop_mirror()
+
+        # Nothing yields a frame at all: the last word must be a next step.
+        _rec38.rows = []
+        del _notify38[:]
+        _dead38 = _write_fake(os.path.join(_tmp38, 'bin38dead'), 'ffmpeg-dead',
+                              '#!/bin/sh\ncat >&2 <<\'NOISE\'\n'
+                              + _noise38[0] + '\nNOISE\nsleep 60\n')
+        m38.find_ffmpeg = lambda: _dead38
+        mir38b = _Mirror38()
+        mir38b.start_mirror()
+        check("a capture with no audio left to blame still reports a failure",
+              _wait_until(lambda: ('error', True) in _rec38.rows, timeout=20),
+              str(_rec38.rows))
+        _title38 = [v for k, v in _rec38.rows if k == 'CurrentTrackTitle']
+        check("and that failure names the permission door and the restart, "
+              "with the runtime noise left out",
+              _title38 and m38.PERMISSION_DOOR in _title38[-1]
+              and '重启' in _title38[-1] and 'objc' not in _title38[-1],
+              str(_title38))
+        mir38b.stop_mirror()
+    finally:
+        m38.probe_capture = _saved38_probe
+        m38.find_ffmpeg = _saved38_find
+        m38._keep_awake = _saved38_awake
+        m38.NO_FRAME_SECONDS = _saved38_budget
+        m38._capture_cache.clear()
+        try:
+            cherrypy.engine.unsubscribe('app_notify', _notify38_rec)
+        except Exception:
+            pass
+finally:
+    if mirror38 is None:
+        print('Part 38 setup error: %s' % _traceback38.format_exc())
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp38, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
