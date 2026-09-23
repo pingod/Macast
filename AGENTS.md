@@ -739,16 +739,26 @@ dns-sd -B _googlecast._tcp            # 5 秒后应有 Macast-<主机名>
 # 4. 只有要测「电脑投屏」时：先重新勾一次录屏授权，再判定镜像坏没坏
 ```
 
-**替换安装后有两件事会被误读成"新产物坏了"，都是本机 2026-09-23 实测过的：**
+**替换安装后有三件事会被误读成"新产物坏了"，都是本机 2026-09-23 实测过的：**
 
 - **`open -a /Applications/Macast.app` 可能什么都不启动**（LaunchServices 还认那个刚被移走的
-  旧实例）。直接跑 `Contents/MacOS/Macast` 能证明包是好的，但**测权限必须走 `open`**
-  —— 从 shell 直接起会改 TCC 的归属对象。可靠写法：`open -n -a /Applications/Macast.app`。
-- **录屏授权记在"那一个包"的身份上，换了包就失效一次**：装完新包第一次镜像会报
-  「屏幕采集在 3 秒内没有返回画面」，带音频与只带画面两路都一样 —— 那是授权，不是链路。
-  判据在 `/Library/Application Support/com.apple.TCC/TCC.db` 的 `access` 表
-  （`kTCCServiceScreenCapture` / `cn.xfangfang.Macast` 的 `auth_value` 与 `last_modified`），
-  重新勾上并重启之后同一条采集命令立刻出帧。完整说法见 `docs/Casting-Suite.md` §5。
+  旧实例）。可靠写法是 `open -n -a /Applications/Macast.app`。
+- **不要用 `Contents/MacOS/Macast` 做"包起不起来"的冒烟**（本轮就在这上面栽了一次）：它读的是
+  **用户真实的配置目录**，而旧实例还在听 58880 ⇒ 按 §4.2 那条端口回退逻辑，它会挑一个随机端口
+  并把 `ApplicationPort` **写进真实设置**、同时重置 USN（本机实测：`58880 → 50116`，
+  `macast_setting.json` 当场被改）。要证明包是好的，就直接装到 `/Applications` 再 `open -n -a`；
+  万一已经误起了第二个实例，还原顺序是：`kill -2` 掉真实实例（它会自己按内存里的值回写）、
+  确认 `keys` 数与 `USN` 没继续变，再把 `ApplicationPort` 改回bound 端口。
+  带临时配置目录的启动只有 `scripts/e2e_smoke.py` 会做（§4.9 那条 `appdirs` 打桩）。
+- **录屏授权记在"那一个包"的代码身份上，换了包就失效一次**：装完新包第一次镜像会报
+  「屏幕采集在 3 秒内没有返回画面」（或预览那句「屏幕是不是锁了？」），带音频与只带画面两路
+  都一样 —— 那是授权，不是链路。**区分"锁屏"与"没授权"的判据**：同一分钟、同一个设备号，
+  从 shell 直接跑 `ffmpeg -f avfoundation -i "3:none" -t 3 …` 能写出 1.1 MB H.264
+  ⇒ 屏幕没锁，缺的是这个包的授权（shell 那一路有自己的身份）。而 `TCC.db` 里
+  `kTCCServiceScreenCapture` / `cn.xfangfang.Macast` 那一行**不会替你说话**：本机实测它停在
+  `auth_value=2`、`last_modified=13:18:20`，新装的包（13:37）拿不到帧也不会改写这一行。
+  修法是让用户在「系统设置 → 隐私与安全性 → 屏幕录制」里把 Macast 关掉再打开（列表里有两个
+  就删掉旧的），然后重启 Macast —— **这是系统设置，别代用户点**。完整说法见 `docs/Casting-Suite.md` §5。
 
 **改成了同一版本号重新发布时**：两个方向都走得通 —— `gh release delete v<x>`（默认只删
 Release、**保留 git tag**，v0.7.15 之前那 14 个 Release 就是这么清的）可以直接把同名
