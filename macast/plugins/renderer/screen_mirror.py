@@ -5205,9 +5205,12 @@ class ScreenMirrorRenderer(Renderer):
         self._url = ''
         #: What the DLNA renderer last said (TransportState), for the menu.
         self._dlna_state = ''
-        #: Whether the last DLNA poll saw bytes being consumed. Kept apart from
+        #: Whether the last DLNA poll found the renderer *disagreeing* with
+        #: bytes that were visibly being consumed. Kept apart from
         #: `_dlna_state` on purpose: that field is the renderer's own word and
-        #: the diagnostics card quotes it, while this one is what we measured.
+        #: the diagnostics card quotes it, while this one is our own finding --
+        #: it is what makes the status line say「（客户端在读取）」instead of
+        #: repeating STOPPED over a picture that is on screen.
         self._dlna_reading = False
         #: A session is being set up: the console's button must not start a
         #: second one while the first is still probing, and「已经在镜像了」would
@@ -5291,13 +5294,18 @@ class ScreenMirrorRenderer(Renderer):
             info['frames'] = sink.frames
             info['in_flight'] = sink.in_flight()
             info['delay'] = sink.playout_delay
-        elif server.session.bytelog:
-            # On this target the meaningful health number is how far behind
-            # the TV is -- it is reading from the hoard we pre-filled.
+        elif kind == 'dlna':
+            # Both shapes serve this target, and both need the same three facts.
+            # Keying this on the byte log made the *default* shape (the live
+            # stream, which keeps no hoard) report nothing at all -- the line
+            # read「档位 ? · 电视 未上报」over a picture that was on screen.
             info['profile'] = dlna_profile_id(server.session.profile)
             info['state'] = self._dlna_state
             info['reading'] = self._dlna_reading
-            info['buffered'] = max(0, source.end - source.start)
+            if server.session.bytelog:
+                # How far behind the TV is, which only means something when it
+                # is reading from a hoard we pre-filled.
+                info['buffered'] = max(0, source.end - source.start)
         return info
 
     # -- Renderer API ----------------------------------------------------------
