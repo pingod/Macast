@@ -257,6 +257,7 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
@@ -352,6 +353,7 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \
@@ -473,6 +475,7 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
             --hidden-import=pyperclip \

@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.13</macast.version>
+# <macast.version>0.14</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows is video only. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding (default: auto, which takes hardware once an encoder probe has answered), and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; since 0.12 the menu bar holds no mirror rows at all, only the notifications, and stopping goes through the tab,「停止接受投屏」or switching renderer -- all three end in the same teardown. Drops for a slow viewer now land on container boundaries (whole MP4 fragments, whole 188-byte TS packets), queue depth is budgeted in seconds of picture rather than bytes, and the console says whether system sound actually reaches the capture tap instead of only that a tap exists. Since 0.13 an audio tap this process may not read no longer costs the mirror: a capture that returns no frame retries without it, and both the degraded success and the final failure name the permission door and the restart they need.</macast.desc>
+# <macast.desc>Mirror this Mac/PC/desktop screen to a Chromecast on the LAN (two channels: a compatible MPEG-TS LOAD, or an experimental low-latency Cast Streaming path that speaks Chrome's own mirroring protocol and falls back to LOAD if the device refuses it), to an old DLNA TV (five compatibility profiles, nothing to install on the TV), or to any browser on the LAN (open a URL -- no app needed). ffmpeg captures (avfoundation / gdigrab / x11grab), encodes, and a live stream is served from this machine: MPEG-TS LOADed on the TV for Chromecast, fragmented MP4 played in a bundled web page for browsers, or a deliberately endless MPEG-PS / MPEG-TS / MKV "file" that a UPnP MediaRenderer is pushed to fetch over SOAP. System audio rides along where a tap exists: macOS gets a one-click assisted install (official BlackHole pkg, sha256-verified, plus an auto-created multi-output device), Linux uses the PulseAudio monitor; Windows uses a dshow *loopback recording device* (「立体声混音」/ Stereo Mix) when one is enabled, and names that device -- or says which door to open when there is none -- instead of claiming to be picture-only. The first-frame budget is per platform since 0.14: gdigrab has to open the desktop before the dshow input is even opened, so a 3-second macOS budget was killing captures whose sound device had already negotiated stereo, and the message a Windows session got sent it to macOS's microphone pane. Also selectable: which display, cursor or no cursor, four quality presets, VideoToolbox hardware encoding (default: auto, which takes hardware once an encoder probe has answered), and a DLNA watchdog that re-pushes when the TV falls out of PLAYING and tells you which profile to try next. Since 0.11 the whole control surface is the「电脑投屏」tab of the settings page Macast serves in the browser; since 0.12 the menu bar holds no mirror rows at all, only the notifications, and stopping goes through the tab,「停止接受投屏」or switching renderer -- all three end in the same teardown. Drops for a slow viewer now land on container boundaries (whole MP4 fragments, whole 188-byte TS packets), queue depth is budgeted in seconds of picture rather than bytes, and the console says whether system sound actually reaches the capture tap instead of only that a tap exists. Since 0.13 an audio tap this process may not read no longer costs the mirror: a capture that returns no frame retries without it, and both the degraded success and the final failure name the permission door and the restart they need.</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -117,7 +117,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.13'
+PLUGIN_VERSION = '0.14'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -1229,6 +1229,27 @@ def capture_unavailable_hint():
 #: failure -- a session that opens and never delivers a frame.
 NO_FRAME_SECONDS = 3.0
 
+#: Windows needs longer, and not by a little. gdigrab opens the desktop first
+#: and the dshow loopback input is opened *after* it, so the pair takes seconds
+#: to reach its first byte. Measured on a real Windows 11 box (AMD-YES, ffmpeg
+#: 8.1.2), the combined pipeline printed both of these at the 3 s mark:
+#:
+#:   [in#0/gdigrab @ ...] Stream #0: not enough frames to estimate rate;
+#:                        consider increasing probesize
+#:   [aist#1:0/pcm_s16le @ ...] Guessed Channel Layout: stereo
+#:
+#: -- a slow start and a *working* sound device, and this budget killed them.
+#: The video-only retry then came up 1.2 s later, which is exactly how a
+#: machine with a working Stereo Mix reported「没有系统声音」: the verdict was
+#: ours, not ffmpeg's. Nothing here is macOS-derived any more.
+NO_FRAME_SECONDS_WIN32 = 8.0
+
+
+def no_frame_budget(platform=None):
+    """Seconds to wait for the first byte of encoder output on this platform."""
+    return (NO_FRAME_SECONDS_WIN32 if (platform or sys.platform) == 'win32'
+            else NO_FRAME_SECONDS)
+
 #: Lines that show up on *working* captures too, so quoting them as the reason
 #: for a failure would be a guess. Measured on this machine: a 6-second grab
 #: that wrote 3.9 MB of H.264 printed both of these.
@@ -1252,6 +1273,30 @@ AUDIO_DROPPED_SUFFIX = (
 #: 状态行要短：门的全名在通知与「系统声音」那一行里。
 AUDIO_DROPPED_MARK = '· 本次无系统声音（麦克风未授权）'
 
+#: The same two sentences for Windows, where the tap is lost for a different
+#: reason: there is no microphone grant to give, the loopback device is either
+#: busy, disabled, or too slow to clock the pipeline. Sending a Windows user to
+#: 「隐私与安全性 → 麦克风」is a dead end -- and it is what the first Windows run
+#: actually said.
+AUDIO_DROPPED_WIN32_SUFFIX = (
+    '（本次镜像没有系统声音：回环录音设备没能及时出帧，已改为只采集画面。'
+    'Windows 上多半是「立体声混音」被别的程序独占、或者它被停用了；'
+    '确认它可用后点「重新探测采集」，镜像会重启一次）')
+
+AUDIO_DROPPED_WIN32_MARK = '· 本次无系统声音（回环设备未出帧）'
+
+
+def audio_dropped_suffix(platform=None):
+    """The long sentence for a session that gave up its system audio."""
+    return (AUDIO_DROPPED_WIN32_SUFFIX if (platform or sys.platform) == 'win32'
+            else AUDIO_DROPPED_SUFFIX)
+
+
+def audio_dropped_mark(platform=None):
+    """The short one for the status line."""
+    return (AUDIO_DROPPED_WIN32_MARK if (platform or sys.platform) == 'win32'
+            else AUDIO_DROPPED_MARK)
+
 
 def no_frame_words(detail='', platform=None):
     """The sentence for a capture that opened and never produced a frame.
@@ -1261,7 +1306,7 @@ def no_frame_words(detail='', platform=None):
     and a message that leads with it leaves the user without a door to knock
     on -- which is the one thing this branch exists to provide.
     """
-    text = '屏幕采集在 {:g} 秒内没有返回画面'.format(NO_FRAME_SECONDS)
+    text = '屏幕采集在 {:g} 秒内没有返回画面'.format(no_frame_budget(platform))
     if detail:
         text += '（ffmpeg：{}）'.format(detail)
     if (platform or sys.platform) == 'darwin':
@@ -5268,7 +5313,8 @@ class ScreenMirrorRenderer(Renderer):
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait.
-            first_bytes.wait(timeout=NO_FRAME_SECONDS)
+            budget = no_frame_budget()
+            first_bytes.wait(timeout=budget)
             if not first_bytes.is_set():
                 detail = '；'.join(list(tail)[-3:])
                 if with_audio and capture.audio_map and kind != 'caststream':
@@ -5278,7 +5324,7 @@ class ScreenMirrorRenderer(Renderer):
                     # included. Give up the sound rather than the mirror.
                     logger.warning(
                         'capture with system audio returned no frame in %g s'
-                        ' (%s); retrying video only', NO_FRAME_SECONDS,
+                        ' (%s); retrying video only', budget,
                         detail or 'no stderr from ffmpeg')
                     # Retire the generation before the process dies, or the
                     # pump reports our own kill as an interruption.
@@ -5375,7 +5421,7 @@ class ScreenMirrorRenderer(Renderer):
             # Same rule as the fallback above: the picture arrived, so the
             # sentence is green -- but the sound the user asked for did not,
             # and only this line says so and where the door is.
-            message += AUDIO_DROPPED_SUFFIX
+            message += audio_dropped_suffix()
         notify(message, sound=True)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
@@ -6558,7 +6604,7 @@ class ScreenMirrorSetting(RendererSetting):
             line = '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
                 minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
         if renderer.audio_dropped():
-            line += ' ' + AUDIO_DROPPED_MARK
+            line += ' ' + audio_dropped_mark()
         return line
 
     @staticmethod
@@ -6572,20 +6618,30 @@ class ScreenMirrorSetting(RendererSetting):
                     CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
 
     @staticmethod
-    def _audio_line(renderer=None):
+    def _audio_line(renderer=None, platform=None):
         """What the last probe decided about system audio (never probes:
         the console polls this view while it is open).
 
         `renderer` is the live session, and it outranks the probe: a tap can be
         configured, probed, and still unreadable -- in which case this session
         has no sound in it, whatever the machine is set up to deliver.
+
+        `platform` is a test seam; production means sys.platform, because the
+        two platforms lose the tap for entirely different reasons and a sentence
+        that names the wrong one is worse than no sentence at all.
         """
+        platform = platform or sys.platform
         capture = next(iter(_capture_cache.values()), None)
         if capture is None:
             return '系统声音：开始镜像后这里会显示'
         if capture.audio_map:
             line = '系统声音：已启用 · {}'.format(capture.label)
             if renderer is not None and renderer.audio_dropped():
+                if platform == 'win32':
+                    return ('系统声音：这一次镜像没有声音 —— 回环录音设备没能'
+                            '及时出帧，所以只采了画面。要声音请确认「立体声混音」'
+                            '已启用、且没有被别的程序独占，点上面的'
+                            '「重新探测采集」，再把镜像重启一次')
                 return ('系统声音：这一次镜像没有声音 —— 那个采集口打不开，'
                         '连画面也不给，所以只采了画面。要声音请{}，勾选后重启 '
                         'Macast').format(MICROPHONE_DOOR)

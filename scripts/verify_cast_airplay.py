@@ -13493,6 +13493,126 @@ finally:
 
 
 # --------------------------------------------------------------------------
+# Part 40: three things only the *packaged* Windows build could teach us
+#
+# v0.8.4 shipped to a real Windows 11 box (AMD-YES) and was driven there -- the
+# running app, not the source -- which turned up a number, a sentence and a
+# build flag that were each right on exactly one platform:
+#
+#   1. our own 3-second first-frame budget killed a capture whose sound device
+#      had already opened (`Guessed Channel Layout: stereo`) and whose picture
+#      was 1.2 s behind; the video-only retry then came up, so a machine with a
+#      working Stereo Mix reported「没有系统声音」,
+#   2. the sentence explaining that sent a Windows user to macOS's microphone
+#      pane -- a door Windows does not have,
+#   3. the packaged build logged `Failed to start HTTPS channel: No module
+#      named 'cheroot.ssl'` at startup: AGENTS 4.3's class of bug, sitting on
+#      the very packaging path that had just been repaired for the plugins.
+#
+# So this part anchors the budget to the real stderr that justified it, keeps
+# the two wordings apart, and makes the three PyInstaller jobs prove they carry
+# the module that failed.
+# --------------------------------------------------------------------------
+print("\n=== Part 40: windows first-frame budget, wording, ssl module ===")
+import traceback as _traceback40
+
+_tmp40 = _tempfile.mkdtemp(prefix="macast-win40-")
+mirror40 = None
+try:
+    utils.SETTING_DIR = _tmp40
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp40, "macast_setting.json")
+    mirror40 = _load_plugin("screen_mirror_plugin_v40", "screen_mirror.py")
+    m40 = mirror40
+    _root40 = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _src40 = open(os.path.join(_root40, 'macast', 'plugins', 'renderer',
+                               'screen_mirror.py'), encoding='utf-8').read()
+
+    # -- the budget --------------------------------------------------------
+    check("the first-frame budget is platform-aware, not one number",
+          m40.no_frame_budget('darwin') == m40.NO_FRAME_SECONDS
+          and m40.no_frame_budget('linux') == m40.NO_FRAME_SECONDS
+          and m40.no_frame_budget('win32') == m40.NO_FRAME_SECONDS_WIN32
+          and m40.NO_FRAME_SECONDS_WIN32 > m40.NO_FRAME_SECONDS * 2,
+          'darwin/linux=%g win32=%g' % (m40.NO_FRAME_SECONDS,
+                                        m40.NO_FRAME_SECONDS_WIN32))
+
+    # Verbatim from the box, in the same stderr chunk the old budget killed:
+    # a gdigrab still starting up *and* a sound device that had opened.
+    check("the Windows budget cites the real output that justified it",
+          'not enough frames to estimate rate' in _src40
+          and 'Guessed Channel Layout: stereo' in _src40,
+          'a number without the evidence next to it is just a bigger guess')
+
+    check("the sentence a timed-out Windows capture gets quotes that budget",
+          '8 秒' in m40.no_frame_words('x', platform='win32')
+          and '3 秒' in m40.no_frame_words('x', platform='darwin'),
+          m40.no_frame_words('', platform='win32')[:120])
+
+    # -- the two wordings --------------------------------------------------
+    _win40 = m40.audio_dropped_suffix('win32') + m40.audio_dropped_mark('win32')
+    check("a Windows session that drops sound names the Windows cause",
+          '立体声混音' in _win40 and '重新探测采集' in _win40
+          and '独占' in _win40,
+          _win40)
+    check("and never sends the user to a door Windows does not have",
+          '麦克风' not in _win40 and '隐私与安全性' not in _win40,
+          'the macOS door is what the first Windows run actually printed')
+    check("the macOS wording is untouched by the Windows branch",
+          m40.audio_dropped_suffix('darwin') == m40.AUDIO_DROPPED_SUFFIX
+          and m40.audio_dropped_mark('darwin') == m40.AUDIO_DROPPED_MARK
+          and '麦克风' in m40.AUDIO_DROPPED_MARK,
+          m40.audio_dropped_suffix('darwin'))
+
+    # The「系统声音」row and the status line have to agree: green「已启用」above
+    # a mark that says otherwise is the lie Part 38 exists to prevent.
+    class _Dropped40(object):
+        @staticmethod
+        def audio_dropped():
+            return True
+    _cap40 = type('C40', (), {
+        'audio_map': ['0:a'],
+        'label': '屏幕 (GDI) + 系统声音 (立体声混音 (Realtek(R) Audio))'})()
+    m40._capture_cache['part40'] = _cap40
+    _holder40 = next(obj for obj in vars(m40).values()
+                     if isinstance(obj, type) and hasattr(obj, '_audio_line'))
+    _win_line40 = _holder40._audio_line(_Dropped40(), platform='win32')
+    _mac_line40 = _holder40._audio_line(_Dropped40(), platform='darwin')
+    check("the「系统声音」row speaks the language of the platform it ran on",
+          '立体声混音' in _win_line40 and '麦克风' not in _win_line40
+          and '麦克风' in _mac_line40,
+          _win_line40[:120])
+    check("and it does not say「已启用」in the same breath",
+          not _win_line40.startswith('系统声音：已启用'),
+          _win_line40[:60])
+
+    # -- the build flag ----------------------------------------------------
+    _yml40 = open(os.path.join(_root40, '.github', 'workflows', 'build.yml'),
+                  encoding='utf-8').read()
+    _py2app40 = open(os.path.join(_root40, 'scripts', 'setup_py2app.py'),
+                     encoding='utf-8').read()
+    _count40 = _yml40.count('--hidden-import=cheroot.ssl.builtin')
+    check("every PyInstaller job ships the ssl module cherrypy names at runtime",
+          _count40 == 3,
+          'found %d of 3 (macos-arm64, linux-x86_64, linux-arm64, windows)'
+          % _count40)
+    check("py2app keeps its include, so the two packaging paths cannot drift",
+          'cheroot.ssl.builtin' in _py2app40
+          and 'cheroot.ssl.builtin' in _yml40,
+          'the packaged Windows build logged this exact module as missing')
+    check("the Windows job is one of the three that carries it",
+          _yml40.count('--hidden-import=cheroot.ssl.builtin') >= 1
+          and _yml40.index('--hidden-import=cheroot.ssl.builtin')
+              < _yml40.index('windows-x86_64'),
+          'the module has to be in the list *before* the job that builds it')
+finally:
+    if mirror40 is None:
+        print('Part 40 setup error: %s' % _traceback40.format_exc())
+    utils.Setting.setting = {}
+    _shutil.rmtree(_tmp40, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
 
