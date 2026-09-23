@@ -5,7 +5,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.15</macast.version>
+# <macast.version>0.16</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
@@ -117,7 +117,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.15'
+PLUGIN_VERSION = '0.16'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -383,6 +383,12 @@ DLNA_ORG_FLAGS = '01500000000000000000000000000000'
 #: a short answer is what makes it give up.
 PS_PADDING = b'\x00\x00\x01\xbe\x00\x00'
 DLNA_POLL_SECONDS = 5.0
+#: How far past the encoder's newest byte a `Range` may start before it is read
+#: as a probe of the size we advertised rather than a reconnect. A renderer that
+#: resumes asks for the next byte it expects, which the encoder has almost
+#: always already produced; something hunting for a container index asks for an
+#: offset megabytes or gigabytes ahead of anything that exists.
+DLNA_MAX_AHEAD_BYTES = 4 << 20
 #: How long a bounded sniff waits for the encoder before we pad the rest.
 #: Longer than a keyframe interval, shorter than most TVs' own read timeout.
 DLNA_SNIFF_TIMEOUT = 10.0
@@ -776,8 +782,18 @@ def advertised_file(bitrate):
 
 
 def protocol_info(profile):
-    """The DIDL `protocolInfo` attribute for a DLNA profile."""
-    parts = ['DLNA.ORG_OP=01', 'DLNA.ORG_CI=0',
+    """The DIDL `protocolInfo` attribute for a DLNA profile.
+
+    `DLNA.ORG_OP=00` with `DLNA.ORG_CI=1` is the honest pair for what this is: a
+    live transcode with no seek of any kind. It used to say `OP=01`
+    ("byte-seek supported") and `CI=0` ("not converted"), and neither is true --
+    the file has no end to seek within, and every byte comes out of ffmpeg
+    rather than a stored file. Claiming byte-seek is what made a real Android 11
+    television take our fabricated 1.9 GB size as fact and go looking for a
+    container index at the end of it (measured: a whole-file read, then
+    `Range: bytes=1899887200-`, then that same pair again, never PLAYING).
+    """
+    parts = ['DLNA.ORG_OP=00', 'DLNA.ORG_CI=1',
              'DLNA.ORG_FLAGS={}'.format(DLNA_ORG_FLAGS)]
     if profile.org_pn:
         parts.insert(0, 'DLNA.ORG_PN={}'.format(profile.org_pn))
@@ -797,8 +813,9 @@ def content_features(profile):
     parts = []
     if profile.org_pn:
         parts.append('DLNA.ORG_PN={}'.format(profile.org_pn))
-    parts.append('DLNA.ORG_OP=01')
-    parts.append('DLNA.ORG_CI=0')
+    # Same policy as protocol_info: no seek, and it is a conversion. See there.
+    parts.append('DLNA.ORG_OP=00')
+    parts.append('DLNA.ORG_CI=1')
     parts.append('DLNA.ORG_FLAGS={}'.format(DLNA_ORG_FLAGS))
     return ';'.join(parts)
 
@@ -3018,6 +3035,25 @@ class _StreamHandler(BaseHTTPRequestHandler):
             self._not_found()
             return
         start, stop = requested
+        # A renderer hunting for a container index asks for an offset near the
+        # end of whatever size it believes in -- millions of bytes past anything
+        # the encoder has produced. Padding that gap (what this used to do)
+        # answers a fabricated offset with fabricated bytes, and a real
+        # Android 11 television read that as a broken index and started over
+        # instead of playing: whole file, tail, whole file, tail, eight times.
+        # 416 with the offset we actually hold is the honest answer, and it is
+        # the one that tells a player there is no index to go looking for.
+        ahead = (session.file_anchor + start) - log.end
+        if ahead > DLNA_MAX_AHEAD_BYTES:
+            logger.info('the renderer asked for %d bytes past the encoder '
+                        '(offset %d); answering 416 with the live size %d',
+                        ahead, session.file_anchor + start, log.end)
+            self.send_response(416)
+            self.send_header('Content-Range', 'bytes */{}'.format(log.end))
+            self.send_header('Content-Length', '0')
+            self._dlna_headers()
+            self.end_headers()
+            return
         if start >= session.file_size:
             # Past the end of the file we promised. 416 with our own size is
             # honest and keeps the client from concluding the file is broken.

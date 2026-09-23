@@ -5329,7 +5329,8 @@ done
         check("protocolInfo names the container the TV is being lied to about",
               _pi23.startswith('http-get:*:video/mpeg:')
               and 'DLNA.ORG_PN=MPEG_PS_PAL' in _pi23
-              and 'DLNA.ORG_OP=01' in _pi23
+              and 'DLNA.ORG_OP=00' in _pi23
+              and 'DLNA.ORG_CI=1' in _pi23
               and 'DLNA.ORG_FLAGS=' in _pi23, _pi23)
         check("an H.264 shape claims no profile name it cannot honour",
               'DLNA.ORG_PN' not in mirror.protocol_info(_h26423)
@@ -5343,7 +5344,7 @@ done
               # through eight connections and never reached PLAYING (Part 42).
               'DLNA.ORG_PN={}'.format(_pal23.org_pn)
               in mirror.content_features(_pal23)
-              and 'DLNA.ORG_OP=01' in mirror.content_features(_pal23),
+              and 'DLNA.ORG_OP=00' in mirror.content_features(_pal23),
               mirror.content_features(_pal23))
 
         _didl23 = mirror.build_didl('http://10.0.0.2:9/stream/aa.mpg',
@@ -5537,7 +5538,7 @@ done
               and _head23['Content-Type'] == 'video/mpeg', str(_head23))
         check("the two DLNA headers the firmware sniffs are on every answer",
               _head23['transferMode.dlna.org'] == 'Streaming'
-              and 'DLNA.ORG_OP=01' in _head23['contentFeatures.dlna.org'],
+              and 'DLNA.ORG_OP=00' in _head23['contentFeatures.dlna.org'],
               str(_head23))
         check("and a plain 200 carries no Content-Range",
               'Content-Range' not in _head23, str(_head23))
@@ -5577,13 +5578,32 @@ done
                   _sess23.file_size), repr(_body23[:8]))
         check("past the promised end is a 416 that names the size",
               _http23('GET', _path23, 'bytes=2000000000-')[0] == 416, '')
+        # A renderer that believes in our fabricated size goes looking for a
+        # container index at the end of it. Measured on a real Android 11
+        # television: `Range: bytes=1899887200-` -- the last 112,800 bytes of
+        # the 1.9 GB we advertised -- answered with padding it could not parse,
+        # after which it asked for the whole file and the tail *again* instead
+        # of playing. A request megabytes past the encoder is not a reconnect,
+        # and the honest answer is 416 with the size we actually hold.
+        _st_far23, _hd_far23, _bd_far23 = _http23(
+            'GET', _path23, 'bytes={}-'.format(_sess23.file_size - 112800))
+        check("an index probe far past the encoder is a 416, not padding",
+              _st_far23 == 416 and _bd_far23 == b''
+              and _hd_far23['Content-Range'].startswith('bytes */')
+              and _hd_far23['Content-Range'] != 'bytes */{}'.format(
+                  _sess23.file_size),
+              '{} {}'.format(_st_far23, _hd_far23.get('Content-Range')))
         _st416, _hd416, _bd416 = _http23('GET', _path23,
                                          'bytes={}-{}'.format(
                                              _sess23.file_size,
                                              _sess23.file_size + 100))
         check("the 416 keeps the DLNA headers and an empty body",
-              _hd416['Content-Range'] == 'bytes */{}'.format(
-                  _sess23.file_size) and _bd416 == b''
+              # And it names the size we actually hold, not the fabricated one.
+              # Telling a renderer `bytes */1900000000` is the same lie that
+              # sent the television back for another look at an index that does
+              # not exist; `bytes */<live>` says what is really here.
+              _hd416['Content-Range'] == 'bytes */{}'.format(_log23b.end)
+              and _bd416 == b''
               and _hd416['transferMode.dlna.org'] == 'Streaming', str(_hd416))
         check("a multi-range request is refused rather than half-served",
               _http23('GET', _path23, 'bytes=0-99,200-299')[0] == 404, '')
