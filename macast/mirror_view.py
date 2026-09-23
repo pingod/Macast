@@ -346,6 +346,10 @@ def diagnostics_rows(state):
         add('在途帧', stats.get('in_flight'))
     if kind == 'dlna':
         add('电视上报状态', stats.get('state'))
+        # The renderer's word and our own measurement, side by side: the two
+        # disagree exactly when a renderer is between states and a client is
+        # reading anyway, and that is the case worth being able to see.
+        add('客户端正在读取', '是' if stats.get('reading') else '')
         add('电视侧缓冲', _mib(stats.get('buffered')))
 
     # -- discovery, because "找不到设备" and "包没发出去" look the same

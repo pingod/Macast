@@ -5205,6 +5205,10 @@ class ScreenMirrorRenderer(Renderer):
         self._url = ''
         #: What the DLNA renderer last said (TransportState), for the menu.
         self._dlna_state = ''
+        #: Whether the last DLNA poll saw bytes being consumed. Kept apart from
+        #: `_dlna_state` on purpose: that field is the renderer's own word and
+        #: the diagnostics card quotes it, while this one is what we measured.
+        self._dlna_reading = False
         #: A session is being set up: the console's button must not start a
         #: second one while the first is still probing, and「已经在镜像了」would
         #: be a lie for the ~3 s the setup takes.
@@ -5292,6 +5296,7 @@ class ScreenMirrorRenderer(Renderer):
             # the TV is -- it is reading from the hoard we pre-filled.
             info['profile'] = dlna_profile_id(server.session.profile)
             info['state'] = self._dlna_state
+            info['reading'] = self._dlna_reading
             info['buffered'] = max(0, source.end - source.start)
         return info
 
@@ -5756,6 +5761,7 @@ class ScreenMirrorRenderer(Renderer):
                     last_position = position
                 with self._lock:
                     self._dlna_state = state
+                    self._dlna_reading = False
                 misses = 0
                 continue
             if reading:
@@ -5765,10 +5771,12 @@ class ScreenMirrorRenderer(Renderer):
                              ' leaving it alone', state, read_now)
                 with self._lock:
                     self._dlna_state = state
+                    self._dlna_reading = True
                 misses = 0
                 continue
             with self._lock:
                 self._dlna_state = state
+                self._dlna_reading = False
             misses += 1
             if misses < 2:
                 logger.info('renderer is %s; waiting for one more poll before'
@@ -6893,9 +6901,15 @@ class ScreenMirrorSetting(RendererSetting):
             return '状态：正在启动…'
         minutes, seconds = divmod(stats['seconds'], 60)
         if stats.get('kind') == 'dlna':
+            # A renderer reports STOPPED for a moment while its player opens the
+            # stream, and its own word alone then reads as「什么都没发生」while
+            # the picture is on screen. Bytes being consumed say otherwise, so
+            # the line carries both facts instead of picking one.
+            shown = stats.get('state') or '未上报'
+            if stats.get('reading') and shown != 'PLAYING':
+                shown += '（客户端在读取）'
             line = '已镜像 {:d}:{:02d} · 档位 {} · 电视 {} · 缓冲 {:.0f} MiB'.format(
-                minutes, seconds, stats.get('profile', '?'),
-                stats.get('state') or '未上报',
+                minutes, seconds, stats.get('profile', '?'), shown,
                 max(0, stats.get('buffered', 0)) / 1048576.0)
         elif stats.get('kind') == 'caststream':
             #: Frames in the receiver's own words: 在途 is how many pictures it

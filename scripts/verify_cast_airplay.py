@@ -6135,6 +6135,39 @@ done
             _live23w._generation += 1
         _sender_live23.close()
         mirror.DLNA_POLL_SECONDS = _saved_poll_live23
+
+        # The line the user reads carries both facts. A renderer that says
+        # STOPPED while a client is reading is the exact case this whole change
+        # is about, and quoting the renderer alone would report「什么都没发生」
+        # over a picture that is on screen.
+        class _Stats23(object):
+            """Just enough renderer for `_status_line`: it reads `stats()` and
+            asks whether this session had to give up the sound."""
+
+            def __init__(self, stats):
+                self._stats = stats
+
+            def stats(self):
+                return self._stats
+
+            def audio_dropped(self):
+                return False
+
+        _base_stats23 = {'kind': 'dlna', 'seconds': 42, 'profile': 'ts-h264',
+                         'buffered': 4 << 20}
+        _line_stopped23 = mirror.ScreenMirrorSetting._status_line(_Stats23(
+            dict(_base_stats23, state='STOPPED', reading=True)))
+        _line_playing23 = mirror.ScreenMirrorSetting._status_line(_Stats23(
+            dict(_base_stats23, state='PLAYING', reading=True)))
+        _line_quiet23 = mirror.ScreenMirrorSetting._status_line(_Stats23(
+            dict(_base_stats23, state='STOPPED', reading=False)))
+        check("the DLNA status line says a client is reading when it is",
+              '（客户端在读取）' in _line_stopped23
+              and 'STOPPED' in _line_stopped23
+              and '（客户端在读取）' not in _line_playing23
+              and '（客户端在读取）' not in _line_quiet23,
+              '%s | %s | %s' % (_line_stopped23, _line_playing23,
+                                _line_quiet23))
         mirror.DLNA_POLL_SECONDS = _saved_poll23
         mirror.DLNA_MAX_REPUSHES = _saved_rep23
 
