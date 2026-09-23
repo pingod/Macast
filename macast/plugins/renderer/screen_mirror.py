@@ -1118,12 +1118,16 @@ FFMPEG_NOISE = re.compile(
 #: 不重启 Macast，勾了也没有用。每一句"没有画面"都必须说到这一步。
 PERMISSION_DOOR = '请在「系统设置 → 隐私与安全性 → 屏幕录制」中允许 Macast'
 
-#: avfoundation 把系统声音当作**输入**设备，所以它吃的是麦克风授权，不是屏幕录制；
-#: 拿不到麦克风时它不报错，只是整条采集再没有一帧。降级成功的那一句要说出这一点。
+#: avfoundation 把系统声音当作**输入**设备，所以它吃的是麦克风授权，不是屏幕录制
+#: —— 两道门，两个后果。降级成功的那一句要说出少了什么、去哪补。
+MICROPHONE_DOOR = '请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Macast'
+
 AUDIO_DROPPED_SUFFIX = (
     '（本次镜像没有系统声音：带上它就一直取不到帧，已改为只采集画面。'
-    '要声音请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Macast，勾选后重启 '
-    'Macast）')
+    '要声音请{}，勾选后重启 Macast）'.format(MICROPHONE_DOOR))
+
+#: 状态行要短：门的全名在通知与「系统声音」那一行里。
+AUDIO_DROPPED_MARK = '· 本次无系统声音（麦克风未授权）'
 
 
 def no_frame_words(detail='', platform=None):
@@ -4845,6 +4849,15 @@ class ScreenMirrorRenderer(Renderer):
         """A session is in flight but has not produced a frame yet."""
         return self._starting
 
+    def audio_dropped(self):
+        """This session gave up the system-audio tap to get a frame at all.
+
+        The「系统声音」row answers what the machine is *configured* for; only the
+        running capture knows what it actually carries, and a page that says
+        「已启用」over a silent mirror is the lie v0.12 was meant to end.
+        """
+        return self._audio_dropped
+
     def stop_mirror(self):
         with self._lock:
             self._generation += 1
@@ -5866,7 +5879,7 @@ class ScreenMirrorSetting(RendererSetting):
                 'note': self._quality_note() or '',
             },
             'capture': self._capture_state(),
-            'audio': self._audio_state(),
+            'audio': self._audio_state(renderer),
             'viewer': self._viewer_state(renderer, mirroring, kind),
             'preview': self._preview_state(mirroring),
         }
@@ -5980,11 +5993,11 @@ class ScreenMirrorSetting(RendererSetting):
         }
 
     @staticmethod
-    def _audio_state():
+    def _audio_state(renderer=None):
         capture = next(iter(_capture_cache.values()), None)
         progress = _audio_progress.snapshot() if _audio_progress else {}
         return {
-            'line': ScreenMirrorSetting._audio_line(),
+            'line': ScreenMirrorSetting._audio_line(renderer),
             'capturable': bool(capture and capture.audio_map),
             'setup_available': sys.platform == 'darwin' and audio_setup_needed(),
             'restore_available': Setting.get(
@@ -6212,26 +6225,33 @@ class ScreenMirrorSetting(RendererSetting):
 
     @staticmethod
     def _status_line(renderer):
-        """Live throughput, so 'it is fine, it is just 200 kbps' is visible."""
+        """Live throughput, so 'it is fine, it is just 200 kbps' is visible.
+
+        The one thing throughput cannot tell is whether the sound arrived: that
+        is the session's own answer, so it rides on the same line.
+        """
         stats = renderer.stats()
         if not stats:
             return '状态：正在启动…'
+        minutes, seconds = divmod(stats['seconds'], 60)
         if stats.get('kind') == 'dlna':
-            minutes, seconds = divmod(stats['seconds'], 60)
-            return '已镜像 {:d}:{:02d} · 档位 {} · 电视 {} · 缓冲 {:.0f} MiB'.format(
+            line = '已镜像 {:d}:{:02d} · 档位 {} · 电视 {} · 缓冲 {:.0f} MiB'.format(
                 minutes, seconds, stats.get('profile', '?'),
                 stats.get('state') or '未上报',
                 max(0, stats.get('buffered', 0)) / 1048576.0)
-        minutes, seconds = divmod(stats['seconds'], 60)
-        if stats.get('kind') == 'caststream':
+        elif stats.get('kind') == 'caststream':
             #: Frames in the receiver's own words: 在途 is how many pictures it
             #: has not acknowledged, and 丢帧 counts the ones we shed because
             #: that number hit its ceiling.
-            return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 帧 · 在途 {:d} · 丢帧 {:d}'.format(
+            line = '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 帧 · 在途 {:d} · 丢帧 {:d}'.format(
                 minutes, seconds, stats['mbps'], stats['frames'],
                 stats['in_flight'], stats['drops'])
-        return '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
-            minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
+        else:
+            line = '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
+                minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
+        if renderer.audio_dropped():
+            line += ' ' + AUDIO_DROPPED_MARK
+        return line
 
     @staticmethod
     def _quality_note():
@@ -6244,14 +6264,23 @@ class ScreenMirrorSetting(RendererSetting):
                     CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
 
     @staticmethod
-    def _audio_line():
+    def _audio_line(renderer=None):
         """What the last probe decided about system audio (never probes:
-        the console polls this view while it is open)."""
+        the console polls this view while it is open).
+
+        `renderer` is the live session, and it outranks the probe: a tap can be
+        configured, probed, and still unreadable -- in which case this session
+        has no sound in it, whatever the machine is set up to deliver.
+        """
         capture = next(iter(_capture_cache.values()), None)
         if capture is None:
             return '系统声音：开始镜像后这里会显示'
         if capture.audio_map:
             line = '系统声音：已启用 · {}'.format(capture.label)
+            if renderer is not None and renderer.audio_dropped():
+                return ('系统声音：这一次镜像没有声音 —— 那个采集口打不开，'
+                        '连画面也不给，所以只采了画面。要声音请{}，勾选后重启 '
+                        'Macast').format(MICROPHONE_DOOR)
             if system_audio_routed() is False:
                 # "已启用" is a statement about the tap, not about the sound.
                 # Saying only that is what made a silent mirror look like an

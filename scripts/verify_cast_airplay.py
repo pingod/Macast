@@ -5075,6 +5075,9 @@ done
             def is_starting(self):
                 return False
 
+            def audio_dropped(self):
+                return False
+
             def stop_mirror(self):
                 self.stops += 1
 
@@ -6013,6 +6016,9 @@ done
                 return True
 
             def is_starting(self):
+                return False
+
+            def audio_dropped(self):
                 return False
 
             def stop_mirror(self):
@@ -12978,6 +12984,47 @@ esac
               '-an' in _cmd38 and '0:a:0' not in _cmd38
               and '-i' in _cmd38 and _cmd38[_cmd38.index('-i') + 1] == '1:none',
               str(_cmd38))
+        # A notification flashes once and is gone; the page is what the user can
+        # still read ten minutes later, and its「系统声音」row otherwise answers
+        # only for the machine's configuration --「已启用」over a silent session.
+        check("the session keeps its own answer, separate from the probe's",
+              mir38.audio_dropped() is True, str(mir38.audio_dropped()))
+        m38._capture_cache[('fake38', 'darwin', '1')] = _cap38
+        _row38 = m38.ScreenMirrorSetting._audio_line(mir38)
+        check("so the row stops saying 已启用 over a mirror with no sound in it",
+              '没有声音' in _row38 and '麦克风' in _row38 and '重启' in _row38
+              and '已启用' not in _row38, _row38)
+
+        class _Live38:
+            def __init__(self, dropped, kind='browser'):
+                self._dropped = dropped
+                self.s = {'kind': kind, 'seconds': 65, 'mbps': 3.2, 'frames': 40,
+                          'in_flight': 2, 'clients': 1, 'drops': 0,
+                          'profile': 'ps-pal', 'state': 'PLAYING',
+                          'buffered': 1048576}
+
+            def audio_dropped(self):
+                return self._dropped
+
+            def stats(self):
+                return self.s
+
+        _quiet38 = m38.ScreenMirrorSetting._audio_line(_Live38(False))
+        check("a session that kept its sound is not accused of losing it, "
+              "and the routing question still gets asked",
+              _quiet38.startswith('系统声音：已启用'), _quiet38)
+        check("the status line carries the fact in the few words it has, "
+              "on both of the two shapes that report throughput",
+              m38.AUDIO_DROPPED_MARK in m38.ScreenMirrorSetting._status_line(
+                  _Live38(True)) and m38.AUDIO_DROPPED_MARK in
+              m38.ScreenMirrorSetting._status_line(_Live38(True, 'dlna')),
+              '%s / %s' % (m38.ScreenMirrorSetting._status_line(_Live38(True)),
+                           m38.ScreenMirrorSetting._status_line(
+                               _Live38(True, 'dlna'))))
+        check("and a healthy session's line is only the numbers it always was",
+              m38.AUDIO_DROPPED_MARK not in m38.ScreenMirrorSetting._status_line(
+                  _Live38(False)),
+              m38.ScreenMirrorSetting._status_line(_Live38(False)))
         mir38.stop_mirror()
 
         # Nothing yields a frame at all: the last word must be a next step.
