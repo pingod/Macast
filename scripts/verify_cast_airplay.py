@@ -1133,6 +1133,32 @@ try:
     check("nirvana manifest declares its platform",
           _nva.get("platform") == "darwin,win32,linux", repr(_nva.get("platform")))
 
+    # Hidden imports put bytecode in PyInstaller's PYZ archive, but the loader
+    # discovers plugins by scanning real .py files before importing them. Linux
+    # and Windows builds therefore need both the modules and the manifest tree.
+    with open(os.path.join(REPO, ".github", "workflows", "build.yml"),
+              encoding="utf-8") as _f:
+        _build5b = _f.read()
+    _bundled5b = []
+    for _kind5b, _dir5b in (("renderer", _renderer_dir),
+                            ("protocol", _protocol_dir)):
+        for _entry5b in sorted(os.listdir(_dir5b)):
+            if _entry5b.endswith(".py") and _entry5b != "__init__.py":
+                _bundled5b.append("macast.plugins.{}.{}".format(
+                    _kind5b, _entry5b[:-3]))
+    _missing_hidden5b = [
+        _module5b for _module5b in _bundled5b
+        if _build5b.count("--hidden-import={}".format(_module5b)) != 3
+    ]
+    check("every PyInstaller target includes every bundled plugin module",
+          not _missing_hidden5b, repr(_missing_hidden5b))
+    check("every PyInstaller target ships the scannable plugin manifests",
+          _build5b.count('--add-data "macast/plugins:macast/plugins"') == 2
+          and _build5b.count('--add-data "macast/plugins;macast/plugins"') == 1,
+          "unix={}, windows={}".format(
+              _build5b.count('--add-data "macast/plugins:macast/plugins"'),
+              _build5b.count('--add-data "macast/plugins;macast/plugins"')))
+
     # A bundled plugin for another OS must be *registered* (so the settings
     # page can grey it out) while its module is never imported. The fixtures
     # are injected where the loader looks for them, so this needs no real
