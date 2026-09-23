@@ -736,7 +736,19 @@ open -a /Applications/Macast.app && sleep 15
 lsof -nP -iTCP:8009 -sTCP:LISTEN      # 应有进程
 curl -s 'http://127.0.0.1:58880/api?query=status' | head -c 200   # 应返回版本号
 dns-sd -B _googlecast._tcp            # 5 秒后应有 Macast-<主机名>
+# 4. 只有要测「电脑投屏」时：先重新勾一次录屏授权，再判定镜像坏没坏
 ```
+
+**替换安装后有两件事会被误读成"新产物坏了"，都是本机 2026-09-23 实测过的：**
+
+- **`open -a /Applications/Macast.app` 可能什么都不启动**（LaunchServices 还认那个刚被移走的
+  旧实例）。直接跑 `Contents/MacOS/Macast` 能证明包是好的，但**测权限必须走 `open`**
+  —— 从 shell 直接起会改 TCC 的归属对象。可靠写法：`open -n -a /Applications/Macast.app`。
+- **录屏授权记在"那一个包"的身份上，换了包就失效一次**：装完新包第一次镜像会报
+  「屏幕采集在 3 秒内没有返回画面」，带音频与只带画面两路都一样 —— 那是授权，不是链路。
+  判据在 `/Library/Application Support/com.apple.TCC/TCC.db` 的 `access` 表
+  （`kTCCServiceScreenCapture` / `cn.xfangfang.Macast` 的 `auth_value` 与 `last_modified`），
+  重新勾上并重启之后同一条采集命令立刻出帧。完整说法见 `docs/Casting-Suite.md` §5。
 
 **改成了同一版本号重新发布时**：两个方向都走得通 —— `gh release delete v<x>`（默认只删
 Release、**保留 git tag**，v0.7.15 之前那 14 个 Release 就是这么清的）可以直接把同名

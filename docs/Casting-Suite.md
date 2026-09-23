@@ -481,6 +481,15 @@ env -u PYTHONPATH .venv/bin/python scripts/check_index_reachability.py
   所以它说的是画面那一路（多半是屏幕录制权限），不再是"某处说不清"。给完权限**必须重启 Macast**
   —— 授权只对新启动的进程生效，而 ffmpeg 是我们 spawn 的子进程。反过来，如果镜像起来了、通知里
   带着「本次镜像没有系统声音」，那是**麦克风**那一格（见 §1.5），画面与声音是两道不同的门。
+- **装了一个新构建（或新下载）的 `.app` 之后，上面那一条会重新出现一次**：录屏授权记在**那一个包**
+  的身份上，换了包就要再勾一次。本机 2026-09-23 实测：替换安装后第一次镜像，带音频与只带画面两路
+  都在 3 秒内没有帧（`logs/ScreenMirror.log` 里逐条可查）；系统把 `cn.xfangfang.Macast` 的
+  `kTCCServiceScreenCapture` 重新记成已允许之后，同一条采集命令立刻出帧（之后 77 秒 3.1 Mbps、
+  丢块 0）。所以**先按这一条走一遍再怀疑镜像链路**：「系统设置 → 隐私与安全性 → 屏幕录制」里
+  把 Macast 关掉再打开（列表里有两个就删掉旧的），然后重启 Macast。
+  想确认系统到底记了什么：`sqlite3` 只读打开
+  `/Library/Application Support/com.apple.TCC/TCC.db`，看 `access` 表里那一行的 `auth_value`
+  （2 = 已允许）与 `last_modified`。
 - **系统声音「装了却没有设备 / 每次点一键设置都要重装」**：先跑 `scripts/selfcheck.py` 看它落在
   §1.5 那张表的哪一格。最常见的是**驱动在磁盘上但音频服务没加载它**（官方 `.pkg` 的 postinstall
   只改权限，从不重启 coreaudiod），**不需要重启电脑**：再点一次一键设置只会要一次管理员密码去重载，
