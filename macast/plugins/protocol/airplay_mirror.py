@@ -6,10 +6,10 @@
 # <macast.title>AirPlay Screen Mirror</macast.title>
 # <macast.protocol>AirPlayMirrorProtocol</macast.protocol>
 # <macast.platform>darwin,linux,win32</macast.platform>
-# <macast.version>0.1</macast.version>
+# <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Show your iPhone / iPad / Mac screen on this computer. Macast's own AirPlay code only accepts a video URL; screen mirroring is a different thing (H.264 over an encrypted AirPlay session) and is done here by supervising uxplay, which you build and install yourself -- there is no Homebrew formula and no macOS binary in its releases.</macast.desc>
+# <macast.desc>Show your iPhone / iPad / Mac screen on this computer. Macast's own AirPlay code only accepts a video URL; screen mirroring is a different thing (H.264 over an encrypted AirPlay session) and is done here by supervising uxplay, which you build and install yourself -- there is no Homebrew formula and no macOS binary in its releases. Since 0.2 the advice is per platform: uxplay does run on Windows (upstream builds it with the MinGW-64 compiler inside MSYS2 and tests Windows 10/11 x64), so a Windows user is pointed at upstream's own build notes and at the MSYS2 tree Macast searches for uxplay.exe, instead of being told to run brew install.</macast.desc>
 #
 # Why a supervisor and not an implementation: uxplay already speaks the whole
 # AirPlay mirroring session -- pairing, the stream key, the AES-128-CTR data
@@ -106,10 +106,74 @@ class SettingProperty(Enum):
 #: uxplay in /usr/local/bin while a MacPorts build puts it in /opt/local/bin.
 EXTRA_BIN_DIRS = ('/opt/homebrew/bin', '/usr/local/bin', '/opt/local/bin',
                   '/usr/bin')
+#: The same idea on Windows, where `shutil.which` already reads PATHEXT but a
+#: GUI app started from the Start menu still does not inherit a shell PATH. The
+#: upstream Windows build (MSYS2 + MinGW-64) leaves `uxplay.exe` inside the
+#: MinGW tree, which is on no PATH by default.
+WINDOWS_BIN_DIRS = (r'C:\msys64\mingw64\bin', r'C:\msys64\mingw32\bin',
+                    r'C:\msys64\usr\bin')
+#: Windows needs the extension to see the file at all.
+UXPLAY_FILENAMES = ('uxplay.exe', 'uxplay')
+
+
+def binary_dirs(platform=None):
+    """Directories to look in after PATH, on this platform."""
+    return (WINDOWS_BIN_DIRS if (platform or sys.platform) == 'win32'
+            else EXTRA_BIN_DIRS)
+
+
+def binary_names(platform=None):
+    """The filenames uxplay can have here."""
+    return (UXPLAY_FILENAMES if (platform or sys.platform) == 'win32'
+            else ('uxplay',))
+
 
 #: Short version, for a notification. The recipe goes to the log.
 NO_UXPLAY_MESSAGE = ('未找到 uxplay，AirPlay 屏幕镜像无法启动：它没有 Homebrew '
                      '包，官方发布也不提供 macOS 二进制，需要自己编译（步骤见日志）')
+
+#: The same fact on Windows, where the sentence above is actively wrong: uxplay
+#: *does* run there (upstream builds it with MinGW-64 inside MSYS2 and tests it
+#: on Windows 10/11 x64), and Homebrew is not a thing to install it with -- it
+#: is the macOS/Linux package manager. A Windows user was shown the macOS
+#: recipe, brew install and all, which is what this pair exists to stop.
+WINDOWS_NO_UXPLAY_MESSAGE = (
+    '未找到 uxplay，AirPlay 屏幕镜像无法启动：它在 Windows 上是可以用的'
+    '（上游用 MSYS2 里的 MinGW-64 编译，已在 Windows 10/11 64 位测试过），'
+    '但没有官方二进制，也不能用 Homebrew 装 —— 那是 macOS/Linux 的包管理器。'
+    '构建说明见上游仓库，Macast 会在 PATH 与 C:\\msys64\\mingw64\\bin 里找 '
+    'uxplay.exe（完整说明在日志里）')
+
+
+def no_uxplay_message(platform=None):
+    """The one-line notice, in the terms of the platform that will show it."""
+    return (WINDOWS_NO_UXPLAY_MESSAGE
+            if (platform or sys.platform) == 'win32' else NO_UXPLAY_MESSAGE)
+
+
+#: What the settings page shows under the「自检」requirement row. Split for the
+#: same reason the notice above is: the macOS recipe is not merely useless on
+#: Windows, it names a package manager Windows does not have.
+UXPLAY_REQUIREMENT_DETAIL = (
+    '它没有 Homebrew 包，官方发布也不给 macOS 二进制，必须自己编译：'
+    'sudo xcode-select --install → brew install cmake libplist openssl@3 '
+    '→ 从 gstreamer.freedesktop.org 装 runtime 与 -devel 两个 .pkg → '
+    'git clone https://github.com/FDH2/UxPlay 后 cmake . && make && '
+    'sudo make install。完整说明也在日志里。')
+
+WINDOWS_UXPLAY_REQUIREMENT_DETAIL = (
+    '它在 Windows 上可用，但要自己编译：上游用 MSYS2 里的 MinGW-64 构建'
+    '（已在 Windows 10/11 64 位测试过），没有官方二进制，Homebrew 也装不了'
+    '——那是 macOS/Linux 的包管理器。步骤见上游仓库 '
+    'https://github.com/FDH2/UxPlay ；Macast 在 PATH 与 '
+    'C:\\msys64\\mingw64\\bin 里找 uxplay.exe。完整说明也在日志里。')
+
+
+def uxplay_requirement_detail(platform=None):
+    """The long form for the settings page, per platform."""
+    return (WINDOWS_UXPLAY_REQUIREMENT_DETAIL
+            if (platform or sys.platform) == 'win32'
+            else UXPLAY_REQUIREMENT_DETAIL)
 
 INSTALL_GUIDE = """\
 uxplay is not installed, so AirPlay screen mirroring cannot start. There is no
@@ -127,6 +191,36 @@ On Linux the same options apply but package names differ (and Wayland users
 usually want "vs waylandsink" in the extra options below).
 Extra options: advanced setting "{}".""".format(OPTIONS_KEY)
 
+#: The Windows recipe, and it is mostly a pointer on purpose: upstream's README
+#: states Windows support ("builds with the MinGW-64 compiler in the unix-like
+#: MSYS2 environment", tested on Windows 10 and 11 x64) but does not publish a
+#: step-by-step package list, and inventing one here -- with package names
+#: nobody verified -- is the mistake this repository already documents as
+#: "made-up tool output". What Macast can state for certain is where it looks.
+WINDOWS_INSTALL_GUIDE = """\
+uxplay is not installed, so AirPlay screen mirroring cannot start. It does run
+on Windows -- upstream builds it with the MinGW-64 compiler inside the MSYS2
+environment and tests it on Windows 10/11 x64 -- but there is no official
+Windows binary, and Homebrew (macOS/Linux only) cannot install it here:
+  1. build it by upstream's own Windows notes:
+       https://github.com/FDH2/UxPlay   (maintained mirror: antimof/UxPlay)
+  2. the GStreamer it needs comes from https://gstreamer.freedesktop.org/
+     -- the runtime and the -devel installers, matching your compiler.
+  3. Macast looks for uxplay.exe on PATH and then in:
+       {dirs}
+Extra options: advanced setting "{options}".""".format(
+    dirs=', '.join(WINDOWS_BIN_DIRS), options=OPTIONS_KEY)
+
+
+def install_guide(platform=None):
+    """The long recipe, in the terms of the platform that will run it.
+
+    start() logs this, so a single shared text also means the *log* tells a
+    Windows user to run brew install -- which it did, on a real machine.
+    """
+    return (WINDOWS_INSTALL_GUIDE if (platform or sys.platform) == 'win32'
+            else INSTALL_GUIDE)
+
 #: uxplay's own words for the events worth telling the user about.
 CONNECTED_RE = re.compile(r'connection request from (.*?) \((.*?)\)'
                           r' with deviceID = (\S+)')
@@ -140,20 +234,24 @@ READY = 'initialized server socket'
 PROGRESS = 'audio progress'
 
 
-def find_uxplay():
+def find_uxplay(platform=None):
     """Path of the uxplay binary, or None.
 
     Module-level so tests can swap it, and looked up at start() rather than at
     import: building and installing uxplay while Macast runs should not need a
-    restart.
+    restart. Both the names and the fallback directories are per platform --
+    `uxplay.exe` is invisible under the bare name to some of the lookups, and
+    the MSYS2 tree is on no PATH at all.
     """
-    found = shutil.which('uxplay')
-    if found:
-        return found
-    for directory in EXTRA_BIN_DIRS:
-        candidate = os.path.join(directory, 'uxplay')
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
+    for name in binary_names(platform):
+        found = shutil.which(name)
+        if found:
+            return found
+    for directory in binary_dirs(platform):
+        for name in binary_names(platform):
+            candidate = os.path.join(directory, name)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
     return None
 
 
@@ -308,16 +406,12 @@ class AirPlayMirrorProtocol(Protocol):
             return
         binary = find_uxplay()
         if binary is None:
-            logger.error(INSTALL_GUIDE)
-            _tell(NO_UXPLAY_MESSAGE)
+            logger.error(install_guide())
+            _tell(no_uxplay_message())
             notice.requirement(
                 'uxplay',
                 label='AirPlay 屏幕镜像需要 uxplay',
-                detail='它没有 Homebrew 包，官方发布也不给 macOS 二进制，必须自己编译：'
-                       'sudo xcode-select --install → brew install cmake libplist openssl@3 '
-                       '→ 从 gstreamer.freedesktop.org 装 runtime 与 -devel 两个 .pkg → '
-                       'git clone https://github.com/FDH2/UxPlay 后 cmake . && make && '
-                       'sudo make install。完整说明也在日志里。')
+                detail=uxplay_requirement_detail())
             return
         notice.satisfied('uxplay')
         try:

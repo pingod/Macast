@@ -8859,6 +8859,40 @@ try:
         check("the build recipe names the dependencies, not just the project",
               all(word in am.INSTALL_GUIDE for word in
                   ('cmake', 'libplist', 'openssl', 'GStreamer', 'make install')))
+        # The same missing binary on Windows: uxplay *does* run there (upstream
+        # builds it with MinGW-64 inside MSYS2 and tests Windows 10/11 x64), and
+        # Homebrew is not a thing to install it with -- that is the macOS/Linux
+        # package manager. A real Windows machine was shown the macOS recipe,
+        # brew install and all, which is what these five checks exist to stop.
+        check("the Windows notice does not send anyone to Homebrew",
+              'Homebrew 包' not in am.no_uxplay_message('win32')
+              and 'Windows' in am.no_uxplay_message('win32')
+              and 'MSYS2' in am.no_uxplay_message('win32'),
+              am.no_uxplay_message('win32'))
+        check("the Windows recipe is a pointer, not invented package names",
+              'MSYS2' in am.install_guide('win32')
+              and 'UxPlay' in am.install_guide('win32')
+              and all(word not in am.install_guide('win32') for word in
+                      ('brew install', 'xcode-select', '/Library/Frameworks',
+                       'pacman -S')),
+              'upstream publishes no Windows package list, so we point at it '
+              'rather than naming packages nobody verified')
+        check("and it says where uxplay.exe has to be for us to find it",
+              'uxplay.exe' in am.install_guide('win32')
+              and any('msys64' in directory for directory in am.WINDOWS_BIN_DIRS),
+              str(am.WINDOWS_BIN_DIRS))
+        check("the settings-page row follows the platform too",
+              'Homebrew 包' not in am.uxplay_requirement_detail('win32')
+              and 'uxplay.exe' in am.uxplay_requirement_detail('win32')
+              and 'brew install' in am.uxplay_requirement_detail('darwin'),
+              am.uxplay_requirement_detail('win32')[:90])
+        check("the search paths and filenames are the ones this platform has",
+              am.binary_dirs('win32') == am.WINDOWS_BIN_DIRS
+              and am.binary_dirs('darwin') == am.EXTRA_BIN_DIRS
+              and 'uxplay.exe' in am.binary_names('win32')
+              and am.binary_names('darwin') == ('uxplay',)
+              and am.install_guide('darwin') == am.INSTALL_GUIDE,
+              str(am.binary_names('win32')))
         check("a missing binary leaves no process behind", proto26b._proc is None)
         am.find_uxplay = _real_find26
 
