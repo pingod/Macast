@@ -6847,8 +6847,9 @@ OUTPUT_HINTS = {
     'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 本通道无声音 · '
                    '电视不认这一通道时会自动回落上面的兼容通道，那时是有声音的 · '
                    '未在真电视上验证过'),
-    'dlna': ('给没有 Google 栈的老电视 · 先攒约 6 秒画面再交给它，'
-             '所以一开始就有秒级延迟'),
+    'dlna': ('给没有 Google 栈的老电视 · 「伪装成文件」会先攒约 {} 秒画面再交给它，'
+             '所以一开始就有秒级延迟；默认的「直播流」不预填').format(
+        DLNA_PREFILL_SECONDS),
     'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
 }
 
@@ -7193,9 +7194,15 @@ def _grab_snapshot():
     except subprocess.TimeoutExpired:
         # `str(e)` spells out the whole argv, which is a wall of text in a card
         # whose only useful content is「it did not finish」-- and a locked or
-        # sleeping display is exactly the case this fires on.
-        return b'', '预览采集超时（{:.0f} 秒）：屏幕是不是锁了？'.format(
-            SNAPSHOT_TIMEOUT)
+        # sleeping display is exactly the case this fires on. It is not the only
+        # case, though: a build that was never granted 屏幕录制 sits here too,
+        # and a fresh source checkout lands in that second one every time. The
+        # rule the capture path follows -- every「没有返回画面」names the door --
+        # applies to the preview as well, because the preview is where a user
+        # looks first when the mirror will not start.
+        return b'', ('预览采集超时（{:.0f} 秒）：屏幕可能锁了，也可能是这个 Macast '
+                     '还没有屏幕录制授权 —— {}，勾选后重启 Macast').format(
+            SNAPSHOT_TIMEOUT, PERMISSION_DOOR)
     except Exception as e:
         return b'', '预览采集失败：{}'.format(e)
     finally:

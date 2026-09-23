@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（2026-09-24 本机实测 1433 条；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
+# 2) 回归验证（2026-09-24 本机实测 1435 条；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
 #    8009/58880）时真实 socket 的那几段没跑就是没跑，套件不会替它承认。所以先看总数，
 #    再信"全绿"；跑之前按 §4.2 杀干净实例。
 #    **但这台机器上有一组永远红的**：Part 34（来源台账）的 6 条 —— 见 §4.12 末条，
@@ -698,7 +698,7 @@ $FF -y -i /tmp/cast_test.mp4 -c copy -f mpegts /tmp/cast_test.ts
 |---|---|
 | `docs/Cast-AirPlay-Testing.md` | **真机验证指南 + 全部已修问题的完整复盘**（三轮："找不到 / 投不上 / 有声音没画面"） |
 | `docs/Casting-Suite-Plan.md` | **发送端插件族的规划书**：JustStream 需求矩阵、六个参考项目（mkchromecast / MirrorCast / omacast / UxPlay / Castify / Mac-Screencast）的代码级取证与许可判定、P1-P6 阶段计划与「明确不做」。动镜像/投文件/投浏览器相关代码前先读它 |
-| `docs/Casting-Suite.md` | **发送端插件的用户指南**（与上一行分工：规划书给改代码的人，这份给用插件的人）。每个目标的**首次设置流程**：Chromecast 兼容通道 / Chromecast 低延迟（含"上限 4.5 Mbps 是软件加密不是网络"）/ DLNA 老电视（含"约 6 秒预填是设计如此"与五档回退）/ 浏览器（观看地址与 token 的来历）；§1.6 说清画质档位、编码器与延迟预算各是多少；本地文件投屏的"自动"在判什么、音轨字幕为什么各有边界；uxplay 与 shairport-sync 的自备安装配方；macOS 屏幕录制权限与 BlackHole 一键设置。**每一节都写明"这条路真机验证到什么程度"** —— 全族只在打桩测试与自家假设备上验证过 |
+| `docs/Casting-Suite.md` | **发送端插件的用户指南**（与上一行分工：规划书给改代码的人，这份给用插件的人）。每个目标的**首次设置流程**：Chromecast 兼容通道 / Chromecast 低延迟（含"上限 4.5 Mbps 是软件加密不是网络"）/ DLNA 老电视（含"约 4 秒预填是设计如此，且只在「伪装成文件」形状"与五档回退）/ 浏览器（观看地址与 token 的来历）；§1.6 说清画质档位、编码器与延迟预算各是多少；本地文件投屏的"自动"在判什么、音轨字幕为什么各有边界；uxplay 与 shairport-sync 的自备安装配方；macOS 屏幕录制权限与 BlackHole 一键设置。**每一节都写明"这条路真机验证到什么程度"** —— 全族只在打桩测试与自家假设备上验证过 |
 | `docs/reference-projects-review.md` | 参考项目评估（**接收端**视角）：miraclecast / mkchromecast / AirConnect |
 | `docs/Provenance.md` | **来源台账与重写队列**：fork 点与 215 条上游提交、`git blame` 的四态（upstream / vendored / mixed / ours）与它两个盲区（跨仓库粘贴、改名丢 blame）、按域的行数台账（应用本体还有约 3587 行是上游的；"看文件头"会高估成 21623 行，因为上游的头贴在代码早被重写干净的文件上）、`macast/ssdp.py` 里第三方 MIT 作者群那一层、按模块的 8 步重写队列（**完成判据是 `upstream_lines == 0`，可机检**）。**已定边界**：声明只加不减、不在 vendored 文件上署名、不把重写叙述成摆脱 GPLv3 的路径（净室才行）；"去掉 fork 与所有原项目信息"这一半已被拒绝 |
 | `docs/Development.md` | 三平台开发与打包 |
@@ -761,7 +761,9 @@ dns-sd -B _googlecast._tcp            # 5 秒后应有 Macast-<主机名>
   确认 `keys` 数与 `USN` 没继续变，再把 `ApplicationPort` 改回bound 端口。
   带临时配置目录的启动只有 `scripts/e2e_smoke.py` 会做（§4.9 那条 `appdirs` 打桩）。
 - **录屏授权记在"那一个包"的代码身份上，换了包就失效一次**：装完新包第一次镜像会报
-  「屏幕采集在 3 秒内没有返回画面」（或预览那句「屏幕是不是锁了？」），带音频与只带画面两路
+  「屏幕采集在 3 秒内没有返回画面」（预览那张图则是「预览采集超时（8 秒）：屏幕可能锁了，
+  也可能是这个 Macast 还没有屏幕录制授权 —— …，勾选后重启 Macast」；两条句子都点名门），
+  带音频与只带画面两路
   都一样 —— 那是授权，不是链路。**区分"锁屏"与"没授权"的判据**：同一分钟、同一个设备号，
   从 shell 直接跑 `ffmpeg -f avfoundation -i "3:none" -t 3 …` 能写出 1.1 MB H.264
   ⇒ 屏幕没锁，缺的是这个包的授权（shell 那一路有自己的身份）。而 `TCC.db` 里

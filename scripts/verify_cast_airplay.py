@@ -13694,6 +13694,19 @@ try:
           "ones this file no longer implements",
           '20 MiB' not in m37.OUTPUT_HINTS['dlna']
           and '2–4 秒' not in m37.OUTPUT_HINTS['cast'], str(m37.OUTPUT_HINTS))
+    # The case above has a hole: it rules out strings this file used to write,
+    # and a hint can be wrong without containing any of them. It was -- the card
+    # said「先攒约 6 秒画面」for a release after `DLNA_PREFILL_SECONDS` became 4,
+    # and it said it unconditionally while only the file shape hoards anything
+    # (the live shape, now the default, hands the URL over with no prefill at
+    # all). So ask the positive question instead: the number in the sentence is
+    # the number in the code, and the sentence names the shape that pays it.
+    check("the DLNA card's seconds are the constant's seconds, and it names "
+          "the shape that actually waits",
+          str(m37.DLNA_PREFILL_SECONDS) in m37.OUTPUT_HINTS['dlna']
+          and '6 秒' not in m37.OUTPUT_HINTS['dlna']
+          and '伪装成文件' in m37.OUTPUT_HINTS['dlna'],
+          m37.OUTPUT_HINTS['dlna'])
 finally:
     print('Part 37 setup error: %s' % _traceback37.format_exc()
           if mirror37 is None else '')
@@ -13941,6 +13954,44 @@ esac
               and '重启' in _title38[-1] and 'objc' not in _title38[-1],
               str(_title38))
         mir38b.stop_mirror()
+
+        # -- the preview owes the same sentence ------------------------------
+        # 「预览采集超时（8 秒）：屏幕是不是锁了？」used to be the whole answer.
+        # It is the *first* thing a user sees when the mirror will not start --
+        # the preview card is above the button -- and on a build that was never
+        # granted 屏幕录制 it points at a locked display instead of the door.
+        # The rule the capture path follows ("every「没有返回画面」gives a way
+        # out") has no exception for a card that only shows a thumbnail.
+        _saved38_sub = m38.subprocess
+        _saved38_req = m38.ffmpeg_requirement
+        _saved38_snap = m38.SNAPSHOT_TIMEOUT
+
+        class _Sub38(object):
+            DEVNULL = subprocess.DEVNULL
+            PIPE = subprocess.PIPE
+            TimeoutExpired = subprocess.TimeoutExpired
+
+            @staticmethod
+            def run(*args, **kwargs):
+                raise subprocess.TimeoutExpired(args[0],
+                                                kwargs.get('timeout', 8))
+
+        try:
+            m38.subprocess = _Sub38
+            m38.ffmpeg_requirement = lambda: '/usr/bin/ffmpeg'
+            m38.SNAPSHOT_TIMEOUT = 8
+            m38.probe_capture = lambda ffmpeg, *a, **k: types.SimpleNamespace(
+                inputs=[['-f', 'avfoundation', '-i', '1:none']])
+            _png38, _why38 = m38._grab_snapshot()
+            check("a preview that never gets a frame names the door and the "
+                  "restart, beside the locked-screen guess it already made",
+                  _png38 == b'' and m38.PERMISSION_DOOR in _why38
+                  and '重启' in _why38 and '锁' in _why38, _why38)
+        finally:
+            m38.subprocess = _saved38_sub
+            m38.ffmpeg_requirement = _saved38_req
+            m38.SNAPSHOT_TIMEOUT = _saved38_snap
+            m38.probe_capture = _saved38_probe
     finally:
         m38.probe_capture = _saved38_probe
         m38.find_ffmpeg = _saved38_find
