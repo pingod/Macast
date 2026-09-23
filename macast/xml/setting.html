@@ -629,6 +629,20 @@
                             </div>
                         </div>
 
+                        <div class="status-card" v-if="sec === 'shape'" key="shape">
+                            <h3>投屏形状</h3>
+                            <div class="mirror-pills">
+                                <span class="mirror-pill" :class="{sel: s.key === mirror_state.shape.current}"
+                                      v-for="s in mirror_state.shape.options" :key="s.key"
+                                      @click="mirror_run('set-dlna-shape', {value: s.key})">{{ s.label }}</span>
+                            </div>
+                            <div class="hint" style="margin-top:8px;">{{ mirror_view.shape.note }}</div>
+                            <div class="hint" style="margin-top:6px;">
+                                「直播流」是默认：不报长度、不声明可拖动，现代电视和播放器都认。
+                                换形状会立刻重启镜像。
+                            </div>
+                        </div>
+
                         <div class="status-card" v-if="sec === 'profiles'" key="profiles">
                             <h3>兼容档位</h3>
                             <div class="mirror-pills">
@@ -1244,7 +1258,8 @@
             mirror_state: null,
             mirror_view: {
                 sections: [], channels: [], devices: [], device_note: '',
-                header: '', quality: {labels: {}, note: ''}, step_marks: [],
+                header: '', quality: {labels: {}, note: ''},
+                shape: {note: ''}, step_marks: [],
                 banner: {text: '', level: null}
             },
             mirror_busy: false,

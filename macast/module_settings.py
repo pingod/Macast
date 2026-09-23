@@ -75,6 +75,9 @@ PLUGIN_LABELS = {
         'Mirror_Encoder': ('编码器', "'software'（x264）| 'hardware'（VideoToolbox，仅 macOS）。"),
         'Mirror_Dlna_Profile': ('DLNA 档位', 'DLNA_PROFILES 的键；老电视吃得下什么封装由它决定。'),
         'Mirror_Dlna_Control': ('DLNA 控制 URL', '所选 DLNA 渲染器的 AVTransport 控制地址。'),
+        'Mirror_Dlna_Shape': ('DLNA 投屏形状',
+                              "'live' 直播流（默认）| 'file' 伪装成文件"
+                              '（只认有限文件的老电视）。'),
     },
     'cast_local_file': {
         'Target_Kind': ('目标类型', "'cast'（Chromecast）或 'dlna'（电视）。"),

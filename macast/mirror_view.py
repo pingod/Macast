@@ -40,9 +40,9 @@ VIEW_VERSION = 4
 #: Every panel this module can ask for, in layout order. Not a preference list:
 #: `sections_for` returns a subset of this, and the page renders in the order it
 #: is given, so the ordering decision stays here.
-SECTION_ORDER = ('channels', 'devices', 'requirements', 'profiles', 'quality',
-                 'capture', 'audio', 'viewer', 'preview', 'diagnostics',
-                 'activity')
+SECTION_ORDER = ('channels', 'devices', 'requirements', 'shape', 'profiles',
+                 'quality', 'capture', 'audio', 'viewer', 'preview',
+                 'diagnostics', 'activity')
 
 #: Card names to fall back to when the app answers without a catalog -- which is
 #: what it does while the app is still starting, or with a plugin that failed to
@@ -92,6 +92,12 @@ def sections_for(state):
     if state.get('requirements'):
         sections.append('requirements')
     if kind == 'dlna':
+        # Shape before profile: the shape decides whether the renderer is
+        # handed a live stream or an endless file at all, and the profile only
+        # says what is inside it. Getting that order wrong sends a user with a
+        # modern television through five containers before the one setting that
+        # matters.
+        sections.append('shape')
         sections.append('profiles')
     sections.append('quality')
     sections.append('capture')
@@ -178,6 +184,20 @@ def search_note(channel):
     deciding which「没有发现」was meant.
     """
     return (channel or {}).get('words') or ''
+
+
+def shape_note(shape):
+    """The line under「投屏形状」: what the chosen shape means, in its own words.
+
+    Read off the plugin's own option table rather than restated here, so the
+    page cannot end up describing a shape the app no longer offers.
+    """
+    shape = shape or {}
+    current = shape.get('current') or ''
+    for option in shape.get('options') or []:
+        if option.get('key') == current:
+            return option.get('hint') or ''
+    return ''
 
 
 def quality_text(quality):
@@ -381,6 +401,7 @@ def view_for(state):
         'channels': channel_rows(state.get('channels') or []),
         'devices': device_rows(channel),
         'device_note': search_note(channel),
+        'shape': {'note': shape_note(state.get('shape') or {})},
         'quality': {'labels': pills, 'note': note},
         'diagnostics': diagnostics_rows(state),
         'diagnostics_text': diagnostics_text(state),

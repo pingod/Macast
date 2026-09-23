@@ -5511,6 +5511,19 @@ done
               and _woke23[0] == (b'', False), str(_woke23))
 
         # -- serving that file over HTTP -------------------------------------
+        # The endless-file shape stopped being the default (see DLNA_SHAPES):
+        # an untouched install now serves the live stream, so this block --
+        # which is the file shape's whole specification -- selects it
+        # explicitly, and the block after it covers the default. Settings go to
+        # a throw-away path for the duration, because a test must never write
+        # the user's own macast_setting.json (AGENTS.md 10).
+        _saved_shape23 = (mirror.Setting.setting, mirror.Setting.setting_path)
+        _shape_dir23 = _tempfile.mkdtemp(prefix='macast-shape-')
+        mirror.Setting.setting = {}
+        mirror.Setting.setting_path = os.path.join(_shape_dir23,
+                                                   'macast_setting.json')
+        mirror.Setting.set(mirror.SettingProperty.Mirror_Dlna_Shape,
+                           mirror.DLNA_SHAPE_FILE)
         _sess23 = mirror._Session('dlna', has_audio=True, title='测试机')
         _server23 = mirror.start_stream_server(_sess23)
         _port23 = _server23.server_address[1]
@@ -5679,6 +5692,108 @@ done
               _hd23b.get('Accept-Ranges') == 'none'
               and 'transferMode.dlna.org' not in _hd23b
               and 'Content-Range' not in _hd23b, str(_hd23b))
+
+        # -- the shape an untouched install gets: a live stream ---------------
+        # Measured with mpv as the client (Part 39 drives it end to end): the
+        # live shape gives a position that advances and a resolved video codec,
+        # while the endless-file shape above makes every modern client read the
+        # whole thing, ask for the bytes just before the fabricated end -- the
+        # container-index hunt -- and start over. So the default is the shape
+        # that plays, and these checks say which is which rather than trusting
+        # a default to be the good one.
+        mirror.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Shape)
+        check("an untouched install serves the live shape",
+              mirror.dlna_shape() == mirror.DLNA_SHAPE_LIVE
+              and not mirror.Setting.has(
+                  mirror.SettingProperty.Mirror_Dlna_Shape),
+              'asking which shape is in use must not record one')
+        check("both shapes are offered, with words for the page",
+              set(mirror.DLNA_SHAPES) == {mirror.DLNA_SHAPE_LIVE,
+                                          mirror.DLNA_SHAPE_FILE}
+              and all(len(mirror.DLNA_SHAPES[key]) == 2
+                      and mirror.DLNA_SHAPES[key][0]
+                      for key in mirror.DLNA_SHAPES),
+              str(sorted(mirror.DLNA_SHAPES)))
+
+        _live23 = mirror._Session('dlna', has_audio=True, title='测试机')
+        _live_srv23 = mirror.start_stream_server(_live23)
+        _live_port23 = _live_srv23.server_address[1]
+        # Feed it first: a live answer blocks on the queue, so asking for a
+        # body before the encoder produced one is a request that waits until
+        # the client times out -- which is correct behaviour, and useless as a
+        # test of the headers.
+        _live_srv23.broadcaster.feed(b'live-bytes' * 512)
+        check("a live DLNA session keeps no byte log and claims no size",
+              not _live23.bytelog and _live23.file_size is None
+              and _live23.file_duration is None
+              and isinstance(_live_srv23.broadcaster, mirror._Broadcaster),
+              type(_live_srv23.broadcaster).__name__)
+
+        def _live_http23(method, range_header=None, timeout=6):
+            """Status and headers only: a live body is endless by design, and a
+            new subscriber starts at the live edge, so reading it would block
+            until the client gave up -- the very thing being claimed here is
+            what the *headers* say."""
+            conn = http.client.HTTPConnection('127.0.0.1', _live_port23,
+                                              timeout=timeout)
+            conn.request(method, _live23.stream_path(),
+                         headers={} if range_header is None else
+                         {'Range': range_header})
+            resp = conn.getresponse()
+            head = dict(resp.getheaders())
+            conn.close()
+            return resp.status, head, b''
+
+        _lst23, _lhd23, _lbd23 = _live_http23('GET', 'bytes=1899750000-')
+        check("the tail probe that stops a file client is just a live read",
+              _lst23 == 200 and 'Content-Range' not in _lhd23,
+              '{} / {}'.format(_lst23, _lhd23.get('Content-Range')))
+        check("a live answer names no length and promises no ranges",
+              'Content-Length' not in _lhd23
+              and _lhd23['Accept-Ranges'] == 'none'
+              and _lhd23['Content-Type'] == 'video/mpeg', str(_lhd23))
+        check("and keeps the two DLNA headers the firmware sniffs",
+              _lhd23['transferMode.dlna.org'] == 'Streaming'
+              and 'DLNA.ORG_OP=00' in _lhd23['contentFeatures.dlna.org'],
+              str(_lhd23))
+        _lst_h23, _lhd_h23, _ = _live_http23('HEAD')
+        check("a HEAD says the same: no length, no ranges, just the type",
+              _lst_h23 == 200 and 'Content-Length' not in _lhd_h23
+              and _lhd_h23['Accept-Ranges'] == 'none'
+              and _lhd_h23['Content-Type'] == 'video/mpeg', str(_lhd_h23))
+        check("the DIDL claims no size and no duration in this shape",
+              'size=' not in mirror.build_didl('http://x/s.mpg', 'T',
+                                               _live23.profile)
+              and 'duration=' not in mirror.build_didl('http://x/s.mpg', 'T',
+                                                       _live23.profile)
+              and 'size=' in mirror.build_didl('http://x/s.mpg', 'T',
+                                               _live23.profile, 100,
+                                               '0:01:00'),
+              'the file shape keeps them; the live one must not')
+        _live_srv23.shutdown()
+
+        # The console action, driven without a renderer: `_ok` is what restarts
+        # a live session, and a restart is not what is under test here.
+        class _ShapeOnly23(mirror.ScreenMirrorSetting):
+            def _ok(self, message, restart=False):
+                return {'code': 0, 'message': message, 'restart': restart}
+
+        _shape_setting23 = _ShapeOnly23()
+        _picked23 = _shape_setting23.console_action(
+            'set-dlna-shape', {'value': mirror.DLNA_SHAPE_FILE})
+        check("the console can switch the shape, and refuses a junk one",
+              _picked23.get('code') == 0
+              and mirror.dlna_shape() == mirror.DLNA_SHAPE_FILE
+              and _shape_setting23.console_action(
+                  'set-dlna-shape', {'value': 'nope'}).get('code') == 1,
+              str(_picked23))
+        check("switching the shape restarts the running session",
+              _shape_setting23.console_action(
+                  'set-dlna-shape',
+                  {'value': mirror.DLNA_SHAPE_LIVE}).get('restart') is True,
+              'the shape is settled when the session is built, so a running '
+              'one would keep the shape the user just rejected')
+        mirror.Setting.setting, mirror.Setting.setting_path = _saved_shape23
 
         # -- discovery: device descriptions ----------------------------------
         _desc23 = (
@@ -5944,6 +6059,17 @@ done
         mirror.DLNA_MAX_REPUSHES = _saved_rep23
 
         # -- prefill, the honest reason this target lags ----------------------
+        # Prefill belongs to the file shape: it is the hoard a renderer reads
+        # from before it is handed the URL. The live shape has nothing to hoard,
+        # so the shape is selected here -- on a throw-away settings path, as
+        # above, because a test must not write the user's real settings.
+        _saved_shape23b = (mirror.Setting.setting, mirror.Setting.setting_path)
+        _shape_dir23b = _tempfile.mkdtemp(prefix='macast-prefill-')
+        mirror.Setting.setting = {}
+        mirror.Setting.setting_path = os.path.join(_shape_dir23b,
+                                                   'macast_setting.json')
+        mirror.Setting.set(mirror.SettingProperty.Mirror_Dlna_Shape,
+                           mirror.DLNA_SHAPE_FILE)
         _saved_prefill23 = mirror.dlna_prefill_bytes
         mirror.dlna_prefill_bytes = lambda profile: 4096
         _server23c = mirror.start_stream_server(mirror._Session('dlna'))
@@ -5965,12 +6091,33 @@ done
                   time.time() - _t023 < 1.0, '')
         finally:
             for _s23c in (_server23c, _server23d):
-                _s23c.broadcaster.close()
+                # Only the byte log has to wake parked readers. A live
+                # broadcaster has no `close`, and asking for one blindly is
+                # exactly how this cleanup broke when the default shape changed.
+                _closer23 = getattr(_s23c.broadcaster, 'close', None)
+                if _closer23 is not None:
+                    _closer23()
                 _s23c.shutdown()
                 _s23c.server_close()
             mirror.dlna_prefill_bytes = _saved_prefill23
+            mirror.Setting.setting, mirror.Setting.setting_path = \
+                _saved_shape23b
 
         # -- the whole thing, end to end --------------------------------------
+        # This block is the file shape's end-to-end specification -- it expects
+        # the renderer's Range read to come back as a 206 of exactly the bytes
+        # asked for -- so the shape is chosen rather than inherited. Left to
+        # inherit, it now meets the live default and blocks reading a body that
+        # has no end, which is what a hung suite looks like.
+        # ...and on a throw-away settings path, so the shape this test picks is
+        # never written into the user's own macast_setting.json.
+        _saved_shape23c = (mirror.Setting.setting, mirror.Setting.setting_path)
+        _shape_dir23c = _tempfile.mkdtemp(prefix='macast-e2e-')
+        mirror.Setting.setting = {}
+        mirror.Setting.setting_path = os.path.join(_shape_dir23c,
+                                                   'macast_setting.json')
+        mirror.Setting.set(mirror.SettingProperty.Mirror_Dlna_Shape,
+                           mirror.DLNA_SHAPE_FILE)
         mir23b = _Mirror23()
         mirror.find_ffmpeg = lambda: fake_ffmpeg23
         mirror.start_search = lambda: True
@@ -6061,6 +6208,8 @@ done
             utils.Setting.unset(mirror.SettingProperty.Mirror_Dlna_Control)
             if mir23b.is_mirroring():
                 mir23b.stop_mirror()
+            mirror.Setting.setting, mirror.Setting.setting_path = \
+                _saved_shape23c
 
         # -- the menu ----------------------------------------------------------
         class _FakeMirror23(object):
@@ -6132,8 +6281,11 @@ done
               not _st23['viewer']['available'], str(_st23['viewer']))
         _sections23 = _mc.sections_for(_st23)
         check("and a DLNA target is laid out with its compatibility profiles",
-              [s for s in _sections23 if s != 'requirements'][:3]
-              == ['channels', 'devices', 'profiles'], str(_sections23))
+              # 「投屏形状」sits between them: live stream or endless file is a
+              # bigger decision than which container carries it, and it is the
+              # one setting a modern television gets wrong by default.
+              [s for s in _sections23 if s != 'requirements'][:4]
+              == ['channels', 'devices', 'shape', 'profiles'], str(_sections23))
         # The board is the app's, not this plugin's: whatever an *other* plugin
         # said it needs is on it, and the window shows that instead of keeping
         # it to a five-second notification. Where it sits is the whole design.
@@ -11355,9 +11507,16 @@ try:
                                         'activity'],
           str(_mc.sections_for(_base35)))
     check("a DLNA电视 adds its compatibility profiles beside the devices",
-          _mc.sections_for(_state35(output={'kind': 'dlna'}))[:4]
-          == ['channels', 'devices', 'profiles', 'quality'],
+          _mc.sections_for(_state35(output={'kind': 'dlna'}))[:5]
+          == ['channels', 'devices', 'shape', 'profiles', 'quality'],
           str(_mc.sections_for(_state35(output={'kind': 'dlna'}))))
+    check("the shape panel comes before the profiles it narrows",
+          'shape' not in _mc.sections_for(_state35(output={'kind': 'cast'}))
+          and _mc.sections_for(_state35(output={'kind': 'dlna'})).index('shape')
+          < _mc.sections_for(_state35(output={'kind': 'dlna'})).index(
+              'profiles'),
+          'live stream or endless file is a bigger choice than the container, '
+          'and it is only a DLNA question')
     check("a browser target drops the device list and gains the viewer",
           'devices' not in _mc.sections_for(_state35(output={'kind': 'browser'}))
           and 'viewer' in _mc.sections_for(_state35(output={'kind': 'browser'})))

@@ -616,6 +616,10 @@ class SettingProperty(Enum):
     #: AVTransport control URL of the chosen DLNA renderer. Its own key
     #: because Mirror_Target holds `host:port` for a Chromecast.
     Mirror_Dlna_Control = 11
+    #: 'live' | 'file' -- how the DLNA target answers a renderer. See
+    #: DLNA_SHAPES: the live shape is the default because it is the only one
+    #: measured to play on both clients we can test against.
+    Mirror_Dlna_Shape = 12
 
 
 # -- ffmpeg ----------------------------------------------------------------
@@ -757,6 +761,42 @@ def dlna_profile_id(profile):
     return DEFAULT_DLNA_PROFILE
 
 
+#: How the DLNA target answers a renderer.
+#:
+#: 'live' says what this is: an endless stream with no length, no ranges and no
+#: end to seek within. 'file' is the older shape, which fabricates a size below
+#: 2 GiB and promises byte ranges -- the MirrorCast-era trick for a renderer
+#: that will only play a finite file.
+#:
+#: Live is the default because it is the only shape measured to work. On the
+#: same LAN and with the same encoder: `live` gives mpv on the receiving Mac
+#: H.264 at 1680x1080 with the position advancing (0 -> 19.5 s, vo-configured),
+#: while `file` makes mpv *and* a TCL Android 11 television read the whole
+#: thing, ask for `Range: bytes=<just before the fabricated end>-` -- the
+#: container-index hunt -- and start over rather than play.
+DLNA_SHAPE_LIVE = 'live'
+DLNA_SHAPE_FILE = 'file'
+DLNA_SHAPES = {
+    DLNA_SHAPE_LIVE: ('直播流',
+                      '不报长度、不声明可拖动；现代电视和播放器都认'),
+    DLNA_SHAPE_FILE: ('伪装成文件',
+                      '只认有限文件的老电视才需要；现代设备会去读尾部索引'),
+}
+
+
+def dlna_shape():
+    """The stored shape, or the live one when nothing was chosen.
+
+    Read through `Setting.has` on purpose: `Setting.get(key, default)` writes
+    that default into the user's settings as a side effect (AGENTS.md 4.2), so
+    asking would leave a key behind on an untouched install.
+    """
+    if not Setting.has(SettingProperty.Mirror_Dlna_Shape):
+        return DLNA_SHAPE_LIVE
+    chosen = str(Setting.get(SettingProperty.Mirror_Dlna_Shape, '') or '')
+    return chosen if chosen in DLNA_SHAPES else DLNA_SHAPE_LIVE
+
+
 def profile_order():
     """Profiles in "try this next" order, starting after the current one."""
     keys = list(DLNA_PROFILES)
@@ -821,15 +861,21 @@ def content_features(profile):
     return ';'.join(parts)
 
 
-def build_didl(url, title, profile, size, duration):
+def build_didl(url, title, profile, size=None, duration=None):
     """DIDL-Lite for SetAVTransportURI.
 
     Both interpolations are escaped: `title` is this machine's hostname and
     `url` is ours while mirroring, but the same builder is used when a phone
     pushes a third-party URL through us -- an unescaped & or < there is a
     malformed envelope the TV blames on us.
+
+    `size` and `duration` belong to the file shape alone. A live stream has
+    neither, and claiming them is exactly what sent a real television looking
+    for a container index at the end of a file that has no end.
     """
     from xml.sax.saxutils import escape
+    claimed = '' if size is None else ' size="{}" duration="{}"'.format(
+        size, escape(duration or ''))
     return (
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
@@ -837,10 +883,10 @@ def build_didl(url, title, profile, size, duration):
         '<item id="0" parentID="-1" restricted="1">'
         '<dc:title>{title}</dc:title>'
         '<upnp:class>object.item.videoItem</upnp:class>'
-        '<res protocolInfo="{pn}" size="{size}" duration="{duration}">'
+        '<res protocolInfo="{pn}"{claimed}>'
         '{url}</res></item></DIDL-Lite>'
     ).format(title=escape(title), pn=escape(protocol_info(profile)),
-             size=size, duration=escape(duration), url=escape(url))
+             claimed=claimed, url=escape(url))
 
 
 def probe_capture(ffmpeg, platform=None, cursor=None):
@@ -3033,6 +3079,10 @@ class _StreamHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
             self.send_header('Accept-Ranges', 'none')
+            #: A no-op unless this is the DLNA target: a renderer refuses the
+            #: stream without `transferMode`/`contentFeatures`, and the live
+            #: shape must not advertise ranges it cannot serve.
+            self._dlna_headers(ranges=False)
             self.end_headers()
             if head_only:
                 return
@@ -3164,17 +3214,19 @@ class _StreamHandler(BaseHTTPRequestHandler):
         finally:
             log.reader_leave()
 
-    def _dlna_headers(self):
+    def _dlna_headers(self, ranges=True):
         """The DLNA-specific headers, on every answer of a DLNA session.
 
         `transferMode.dlna.org: Streaming` is what tells the renderer not to
-        wait for the whole file; plenty of firmware refuses the stream without
-        `contentFeatures.dlna.org`, and `Accept-Ranges: bytes` has to be there
-        because the client's buffering strategy *is* seeking.
+        wait for the whole file, and plenty of firmware refuses the stream
+        without `contentFeatures.dlna.org`. `Accept-Ranges: bytes` belongs to
+        the file shape, where the client's buffering strategy *is* seeking; it
+        is left off the live one, where it would promise what cannot be kept.
         """
         if self.session.kind != 'dlna':
             return
-        self.send_header('Accept-Ranges', 'bytes')
+        if ranges:
+            self.send_header('Accept-Ranges', 'bytes')
         self.send_header('transferMode.dlna.org', DLNA_SECONDARY_HEADER)
         self.send_header('contentFeatures.dlna.org',
                          content_features(self.session.profile))
@@ -3227,9 +3279,16 @@ class _Session(object):
             self.profile = profile or dlna_profile()
             self.suffix = self.profile.suffix
             self.content_type = self.profile.content_type
-            self.bytelog = True
-            self.file_size, self.file_duration = advertised_file(
-                self.profile.total_bitrate)
+            #: Only the file shape keeps a byte log: it is the one that has to
+            #: answer absolute offsets. The live shape serves from the queue in
+            #: front of the encoder, exactly like the other live targets -- and
+            #: a `_ByteLog` has no `subscribe`, so getting this wrong is not a
+            #: slow mirror but a handler that throws on the first request.
+            self.bytelog = dlna_shape() == DLNA_SHAPE_FILE
+            self.file_size = self.file_duration = None
+            if self.bytelog:
+                self.file_size, self.file_duration = advertised_file(
+                    self.profile.total_bitrate)
         #: A browser can only attach to a live fragmented stream at a
         #: keyframe, so replaying the header plus a short tail is what makes
         #: "open the URL a second time" work. A TV is never replayed: it would
@@ -4263,8 +4322,16 @@ class _DlnaSender(object):
                     values[_local_name(child.tag)] = (child.text or '').strip()
         return values
 
-    def set_uri(self, url, title, profile):
-        size, duration = advertised_file(profile.total_bitrate)
+    def set_uri(self, url, title, profile, shape=None):
+        """Tell the renderer what to play.
+
+        Only the file shape states a size and a duration -- see `build_didl`.
+        """
+        shape = shape or dlna_shape()
+        if shape == DLNA_SHAPE_FILE:
+            size, duration = advertised_file(profile.total_bitrate)
+        else:
+            size = duration = None
         return self._request('SetAVTransportURI', {
             'CurrentURI': url,
             'CurrentURIMetaData': build_didl(url, title, profile, size,
@@ -6390,6 +6457,19 @@ class ScreenMirrorSetting(RendererSetting):
                 'options': [{'key': key, 'label': profile.label}
                             for key, profile in DLNA_PROFILES.items()],
             },
+            #: How the DLNA target answers the renderer. Live by default, and
+            #: the page says so as a choice rather than a hidden default: the
+            #: endless-file shape is what a television that only plays finite
+            #: files needs, and every modern client (mpv on the receiving
+            #: machine, an Android 11 television) treats its fabricated size as
+            #: real, hunts for a container index at the end of it, and starts
+            #: over instead of playing.
+            'shape': {
+                'current': dlna_shape(),
+                'options': [{'key': key, 'label': DLNA_SHAPES[key][0],
+                             'hint': DLNA_SHAPES[key][1]}
+                            for key in (DLNA_SHAPE_LIVE, DLNA_SHAPE_FILE)],
+            },
             'quality': {
                 'current': quality_key(),
                 'options': [{'key': key, 'label': QUALITY_LABELS[key]}
@@ -6542,9 +6622,10 @@ class ScreenMirrorSetting(RendererSetting):
     #: Everything the page may do, in one list: the HTTP endpoint refuses any
     #: name that is not here rather than dispatching on it.
     CONSOLE_ACTIONS = ('start', 'stop', 'toggle', 'set-output', 'set-target',
-                       'set-dlna-target', 'set-profile', 'set-quality',
-                       'set-screen', 'set-cursor', 'set-encoder', 'refresh',
-                       'probe', 'audio-setup', 'audio-restore')
+                       'set-dlna-target', 'set-dlna-shape', 'set-profile',
+                       'set-quality', 'set-screen', 'set-cursor',
+                       'set-encoder', 'refresh', 'probe', 'audio-setup',
+                       'audio-restore')
 
     def console_action(self, action, args=None):
         """Single entry point for the console; {'code', 'message'} either way.
@@ -6643,6 +6724,24 @@ class ScreenMirrorSetting(RendererSetting):
             return {'code': 0, 'message': '档位已经是{}'.format(DLNA_PROFILES[key].label)}
         Setting.set(SettingProperty.Mirror_Dlna_Profile, key)
         return self._ok('兼容档位：{}'.format(DLNA_PROFILES[key].label),
+                        restart=True)
+
+    def _do_set_dlna_shape(self, args):
+        """How the DLNA target answers a renderer: live stream, or fake file.
+
+        Restarts for the same reason a profile change does: the whole shape of
+        every answer -- headers, DIDL, the size the renderer believes in -- is
+        settled when the session is built, so a running one would keep the
+        shape the user just rejected.
+        """
+        key = str(args.get('value') or '')
+        if key not in DLNA_SHAPES:
+            return self._no('没有这种投屏形状：{}'.format(key))
+        if key == dlna_shape():
+            return {'code': 0,
+                    'message': '投屏形状已经是{}'.format(DLNA_SHAPES[key][0])}
+        Setting.set(SettingProperty.Mirror_Dlna_Shape, key)
+        return self._ok('DLNA 形状：{}'.format(DLNA_SHAPES[key][0]),
                         restart=True)
 
     def _do_set_quality(self, args):
