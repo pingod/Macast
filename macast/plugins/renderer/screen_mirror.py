@@ -5219,6 +5219,10 @@ class ScreenMirrorRenderer(Renderer):
         #: This session had to drop the system-audio tap to get a frame at all;
         #: see AUDIO_DROPPED_SUFFIX.
         self._audio_dropped = False
+        #: Whether a capture device has already refused to deliver a frame in
+        #: this run. The answer does not change between sessions, and asking
+        #: again costs the viewer seconds of black before the picture starts.
+        self._audio_refused = False
         #: The running session's own raw facts for the「统计信息」card: what
         #: ffmpeg was actually asked to do, which tap and encoder the probe
         #: chose, and the budgets the end-to-end delay is assembled from.
@@ -5441,7 +5445,16 @@ class ScreenMirrorRenderer(Renderer):
 
     def _mirror(self, generation):
         """Set one session up, and stop saying「正在启动」whichever way it ends."""
-        with_audio = True
+        # Asked once per run, not once per session: a device that delivered
+        # nothing a minute ago will deliver nothing now, and the only thing a
+        # second enquiry buys is a longer wait before the picture appears.
+        with_audio = not self._audio_refused
+        if not with_audio:
+            logger.info(
+                'starting without system audio: a capture device refused to '
+                'deliver a frame earlier in this run, so the %g s enquiry that'
+                ' would otherwise precede every session is skipped',
+                no_frame_budget())
         try:
             while self._run_mirror(generation, with_audio):
                 # The video-only attempt is a new session, not a second half of
@@ -5575,6 +5588,9 @@ class ScreenMirrorRenderer(Renderer):
                     with self._lock:
                         self._generation += 1
                         self._audio_dropped = True
+                        # Remember it for the rest of the run: the next session
+                        # starts without audio instead of paying this wait again.
+                        self._audio_refused = True
                     raise _RetryVideoOnly()
                 if proc.poll() is None:
                     proc.terminate()

@@ -6168,6 +6168,33 @@ done
               and '（客户端在读取）' not in _line_quiet23,
               '%s | %s | %s' % (_line_stopped23, _line_playing23,
                                 _line_quiet23))
+        # The audio tap is asked for once per *run*, not once per session. A
+        # device that gave nothing ten seconds ago gives nothing now, and the
+        # only thing a second enquiry buys the viewer is more black before the
+        # picture appears -- on a box with no loopback tap that is eight seconds
+        # taken from every single session.
+        class _Mirror23b(object):
+            _mirror = mirror.ScreenMirrorRenderer._mirror
+
+            def __init__(self, refused):
+                self._audio_refused = refused
+                self._lock = threading.Lock()
+                self._generation = 1
+                self._starting = False
+                self.seen = []
+
+            def _run_mirror(self, generation, with_audio=True):
+                self.seen.append(with_audio)
+                return False          # one attempt; no retry loop
+
+        _fresh23 = _Mirror23b(refused=False)
+        _fresh23._mirror(1)
+        _refused23 = _Mirror23b(refused=True)
+        _refused23._mirror(1)
+        check("system audio is asked for once per run, not once per session",
+              _fresh23.seen == [True] and _refused23.seen == [False],
+              'fresh=%s refused=%s' % (_fresh23.seen, _refused23.seen))
+
         mirror.DLNA_POLL_SECONDS = _saved_poll23
         mirror.DLNA_MAX_REPUSHES = _saved_rep23
 
