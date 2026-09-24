@@ -7,8 +7,8 @@
 # <macast.platform>win32,darwin,linux</macast.platform>
 # <macast.version>0.3</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>dushan555</macast.author>
-# <macast.desc>Live support for Macast,It developed based on MPVRenderer,Can be used to watch live TV.</macast.desc>
+# <macast.author>pingod（原作者 dushan555）</macast.author>
+# <macast.desc>用 mpv 播放直播流（IPTV / 网络电视）的渲染器，基于 MPVRenderer 实现。需要本机提供直播源地址。</macast.desc>
 #
 # Upstream note: this module used to fetch its channel list over the network
 # and write it into the config directory *at import time*, with no timeout and

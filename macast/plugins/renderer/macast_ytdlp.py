@@ -9,7 +9,7 @@
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Download what you cast instead of playing it (Bilibili, YouTube, m3u8 ...), or stream it while it downloads. Needs the yt-dlp command installed.</macast.desc>
+# <macast.desc>把投屏的内容下载下来而不是播放（B 站、YouTube、m3u8 等），或边下边播。需本机已安装 yt-dlp 命令。</macast.desc>
 #
 # Why this exists: a sender can only hand over a URL. For Bilibili / YouTube /
 # an m3u8 index page that URL is not a file, and the built-in mpv renderer has

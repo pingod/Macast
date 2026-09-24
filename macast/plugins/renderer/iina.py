@@ -8,8 +8,8 @@
 # <macast.platform>darwin</macast.platform>
 # <macast.version>0.31</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>xfangfang</macast.author>
-# <macast.desc>IINA support for Macast. Because iina is developed based on MPV, this plugin's experience is similar to the built-in MPV renderer.</macast.desc>
+# <macast.author>pingod（原作者 xfangfang）</macast.author>
+# <macast.desc>用 IINA 作为 Macast 的 DLNA 播放器。IINA 基于 mpv 开发，体验与内置的 mpv 渲染器相似。需要本机已安装 IINA。</macast.desc>
 
 
 import os

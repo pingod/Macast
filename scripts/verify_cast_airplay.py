@@ -15932,6 +15932,71 @@ check("the dialog carries its own surface and text colour, in both themes",
       'white-on-white is what shipping without these two rules looks like')
 
 # --------------------------------------------------------------------------
+# Part 45: bundled plugins present a Chinese description, a `pingod`-led author,
+# and the settings page draws avatars from a local asset instead of the network.
+# See AGENTS.md 插件作者 / 头像 / 描述 一节 and the user's 插件 tab 改造.
+print("\n=== Part 45: plugin card text and avatar source ===")
+import re as _re45
+import traceback as _traceback45
+try:
+    _renderer_dir = os.path.join(MACAST, "plugins", "renderer")
+    _protocol_dir = os.path.join(MACAST, "plugins", "protocol")
+    _all_plugins = []
+    for _pdir45 in (_renderer_dir, _protocol_dir):
+        for _f45 in sorted(os.listdir(_pdir45)):
+            if _f45.endswith(".py") and _f45 != "__init__.py":
+                _all_plugins.append((_f45, os.path.join(_pdir45, _f45)))
+
+    # A vendored plugin keeps its original author next to `pingod`; see
+    # macast/plugins/4.4 and AGENTS.md 4.8 (we do not claim others' code).
+    _vendored_originals = {
+        "iina.py": "xfangfang", "web.py": "xfangfang", "live.py": "dushan555",
+        "pi_fm.py": "xfangfang", "potplayer.py": "xfangfang",
+        "nirvana.py": "xfangfang",
+    }
+    _cjk45 = _re45.compile(r"[\u4e00-\u9fff]")
+
+    for _fname45, _path45 in _all_plugins:
+        _meta45 = macast_mod._read_plugin_metadata(_path45)
+        check("{} declares an author".format(_fname45),
+              bool(_meta45.get("author")), str(_meta45.get("author")))
+        check("{}'s author is led by pingod".format(_fname45),
+              (_meta45.get("author") or "").startswith("pingod"),
+              repr(_meta45.get("author")))
+        check("{} carries a Chinese description".format(_fname45),
+              bool(_cjk45.search(_meta45.get("desc", ""))),
+              repr(_meta45.get("desc")))
+        if _fname45 in _vendored_originals:
+            check("{} keeps its original author beside pingod".format(_fname45),
+                  _vendored_originals[_fname45] in _meta45.get("author", ""),
+                  repr(_meta45.get("author")))
+
+    # The page must source avatars from a bundled local asset, not a per-card
+    # call to api.github.com (that host is exactly the one that stalls on a CN
+    # network, and 15 cards would all fetch the same pingod avatar).
+    with open(os.path.join(MACAST, "xml", "setting.html"), encoding="utf-8") as _f45:
+        _html45 = _f45.read()
+    check("the settings page no longer dials out to GitHub for avatars",
+          "api.github.com/users" not in _html45 and "get_github_avatar" not in _html45,
+          "api.github.com/users" if "api.github.com/users" in _html45
+          else "get_github_avatar")
+    check("the plugin card avatar resolves to a local /assets/ path",
+          "/assets/" in _html45 and "circleUrl" in _html45,
+          "no local asset reference in the plugin card")
+
+    # `_builtin_desc` is the fallback for any bundled plugin without its own
+    # <macast.desc>; its English text ("Built-in renderer.") used to leak onto
+    # the Chinese cards.
+    _fallback45 = macast_mod.MacastPlugin(path=None, title="x",
+                                         role="player")
+    _fb45 = _fallback45._builtin_desc("renderer")
+    check("the built-in description fallback is Chinese",
+          bool(_cjk45.search(_fb45)), repr(_fb45))
+except Exception as _e45:
+    _traceback45.print_exc()
+    check("Part 45 runs", False, "{}: {}".format(type(_e45).__name__, _e45))
+
+# --------------------------------------------------------------------------
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed

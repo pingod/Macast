@@ -8,8 +8,8 @@
 # <macast.platform>win32</macast.platform>
 # <macast.version>0.5</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>xfangfang</macast.author>
-# <macast.desc>PotPlayer support for Macast, this is a simple plugin that only supports play and stop.</macast.desc>
+# <macast.author>pingod（原作者 xfangfang）</macast.author>
+# <macast.desc>用 PotPlayer 作为 Macast 的 DLNA 播放器。仅实现播放与停止，需本机已安装 PotPlayer。</macast.desc>
 #
 # Upstream note: the original header closed its renderer and platform tags
 # with the WRONG closing name -- it reused the title tag for all three -- so

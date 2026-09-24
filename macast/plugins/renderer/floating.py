@@ -9,7 +9,7 @@
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>A small always-on-top mpv window in the corner, for keeping half an eye on something while you work. Includes an experimental desktop-wallpaper mode.</macast.desc>
+# <macast.desc>一个常驻桌角、置顶的小 mpv 窗口，方便工作时瞄一眼内容。附带一个实验性的桌面壁纸模式。</macast.desc>
 #
 # Why: the built-in window is sized from the global Player Size setting, which
 # is a full-size viewing window. "Small" in that menu is still ~30% of the

@@ -9,7 +9,7 @@
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Re-cast what you received to another Chromecast on the network -- a TV, a speaker group. Pick the target from the menu bar; Macast stays the receiver, the other device does the playing.</macast.desc>
+# <macast.desc>把收到的投屏内容再转发到局域网里的另一个 Chromecast（一台电视、一组音箱）。在菜单栏选择目标即可；Macast 仍是接收端，播放交给那台设备。</macast.desc>
 #
 # Why: a phone app that only speaks DLNA (or a private dialect of it) cannot
 # reach a TV that only speaks Chromecast. Macast already receives the first half;

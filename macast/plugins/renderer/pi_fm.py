@@ -9,8 +9,8 @@
 # <macast.platform>linux</macast.platform>
 # <macast.version>0.3</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>xfangfang</macast.author>
-# <macast.desc>PIFMRDS support for Macast. Only for raspberry pi, visit the plugin repository for more information.</macast.desc>
+# <macast.author>pingod（原作者 xfangfang）</macast.author>
+# <macast.desc>把 Macast 收到的媒体通过树莓派的 FM 射频播出去（PIFMRDS）。仅适用于树莓派，需本机安装 PIFMRDS。</macast.desc>
 #
 # Upstream notes for this version:
 #   * `__init__` spawned `sudo pi_fm_rds` unconditionally. Selecting this

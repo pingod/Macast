@@ -9,7 +9,7 @@
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Play the cast url in a player you already use -- VLC, MPC-BE/HC or mpv.net -- instead of the built-in mpv. Pick it from the menu bar.</macast.desc>
+# <macast.desc>用你常用的播放器（VLC、MPC-BE/HC 或 mpv.net）播放投屏地址，代替内置的 mpv。在菜单栏切换即可。</macast.desc>
 #
 # Why: the bundled mpv is a good default, but people keep their own player for a
 # reason -- custom shortcuts, OSC plugins, hardware-decoding quirks, a remote

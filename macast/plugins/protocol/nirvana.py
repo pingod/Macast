@@ -8,8 +8,8 @@
 # <macast.platform>darwin,win32,linux</macast.platform>
 # <macast.version>0.33</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>xfangfang</macast.author>
-# <macast.desc>NVA protocol support for Macast. Known as "哔哩必连".</macast.desc>
+# <macast.author>pingod（原作者 xfangfang）</macast.author>
+# <macast.desc>NVA 协议支持（俗称「哔哩必连」），用于投屏 B 站等需要该协议的来源。</macast.desc>
 
 # changelog
 # v0.33: Fix video API error, Fix live stream error

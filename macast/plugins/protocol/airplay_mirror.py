@@ -9,7 +9,7 @@
 # <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Show your iPhone / iPad / Mac screen on this computer. Macast's own AirPlay code only accepts a video URL; screen mirroring is a different thing (H.264 over an encrypted AirPlay session) and is done here by supervising uxplay, which you build and install yourself -- there is no Homebrew formula and no macOS binary in its releases. Since 0.2 the advice is per platform: uxplay does run on Windows (upstream builds it with the MinGW-64 compiler inside MSYS2 and tests Windows 10/11 x64), so a Windows user is pointed at upstream's own build notes and at the MSYS2 tree Macast searches for uxplay.exe, instead of being told to run brew install.</macast.desc>
+# <macast.desc>把 iPhone / iPad / Mac 的屏幕投到这台电脑上。Macast 自带的 AirPlay 代码只能接收视频地址；屏幕镜像是不同的东西（加密 AirPlay 会话里的 H.264），这里通过监督 uxplay 实现——需要你自己编译安装，上游没有 Homebrew 公式、发布包里也没有 macOS 二进制。0.2 起按平台给出指引：uxplay 其实能在 Windows 上跑（上游用 MSYS2 里的 MinGW-64 编译并测试 Windows 10/11 x64），所以 Windows 用户会看到上游自己的编译说明，以及 Macast 查找 uxplay.exe 的那棵 MSYS2 目录，而不是被叫去 brew install。</macast.desc>
 #
 # Why a supervisor and not an implementation: uxplay already speaks the whole
 # AirPlay mirroring session -- pairing, the stream key, the AES-128-CTR data

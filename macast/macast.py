@@ -255,8 +255,8 @@ class MacastPlugin:
         if self.desc:
             return self.desc
         if kind == 'renderer':
-            return 'Built-in renderer.'
-        return 'Built-in protocol.'
+            return '随 Macast 内置的渲染器。'
+        return '随 Macast 内置的协议。'
 
     def get_instance(self):
         if self.plugin_instance is None:

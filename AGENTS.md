@@ -243,6 +243,21 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 
 `_guess_plugin_class` 是兜底：清单写错类名时按模块体里的类反推，不再直接丢插件。
 
+### 4.5b 插件卡片的作者 / 头像 / 描述（`setting.html`「插件」tab，Part 45）
+
+设置页每张插件卡显示 `<macast.author>`、`<macast.desc>` 与一个头像。三条都已定死并有 Part 45 守着：
+
+- **作者一律以 `pingod` 开头。** 本 fork 自研的插件写 `pingod`；**6 个 vendored 插件写混合作者**
+  `pingod（原作者 xfangfang）`（`live.py` 是 `dushan555`）—— 我们不把他人的代码署成自己的名，
+  但主名是维护者。文件头的版权声明与 "Copied from" 行**不动**（那是 §4.12 台账的证据）。
+- **描述一律中文。** 每个 `macast/plugins/*.py` 的 `<macast.desc>` 必须含中日韩字符；
+  `MacastPlugin._builtin_desc(kind)`（内置插件没写自己 `<macast.desc>` 时的兜底，核心三张卡走这条）
+  也必须是中文，否则英文 "Built-in renderer." 会漏到中文卡片上。
+- **头像走本地图 `/assets/avatar.png`，绝不再按卡片请求 `api.github.com/users/<author>`。**
+  那个 host 正是国内网络会卡住的那一个，而十几张卡拉的都是同一个 pingod 头像。
+  因此 `setting.html` 里**不允许**出现 `api.github.com/users` 或 `get_github_avatar`；
+  `circleUrl` 的初值就是本地资源路径。头像由 `macast/assets/icon.png` 裁成圆形衍生而来。
+
 ### 4.6 插件索引与内置策略：地址只有一处，页面不写死
 
 本仓库的 15 个第一方插件**全部内置**（`macast/plugins/renderer/` 与 `macast/plugins/protocol/`，

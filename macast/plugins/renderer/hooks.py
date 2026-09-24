@@ -9,7 +9,7 @@
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>Run your own command when casting starts, pauses, resumes or stops - switch the audio output, pause the music, dim the lights, send a notification. Uses the built-in mpv for playback.</macast.desc>
+# <macast.desc>在投屏开始、暂停、继续、停止时执行你自己的命令——切换音频输出、暂停音乐、调暗灯光、发通知都行。播放仍使用内置 mpv。</macast.desc>
 #
 # Configure the commands in the settings JSON (menu: "Edit Hooks"):
 #

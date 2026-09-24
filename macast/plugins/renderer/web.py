@@ -9,8 +9,8 @@
 # <macast.platform>darwin,linux,win32</macast.platform>
 # <macast.version>0.3</macast.version>
 # <macast.host_version>0.7</macast.host_version>
-# <macast.author>xfangfang</macast.author>
-# <macast.desc>Using web browser as DLNA media renderer, This plugin can be used to download media files or get some m3u8 played.</macast.desc>
+# <macast.author>pingod（原作者 xfangfang）</macast.author>
+# <macast.desc>用浏览器作为 DLNA 媒体渲染器，可下载媒体文件或播放部分 m3u8 流。需在系统默认浏览器可打开的地址。</macast.desc>
 #
 # Upstream notes for this version:
 #   * The position thread started in __init__ and ticked forever, so the

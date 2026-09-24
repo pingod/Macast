@@ -8,7 +8,7 @@
 # <macast.version>0.2</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
-# <macast.desc>Receive AirPlay audio from an iPhone / iPad / Mac and play it on this machine's speakers. Macast itself only implements the video half of AirPlay; this plugin supervises shairport-sync, which you install yourself.</macast.desc>
+# <macast.desc>接收来自 iPhone / iPad / Mac 的 AirPlay 音频并在本机音箱上播放。Macast 自己只实现了 AirPlay 的视频一半；这个插件监督 shairport-sync，需要你自己安装。</macast.desc>
 #
 # Why a supervisor and not an implementation: RAOP audio is a real protocol
 # (RSA key exchange, ALAC over UDP, AES) and re-implementing it in a single-file

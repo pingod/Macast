@@ -1654,22 +1654,8 @@
             }
         },
         async mounted() {
-            this.get_github_avatar()
         },
         methods: {
-            async get_github_avatar() {
-                if (!this.item.author) {
-                    this.circleUrl = "/assets/icon.ico"
-                    return;
-                }
-
-                let url = `https://api.github.com/users/${this.item.author}`
-                this.$http.get(url).then(res => {
-                    this.circleUrl = res.data.avatar_url;
-                }).catch(err => {
-                    console.log(err)
-                })
-            },
             async install(evt) {
                 this.busy = true
                 let fd = new window.FormData()
