@@ -1,0 +1,53 @@
+// risk-map.dot — Macast 架构风险关系图
+// 生成工具: risk-quality-reviewer (场景) + graphviz (格式)
+// 阅读方式: 方框=质量属性, 椭圆=发现(R#), 粗红边=因果/放大, 虚线边=盲区使问题逃逸
+// 渲染: dot -Tsvg docs/risk-map.dot -o docs/risk-map.svg
+
+digraph MacastRiskMap {
+  rankdir=TB;
+  nodesep=0.4; ranksep=0.7;
+  fontname="Helvetica";
+  node [fontname="Helvetica", fontsize=11];
+  edge [fontname="Helvetica", fontsize=9];
+
+  // ---- quality attributes (boxes) ----
+  sec  [label="安全性\nSecurity", shape=box, style=filled, fillcolor="#ffd6d6"];
+  maint[label="可维护性 / 可审计性\nMaintainability", shape=box, style=filled, fillcolor="#fff2cc"];
+  rel  [label="可靠性\n并发 / 进程生命周期", shape=box, style=filled, fillcolor="#e0e0ff"];
+  test [label="可测试性\nTestability", shape=box, style=filled, fillcolor="#dff0d8"];
+
+  // ---- findings (ellipses), colored by severity ----
+  R1 [label="R1 高\ninstall-plugin / save-launch-param\nCSRF→任意代码执行", shape=ellipse, style=filled, fillcolor="#ff9d9d"];
+  R2 [label="R2 高\n单体热点\nverify 16k / screen_mirror 8k\nHandler 846 行 if/elif", shape=ellipse, style=filled, fillcolor="#ffcc99"];
+  R3 [label="R3 中\nevent_subscribes 无锁\n迭代与插入交错", shape=ellipse, style=filled, fillcolor="#ffe08a"];
+  R4 [label="R4 中\n通知在发布线程操作托盘\n未走主线程 hop", shape=ellipse, style=filled, fillcolor="#ffe08a"];
+  R5 [label="R5 中\n护栏盲区\n网络全打桩 / Part34 永久红\nCast Streaming 无真机", shape=ellipse, style=filled, fillcolor="#ffe08a"];
+  R6 [label="R6 低-中\nimport/读取期副作用\nSETTING_DIR / Setting.get 读带写", shape=ellipse, style=filled, fillcolor="#d9d9d9"];
+  R7 [label="R7 低\n202 处 except Exception\n静默失效", shape=ellipse, style=filled, fillcolor="#d9d9d9"];
+
+  // ---- finding -> quality attribute ----
+  R1 -> sec;
+  R2 -> maint;
+  R2 -> sec  [style=dashed, label="放大", color=gray];
+  R3 -> rel;
+  R4 -> rel;
+  R5 -> test;
+  R6 -> maint;
+  R6 -> rel  [style=dashed, color=gray];
+  R7 -> rel;
+
+  // ---- causal / amplification (thick red) ----
+  R2 -> R1 [penwidth=2.5, color="#c0392b", label="门控散落在\n每个 elif", fontcolor="#c0392b"];
+
+  // ---- blind spots let real-thread / real-network / real-hardware bugs escape ----
+  R5 -> R1 [style=dashed, color="#7f8c8d", label="套件不测真网络"];
+  R5 -> R3 [style=dashed, color="#7f8c8d", label="套件不测真线程"];
+  R5 -> R4 [style=dashed, color="#7f8c8d", label="套件不渲染 UI"];
+
+  // ---- cluster hints ----
+  subgraph cluster_threads {
+    label="跨线程共享状态缺一致性纪律";
+    style=rounded; color="#8e44ad"; fontcolor="#8e44ad";
+    R3; R4;
+  }
+}
