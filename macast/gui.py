@@ -24,6 +24,26 @@ class Platform(Enum):
     Others = 2
 
 
+# pystray writes a balloon into fixed-size character buffers (NOTIFYICONDATAW's
+# szInfo / szInfoTitle); ctypes raises ValueError for anything longer, and
+# cherrypy re-raises it as ChannelFailures in whichever thread was reporting a
+# failure. See `fit_notification` and §4.8 of AGENTS.md.
+NOTIFY_TEXT_LIMIT = 256
+NOTIFY_TITLE_LIMIT = 64
+NOTIFY_TRUNCATED = u'……（全文见设置页「电脑投屏」的活动）'
+
+
+def fit_notification(text, limit):
+    """Keep the head *and the tail* of `text` inside `limit` characters: the
+    last clause is where the actionable half lives (「在兼容档位里换成…再试一次」).
+    """
+    if len(text) <= limit:
+        return text
+    room = max(0, limit - len(NOTIFY_TRUNCATED))
+    head = room // 2
+    return text[:head] + NOTIFY_TRUNCATED + text[len(text) - (room - head):]
+
+
 class MenuItem:
     def __init__(self, text, callback=None, checked=None, enabled=True,
                  children=None, data=None, key=None):
@@ -304,9 +324,13 @@ class App:
             rumps.notification(title, "", content, sound=sound)
         else:
             try:
-                self.app.notify(message=content, title=title)
-            except NotImplementedError:
-                pass
+                self.app.notify(
+                    message=fit_notification(content, NOTIFY_TEXT_LIMIT),
+                    title=fit_notification(title, NOTIFY_TITLE_LIMIT))
+            except Exception as e:
+                # Whatever was reporting has bigger problems than this balloon,
+                # and `notice` already holds the full sentence.
+                logger.warning('notification failed: %s', e)
 
     def dialog(self, content, callback=None, cancel="Cancel", ok="Ok"):
         if self.platform == Platform.Darwin:

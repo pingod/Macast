@@ -746,9 +746,17 @@ def notify(message, sound=False):
     and the board is what they can still read ten minutes later -- a recipe for
     `brew install …` that only ever reached Notification Center was the report
     this replaces: gone before it could be copied.
+
+    The board is written first and the balloon is fire-and-forget on purpose:
+    `publish` re-raises a subscriber's failure into its caller, and the callers
+    here are the failure reporters -- `_fail` used to lose the teardown on its
+    own next line to pystray's 256-character buffer.
     """
     notice.record(message)
-    cherrypy.engine.publish('app_notify', 'Macast', message, sound=sound)
+    try:
+        cherrypy.engine.publish('app_notify', 'Macast', message, sound=sound)
+    except Exception as e:
+        logger.warning('app_notify failed: %s', e)
 
 
 def recent_messages(limit=20):

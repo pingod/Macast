@@ -13527,6 +13527,98 @@ try:
           not any(l.startswith('msgstr') and l.endswith('" "')
                   for l in _po36.splitlines()),
           'a msgid/msgstr pair that msgfmt would reject also breaks the build')
+
+    # -- the balloon's fixed-size buffer ------------------------------------
+    # pystray writes a notification into NOTIFYICONDATAW, where szInfo is a
+    # fixed c_wchar[256] and szInfoTitle a c_wchar[64]. Measured on the Windows
+    # machine with the pystray it actually runs (0.17.4): 256 characters fit,
+    # 257 raise 「ValueError: string too long (257, maximum length 256)」, and
+    # the count is characters, so Chinese is no worse than ASCII. That error
+    # does not stay in the tray -- cherrypy.engine.publish re-raises it as
+    # ChannelFailures in the thread that was only reporting a failure, which is
+    # what Part 38 checks the fallout of.
+    # `from macast import gui` would hand back the same-named *function* that
+    # macast/macast.py re-exports, not this module.
+    import importlib as _importlib36
+    _gui36 = _importlib36.import_module('macast.gui')
+    _tray_caps36 = {'title': 64, 'message': 256}
+
+    class _StrictTray36(object):
+        """A tray as strict about its buffers as the ctypes struct is."""
+
+        def __init__(self):
+            self.sent = []
+
+        def notify(self, message=None, title=None):
+            for _field36, _value36 in (('title', title), ('message', message)):
+                if len(_value36) > _tray_caps36[_field36]:
+                    raise ValueError(
+                        'string too long ({}, maximum length {})'.format(
+                            len(_value36), _tray_caps36[_field36]))
+            self.sent.append((title, message))
+
+    def _through_tray36(message, title='Macast'):
+        _tray36 = _StrictTray36()
+        try:
+            _gui36.App.notification(types.SimpleNamespace(
+                mode='tray', platform=_gui36.Platform.Win32, app=_tray36),
+                title, message)
+        except Exception as _e_sent36:
+            # Recorded rather than re-raised: Part 36's own `except` would
+            # collapse the whole section into "the menu bar builds" and say
+            # nothing about which sentence the tray could not hold.
+            _tray36.sent.append(('raised', type(_e_sent36).__name__))
+        return _tray36.sent
+
+    # The real shape of the sentence that crashed it: what failed up front, the
+    # one knob to turn at the end, and elaboration in between.
+    _door36 = u'在「电脑投屏」页的「兼容档位」里换成「PS + AC-3」再试一次'
+    _head36 = (u'电视连续 8 次没有播起来：本次镜像已经自动换过 4 档封装'
+               u'（最后一档「MKV + H.264」），它一种都没有接受。这不是档位能'
+               u'解决的问题，确认电视和这台 Mac 在同一个网络。')
+    _long36 = (_head36 * 3) + _door36
+    check("the Windows crash still has a case to be about here",
+          len(_long36) > 256, '{} characters'.format(len(_long36)))
+    _sent36 = _through_tray36(_long36)
+    check("a notification longer than the tray's buffer is delivered rather "
+          "than thrown back at whoever was reporting a failure",
+          len(_sent36) == 1 and _sent36[0][0] == 'Macast', str(_sent36))
+    # Each assertion below names the delivery too: a swallowed exception would
+    # otherwise leave `len('') <= 256` passing for a tray that never saw anything.
+    _delivered36 = [m for t, m in _sent36 if t == 'Macast']
+    _balloon36 = _delivered36[0] if _delivered36 else ''
+    check("...and what reaches the tray fits the field it is written into",
+          len(_delivered36) == 1 and len(_balloon36) <= _tray_caps36['message'],
+          '{} characters'.format(len(_balloon36)))
+    check("the balloon keeps both ends, because the tail is the only "
+          "actionable half of the sentence",
+          _balloon36.startswith(_head36[:20]) and _balloon36.endswith(_door36),
+          repr(_balloon36[-50:]))
+    check("and it says where the rest of the sentence still is",
+          u'设置页' in _balloon36, repr(_balloon36))
+    check("a message that already fits reaches the tray untouched",
+          _through_tray36(u'镜像已开始') == [('Macast', u'镜像已开始')],
+          str(_through_tray36(u'镜像已开始')))
+    _titled36 = _through_tray36(u'短', u'错误' * 40)
+    check("a long title is bounded by its own, smaller field",
+          len(_titled36) == 1 and _titled36[0][0] != 'raised'
+          and 0 < len(_titled36[0][0]) <= _tray_caps36['title'],
+          str([len(t) for t, _ in _titled36]))
+
+    class _DeadTray36(object):
+        def notify(self, message=None, title=None):
+            raise OSError('no notification backend on this display')
+
+    _quiet36 = True
+    try:
+        _gui36.App.notification(types.SimpleNamespace(
+            mode='tray', platform=_gui36.Platform.Win32, app=_DeadTray36()),
+            'Macast', u'任何一句话')
+    except Exception as _e_dead36:
+        _quiet36 = '{}: {}'.format(type(_e_dead36).__name__, _e_dead36)
+    check("a tray that cannot notify at all is the reporter's problem to route "
+          "around, not the caller's to survive",
+          _quiet36 is True, str(_quiet36))
 except Exception as _e36:
     import traceback
     traceback.print_exc()
@@ -14148,6 +14240,65 @@ esac
             m38.ffmpeg_requirement = _saved38_req
             m38.SNAPSHOT_TIMEOUT = _saved38_snap
             m38.probe_capture = _saved38_probe
+
+        # -- a tray that throws must not leak the capture --------------------
+        # On the Windows machine the 387-character「五档封装都没有接受」sentence
+        # went into pystray's 256-character szInfo, and the ValueError came back
+        # through cherrypy.engine.publish into `_fail`. `_fail`'s callers
+        # (`_stream_lost`, `_encoder_died`) tear the capture down on the *next*
+        # line, so a balloon tip that will not fit was enough to skip it: ffmpeg
+        # and the watching HTTP server keep running behind a page that reads
+        # 「未镜像」. Part 36 keeps the sentence inside the buffer; this keeps any
+        # future tray failure from costing the rig.
+        def _raising_tray38(*args, **kwargs):
+            raise ValueError('string too long (387, maximum length 256)')
+
+        _word38 = u'电视连续 8 次没有播起来：' + u'档位都换过了。' * 40
+        cherrypy.engine.subscribe('app_notify', _raising_tray38)
+        try:
+            _survived38 = True
+            try:
+                m38.notify(_word38)
+            except Exception as _e38n:
+                _survived38 = '{}: {}'.format(type(_e38n).__name__, _e38n)
+            check("telling the user about a failure cannot fail the telling",
+                  _survived38 is True, str(_survived38))
+            check("...and the sentence is not lost, because the board keeps it",
+                  any(r.get('text') == _word38 for r in m38.notice.recent(60)),
+                  str([r.get('text', '')[:40]
+                       for r in m38.notice.recent(3)]))
+
+            # Recorded, not re-raised: the whole point of this block is that the
+            # exception escapes the call, and letting it propagate would collapse
+            # Part 38 into a traceback instead of naming the one line that leaked.
+            def _quietly38(call):
+                try:
+                    call()
+                except Exception as _e38q:
+                    return '{}: {}'.format(type(_e38q).__name__, _e38q)
+                return None
+
+            _mir38d = _Mirror38()
+            _torn38 = []
+            _mir38d._teardown = lambda: _torn38.append(1)
+            _leak38 = _quietly38(lambda: _mir38d._stream_lost(u'电视不再读这条流了'))
+            check("the caller of `_fail` still reaches the teardown it wrote "
+                  "on the next line", _torn38 == [1] and _leak38 is None,
+                  '{} / {}'.format(_torn38, _leak38))
+
+            _mir38e = _Mirror38()
+            _rows38 = len(_rec38.rows)
+            _leak38b = _quietly38(lambda: _mir38e._fail(_word38, _mir38e._generation))
+            check("the page still gets the failure it was owed",
+                  [v for k, v in _rec38.rows[_rows38:]
+                   if k == 'CurrentTrackTitle'] == [_word38] and _leak38b is None,
+                  str(_rec38.rows[_rows38:]))
+        finally:
+            try:
+                cherrypy.engine.unsubscribe('app_notify', _raising_tray38)
+            except Exception:
+                pass
+
     finally:
         m38.probe_capture = _saved38_probe
         m38.find_ffmpeg = _saved38_find
