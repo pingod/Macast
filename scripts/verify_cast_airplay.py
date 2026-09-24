@@ -4933,6 +4933,49 @@ done
         check("the page is ours end to end: no template hole, no innerHTML",
               b'@STREAM@' not in _html22 and b'innerHTML' not in _html22
               and b'document.write' not in _html22, str(_html22[:80]))
+        # The overlay's JS needs its own `'\n'`, and an unescaped Python string
+        # ate the backslash once: the browser got `out.join('<real newline>')`,
+        # threw `SyntaxError: Invalid or unexpected token`, and *every*
+        # Python-side assertion about that page still passed -- the panel was
+        # empty, the button dead, the video never started, and the suite was
+        # green. Two nets, because the failure mode is invisible from Python:
+        # the literal must be raw, and no JS string may span a real newline.
+        import re as _re22
+        with open(mirror.__file__, encoding='utf-8') as _mf22:
+            _mirror_src22 = _mf22.read()
+        check("the player page is a raw string, so Python cannot eat a JS escape",
+              _re22.search(r'^PLAYER_PAGE = r"""', _mirror_src22, _re22.M)
+              is not None, 'PLAYER_PAGE is not raw')
+        _js22 = _html22.decode('utf-8').split('<script>')[1].split('</script>')[0]
+        # Count quotes on the code only: an apostrophe inside a `//` comment
+        # ("the overlay's rate window") is not an unterminated string, and three
+        # innocent lines looked guilty until the comment was stripped first.
+        _spanning22 = [ln for ln in _js22.split('\n')
+                       if (lambda c: (c.count("'") - c.count("\\'")) % 2
+                           or (c.count('"') - c.count('\\"')) % 2)
+                       (_re22.sub(r'//.*', '', ln))]
+        check("no JS string literal in the served page spans a real newline",
+              not _spanning22, str(_spanning22[:2]))
+        # Found on the real page, 2026-09-24: the panel printed 「档位码率：32.00
+        # Mbps」 for a 4 Mbps preset, because the sender's *preset* is bits per
+        # second while its *traffic counters* are bytes per second, and one row
+        # reused the byte formatter. The overlay exists to be trusted, so the
+        # two units may not share a formatter.
+        check("the preset bitrate is formatted as bits, the traffic as bytes",
+              "line('档位码率',bps(d.bitrate))" in _js22
+              and "rate(d.bitrate)" not in _js22
+              and "function bps(b){return b?(b/1e6)" in _js22
+              and "line('接收码率',rate(M.instant))" in _js22,
+              'the Mbps rows share a formatter')
+        # Second finding from the same real run: the page presented 2 fps while
+        # the decoder took 29, because an occluded window is throttled. One
+        # "fps" row would have read as "the mirror is broken", so the panel
+        # reports both and says which one is the window's fault.
+        check("the panel counts decoded frames separately from presented ones",
+              "Q.dec=Math.round((q.totalVideoFrames-dtotal)*1000/dt)" in _js22
+              and "' fps 解码'" in _js22 and "' fps 上屏'" in _js22
+              and '窗口不在前台' in _js22,
+              'only one frame rate is reported')
         # `addSourceBuffer` only accepts a MIME type: the bare codec list used to
         # throw NotSupportedError, so *every* viewer fell through to the
         # progressive path -- fine in Chrome, an empty black page in Safari, and
@@ -4946,6 +4989,88 @@ done
         check("and a fallback that reaches the reader says why",
               _html22.count(b'progressive(') >= 4
               and b"progressive('" in _html22, str(_html22.count(b'progressive(')))
+
+        # -- the overlay: what the page is told, and what it can ask for ------
+        # The panel exists because the settings card is on the *sender's*
+        # screen: someone watching from another machine sees a stutter they
+        # cannot explain. So the page needs the sender's counters, and it needs
+        # them behind the same one-time credential the page itself is behind.
+        check("the overlay's facts are injected, and no placeholder survives",
+              b'@DIAG@' not in _html22 and b'var DIAG=' in _html22,
+              str(_html22[_html22.find(b'var DIAG'):][:60]))
+        _nostat22, _junk22 = _get22(mirror.BROWSER_STATS_PATH)
+        check("the stats endpoint refuses a caller with no token",
+              _nostat22.status == 403, str(_nostat22.status))
+        _badstat22, _junk22 = _get22(mirror.BROWSER_STATS_PATH + '?token=deadbeef')
+        check("and one with the wrong token", _badstat22.status == 403,
+              str(_badstat22.status))
+        _stat_path22 = _html_path22.replace(mirror.BROWSER_PATH,
+                                            mirror.BROWSER_STATS_PATH)
+
+        def _stats_read22():
+            _c22 = http.client.HTTPConnection('127.0.0.1', _port22, timeout=5)
+            _c22.request('GET', _stat_path22)
+            _r22 = _c22.getresponse()
+            _b22 = _r22.read()
+            _hdr22 = (_r22.getheader('Content-Type'),
+                      _r22.getheader('Cache-Control'),
+                      _r22.getheader('X-Content-Type-Options'))
+            _c22.close()
+            return _r22.status, _hdr22, json.loads(_b22.decode('utf-8'))
+
+        _statcode22, _stathdr22, _live22 = _stats_read22()
+        check("with the page token it answers as JSON, uncacheable",
+              _statcode22 == 200 and _stathdr22 == ('application/json',
+                                                    'no-store', 'nosniff'),
+              str(_stathdr22))
+        check("and it reports the broadcaster's own counters, not a copy",
+              _live22['chunks'] == _server22.broadcaster.chunks
+              and _live22['bytes'] == _server22.broadcaster.bytes
+              and _live22['drops'] == _server22.broadcaster.drops
+              and _live22['shape'] == 'live'
+              and isinstance(_live22['clients'], int),
+              str(_live22))
+        _server22.broadcaster.drops += 3
+        check("a slow viewer's dropped fragments reach the overlay",
+              _stats_read22()[2]['drops'] == _server22.broadcaster.drops,
+              'the one number that explains a stutter is the sender dropping '
+              'whole fragments, and the page cannot see it locally')
+        _watched22 = mirror._Broadcaster(init_marker=b'moof')
+        _watched22.feed(b'moofAAAA')
+        _sub22 = _watched22.subscribe()
+        check("and it counts the viewers attached, so 'it is slow' and "
+              "'nobody is watching' stay two different answers",
+              mirror.page_stats(_sess_b22, _watched22)['clients'] == 1
+              and mirror.page_stats(_sess_b22, None)['clients'] == 0,
+              str(mirror.page_stats(_sess_b22, _watched22)))
+
+        _sess_b22.diag = {'kind': 'browser', 'encoder': 'libx264', 'height': 720,
+                          'fps': 30, 'gop': 60, 'bitrate': 6000000,
+                          'capture': '3:none', 'command': 'ffmpeg --secret-flag'}
+        _page_b22, _html_b22 = _get22(_html_path22, 1 << 16)
+        check("a session that knows what it is tells the page",
+              _page_b22.status == 200 and b'"encoder": "libx264"' in _html_b22
+              and b'"height": 720' in _html_b22, str(_html_b22[:80]))
+        check("the ffmpeg argv stays in the settings card, off the video",
+              b'"command"' not in _html_b22 and b'secret-flag' not in _html_b22,
+              'the overlay is a filtered view, not a dump of the dict')
+        check("the served page never repeats the viewing token",
+              _sess_b22.page_token.encode() not in _html_b22
+              and b'location.search.match' in _html_b22
+              and b'/browser/stats?token=' in _html_b22,
+              'the JS reads its credential back out of the URL it was opened '
+              'with; echoing it into the body would copy a secret into bytes '
+              'that no one needed')
+        check("the overlay writes text, never markup",
+              b'textContent' in _html_b22 and b'innerHTML' not in _html_b22
+              and b'document.write' not in _html_b22, str(_html_b22[:80]))
+        check("and it costs nothing while it is closed",
+              b'if(on){poll();paint();poller=setInterval(poll,1000)}' in _html_b22
+              and b'if(poller){clearInterval(poller)' in _html_b22,
+              'a once-a-second poll on every viewer of a live pipe is a feature '
+              'that must only run when someone asked to see it')
+        _sess_b22.diag = {}
+
         _head22 = http.client.HTTPConnection('127.0.0.1', _port22, timeout=5)
         _head22.request('HEAD', _path22)
         _hresp22 = _head22.getresponse()
@@ -5025,6 +5150,37 @@ done
                   _stats22.get('kind') == 'browser' and _stats22.get('chunks', 0)
                   > 0 and 'mbps' in _stats22 and 'drops' in _stats22,
                   str(_stats22))
+            # The two surfaces a viewer can look at -- this card and the
+            # overlay on the watching machine -- must not keep their own
+            # arithmetic. One real session, both reads, same numbers.
+            _esess22 = mir22._server.session
+            check("a running mirror attaches its facts before it can be asked",
+                  bool(_esess22.diag.get('encoder'))
+                  and _esess22.diag.get('fps') and 'command'
+                  not in mirror.page_diag(_esess22),
+                  str(sorted(_esess22.diag)))
+            _etok22 = _viewer22.rsplit('token=', 1)[1]
+            _econn22 = http.client.HTTPConnection('127.0.0.1', _vport22, timeout=5)
+            _econn22.request('GET', mirror.BROWSER_STATS_PATH + '?token=' + _etok22)
+            _eresp22 = _econn22.getresponse()
+            _elive22 = json.loads(_eresp22.read().decode('utf-8'))
+            _econn22.close()
+            check("the overlay and the settings card read the same counters",
+                  _eresp22.status == 200
+                  and _elive22['chunks'] == _stats22['chunks']
+                  and _elive22['bytes'] == _stats22['bytes']
+                  and _elive22['drops'] == _stats22['drops']
+                  and _elive22['written'] == _stats22['delivered'],
+                  "{} vs {}".format(_elive22, _stats22))
+            _epg22 = http.client.HTTPConnection('127.0.0.1', _vport22, timeout=5)
+            _epg22.request('GET', '/' + _viewer22.split('/', 3)[3])
+            _eresp22 = _epg22.getresponse()
+            _ehtml22 = _eresp22.read()
+            _epg22.close()
+            check("the running mirror's page names the encoder it is using",
+                  str(_esess22.diag['encoder']).encode() in _ehtml22
+                  and b'@DIAG@' not in _ehtml22,
+                  str(_esess22.diag.get('encoder')))
             check("the sleep assertion is taken for as long as we mirror",
                   mir22._awake == 'awake', str(mir22._awake))
 
@@ -14446,6 +14602,29 @@ done
               'token' not in str(k).lower() and 'token' not in str(v).lower()
               for k, v in _rows39),
           'the mirror stream id and the page token are credentials (AGENTS 4.7)')
+
+    # The viewing page's overlay is a *second* consumer of this same dict, and
+    # it is the one that leaves the sender's machine. So the filter is asserted
+    # against a real `_session_diagnostics` answer, not a hand-written one:
+    # which keys exist is exactly what a new field can silently break.
+    _pg_sess39 = m39._Session('browser', has_audio=True, title='x')
+    check("a session that has not attached its facts answers with an empty set",
+          m39.page_diag(_pg_sess39) == {}, str(m39.page_diag(_pg_sess39)))
+    _pg_diag39 = m39._session_diagnostics(
+        kind='browser', capture=_cap39,
+        command=['ffmpeg', '-i', 'screen:secret', 'pipe:1'],
+        encoder='software', height=720, bitrate=4000000, session=_pg_sess39)
+    _pg_sess39.diag = _pg_diag39
+    _pg_show39 = m39.page_diag(_pg_sess39)
+    check("the overlay gets the budgets that explain a stutter",
+          _pg_show39.get('encoder') == _pg_diag39['encoder']
+          and _pg_show39.get('bitrate') == 4000000
+          and _pg_show39.get('fps') and 'queue_seconds' in _pg_show39,
+          str(sorted(_pg_show39)))
+    check("and never the argv, which is the card's evidence",
+          'command' not in _pg_show39
+          and not any('secret' in str(v) for v in _pg_show39.values()),
+          str(sorted(_pg_show39)))
 
     # The DLNA shape reports its own budget instead of a queue it does not have.
     # Two real sessions again, one per shape: which budget a session has *is* the

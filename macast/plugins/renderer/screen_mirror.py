@@ -302,6 +302,13 @@ OUTPUTS = {
 }
 DEFAULT_OUTPUT = 'cast'
 BROWSER_PATH = '/browser'
+#: The viewing page's live read of the sender's counters. Same port, same
+#: per-session token, one request a second -- and deliberately *not* under
+#: `STREAM_PREFIX`, because it is not a media request and must not be counted
+#: as one: `end_headers` logs the first few exchanges as the evidence of what a
+#: renderer actually asked for, and a once-a-second poll would blow through that
+#: limit and bury the requests it exists to record.
+BROWSER_STATS_PATH = BROWSER_PATH + '/stats'
 
 
 class _DlnaProfile(object):
@@ -3557,6 +3564,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
         path = self.path.partition('?')[0]
         if path == BROWSER_PATH:
             return self._serve_page(head_only)
+        if path == BROWSER_STATS_PATH:
+            return self._serve_stats()
         if path.startswith(STREAM_PREFIX):
             if not self._authorized(self.session.suffix):
                 return self._not_found()
@@ -3745,16 +3754,28 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.send_header('contentFeatures.dlna.org',
                          content_features(self.session.profile))
 
-    def _serve_page(self, head_only=False):
+    def _page_authorized(self):
+        """The viewing page and its stats share one credential.
+
+        `page_token` is per-session and dies with the mirror -- deliberately not
+        the app's stable `Api_Token`, which also opens the whole management API
+        (AGENTS.md 4.7). A viewing URL gets copied around; a management token
+        that leaks once stays open forever.
+        """
         import hmac
         import urllib.parse
         query = urllib.parse.parse_qs(self.path.partition('?')[2] or '')
         token = (query.get('token') or [''])[0]
-        if not token or not hmac.compare_digest(token, self.session.page_token):
+        return bool(token) and hmac.compare_digest(token,
+                                                   self.session.page_token)
+
+    def _serve_page(self, head_only=False):
+        if not self._page_authorized():
             self.send_error(403, 'a token is required')
             return
         body = PLAYER_PAGE.replace('@STREAM@', self.session.stream_path()) \
                           .replace('@CODECS@', self.session.codecs) \
+                          .replace('@DIAG@', json.dumps(page_diag(self.session))) \
                           .replace('@TITLE@', self.session.page_title).encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -3764,6 +3785,22 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if not head_only:
             self.wfile.write(body)
+
+    def _serve_stats(self):
+        """The overlay's per-second read of the sender's own counters."""
+        if not self._page_authorized():
+            self.send_error(403, 'a token is required')
+            return
+        body = json.dumps(page_stats(
+            self.session, getattr(self.server, 'broadcaster', None))
+        ).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(body)
 
 
 class _Session(object):
@@ -3859,6 +3896,13 @@ class _Session(object):
         self.codecs = ('video/mp4; codecs="avc1.640028,mp4a.40.2"' if has_audio
                        else 'video/mp4; codecs="avc1.640028"')
         self.page_title = title
+        #: What this session *is* -- encoder, capture, budgets -- as
+        #: `_session_diagnostics` computed it. The settings card reaches it
+        #: through the renderer; the viewing page's overlay can only reach what
+        #: hangs off the session, because its handler holds a session and a
+        #: server, not a renderer. `{}` until the run attaches it, which is why
+        #: the overlay draws the rows it has and stays quiet about the rest.
+        self.diag = {}
 
     def stream_name(self, suffix=None):
         return '{}.{}'.format(self.stream_id, suffix or self.suffix)
@@ -4007,13 +4051,57 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
     return info
 
 
+# -- what the viewing page's overlay is allowed to say ---------------------
+
+#: The subset of `_session_diagnostics` the browser overlay shows. Deliberately
+#: a subset: `command` is the whole ffmpeg argv -- a paragraph the settings
+#: card can copy out, and nothing the corner of a video has room for. A key
+#: that is absent (a DLNA-only row on a browser session) simply draws no row.
+PAGE_DIAG_KEYS = ('kind', 'capture', 'encoder', 'height', 'fps', 'gop',
+                  'bitrate', 'queue_chunks', 'queue_seconds', 'replay_bytes',
+                  'audio', 'audio_expected', 'audio_map', 'profile',
+                  'profile_bitrate', 'prefill_seconds', 'cast_refused')
+
+
+def page_diag(session):
+    """The session's own facts, as the viewing page should receive them."""
+    diag = getattr(session, 'diag', None) or {}
+    return {k: diag[k] for k in PAGE_DIAG_KEYS if k in diag}
+
+
+def page_stats(session, source):
+    """The live counters of one running mirror, for the overlay's poll.
+
+    A separate shape from `ScreenMirrorRenderer.stats()` rather than a call to
+    it: that one is the settings card's answer, and it asks the *renderer* --
+    which this handler does not hold. Both read the same two objects (the
+    session and whatever is broadcasting its bytes), so the numbers cannot
+    drift; what they must not do is each keep their own copy of one.
+    """
+    live = {
+        'written': getattr(session, 'written', 0),
+        'exchanges': getattr(session, 'exchanges', 0),
+        'shape': 'file' if getattr(session, 'bytelog', False) else 'live',
+    }
+    for name in ('chunks', 'bytes', 'drops'):
+        live[name] = getattr(source, name, 0) if source is not None else 0
+    clients = getattr(source, 'clients', None) if source is not None else None
+    live['clients'] = clients() if callable(clients) else 0
+    return live
+
+
 # -- the browser player page ------------------------------------------------
 #
 # Served by us, so the only substitutions are our own strings: a path, a codec
 # label and a title. Nothing a sender controls reaches it (unlike the log
 # panel's story in AGENTS.md 4.10), and it is textContent-only anyway.
+#
+# A raw string on purpose: the JS inside needs its own `'\n'`, and an
+# unescaped literal would have Python eat the backslash first -- which is how
+# a `SyntaxError: Invalid or unexpected token` once killed the whole overlay
+# while every Python-side test stayed green.
 
-PLAYER_PAGE = """<!doctype html>
+PLAYER_PAGE = r"""<!doctype html>
 <html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>@TITLE@ 屏幕镜像</title>
@@ -4027,16 +4115,33 @@ PLAYER_PAGE = """<!doctype html>
  body:hover #bar{opacity:1}
  button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
    padding:4px 10px;font:inherit}
+ button.on{background:#28465f;border-color:#4d7ea8;color:#fff}
  #err{color:#f88;display:none}
+ /* The推流 overlay: one textContent write per tick, so nothing here is ever
+    parsed as markup. `pointer-events:none` keeps it from stealing a click on
+    the video, which is the only way to unmute. */
+ #stats{position:fixed;left:10px;top:38px;max-width:min(72ch,92%);
+   background:#000c;color:#cfe3ff;font:11px/1.5 ui-monospace,Menlo,Consolas,
+   monospace;padding:8px 10px;border-radius:6px;white-space:pre-wrap;
+   overflow-wrap:break-word;pointer-events:none;display:none}
+ #stats.on{display:block}
 </style></head><body>
 <div id="bar"><span id="st">连接中…</span><span id="err"></span>
  <span style="flex:1"></span>
- <button id="snd">开声音</button><button id="full">全屏</button></div>
+ <button id="snd">开声音</button><button id="stat">统计</button>
+ <button id="full">全屏</button></div>
+<div id="stats"></div>
 <video id="v" autoplay playsinline muted></video>
 <script>
 var STREAM='@STREAM@',CODECS='@CODECS@',LIVE_EDGE=3,STALL_MS=8000;
+var DIAG=@DIAG@||{};
 var v=document.getElementById('v'),st=document.getElementById('st'),
-    err=document.getElementById('err');
+    err=document.getElementById('err'),panel=document.getElementById('stats'),
+    toggle=document.getElementById('stat');
+// The overlay's own credential: the same per-session token the page was opened
+// with, read back out of the URL. Never the app's stable management token.
+var TOKEN=(location.search.match(/[?&]token=([^&]+)/)||[,''])[1];
+var STATS='/browser/stats?token='+encodeURIComponent(TOKEN);
 function say(t){st.textContent=t}
 function fail(t){err.style.display='inline';err.textContent=' · '+t}
 function lock(){if(navigator.wakeLock)navigator.wakeLock.request('screen')
@@ -4046,6 +4151,108 @@ function unmute(){v.muted=false;document.getElementById('snd').style.display=
 document.getElementById('snd').onclick=unmute;
 document.getElementById('full').onclick=function(){
   (v.requestFullscreen||v.webkitRequestFullscreen||function(){}).call(v)};
+
+// -- the overlay: what the sender produced, and what this player did with it --
+var MB=1048576;
+function s(x){return (x===undefined||x===null||x==='')?'—':String(x)}
+function mb(b){return b?((b/MB).toFixed(1)+' MB'):'0 MB'}
+function rate(b){return b?(b*8/1e6).toFixed(2)+' Mbps':'0 Mbps'}
+// The sender's preset speaks bits per second, its traffic counters bytes per
+// second. One row reads each, so the two formatters must not be confused.
+function bps(b){return b?(b/1e6).toFixed(2)+' Mbps':'0 Mbps'}
+function secs(x){return (x===null||x===undefined)?'—':Number(x).toFixed(2)+' s'}
+function line(a,b){return a+'：'+b}
+// Everything the tick reads lives here so the reader loop can update it without
+// reaching into a closure it does not own.
+var M={bytes:0,pieces:0,qdepth:0,last:0,instant:0};
+var live={};          // the sender's counters, from the poll
+var shown=0;          // when the panel last painted
+function rows(){
+  var out=[],d=DIAG;
+  out.push('— 发送端 —');
+  out.push(line('目标',s(d.kind))+' · '+line('形状',s(live.shape)));
+  if(d.capture!==undefined)out.push(line('采集',d.capture));
+  out.push(line('声音',d.audio?(d.audio_map||'有')
+                 :(d.audio_expected?'已弃（保画面）':'无')));
+  if(d.encoder!==undefined)out.push(line('编码器',d.encoder)+' · '
+    +s(d.height)+'p@'+s(d.fps)+' · GOP '+s(d.gop));
+  if(d.bitrate)out.push(line('档位码率',bps(d.bitrate)));
+  if(d.queue_seconds!==undefined&&d.queue_seconds!==null)
+    out.push(line('发送端队列',secs(d.queue_seconds)
+                  +(d.queue_chunks?' ('+d.queue_chunks+' 块)':'')));
+  if(d.prefill_seconds)out.push(line('预填',secs(d.prefill_seconds)));
+  if(d.replay_bytes)out.push(line('重播缓冲',mb(d.replay_bytes)));
+  if(d.cast_refused)out.push(line('回落原因',d.cast_refused));
+  out.push('— 推流（发送端实时）—');
+  out.push(line('编码器产出',s(live.chunks)+' 块 · '+mb(live.bytes)));
+  out.push(line('发送端丢块',s(live.drops)
+                +(live.drops?'（慢消费者被丢整块）':'')));
+  out.push(line('已交付',mb(live.written))+' · '+line('观看端',s(live.clients)));
+  out.push('— 播放器（本机）—');
+  out.push(line('接收码率',rate(M.instant)));
+  out.push(line('已接收',mb(M.bytes))+' · '+s(M.pieces)+' 片 · 积压 '
+              +s(M.qdepth));
+  var ahead=null,fill=null;
+  try{var b=v.buffered;if(b.length){
+    ahead=b.end(b.length-1)-v.currentTime;
+    fill=b.end(b.length-1)-b.start(0)}}catch(x){}
+  out.push(line('距直播边缘',secs(ahead))+' · '+line('已缓冲',secs(fill)));
+  out.push(line('帧率',(Q.dec==='—'?'—':Q.dec+' fps 解码')+' / '
+                +(Q.fps==='—'?'—':Q.fps+' fps 上屏')
+                +(Q.dec>=6&&Q.fps!=='—'&&Q.fps*2<Q.dec
+                  ?'（窗口不在前台，上屏数不算链路）':''))
+              +' · '+line('掉帧',Q.dropped+'/'+Q.total));
+  out.push(line('解码',v.videoWidth?v.videoWidth+'×'+v.videoHeight:'—')
+              +' · '+line('画面',v.clientWidth+'×'+v.clientHeight));
+  out.push(line('最近一片',M.last?(Date.now()-M.last)+' ms 前':'—'));
+  out.push(new Date().toLocaleTimeString());
+  return out.join('\n')}
+function paint(){panel.textContent=rows();shown=Date.now()}
+var Q={fps:'—',dec:'—',dropped:0,total:0};
+// Two frame rates, because they answer different questions: what the decoder
+// is being fed, and what this window actually got on screen. A background or
+// occluded window presents at a couple of fps while the decode side stays at
+// the encoder's rate -- reporting only the second number blames the mirror.
+var dmark=Date.now(),dtotal=null;
+setInterval(function(){
+  var q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();if(!q)return;
+  var n=Date.now(),dt=n-dmark;
+  if(dtotal!==null&&dt>0)Q.dec=Math.round((q.totalVideoFrames-dtotal)*1000/dt);
+  dtotal=q.totalVideoFrames;dmark=n},1000);
+if(v.requestVideoFrameCallback){ // what actually reached the screen
+  var fcount=0,frate=0,fmark=Date.now();
+  var tick=function(){fcount++;v.requestVideoFrameCallback(tick)};
+  v.requestVideoFrameCallback(tick);
+  setInterval(function(){var n=Date.now();
+    if(n-fmark>0){Q.fps=Math.round(fcount*1000/(n-fmark))}
+    fcount=0;fmark=n},1000)}
+function poll(){fetch(STATS).then(function(r){
+    if(!r.ok)throw new Error(''+r.status);return r.json()}).then(function(j){
+      live=j;if(panel.classList.contains('on'))paint()})
+    .catch(function(){})}
+var poller=null;
+function setOpen(on){
+  panel.classList.toggle('on',on);toggle.classList.toggle('on',on);
+  try{localStorage.setItem('macast.mirror.stats',on?'1':'0')}catch(x){}
+  if(poller){clearInterval(poller);poller=null}
+  if(on){poll();paint();poller=setInterval(poll,1000)}}
+toggle.onclick=function(){setOpen(!panel.classList.contains('on'))};
+var stored=null;try{stored=localStorage.getItem('macast.mirror.stats')}catch(x){}
+setOpen(stored==='1');
+// A rate needs a window; the reader only counts bytes, this turns the
+// difference between two reads into bits per second.
+var win_at=Date.now(),win_bytes=0;
+setInterval(function(){
+  var n=Date.now(),dt=n-win_at;
+  if(dt>0){M.instant=Math.round((M.bytes-win_bytes)*1000/dt);
+    win_at=n;win_bytes=M.bytes}
+},1000);
+setInterval(function(){ // keep the panel honest while it is open
+  if(!panel.classList.contains('on'))return;
+  var q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
+  if(q){Q.dropped=q.droppedVideoFrames;Q.total=q.totalVideoFrames}
+  paint()},1000);
+
 // Autoplay policy: start muted, then any real gesture is consent to unmute.
 ['pointerdown','keydown','touchstart'].forEach(function(e){
   addEventListener(e,unmute,{once:true})});
@@ -4075,14 +4282,15 @@ function mse(){
       if(!r.ok||!r.body)throw new Error('http '+r.status);
       var rd=r.body.getReader();
       function pull(){return rd.read().then(function(x){
-        if(!x.done){last=Date.now();
+        if(!x.done){last=Date.now();M.last=last;
+          M.bytes+=x.value.length;M.pieces++;M.qdepth=queue.length;
           if(sb.updating)queue.push(x.value);else sb.appendBuffer(x.value);
           return pull()}
         try{if(ms.readyState==='open')ms.endOfStream()}catch(e){}})}
         return pull()}).catch(function(e){fail('断开：'+e.message);
         setTimeout(function(){location.reload()},2000)});
     sb.addEventListener('updateend',function(){
-      last=Date.now();
+      last=Date.now();M.last=last;M.qdepth=queue.length;
       if(queue.length)sb.appendBuffer(queue.shift());else tail()});
     setInterval(function(){ // watchdogs: stall, or a decoder that ate everything
       if(Date.now()-last>STALL_MS){fail('画面卡住，重连');location.reload()}
@@ -6171,23 +6379,28 @@ class ScreenMirrorRenderer(Renderer):
                            profile=profile, bitrate=bitrate)
         handed = False
         try:
-            server = None if stream is not None else start_stream_server(session)
             # Built once and reused for the spawn and for the log line: the same
             # argv is what the「统计信息」card shows, and building it twice was
             # two chances for the logged command to differ from the run one.
             command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
                                            kind=kind, encoder=encoder,
                                            profile=profile)
+            diagnostics = _session_diagnostics(
+                kind=kind, capture=capture, command=command, encoder=encoder,
+                height=height, bitrate=bitrate, session=session,
+                audio_expected=with_audio, refused=refused)
+            #: Attached before the server exists to answer: the viewing page's
+            #: overlay reads its facts off the session, and a viewer that opens
+            #: the URL inside the first second would otherwise get an empty
+            #: panel and conclude the overlay is broken.
+            session.diag = diagnostics
+            server = None if stream is not None else start_stream_server(session)
             proc = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
                 env=_clean_env())
             logger.info('screen capture command: %s', ' '.join(command))
-            diagnostics = _session_diagnostics(
-                kind=kind, capture=capture, command=command, encoder=encoder,
-                height=height, bitrate=bitrate, session=session,
-                audio_expected=with_audio, refused=refused)
             with self._lock:
                 if generation != self._generation:
                     raise _Aborted()
