@@ -44,7 +44,8 @@
                 "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
             transition: background .25s ease, color .25s ease;
         }
-        #app { max-width: 980px; margin: 0 auto; padding: 12px 16px 64px; }
+        /* 页宽与页边距只在下面的「响应式层」里定一次，这里不留初版值。 */
+        #app { margin: 0 auto; }
         .macast-topbar {
             display: flex; align-items: center; justify-content: space-between;
             margin-bottom: 8px;
@@ -104,6 +105,7 @@
         }
         .plugin-card-actions .el-button + .el-button { margin-left: 0; }
         .plugin-alert {
+            flex: none;
             margin-top: 8px; padding: 6px 9px; border-radius: 6px;
             background: #fdf6ec; color: #b88230; font-size: 12px; line-height: 1.5;
         }
@@ -273,11 +275,6 @@
             font-size: 13px; color: var(--text-soft);
         }
         .pwa-tip b { color: var(--text); }
-        @media (max-width: 600px) {
-            #app { padding: 8px; }
-            .macast-plugins { grid-template-columns: 1fr; }
-            .status-table td.k { width: 84px; }
-        }
 
         /* ── 样式刷新 ────────────────────────────────────────────────────
            同一批选择器，写在后面所以整体盖住上面的初版样式。改动集中在四件事：
@@ -304,6 +301,10 @@
             --shadow-lg: 0 22px 50px -22px rgba(24, 32, 66, .34);
             --radius: 16px;
             --radius-sm: 10px;
+            /* 页边距与卡片间距随视口伸缩；顶栏的负 margin 必须跟着 --pad-x，
+               否则 sticky 背景条和正文对不齐。宽度归视口管，所以 #app 不写像素。 */
+            --pad-x: clamp(12px, 2.6vw, 44px);
+            --pane-gap: clamp(12px, 1.4vw, 18px);
         }
         body.theme-dark {
             --bg: #16181f;
@@ -331,10 +332,10 @@
             font-size: 14px;
             -webkit-font-smoothing: antialiased;
         }
-        #app { max-width: 1000px; padding: 18px 20px 72px; }
+        /* #app 的宽度与内边距：见文件末尾的响应式层，这里不再给第二份值。 */
         .macast-topbar {
             position: sticky; top: 0; z-index: 20;
-            margin: 0 -20px 14px; padding: 12px 20px;
+            margin: 0 calc(var(--pad-x) * -1) 14px; padding: 12px var(--pad-x);
             background: color-mix(in srgb, var(--bg) 78%, transparent);
             backdrop-filter: saturate(180%) blur(14px);
             border-bottom: 1px solid var(--border);
@@ -377,10 +378,9 @@
             background: var(--accent); flex: none;
         }
 
-        /* 「拉得老长」的那一类：键/值表格不再让值横跨整页。给**表格**限宽，
-           而不是给单元格 `max-width` —— 后者对表格布局基本无效（实测：值列照样
-           822px 宽，横跨整张卡片）。 */
-        .status-table { width: 100%; max-width: 780px; }
+        /* 表格铺满它所在的卡片：行宽由卡片的列宽决定，不再另设一个像素封顶。
+           （以前这里给表格限过 780/820px 两个值，代价是宽屏上卡片右侧留白。） */
+        .status-table { width: 100%; }
         .status-table td { padding: 9px 12px; color: var(--text); }
         .status-table td.k {
             width: 132px; min-width: 132px; background: var(--panel-2);
@@ -421,11 +421,19 @@
         .history-item, .mf-item { border-bottom-color: var(--border); }
         .history-item:last-child, .mf-item:last-child { border-bottom: none; }
 
-        /* 弹层：帮助与模块编辑共用同一副面孔。 */
+        /* 弹层：帮助与模块编辑共用同一副面孔。
+           Element 给 .el-dialog 写死了白底，而页面把 `color: var(--text)` 挂在
+           body 上 —— 深色模式下弹层里的正文于是继承到近白色，压在白底上根本读不了
+           （帮助是一整页要读的文字，这个缺陷第一次截图就暴露了）。
+           背景与边框必须一起换：只换文字色的话，浅色模式下会变成灰字压白底。 */
+        .macast-dialog { background: var(--panel); border: 1px solid var(--border); }
+        .macast-dialog .el-dialog__title { color: var(--text); }
+        .macast-dialog .el-dialog__headerbtn .el-dialog__close { color: var(--text-soft); }
+        .macast-dialog .el-dialog__headerbtn:hover .el-dialog__close { color: var(--accent-text); }
         .macast-dialog { border-radius: 18px; box-shadow: var(--shadow-lg); overflow: hidden; }
         .macast-dialog .el-dialog__header { padding: 18px 22px 6px; }
         .macast-dialog .el-dialog__title { font-size: 15px; font-weight: 600; }
-        .macast-dialog .el-dialog__body { padding: 8px 22px 18px; }
+        .macast-dialog .el-dialog__body { padding: 8px 22px 18px; color: var(--text); }
         .macast-dialog .el-dialog__footer { padding: 0 22px 20px; }
         .help-body { max-height: 66vh; overflow: auto; padding-right: 8px; }
         .help-body h1 { font-size: 19px; margin: 4px 0 10px; }
@@ -438,11 +446,169 @@
 
         /* 滚动条：细一点，和卡片圆角一个语气。 */
         .help-body::-webkit-scrollbar, .macast-log::-webkit-scrollbar,
-        .mirror-feed::-webkit-scrollbar { width: 10px; height: 10px; }
+        .mirror-feed::-webkit-scrollbar, .pane-scroll::-webkit-scrollbar,
+        .plugin-card-desc::-webkit-scrollbar { width: 10px; height: 10px; }
         .help-body::-webkit-scrollbar-thumb, .macast-log::-webkit-scrollbar-thumb,
-        .mirror-feed::-webkit-scrollbar-thumb {
+        .mirror-feed::-webkit-scrollbar-thumb, .pane-scroll::-webkit-scrollbar-thumb,
+        .plugin-card-desc::-webkit-scrollbar-thumb {
             background: var(--border-strong); border-radius: 999px;
             border: 3px solid transparent; background-clip: content-box;
+        }
+
+        /* ── 响应式层 ────────────────────────────────────────────────────
+           宽度归视口管，不归这份 CSS 管。三条规则：
+           ① 页面不钉固定宽度：两侧留白只由 --pad-x 给，所以 2100px 的屏不会像
+              以前那样被 min(1680px,100%) 挤出两条没人用的空带；
+           ② 卡片自己填列（auto-fit + minmax），空轨道塌掉，所以只有两张卡的行
+              不会剩下半页空白；窄屏自然退成一列；
+           ③ 需要通栏的东西（进度条、长表格、实时统计、统计信息）显式 span 整行，
+              而长短参差的块（状态页的中间四块）交给 .status-cols 排成左右两叠。 */
+        #app {
+            /* border-box 是必需的：`width: 100%` 加上 --pad-x 的内边距，
+               在 content-box 下会让整页横向溢出。 */
+            box-sizing: border-box;
+            width: 100%;
+            max-width: none;
+            padding: 16px var(--pad-x) 80px;
+        }
+
+        /* 一个标签页 = 一张自动填列的卡片网。窄屏自然退成一列。 */
+        .pane {
+            display: grid; gap: var(--pane-gap);
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+            align-items: start;
+        }
+        .pane .status-card, .pane .cast-box, .pane .pane-block,
+        .mirror-wrap .status-card { margin-bottom: 0; }
+        .pane-tools { grid-column: 1 / -1; display: flex; gap: 10px; flex-wrap: wrap; }
+        .pane-wide { grid-column: 1 / -1; }
+        .mirror-strip { grid-column: 1 / -1; margin-bottom: 0; }
+        /* 「状态」页里那些块的高度差得太远（网卡列表十几行，播放状态六行），
+           放进自动填列的网里只会排成高低参差的四列。所以这一页显式通栏，
+           中间四块再自己分成左右两叠：左列读播放侧，右列读服务侧。 */
+        .status-pane { grid-template-columns: 1fr; }
+        /* 「电脑投屏」是一串流程卡（方式 → 设备 → 采集 → 声音 → 预览 → 统计），
+           不是仪表盘。这里用弹性换行而不是网格：哪几块会出现由
+           macast/mirror_view.py 按状态决定，块数不固定，而自动填列的网格只在
+           **所有**行都空的时候才收列 —— 3 列网里放 4 张卡，必然留下「最后一张
+           占一列、右边一大片空」。flex-basis 420px + 允许伸缩，凑不满的那一行
+           自己摊开；行内仍然等高（align-items 默认就是 stretch）。 */
+        .mirror-wrap {
+            display: flex; flex-wrap: wrap; gap: var(--pane-gap);
+            align-items: stretch;
+        }
+        .mirror-wrap > * { flex: 1 1 420px; min-width: 0; }
+        .mirror-wrap > .pane-wide, .mirror-wrap > .mirror-strip { flex: 0 0 100%; }
+        .status-cols {
+            display: grid; gap: var(--pane-gap); align-items: start;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+        }
+        .status-col { display: flex; flex-direction: column; gap: var(--pane-gap); min-width: 0; }
+        /* 「服务器状态 / 播放状态 / 客户端信息」以前是**没有样式的裸 div**：同一页里
+           三种块（.status-card 有卡片、.cast-box 有卡片、.pane-block 什么都没有），
+           所以页面读起来像散落的段落而不是卡片网。现在它拿同一副面孔。 */
+        .pane-block {
+            background: var(--panel); border: 1px solid var(--border);
+            border-radius: var(--radius); box-shadow: var(--shadow-sm);
+            padding: 18px 20px; min-width: 0;
+        }
+        /* 一处裁定：卡片里的标题只有一种长相。 */
+        .status-card h3, .pane-block > h3.section, .cast-box > .cast-title {
+            font-size: 14px; letter-spacing: .3px; margin: 0 0 12px;
+            display: flex; align-items: center; gap: 8px; color: var(--text);
+        }
+        .status-card h3::before, .pane-block > h3.section::before,
+        .cast-box > .cast-title::before {
+            content: ''; width: 4px; height: 14px; border-radius: 2px;
+            background: var(--accent); flex: none;
+        }
+        /* 长内容（播放历史、十几行网卡、客户端表）走窗内滚动，而不是把整页拉成
+           一屏读不完的一列。上限按视口给，所以矮屏不会顶穿首屏。 */
+        .pane-scroll {
+            max-height: clamp(320px, 52vh, 620px);
+            overflow-y: auto; overscroll-behavior: contain;
+            min-height: 0; padding-right: 4px;
+        }
+        /* 通栏的两块工具卡：一行放得下就不再竖着堆。 */
+        .cast-row {
+            display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+        }
+        .cast-row > .cast-title { margin-bottom: 0; flex: none; }
+        .cast-row > .hint { flex: 1 1 320px; margin-top: 0; min-width: 0; }
+        .cast-cols {
+            display: grid; gap: 10px 18px; align-items: center;
+            grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+        }
+        .cast-cols > .hint { margin-top: 0; }
+        /* 「模块设置」的一张卡里是三列表格，塞进 380px 的列里只会挤成马赛克。 */
+        .module-pane {
+            grid-template-columns: repeat(auto-fill, minmax(min(100%, 620px), 1fr));
+        }
+
+        /* 键/值表格的行长归它所在卡片的列宽管：宽屏上另设像素封顶，就是在卡片里
+           重新挖出用户指着的那些空白（所以这里只留 `.status-table { width: 100% }`）。 */
+        .module-table { table-layout: fixed; }
+        .module-table .mt-label { width: min(240px, 34%); }
+        .module-table .mt-value { word-break: break-word; }
+        .module-table .mt-actions { width: clamp(96px, 22%, 150px); }
+
+        /* 弹层宽度同样交给视口：属性里不写像素。
+           （`!important` 是必需的——el-dialog 把 width 写成行内样式。） */
+        .macast-dialog { width: min(560px, calc(100vw - 24px)) !important; margin-top: 7vh !important; }
+        .help-dialog { width: min(920px, calc(100vw - 20px)) !important; }
+        .help-dialog .el-dialog__body { padding: 8px 20px 14px; }
+        .help-body { max-height: 70vh; }
+        /* 帮助里的表格是纯 HTML（没有 el-table 的样式），初版根本没画过。 */
+        .help-body table {
+            border-collapse: collapse; width: 100%; max-width: 640px; margin: 6px 0 4px;
+        }
+        .help-body th, .help-body td {
+            border: 1px solid var(--border); padding: 6px 10px;
+            font-size: 13px; text-align: left;
+        }
+        .help-body th { background: var(--panel-2); color: var(--text-soft); font-weight: 600; }
+        .help-body figure { margin: 8px 0; }
+        .help-body pre {
+            background: var(--panel-2); border: 1px solid var(--border);
+            border-radius: 8px; padding: 8px 10px; overflow: auto;
+            font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+        }
+        /* 目录：让一屏读不完的帮助有个入口，而不是逼人滚到底再滚回来。 */
+        .help-toc {
+            display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 14px;
+            padding-bottom: 12px; border-bottom: 1px solid var(--border);
+        }
+        .help-toc a {
+            font-size: 12px; color: var(--text-soft); text-decoration: none;
+            border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
+        }
+        .help-toc a:hover { border-color: var(--accent); color: var(--accent-text); }
+
+        /* 日志页的两个下拉与按钮：原来把宽度写在 style 里，窄屏会撑出横向滚动。 */
+        .log-bar .el-select { flex: 0 1 auto; }
+        .log-bar .log-select-module { width: min(220px, 60vw); }
+        .log-bar .log-select-tail { width: min(168px, 46vw); }
+        .log-bar .log-actions { flex-wrap: wrap; }
+
+        /* 插件页的安装行：控件多的时候换行，不让输入框压住按钮。 */
+        .install-row .install-select { width: min(112px, 40vw); }
+        .install-url { flex: 1 1 240px; min-width: 0; }
+
+        @media (max-width: 700px) {
+            .pane { grid-template-columns: 1fr; }
+            .macast-dialog .el-dialog__header,
+            .macast-dialog .el-dialog__body,
+            .macast-dialog .el-dialog__footer { padding-left: 14px; padding-right: 14px; }
+            .status-table td.k { width: 92px; min-width: 92px; }
+            .module-table .mt-label { width: auto; }
+            .module-table { table-layout: auto; }
+            /* 操作列换到值下面比挤成一列更省事，所以窄屏直接按块排。 */
+            .module-table, .module-table tbody, .module-table tr, .module-table td {
+                display: block; width: auto;
+            }
+            .module-table tr { padding: 6px 0; border-top: 1px solid var(--border); }
+            .module-table .mt-actions { text-align: left; }
+            .macast-plugin-repo { bottom: .6rem; right: .6rem; }
         }
     </style>
 </head>
@@ -473,7 +639,7 @@
             <div class="status-card">
                 <h3>安装插件</h3>
                 <div class="install-row">
-                    <el-select v-model="install_type" size="small" style="width:104px;">
+                    <el-select v-model="install_type" size="small" class="install-select">
                         <el-option label="渲染器" value="renderer"></el-option>
                         <el-option label="协议" value="protocol"></el-option>
                     </el-select>
@@ -540,11 +706,13 @@
             </a>
         </el-tab-pane>
         <el-tab-pane label="状态" name="10">
-            <div style="padding: 10px;">
-                <el-button size="small" icon="el-icon-refresh" @click="load_status">刷新</el-button>
+            <div class="pane status-pane">
+                <div class="pane-tools">
+                    <el-button size="small" icon="el-icon-refresh" @click="load_status">刷新</el-button>
+                </div>
 
-                <div class="cast-box">
-                    <div style="font-weight:600;margin-bottom:8px;">投屏本地文件</div>
+                <div class="cast-box pane-wide cast-row">
+                    <h3 class="cast-title">投屏本地文件</h3>
                     <el-upload
                             action="/api"
                             :show-file-list="true"
@@ -558,24 +726,26 @@
                     <div class="hint">文件仅在本机临时目录暂存并通过 127.0.0.1 推送给播放器，关闭应用后不会外传。</div>
                 </div>
 
-                <div class="cast-box">
-                    <div style="font-weight:600;margin-bottom:8px;">网页投屏入口</div>
-                    <div class="hint" style="margin-top:0;margin-bottom:8px;">
+                <div class="cast-box pane-wide">
+                    <h3 class="cast-title">网页投屏入口</h3>
+                    <div class="hint" style="margin-top:0;margin-bottom:10px;">
                         让脚本、iOS 快捷指令、书签或任何能打开网址的东西直接投屏 —— 不用走 DLNA 发现。
                         「url」填媒体的绝对地址（http / https / rtsp 均可）。
                     </div>
-                    <div class="install-row">
-                        <el-input v-model="cast_endpoint" size="small" readonly
-                                  class="install-url"></el-input>
-                        <el-button size="small" icon="el-icon-document-copy"
-                                   @click="copy_text(cast_endpoint)">复制地址</el-button>
-                    </div>
-                    <div class="install-row" style="margin-top:6px;">
-                        <span class="hint" style="margin:0 6px 0 0;">令牌</span>
-                        <el-input v-model="cast_info.token" size="small" readonly
-                                  class="install-url"></el-input>
-                        <el-button size="small" icon="el-icon-key"
-                                   @click="copy_text(cast_info.token)">复制令牌</el-button>
+                    <div class="cast-cols">
+                        <div class="install-row" style="margin:0;">
+                            <el-input v-model="cast_endpoint" size="small" readonly
+                                      class="install-url"></el-input>
+                            <el-button size="small" icon="el-icon-document-copy"
+                                       @click="copy_text(cast_endpoint)">复制地址</el-button>
+                        </div>
+                        <div class="install-row" style="margin:0;">
+                            <span class="hint" style="margin:0 6px 0 0;">令牌</span>
+                            <el-input v-model="cast_info.token" size="small" readonly
+                                      class="install-url"></el-input>
+                            <el-button size="small" icon="el-icon-key"
+                                       @click="copy_text(cast_info.token)">复制令牌</el-button>
+                        </div>
                     </div>
                     <pre class="cast-example">{{ cast_example }}</pre>
                     <div class="hint">
@@ -585,7 +755,7 @@
                     </div>
                 </div>
 
-                <div class="status-card">
+                <div class="status-card pane-wide">
                     <h3>正在播放</h3>
                     <div class="now-playing">
                         <div class="cover">♪</div>
@@ -607,6 +777,11 @@
                     </div>
                 </div>
 
+                <!-- 中间四块排成左右两叠：左列读「本机播出去的东西」，右列读
+                     「这台服务本身」。它们的高度差得太远（网卡十几行 vs 播放状态
+                     六行），放进自动填列的网里只会排成高低参差的四列。 -->
+                <div class="status-cols">
+                <div class="status-col">
                 <div class="status-card">
                     <div style="display:flex;align-items:center;justify-content:space-between;">
                         <h3 style="margin:0;">播放历史</h3>
@@ -614,7 +789,7 @@
                                    @click="clear_history" :disabled="!history.length">清空</el-button>
                     </div>
                     <div v-if="!history.length" class="hint" style="margin-top:8px;">暂无播放记录</div>
-                    <div v-else>
+                    <div v-else class="pane-scroll">
                         <div v-for="(h, i) in history" :key="i" class="history-item">
                             <div class="history-meta">
                                 <div class="history-ttl" :title="h.title">{{ h.title }}</div>
@@ -638,7 +813,7 @@
                         切换后立即重新广播，不需要重启。
                     </div>
                     <el-radio-group v-model="net_choice" @change="apply_interface"
-                                    class="net-list">
+                                    class="net-list pane-scroll">
                         <el-radio label="" class="net-item">
                             <span class="net-name">自动选择</span>
                             <span class="net-hint">默认路由所在的网卡</span>
@@ -662,9 +837,11 @@
                         <span v-if="!net_advertised.length">—</span>
                     </div>
                 </div>
-
-                <h3 class="section">服务器状态</h3>
-                <table class="status-table">
+                </div>
+                <div class="status-col">
+                <div class="pane-block">
+                    <h3 class="section">服务器状态</h3>
+                    <table class="status-table">
                     <tbody>
                     <tr><td class="k">运行状态</td><td>{{ status.server.running ? '运行中' : '已停止' }}</td></tr>
                     <tr><td class="k">端口</td><td>{{ status.server.port }}</td></tr>
@@ -694,29 +871,36 @@
                     </td></tr>
                     </tbody>
                 </table>
+                </div>
 
-                <h3 class="section">播放状态</h3>
-                <table class="status-table">
-                    <tbody>
-                    <tr><td class="k">传输状态</td><td>{{ status.media.TransportState || '空闲' }}</td></tr>
-                    <tr><td class="k">标题</td><td>{{ status.media.CurrentTrackTitle || '—' }}</td></tr>
-                    <tr><td class="k">推送地址</td><td><span class="uri">{{ status.media.CurrentURI || '—' }}</span></td></tr>
-                    <tr><td class="k">当前进度</td><td>{{ status.media.AbsoluteTimePosition || '—' }} / {{ status.media.CurrentTrackDuration || '—' }}</td></tr>
-                    <tr v-if="has_value(status.media.TransportPlaySpeed)">
-                        <td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
-                    <tr v-if="has_value(status.media.CurrentPlayMode)">
-                        <td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
-                    </tbody>
-                </table>
+                <div class="pane-block">
+                    <h3 class="section">播放状态</h3>
+                    <table class="status-table">
+                        <tbody>
+                        <tr><td class="k">传输状态</td><td>{{ status.media.TransportState || '空闲' }}</td></tr>
+                        <tr><td class="k">标题</td><td>{{ status.media.CurrentTrackTitle || '—' }}</td></tr>
+                        <tr><td class="k">推送地址</td><td><span class="uri">{{ status.media.CurrentURI || '—' }}</span></td></tr>
+                        <tr><td class="k">当前进度</td><td>{{ status.media.AbsoluteTimePosition || '—' }} / {{ status.media.CurrentTrackDuration || '—' }}</td></tr>
+                        <tr v-if="has_value(status.media.TransportPlaySpeed)">
+                            <td class="k">播放速度</td><td>{{ status.media.TransportPlaySpeed }}</td></tr>
+                        <tr v-if="has_value(status.media.CurrentPlayMode)">
+                            <td class="k">播放模式</td><td>{{ status.media.CurrentPlayMode }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                </div>
+                </div>
 
-                <h3 class="section">客户端信息</h3>
-                <el-table :data="status.clients" size="mini" empty-text="暂无订阅客户端">
-                    <el-table-column prop="host" label="地址/主机" show-overflow-tooltip></el-table-column>
-                    <el-table-column prop="service" label="服务" show-overflow-tooltip></el-table-column>
-                    <el-table-column prop="path" label="路径" show-overflow-tooltip></el-table-column>
-                    <el-table-column prop="sid" label="SID" show-overflow-tooltip></el-table-column>
-                    <el-table-column prop="timeout" label="超时(秒)"></el-table-column>
-                </el-table>
+                <div class="pane-block pane-wide">
+                    <h3 class="section">客户端信息</h3>
+                    <el-table :data="status.clients" size="mini" empty-text="暂无订阅客户端">
+                        <el-table-column prop="host" label="地址/主机" show-overflow-tooltip></el-table-column>
+                        <el-table-column prop="service" label="服务" show-overflow-tooltip></el-table-column>
+                        <el-table-column prop="path" label="路径" show-overflow-tooltip></el-table-column>
+                        <el-table-column prop="sid" label="SID" show-overflow-tooltip></el-table-column>
+                        <el-table-column prop="timeout" label="超时(秒)"></el-table-column>
+                    </el-table>
+                </div>
             </div>
         </el-tab-pane>
         <el-tab-pane label="电脑投屏" name="13">
@@ -731,12 +915,12 @@
                 <div class="mirror-strip" :class="mirror_banner.class"
                      v-else-if="mirror_banner.text">{{ mirror_banner.text }}</div>
 
-                <div class="status-card" v-if="!mirror_state">
+                <div class="status-card pane-wide" v-if="!mirror_state">
                     <div class="hint">{{ mirror_loaded ? '没有拿到投屏状态。' : '加载中…' }}</div>
                 </div>
 
                 <template v-else>
-                    <div class="status-card mirror-head">
+                    <div class="status-card mirror-head pane-wide">
                         <div class="mirror-head-top">
                             <span class="mirror-live" :class="{on: mirror_state.mirroring}">
                                 <i class="mirror-dot"></i>{{ mirror_view.header }}
@@ -758,7 +942,7 @@
                     </div>
 
                     <template v-for="sec in mirror_view.sections">
-                        <div class="status-card" v-if="sec === 'channels'" key="channels">
+                        <div class="status-card pane-wide" v-if="sec === 'channels'" key="channels">
                             <h3>投屏方式</h3>
                             <div class="mirror-cards">
                                 <div class="mirror-card" :class="{sel: row[3]}"
@@ -899,7 +1083,7 @@
                             </div>
                         </div>
 
-                        <div class="status-card" v-if="sec === 'preview'" key="preview">
+                        <div class="status-card pane-wide" v-if="sec === 'preview'" key="preview">
                             <h3>预览</h3>
                             <img class="mirror-snap" v-if="mirror_snap_src" :src="mirror_snap_src"
                                  alt="这台电脑当前的采集画面">
@@ -911,7 +1095,7 @@
                             </div>
                         </div>
 
-                        <div class="status-card" v-if="sec === 'diagnostics'" key="diagnostics">
+                        <div class="status-card pane-wide" v-if="sec === 'diagnostics'" key="diagnostics">
                             <h3>统计信息</h3>
                             <div class="hint" style="margin-bottom:8px;">
                                 投屏的原始数据。端到端延迟就是「延迟来源」那几项相加再算上电视/浏览器的
@@ -969,6 +1153,7 @@
             </div>
         </el-tab-pane>
         <el-tab-pane label="模块设置" name="12">
+            <div class="pane module-pane">
             <div class="status-card" v-if="!module_groups.length">
                 <div class="hint">{{ module_groups_loaded ? '暂无模块设置数据。' : '加载中…' }}</div>
             </div>
@@ -980,30 +1165,33 @@
                 <div class="hint" v-if="!g.keys.length">
                     该模块没有自己的持久化配置；相关开关在菜单栏里。
                 </div>
-                <table class="module-table" v-else>
-                    <tr v-for="row in g.keys" :key="row.key">
-                        <td class="mt-label">
-                            {{ row.label }}
-                            <div class="hint"><code>{{ row.key }}</code></div>
-                        </td>
-                        <td class="mt-value">
-                            <span v-if="!row.present" class="hint">（未设置）</span>
-                            <code v-else-if="typeof row.value === 'string'">{{ row.value === '' ? '""（空串）' : row.value }}</code>
-                            <code v-else>{{ JSON.stringify(row.value) }}</code>
-                            <div class="hint" v-if="row.hint">{{ row.hint }}</div>
-                        </td>
-                        <td class="mt-actions">
-                            <template v-if="row.editable">
-                                <el-button size="mini" @click="edit_module_setting(g, row)">编辑</el-button>
-                                <el-button size="mini" type="danger" v-if="row.present"
-                                           @click="remove_module_setting(g, row)">删除</el-button>
-                            </template>
-                            <span v-else class="hint">列表/对象值请在「高级设置」里编辑</span>
-                        </td>
-                    </tr>
-                </table>
+                <div class="pane-scroll" v-else>
+                    <table class="module-table">
+                        <tr v-for="row in g.keys" :key="row.key">
+                            <td class="mt-label">
+                                {{ row.label }}
+                                <div class="hint"><code>{{ row.key }}</code></div>
+                            </td>
+                            <td class="mt-value">
+                                <span v-if="!row.present" class="hint">（未设置）</span>
+                                <code v-else-if="typeof row.value === 'string'">{{ row.value === '' ? '""（空串）' : row.value }}</code>
+                                <code v-else>{{ JSON.stringify(row.value) }}</code>
+                                <div class="hint" v-if="row.hint">{{ row.hint }}</div>
+                            </td>
+                            <td class="mt-actions">
+                                <template v-if="row.editable">
+                                    <el-button size="mini" @click="edit_module_setting(g, row)">编辑</el-button>
+                                    <el-button size="mini" type="danger" v-if="row.present"
+                                               @click="remove_module_setting(g, row)">删除</el-button>
+                                </template>
+                                <span v-else class="hint">列表/对象值请在「高级设置」里编辑</span>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
             </div>
-            <el-dialog :title="module_edit.label" :visible.sync="module_edit.visible" width="480px"
+            </div>
+            <el-dialog :title="module_edit.label" :visible.sync="module_edit.visible"
                        custom-class="macast-dialog">
                 <div class="hint" style="margin-bottom:6px;">
                     <code>{{ module_edit.key }}</code>（{{ module_edit.group }}）
@@ -1023,14 +1211,14 @@
         <el-tab-pane label="日志" name="3">
             <div class="status-card">
                 <div class="log-bar">
-                    <el-select v-model="log_module" size="small" style="width:198px;"
+                    <el-select v-model="log_module" size="small" class="log-select-module"
                                @change="get_log">
                         <el-option label="整体日志（macast.log）" value=""></el-option>
                         <el-option v-for="m in log_modules" :key="m.name"
                                    :label="m.name + '（' + fmt_size(m.size) + '）'"
                                    :value="m.name"></el-option>
                     </el-select>
-                    <el-select v-model="log_tail" size="small" style="width:158px;"
+                    <el-select v-model="log_tail" size="small" class="log-select-tail"
                                @change="get_log">
                         <el-option label="末尾 500 行" :value="500"></el-option>
                         <el-option label="末尾 2000 行" :value="2000"></el-option>
@@ -1059,16 +1247,16 @@
             </div>
         </el-tab-pane>
         <el-tab-pane label="字幕" name="11">
-            <div style="padding: 10px;">
+            <div class="pane">
                 <div class="status-card">
-                    <h3 style="margin:0 0 10px;">字幕显隐</h3>
+                    <h3>字幕显隐</h3>
                     <el-switch v-model="sub_show" @change="toggle_sub"
                                active-text="显示字幕" inactive-text="隐藏字幕"></el-switch>
                     <div class="hint" style="margin-top:8px;">开关作用于当前正在播放的视频。</div>
                 </div>
 
-                <div class="cast-box">
-                    <div style="font-weight:600;margin-bottom:8px;">加载字幕文件（仅本机）</div>
+                <div class="cast-box cast-row">
+                    <h3 class="cast-title">加载字幕文件（仅本机）</h3>
                     <el-upload
                             action="/api"
                             :show-file-list="true"
@@ -1087,102 +1275,241 @@
 
     <!-- 「帮助」不是第七个标签页，而是顶栏上的一个按钮：它是参考资料，
          不是这一页的一等公民，而七个平级标签让它看起来同等重要。 -->
-    <el-dialog title="帮助" :visible.sync="helpVisible" width="760px"
+    <el-dialog title="帮助" :visible.sync="helpVisible"
                custom-class="macast-dialog help-dialog" append-to-body>
         <div class="help-body">
 
-                <h1>常见问题（FAQ）</h1>
+                <h1>Macast 帮助</h1>
 
-                <el-link type="primary"
-                         href="https://github.com/xfangfang/Macast/wiki/FAQ"
-                         target="_blank">本文档可能不是最新版本，请前往 Macast Wiki 查看最新内容。
-                </el-link>
+                <p>这份帮助随应用一起打包，说的就是<strong>本机这一版</strong>
+                    （v{{ status.server.version || '未知' }}）的行为，不是网上那篇 FAQ。
+                    数字（端口、秒数、档位数量）都写在应用自己的代码里，页面与代码由回归用例
+                    绑在一起，所以这里过期了会被测红。</p>
 
-                <p>Macast 目前仍处于早期开发阶段，在你的设备上可能无法正常使用。遇到这种情况，请尝试
-                    <el-link type="primary" href='https://github.com/pingod/Macast/actions'>测试版</el-link>
-                    ，或
-                    <el-link type="primary" href='https://github.com/pingod/Macast/issues/new/choose'>提交 issue</el-link>
-                    帮助我们做得更好。
-                </p>
-                <h2 id='i-dont-know-how-to-use'>不知道怎么用</h2>
-                <p>只需打开本应用，<strong>菜单栏</strong> / <strong>任务栏</strong> / <strong>桌面面板</strong>
-                    中就会出现一个小图标，随后你就可以从本地的 DLNA 客户端把媒体文件投送到你的电脑上。<br/>
-                </p>
-                <h2 id='how-to-use-third-party-player-plug-inmacast--v06'>如何使用第三方播放器插件</h2>
-                <ol start=''>
-                    <li>Macast 以往需要你自行下载的播放器——IINA、Web、Live、PotPlayer、PIFMRDS 以及
-                        NVA 协议——现在已<strong>内置</strong>在应用中。它们列在<strong>插件</strong>标签页，
-                        可在该页直接启用或停用。
-                    </li>
-                    <li>若要添加自己的插件：在<strong>插件</strong>标签页安装一个 <strong>[某插件].py</strong>，
-                        或将文件拖入<code>打开配置目录</code>下的 renderer / protocol 目录。
-                    </li>
-                    <li>无需重启——插件安装后即生效。</li>
+                <nav class="help-toc">
+                    <a href="#h-start">快速开始</a>
+                    <a href="#h-find">搜不到 / 投不上</a>
+                    <a href="#h-novideo">有声音没画面</a>
+                    <a href="#h-port">端口与多实例</a>
+                    <a href="#h-web">网页投屏入口</a>
+                    <a href="#h-plugin">插件</a>
+                    <a href="#h-mirror">电脑投屏</a>
+                    <a href="#h-file">投本地文件 / 字幕</a>
+                    <a href="#h-in">镜像与音乐投进来</a>
+                    <a href="#h-where">配置与日志在哪</a>
+                    <a href="#h-setting">改配置</a>
+                    <a href="#h-mpv">给 mpv 加个人配置</a>
+                    <a href="#h-cant">明确做不到</a>
+                </nav>
+
+                <h2 id="h-start">快速开始</h2>
+                <p>Macast 是这台电脑上的 <strong>DLNA / Chromecast / AirPlay 接收端</strong>：
+                    手机或别的电脑把媒体地址交过来，本机用 mpv 播放。</p>
+                <ol>
+                    <li>打开应用，菜单栏（macOS）/ 系统托盘（Windows、Linux）里出现小图标，服务就起来了。</li>
+                    <li>在投屏客户端里找这台电脑：DLNA 应用里叫
+                        <strong>{{ status.server.friendly_name || '友好名称' }}</strong>，
+                        Chromecast 发送端里是同一名字的 receiver。</li>
+                    <li>投不出去先看<strong>状态</strong>页：运行状态、端口、协议、当前广播的 IP 都在那里；
+                        疑难杂症看<strong>日志</strong>页。</li>
                 </ol>
-                <p> 如果找不到想要的插件，可前往
-                    <el-link type="primary"
-                             href='https://github.com/xfangfang/Macast/wiki/Custom-Renderer'>此处
-                    </el-link>
-                    了解如何编写自定义渲染器插件，欢迎提交 Pull Request。
-                </p>
-                <h2 id='unable-to-find-macast-from-your-dlna-client'>DLNA 客户端找不到 Macast</h2>
+                <p>这个设置页一共七个标签，各自管一件事：</p>
                 <ul>
-                    <li>检查防火墙是否拦截了 Macast。<br/>一个简单的检测方法是：从其他设备访问 Macast
-                        开放的端口（默认为 58880，可在设置菜单中查看）。
-                    </li>
-                    <li>检查路由器。<br/>应开启 UPnP 并关闭 AP 隔离（AP Isolation）。
-                    </li>
-                    <li>软件问题。<br/>若使用 iOS 设备，请确保对应 App 的
-                        <strong>「本地网络」查找与连接权限</strong>已开启。<br/>部分应用需要等待 30 秒以上才能发现
-                        Macast，请耐心等待。
-                    </li>
-                    <li>UDP 组播问题。<br/>有反馈称 Windows 与部分路由器存在适配问题，导致 Windows
-                        无法加入组播。此时需修改 Windows 注册表，强制将 IGMP 版本设为 v2。
-                    </li>
-                    <li>多网卡或复杂网络环境。<br/>请确保在单网卡、且与 DLNA 客户端处于同一局域网的条件下
-                        Macast 可正常使用；更复杂场景的解决方案仍在完善中。
-                    </li>
-
+                    <li><strong>状态</strong> —— 正在播什么、谁在订阅、网卡选哪块、把本机文件投出去、网页投屏入口。</li>
+                    <li><strong>电脑投屏</strong> —— 反方向的：把这台电脑的屏幕推给电视或浏览器。</li>
+                    <li><strong>插件</strong> —— 启用/停用/安装卸载渲染器与协议插件。</li>
+                    <li><strong>模块设置</strong> —— 每个配置键写明属于哪个模块，可直接改值。</li>
+                    <li><strong>高级设置</strong> —— 整份 <code>macast_setting.json</code>。</li>
+                    <li><strong>日志</strong> —— 整体日志与各模块独立日志。</li>
+                    <li><strong>字幕</strong> —— 本机播放器当前这条视频的字幕显隐与外挂字幕。</li>
                 </ul>
-                <h2 id='crash-at-startup'>启动时崩溃</h2>
-                <p> Macast 默认开放端口 58880。当你的电脑上该端口被占用时，应用会崩溃。请手动设置应用端口，
-                    此后 Macast 会从配置文件中读取你指定的端口。</p>
-                <h2 id='unable-to-close-or-unresponsive'>无法关闭或无响应</h2>
-                <p> 使用第三方播放器插件时，插件通常需要开启更多线程或进程，导致应用退出时出现无响应问题，
-                    这通常是由插件本身引起的。</p>
-                <h2 id='where-is-the-configuration-file-located'>配置文件在哪里</h2>
+
+                <h2 id="h-find">投屏客户端找不到 Macast / 连上没反应</h2>
+                <p>先分清是<strong>没广播出去</strong>还是<strong>发端不认账</strong>——下面按这两条排。</p>
+                <ul>
+                    <li><strong>防火墙</strong>。<br/>从另一台设备直接访问
+                        <code>http://&lt;本机IP&gt;:{{ status.server.port || 58880 }}/</code>：
+                        打得开说明端口通，打不开就是防火墙或网段隔离。</li>
+                    <li><strong>路由器</strong>。<br/>开启 UPnP，关闭 AP 隔离（访客网络本质上就是 AP 隔离）。</li>
+                    <li><strong>多网卡 / VPN / 虚拟机网桥</strong>。<br/>这是「搜得到、点投屏没反应」最常见的原因：
+                        广播发在了不带默认路由的那块网卡上，发送端随机挑到一个不可达地址。
+                        到<strong>状态 → 网络与广播</strong>里显式选一块网卡，切换后立即重新广播，不用重启。</li>
+                    <li><strong>iOS</strong>。<br/>投屏 App 的<strong>「本地网络」权限</strong>必须打开（不给权限时
+                        不报错，只是永远搜不到）。部分客户端要等 30 秒以上才刷新出设备。</li>
+                    <li><strong>屏幕录制 / 麦克风权限</strong>。<br/>只影响「电脑投屏」这条采集链路，见下面
+                        <a href="#h-mirror">电脑投屏</a>。</li>
+                    <li><strong>Windows 与部分路由器的组播适配</strong>。<br/>表现为 Windows 加不进组播组，
+                        需要改注册表强制 IGMP 版本为 v2。</li>
+                    <li><strong>Chromecast 这一路要单独说</strong>。<br/>Macast 是<strong>未认证</strong>的接收端：
+                        Google 官方发送端（YouTube、Google Home）可能因为设备认证不过而拒绝它，
+                        VLC、mkchromecast、Home Assistant、各类第三方投屏 App 都能用。
+                        手机连得上但 TLS 一直握手不完，去看日志里 8009 那一段。</li>
+                </ul>
+
+                <h2 id="h-novideo">有声音没画面 / 投上去是黑的</h2>
+                <ol>
+                    <li><strong>先看是不是发端只推了音频</strong>。日志里搜
+                        <code>audio-reconfig</code> 与 <code>video-reconfig</code>：mpv 只在真的配置视频轨时
+                        才发后者。只有前者 ⇒ 流里根本没有画面（VLC 要检查是否勾了视频输出；
+                        日志里的 <code>Cast LOAD ... contentType=</code> 会直接写明发送端自称推的是什么）。</li>
+                    <li><strong>DRM 内容永远是这样</strong>。受保护 App 的镜像、加密视频平台投过来本来就是黑屏，
+                        这一条没有解，见<a href="#h-cant">明确做不到</a>。</li>
+                    <li><strong>代理</strong>。播放器进程启动时已经摘掉了 <code>http_proxy</code> 一类变量
+                        （否则局域网地址也会走代理，症状是 <code>HTTP error 502</code>）；
+                        如果你换成了外部播放器插件，那个进程归插件管，需要自己在插件里摘。</li>
+                </ol>
+
+                <h2 id="h-port">端口与多实例</h2>
+                <p>默认端口 58880；Chromecast 通道 8009、AirPlay 通道 7000，后两个被占用时会在紧邻的
+                    后继端口里另找一个，并在 mDNS 上按真实端口广播。
+                    <strong>主端口被占用时应用也不会崩溃</strong>，而是让 HTTP 服务另绑一个随机端口，
+                    同时给自己换一个临时友好名 <code>Macast(0123)</code> 并重置 USN。
+                    所以「旧实例没退干净又开了一个」的症状是：设备列表里多出一个陌生的 Macast，
+                    或者你配好的快捷指令/书签开始 404。</p>
+                <ul>
+                    <li>想固定端口：在<strong>高级设置</strong>里把 <code>ApplicationPort</code> 写定，
+                        并确保场上只有一个实例。</li>
+                    <li>退出走菜单栏的「退出」。用命令行的话是 <code>kill -2</code>：
+                        macOS 的 Cocoa 事件循环不理会 <code>SIGTERM</code>，<code>kill &lt;pid&gt;</code>
+                        之后端口照常监听。</li>
+                    <li>HTTPS 端口是应用端口 +1（在<strong>状态</strong>页可看到是否启用）。
+                        启用后用浏览器打开 HTTPS 地址可以把这个设置页装成 PWA。</li>
+                </ul>
+
+                <h2 id="h-web">网页投屏入口（绕开 DLNA 发现）</h2>
+                <p><strong>状态 → 网页投屏入口</strong>给了一条 GET 通道，专门服务于
+                    「只能打开一个网址」的调用方：iOS 快捷指令、浏览器书签、<code>curl</code>、脚本。</p>
+                <pre><code>GET /api?query=cast&amp;url=&lt;媒体绝对地址&gt;&amp;token=&lt;令牌&gt;</code></pre>
+                <ul>
+                    <li>令牌常驻在同一个面板里，可以直接复制。它存在
+                        <code>macast_setting.json</code> 的 <code>Api_Token</code> 里，
+                        重启不会变——否则你配好的快捷指令下次启动就 403 了。</li>
+                    <li><strong>即使是本机也要求令牌</strong>。任何网页都能发一个 GET 到
+                        <code>127.0.0.1</code>，不设防就等于随便哪个网页都能指使这台电脑开始播片。</li>
+                    <li>同一个令牌也是<strong>整套管理 API</strong> 的钥匙。这条地址会被复制、转发、
+                        贴进群，所以别把它发给别人。</li>
+                </ul>
+
+                <h2 id="h-plugin">插件</h2>
+                <p>应用自带 15 个插件，<strong>开箱即用，不需要下载</strong>：12 个渲染器 + 3 个协议，
+                    都列在<strong>插件</strong>页，可以直接启用或停用，<strong>热生效，不用重启</strong>。</p>
+                <ul>
+                    <li><strong>渲染器</strong>决定「投来的东西由谁播」：mpv（默认）之外还有 IINA、Web、
+                        Live、PotPlayer、PIFMRDS，以及本仓库自研的 yt-dlp 下载/边下边播、外部播放器、
+                        小窗+壁纸、自动化钩子、Chromecast 中继、本地文件投屏、电脑投屏。
+                        <strong>一次只能选一种</strong>，在菜单栏里切换。</li>
+                    <li><strong>协议</strong>决定「除了 DLNA 还听得见什么」：NVA（哔哩必连）、
+                        RAOP（AirPlay 音频）、AirPlay 镜像接收。协议插件可以和任意渲染器共存。</li>
+                    <li>第三方/自建插件：<strong>在线索引在这个安装里是空的</strong>，插件源码所在的仓库不是
+                        公开仓库，匿名下载注定拿不到（能看到的旧缓存也会逐条过期）。要装只有两条手动路：
+                        ① 在<strong>插件</strong>页贴一个你这边可达的 <code>.py</code> 地址，或直接上传
+                        <code>.py</code>；② 把 <code>.py</code> 放进配置目录的
+                        <code>renderer/</code>（协议插件放 <code>protocol/</code>），放好即生效。</li>
+                    <li>卸载不会硬删：文件进配置目录的 <code>.trash/</code>，可以捞回来。</li>
+                </ul>
+
+                <h2 id="h-mirror">电脑投屏（把这台电脑的屏幕推出去）</h2>
+                <p>控制面在<strong>电脑投屏</strong>标签页：选目标、看设备、开镜像、看统计，全在那里。
+                    四种目标各自的脾气：</p>
+                <ul>
+                    <li><strong>Chromecast / Google TV</strong>（兼容通道，默认）：走标准的 LOAD + MPEG-TS，
+                        有声音。</li>
+                    <li><strong>Chromecast 低延迟</strong>（实验）：完全不走 HTTP，直接往设备的 UDP 端口推
+                        RTP。代价写在那张卡片上——加密是纯 Python 实现的，码率上限约 4.5 Mbps，
+                        <strong>而且这条通道没有声音</strong>；电视不认这条通道时会自己回落到上面那条有声音的。</li>
+                    <li><strong>DLNA 电视</strong>（老电视，不用在电视上装东西）：把直播<em>伪装成一个文件</em>
+                        交给电视下载，所以开局要先攒约 4 秒的数据才交出去——这几秒是设计如此，不是卡住。
+                        准备了五种兼容档位（不同的封装/ codec / 帧率组合），因为第一种常被电视拒掉；
+                        连续被拒时本次镜像会自己往下换档，<strong>不会改写你选的档位</strong>。</li>
+                    <li><strong>浏览器</strong>：任何能打开网址的设备都能看，观看地址带每会话随机的
+                        token（不是那个常驻的管理令牌），复制到群里等于把这台电脑的屏幕交出去。</li>
+                </ul>
+                <p>三条会让镜像「开了却看不到画面」的前提：</p>
+                <ol>
+                    <li><strong>屏幕录制权限</strong>（macOS）。它记在「那一个包」的代码身份上：
+                        换了一个 .app（包括升级）就要在「系统设置 → 隐私与安全性 → 屏幕录制」里
+                        重新勾一次，然后<strong>重启 Macast</strong>。没勾上的表现是采集 3 秒内不返回画面，
+                        而不是报错。</li>
+                    <li><strong>麦克风权限</strong>（macOS，只在要采系统声音时）。系统声音靠 BlackHole 设备，
+                        「一键设置」会下载官方 .pkg 并开图形安装器（要你输一次密码，不是全自动）。
+                        装完点「重新探测采集」；如果 CoreAudio 看得见这块设备而采集看不见，
+                        缺的是麦克风权限，重装 .pkg 修不好。</li>
+                    <li><strong>Wayland 不支持</strong>（Linux）：屏幕采集走 X11，Wayland 会话下没有可靠抓手，
+                        页面上会直说，不会假装修好了。</li>
+                </ol>
+                <p>另外两件不算 bug 的事：镜像期间应用会阻止这台电脑休眠；
+                    有 DLNA/Chromecast 投屏进来时，镜像会<strong>主动让位</strong>并把画面转投给那台设备。</p>
+
+                <h2 id="h-file">投本地文件 / 字幕</h2>
+                <ul>
+                    <li><strong>状态 → 投屏本地文件</strong>（由「本地文件投屏」渲染器负责）：
+                        先按 ffprobe 逐文件判断能不能原生播——能就直接按字节供给远端（支持 Range，
+                        电视/接收端可以自己暂停和拖动），不能就 ffmpeg 边播边转成会增长的临时文件。</li>
+                    <li>音轨选择、音画同步偏移、字幕只在<strong>转码</strong>这一路有；选直通就是把原始字节
+                        交出去，那边没有可重排的轨道表。</li>
+                    <li><strong>字幕</strong>标签页管的是<strong>本机</strong>播放器当前这条视频：显隐开关 +
+                        外挂字幕文件（<code>.srt/.ass/.ssa/.vtt/.sub</code>）。要先开始播放，再加载字幕。</li>
+                </ul>
+
+                <h2 id="h-in">让手机把镜像/音乐投<strong>进</strong>这台电脑</h2>
+                <p>这两个方向由协议插件监督<strong>外部程序</strong>完成，插件本身不实现协议：</p>
+                <ul>
+                    <li><strong>AirPlay 音频（RAOP）</strong>：需要本机有 <code>shairport-sync</code>
+                        （macOS 上 <code>brew install shairport-sync</code>）。</li>
+                    <li><strong>AirPlay 屏幕镜像</strong>：需要本机有 <code>uxplay</code>。macOS 上
+                        <strong>没有</strong> Homebrew formula、官方 release 也不含二进制，要自己按配方编译。</li>
+                    <li>找不到这两个二进制是<strong>正常状态</strong>：它们是可选的，插件只会说「还缺什么」，
+                        不会把整个应用带崩。开了这两个协议插件、又同时开着内置的 AirPlay 接收端时，
+                        iPhone 上只会看到一个 AirPlay 入口（镜像与音频共用服务名），这不是坏了。</li>
+                </ul>
+
+                <h2 id="h-where">配置与日志在哪里</h2>
                 <figure>
                     <table>
                         <thead>
                         <tr>
                             <th>平台</th>
-                            <th>路径</th>
+                            <th>配置目录</th>
                         </tr>
                         </thead>
                         <tbody>
                         <tr>
-                            <td>MacOS</td>
-                            <td><code>$HOME/Library/Application\ Support/Macast/</code></td>
+                            <td>macOS</td>
+                            <td><code>$HOME/Library/Application Support/Macast/</code></td>
                         </tr>
                         <tr>
                             <td>Linux</td>
-                            <td><code>$HOME/.config/Macast</code></td>
+                            <td><code>$HOME/.config/Macast/</code></td>
                         </tr>
                         <tr>
                             <td>Windows</td>
-                            <td><code>%HOMEPATH%\AppData\Local\xfangfang\Macast</code></td>
+                            <td><code>%LOCALAPPDATA%\xfangfang\Macast\</code></td>
                         </tr>
                         </tbody>
                     </table>
                 </figure>
-                <h2 id='language-support'>语言支持</h2>
-                <p>可参考以下文档中的命令了解多语言支持：
-                    <el-link type="primary" href='https://github.com/pingod/Macast/blob/main/docs/i18n.md'>docs/i18n.md
-                    </el-link>
-                    ，欢迎提交 Pull Request。
-                </p>
-                <h2 id='how-to-set-personal-configurations-to-mpv'>如何为 mpv 设置个人配置</h2>
-                <p> 关于如何设置个人配置，请参考 mpv 手册：
+                <ul>
+                    <li><code>macast_setting.json</code> —— 全部配置；<code>renderer/</code>、
+                        <code>protocol/</code> —— 你自己放的插件。</li>
+                    <li><code>macast.log</code> —— 整体日志；<code>logs/&lt;模块&gt;.log</code> ——
+                        各插件的独立日志（高频插件不再往整体日志里灌，核心协议的行才读得出来）。
+                        <strong>排障看这些文件，不看 stdout。</strong></li>
+                    <li>日志<strong>每次启动清空</strong>，运行中按 2 MB 轮转、保留 2 份。
+                        「日志」页默认只加载末尾若干行（整份塞进页面会越来越卡），
+                        要全的请用「下载完整日志」。</li>
+                </ul>
+
+                <h2 id="h-setting">改配置：模块设置 vs 高级设置</h2>
+                <ul>
+                    <li><strong>模块设置</strong>按「谁拥有这个键」分组（核心 / 播放器 / 每个已加载插件 /
+                        其他），标量值可以直接改，也能删回未设置状态。列表和对象类型的值请去
+                        <strong>高级设置</strong>的 JSON 里改。</li>
+                    <li><strong>高级设置</strong>就是那份文件本身，<strong>保存会重启 Macast</strong>。
+                        不熟悉字段含义时别整份覆盖——很多行为是插件启动时才读的。</li>
+                </ul>
+
+                <h2 id="h-mpv">如何为 mpv 设置个人配置</h2>
+                <p>默认渲染器用的是应用自带的 mpv。关于选项含义请参考 mpv 手册：
                     <el-link type="primary" href='https://mpv.io/manual/stable/#files'
                              target='_blank' class='url'>https://mpv.io/manual/stable/#files
                     </el-link>
@@ -1207,12 +1534,12 @@
                         </tr>
                         <tr>
                             <td>Windows</td>
-                            <td><code>%HOMEPATH%\AppData\Roaming\mpv\mpv.conf</code></td>
+                            <td><code>%APPDATA%\mpv\mpv.conf</code></td>
                         </tr>
                         </tbody>
                     </table>
                 </figure>
-                <p> 并将一些 mpv 命令行选项写入<strong>配置文件</strong>，例如：</p>
+                <p> 并把一些 mpv 命令行选项写入<strong>配置文件</strong>，例如：</p>
                 <pre><code>fs-screen==1
     </code></pre>
                 <p><em>该选项告诉 mpv 在新视频时全屏到桌面 1。更多 fs-screen 选项详见：
@@ -1228,6 +1555,24 @@
                              target='_blank' class='url'>https://mpv.io/manual/stable/#input-conf
                     </el-link>
                 </p>
+
+                <h2 id="h-cant">明确做不到（这些不算 bug）</h2>
+                <ul>
+                    <li><strong>DRM 内容</strong>：受保护应用的镜像出来本来就是黑屏，加密视频平台的受保护流
+                        不会在这里变得能播。</li>
+                    <li><strong>Google 官方发送端</strong>：Macast 是未认证 Chromecast 接收端，官方发送端
+                        可能拒绝它。</li>
+                    <li><strong>Wayland 下的屏幕采集</strong>（Linux）。</li>
+                    <li><strong>AirPlay 镜像/音频的效果</strong>：取决于你自己装的 uxplay / shairport-sync，
+                        我们只能监督它们的进程。</li>
+                </ul>
+
+                <h2 id="h-i18n">语言与反馈</h2>
+                <p>菜单栏的中英文案走翻译流程，见仓库内的
+                    <code>docs/i18n.md</code>；这个设置页的文案目前是中文。</p>
+                <p>这份帮助说「做不到」的那些事，以及页面上任何一句你觉得对不上的话，
+                    都欢迎在拿到 Macast 的渠道里反馈——报错请带上日志页里那一段，
+                    它比「投不上」三个字有用得多。</p>
         </div>
         <span slot="footer">
             <el-button size="small" @click="helpVisible = false">关闭</el-button>
@@ -2467,19 +2812,23 @@
 
 <style lang="scss">
 
-    body {
-        margin: 20px;
-        font-family: 'Noto Sans', sans-serif;
-    }
+    /* 这一段是随插件卡片一起留下来的初版样式。body 的外边距和字体不归它管：
+       页边距由响应式层的 --pad-x 决定，字体由上面的字体栈决定，这里再设一次会
+       把两者顶掉（`margin: 20px` 就是"页面怎么比想象中窄"的来源）。 */
+    body { margin: 0; }
 
     header {
         float: none !important;
     }
 
     /*plugin style*/
+    /* 一行插件 = 一排等高的小卡。说明长短不一是这张网里唯一的乱源，所以**行高**
+       由网格定死，长短差交给卡片内部的说明区滚动：标题 / 平台 / 底部按钮永远在
+       同一个高度上对齐，扫一眼就能比相邻两个插件。 */
     .macast-plugins {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+        grid-auto-rows: 244px;
         gap: 12px;
     }
 
@@ -2493,8 +2842,13 @@
 
     .plugin-loading { color: var(--text-soft); font-size: 13px; }
 
+    /* 这一页没有全局 `box-sizing: border-box`（只有 #app 自己带），所以定高卡片
+       必须自己声明：不声明的话 `height: 100%` 说的是**内容高**，12px 内边距会把
+       边框盒撑到 270px，比 244px 的网格行高多出的那 26px 正好压住下一排卡片。 */
     .plugin-card {
         display: flex; flex-direction: column;
+        box-sizing: border-box;
+        height: 100%; min-height: 0; overflow: hidden;
         background: var(--panel); border: 1px solid var(--border);
         border-radius: 10px; padding: 12px 14px;
         transition: border-color .2s ease;
@@ -2504,6 +2858,7 @@
 
     .plugin-card-head {
         display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+        flex: none;
     }
     .plugin-card-name {
         font-weight: 700; font-size: 15px; color: var(--text);
@@ -2512,17 +2867,23 @@
     .plugin-card-meta {
         display: flex; align-items: center; gap: 8px;
         margin-top: 8px; font-size: 12px; color: var(--text-soft);
+        flex: none;
     }
     .plugin-card-platform {
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    /* 卡片高度由网格定死，所以只有这里会长：说明超出就在窗内滚，标题、平台、
+       底部按钮永远留在原位。min-height 保证再挤也还剩两行可读。 */
     .plugin-card-desc {
-        flex: 1; margin-top: 10px; font-size: 13px; line-height: 1.6;
+        flex: 1 1 auto; min-height: 44px; overflow-y: auto;
+        margin-top: 10px; font-size: 13px; line-height: 1.6;
         color: var(--text-soft);
+        scrollbar-gutter: stable;
     }
     .plugin-card-foot {
         display: flex; align-items: center; justify-content: space-between;
         margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border);
+        flex: none;
     }
 
     .macast-plugin-avatar {

@@ -15360,6 +15360,427 @@ finally:
 
 
 # --------------------------------------------------------------------------
+# Part 44: the help dialog is a claim about *this* build, so this build answers
+# for it.
+#
+# What shipped in the dialog was upstream's FAQ. It told readers the app
+# crashes when 58880 is busy (it re-binds to a random port and renames itself),
+# that IINA/Web/Live/PotPlayer must be downloaded (fifteen plugins are in-tree
+# and hot-plugged at startup), and pointed at a wiki for a different
+# repository. Nothing noticed, because nothing in the suite read the prose --
+# same family as §4.2's last bullet: a check that never asks the question is
+# indistinguishable from a check that passed.
+#
+# So every number below is asked twice: once of the page, once of the code that
+# decided it (port constants, plugin directory, OUTPUTS/DLNA_PROFILES/prefill
+# in screen_mirror, the rotation ceiling in Macast.py, appdirs' config dir).
+# A sentence here goes stale only if someone changes the behaviour and does not
+# say so in the same pass.
+#
+# The second half is the page's own contract: width belongs to the viewport.
+# Not "is it pretty at 1920" -- just the four things that silently undo a fluid
+# layout: a fixed page width, a pixel width in an element attribute (which beats
+# CSS), a heading that is a grid item next to the table it labels, and a missing
+# viewport meta.
+# --------------------------------------------------------------------------
+print("\n=== Part 44: the help dialog and the page's width ===")
+import re as _re44
+
+_page44 = open(os.path.join(MACAST, "xml", "setting.html"),
+               encoding="utf-8").read()
+_help_raw44 = _page44.split('<div class="help-body">', 1)[1].split(
+    '<span slot="footer">', 1)[0]
+# Tags go first, then whitespace: prose in this file wraps mid-sentence, and a
+# regex that needs `<strong>` to stay intact would match the markup, not the
+# sentence.
+_help44 = ' '.join(_re44.sub(r'<[^>]+>', '', _help_raw44).split())
+_css44 = _page44.split('<style>', 1)[1].split('</style>', 1)[0]
+_CN44 = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7,
+         '八': 8, '九': 9, '十': 10}
+
+
+def _num44(pattern, text=_help44):
+    """The number the prose states -- Arabic digits (whole or decimal) or a
+    Chinese numeral. The decimals are not decoration: the bitrate ceiling that
+    caps the low-latency channel is written "4.5 Mbps"."""
+    m = _re44.search(pattern, text)
+    if not m:
+        return None
+    tok = m.group(1)
+    if tok.isdigit():
+        return int(tok)
+    try:
+        return float(tok)
+    except ValueError:
+        return _CN44.get(tok)
+
+
+check("the dialog is this build's text, not the upstream FAQ",
+      'xfangfang/Macast/wiki' not in _page44
+      and 'Macast Wiki' not in _page44
+      and '早期开发阶段' not in _help44
+      and len(_help44) > 2000, '%d chars of prose' % len(_help44))
+
+# -- the seven tabs ---------------------------------------------------------
+_tabs44 = _re44.findall(r'<el-tab-pane label="([^"]+)"', _page44)
+# Cut from the raw markup, not the stripped prose: the list items keep their
+# <strong> wrappers there, and the prose version has already glued the tab name
+# to the em-dash that follows it.
+_intro44 = _re44.search(r'各自管一件事：</p>\s*<ul>(.*?)</ul>', _help_raw44,
+                        _re44.S)
+check("every tab in the page is introduced in the help, and none is invented",
+      _tabs44 and _intro44 is not None
+      and sorted(_tabs44) == sorted(
+          _re44.findall(r'<li><strong>([^<]+)</strong>', _intro44.group(1))),
+      'page=%s help=%s' % (
+          _tabs44,
+          _re44.findall(r'<li><strong>([^<]+)</strong>',
+                        _intro44.group(1)) if _intro44 else None))
+check("the count of tabs the help states is the count the page has",
+      _num44(r'一共([一二三四五六七八九十0-9]+)个标签') == len(_tabs44),
+      '%r vs %d panes' % (_num44(r'一共([一二三四五六七八九十0-9]+)个标签'),
+                          len(_tabs44)))
+
+# -- ports ------------------------------------------------------------------
+check("the default port in the help is the one the app binds",
+      str(utils.DEFAULT_PORT) in _help44, str(utils.DEFAULT_PORT))
+check("the Cast and AirPlay channels the help names are the constants",
+      str(cast.CAST_PORT) in _help44
+      and str(airplay.AIRPLAY_PORT) in _help44,
+      '%s / %s' % (cast.CAST_PORT, airplay.AIRPLAY_PORT))
+with open(os.path.join(MACAST, "server.py"), encoding="utf-8") as _f44:
+    _server44 = _f44.read()
+check("a busy port does not crash the app, and the help says what it does "
+      "instead: re-bind, then rename -- the rename format is server.py's",
+      '不会崩溃' in _help44 and '另绑一个随机端口' in _help44
+      and _re44.search(r'class AutoPortServer', _server44) is not None
+      and 'Macast(0123)' in _help44
+      and '"Macast({0:04d})"' in _server44,
+      'server.py must keep the fallback the page describes')
+with open(os.path.join(MACAST, "utils.py"), encoding="utf-8") as _f44:
+    _utils44 = _f44.read()
+check("HTTPS really is the app port + 1, as the help claims",
+      'get_port() + 1' in _utils44 and '应用端口 +1' in _help44,
+      _re44.findall(r'return .*get_port.*', _utils44)[:1])
+
+# -- the plugins that ship in the box ---------------------------------------
+_counts44 = {}
+for _kind44 in ("renderer", "protocol"):
+    _d44 = os.path.join(MACAST, "plugins", _kind44)
+    _counts44[_kind44] = sum(1 for _n44 in os.listdir(_d44)
+                             if _n44.endswith(".py") and _n44 != "__init__.py")
+_m44 = _re44.search(r'自带 ([0-9]+) 个插件.*?([0-9]+) 个渲染器 \+ ([0-9]+) 个协议',
+                    _help44)
+check("the plugin census in the help is a directory listing, not a memory",
+      _m44 is not None
+      and int(_m44.group(1)) == _counts44['renderer'] + _counts44['protocol']
+      and int(_m44.group(2)) == _counts44['renderer']
+      and int(_m44.group(3)) == _counts44['protocol'],
+      'help=%s disk=%s' % (_m44.groups() if _m44 else None, _counts44))
+check("the help still tells the truth about where a third-party plugin comes "
+      "from: two manual routes, no online index",
+      '在线索引' in _help44 and 'renderer/' in _help44 and 'protocol/' in _help44
+      and 'jsdelivr' not in _help44.lower() and 'ghproxy' not in _help44,
+      'and Part 5c keeps the page free of repository URLs')
+
+# -- screen mirror, against the plugin that implements it -------------------
+mirror44 = None
+_tmp44 = _tempfile.mkdtemp(prefix="macast-help44-")
+_saved44 = (utils.SETTING_DIR, utils.Setting.setting, utils.Setting.setting_path)
+try:
+    utils.SETTING_DIR = _tmp44
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp44, "macast_setting.json")
+    mirror44 = _load_plugin("screen_mirror_plugin_v44", "screen_mirror.py")
+    m44 = mirror44
+
+    check("every output target the plugin offers is described in the help",
+          _num44(r'([一二三四五六七八九十0-9]+)种目标') == len(m44.OUTPUTS)
+          and all(k in _help44 for k in
+                  ('Google TV', '浏览器', '低延迟', '老电视')),
+          'help says %r 种目标, OUTPUTS has %d' % (
+              _num44(r'([一二三四五六七八九十0-9]+)种目标'), len(m44.OUTPUTS)))
+    # The plugin's own label is the source of truth for which target is mute, so
+    # compare it against the one bullet of the help's target list that says so --
+    # "no audio" written anywhere in the dialog would pass a whole-text check
+    # while sitting in the wrong paragraph.
+    _silent44 = [k for k, v in m44.OUTPUTS.items() if '无声音' in v[0]]
+    _ladder44 = _re44.search(r'四种目标各自的脾气：</p>\s*<ul>(.*?)</ul>',
+                             _help_raw44, _re44.S)
+    _bullets44 = _re44.findall(r'<li>(.*?)</li>',
+                               _ladder44.group(1) if _ladder44 else '', _re44.S)
+    check("the one target with no audio is the one the help says has no audio",
+          _silent44 == ['caststream'] and len(_bullets44) == len(m44.OUTPUTS)
+          and sum(1 for b in _bullets44 if '没有声音' in b) == 1
+          and '低延迟' in [b for b in _bullets44 if '没有声音' in b][0],
+          'silent=%s bullets=%d' % (_silent44, len(_bullets44)))
+    check("the ceiling the help quotes for that channel is the plugin's own",
+          abs((_num44(r'([0-9.]+) Mbps') or 0) * 1e6
+              - m44.CAST_STREAM_MAX_BITRATE) < 1e5,
+          'help=%r Mbps constant=%s' % (_num44(r'([0-9.]+) Mbps'),
+                                        m44.CAST_STREAM_MAX_BITRATE))
+    check("the compatibility ladder has as many rungs as the help claims",
+          _num44(r'([一二三四五六七八九十0-9]+)种兼容档位') == len(m44.DLNA_PROFILES),
+          'help=%r profiles=%d' % (_num44(r'([一二三四五六七八九十0-9]+)种兼容档位'),
+                                   len(m44.DLNA_PROFILES)))
+    check("the prefill the help apologises for is the number the session waits",
+          _num44(r'攒约 ([0-9]+) 秒的数据') == int(m44.DLNA_PREFILL_SECONDS),
+          'help=%r DLNA_PREFILL_SECONDS=%s' % (
+              _num44(r'攒约 ([0-9]+) 秒的数据'), m44.DLNA_PREFILL_SECONDS))
+    check("and the wait that means 'no picture' is the capture's own budget",
+          _num44(r'采集 ([0-9]+) 秒内不返回画面') == int(m44.NO_FRAME_SECONDS),
+          'help=%r NO_FRAME_SECONDS=%s' % (
+              _num44(r'采集 ([0-9]+) 秒内不返回画面'), m44.NO_FRAME_SECONDS))
+    with open(m44.__file__, encoding="utf-8") as _f44:
+        _mirror_src44 = _f44.read()
+    check("Wayland is a stated limit in both places, or in neither",
+          ('Wayland' in _mirror_src44) == ('Wayland' in _help44),
+          'the plugin refuses it; the page has to say so too')
+finally:
+    utils.SETTING_DIR, utils.Setting.setting, utils.Setting.setting_path = _saved44
+    _shutil.rmtree(_tmp44, ignore_errors=True)
+    if mirror44 is None:
+        print("Part 44 could not load screen_mirror; its checks above are the "
+              "ones to read before trusting the rest of this Part")
+
+# -- the two supervised receivers -------------------------------------------
+for _plug44, _tool44 in (("raop.py", "shairport-sync"),
+                         ("airplay_mirror.py", "uxplay")):
+    with open(os.path.join(MACAST, "plugins", "protocol", _plug44),
+              encoding="utf-8") as _f44:
+        _psrc44 = _f44.read()
+    check("%s: the external program the help names is the one the plugin runs"
+          % _plug44,
+          _tool44 in _psrc44 and _tool44 in _help44, _tool44)
+
+# -- config dir and log ceiling ---------------------------------------------
+_platform_row44 = {'darwin': 'macOS', 'linux': 'Linux',
+                   'win32': 'Windows'}.get(sys.platform, 'macOS')
+# utils.SETTING_DIR is an import-time constant, but every Part above that needs
+# one has been pointing it at a temp dir. Recompute the value the same way
+# utils.py does -- and check that that *is* the way, or the comparison is
+# between two unrelated numbers.
+check("the config dir is still one appdirs call with these exact arguments",
+      "user_config_dir('Macast', 'xfangfang')" in _utils44,
+      _re44.search(r'SETTING_DIR = .*', _utils44).group(0)
+      if _re44.search(r'SETTING_DIR = .*', _utils44) else 'no SETTING_DIR')
+_real_dir44 = os.path.normpath(utils.appdirs.user_config_dir('Macast',
+                                                             'xfangfang'))
+_rows44 = _re44.findall(r'<td>(macOS|Linux|Windows)</td>\s*<td><code>([^<]+)',
+                        _help_raw44)
+_row44 = dict(_rows44).get(_platform_row44)
+check("the config directory the help prints for this platform is the one the "
+      "app writes to",
+      _row44 is not None
+      and os.path.normpath(os.path.expandvars(
+          _row44.replace('\\', os.sep).replace('/', os.sep)
+             .replace('$HOME', os.path.expanduser('~'))
+             .rstrip(os.sep))) == _real_dir44,
+      'help=%r real=%s rows=%s' % (_row44, _real_dir44, _rows44))
+_entry44 = globals().get('macast_entry')
+if _entry44 is None:
+    # Part 20 normally imports the entry point; if it did not, do it here with
+    # the same two names the stub package has to lend it (Macast.py is run as a
+    # script, so `from macast import Setting, SETTING_DIR` resolves against the
+    # stub this suite installs at the top of the file).
+    _pkg_stub44 = sys.modules["macast"]
+    _pkg_stub44.Setting = utils.Setting
+    _pkg_stub44.SETTING_DIR = utils.SETTING_DIR
+    _spec44 = importlib.util.spec_from_file_location(
+        "macast_entry44", os.path.join(REPO, "Macast.py"))
+    _entry44 = importlib.util.module_from_spec(_spec44)
+    _spec44.loader.exec_module(_entry44)
+_mb44 = _num44(r'按 ([0-9]+) MB 轮转')
+_copies44 = _num44(r'保留 ([0-9]+) 份')
+check("the log ceiling the help quotes is the entry point's rotation config",
+      _mb44 is not None and _copies44 is not None
+      and _mb44 * 1024 * 1024 == _entry44.LOG_MAX_BYTES
+      and _copies44 == _entry44.LOG_BACKUP_COUNT,
+      'help=%r MB/%r 份, code=%s/%s' % (_mb44, _copies44,
+                                        _entry44.LOG_MAX_BYTES,
+                                        _entry44.LOG_BACKUP_COUNT))
+
+# -- the token rule -----------------------------------------------------------
+with open(os.path.join(MACAST, "protocol.py"), encoding="utf-8") as _f44:
+    _proto44 = _f44.read()
+_cast_branch44 = _proto44.split("if query == 'cast':", 1)[1].split(
+    "if query in (", 1)[0]
+check("the help's promise about the web cast entry is what that branch does",
+      '_token_present()' in _cast_branch44
+      and '即使是本机也要求令牌' in _help44
+      and 'query=cast&amp;url=' in _page44,
+      'the GET must demand the token even on loopback')
+# Name the parenthesis, do not go hunting for "\.xxx/" shapes: the prose is full
+# of URLs, and mpv.io/ is one dot-extension away from being read as a subtitle
+# format list.
+_exts44 = _re44.search(r'外挂字幕文件（([^）]+)）', _help44)
+_ext_list44 = _re44.findall(r'\.([a-z]{2,4})',
+                            _exts44.group(1) if _exts44 else '')
+_allowed44 = _re44.search(r"sub_exts = \(([^)]*)\)", _proto44)
+check("every subtitle extension the help advertises is one the handler takes",
+      _exts44 is not None and _allowed44 is not None and _ext_list44
+      and all('.' + e in _allowed44.group(1) for e in _ext_list44),
+      'help=%s code=%s' % (_ext_list44,
+                           _allowed44.group(1) if _allowed44 else None))
+
+# -- the dialog's own links ---------------------------------------------------
+check("the help's table of contents points at sections that exist",
+      set(_re44.findall(r'href="#(h-[\w-]+)"', _help_raw44))
+      <= set(_re44.findall(r'id="(h-[\w-]+)"', _help_raw44))
+      and len(_re44.findall(r'href="#h-', _help_raw44)) >= 8,
+      'anchors=%s' % _re44.findall(r'href="#(h-[\w-]+)"', _help_raw44))
+
+# -- the width contract -------------------------------------------------------
+# The page carries two <style> blocks: the themed one above and the plugin one
+# at the bottom. Anything about .plugin-card therefore has to be asked of both.
+_css_all44 = _css44 + '\n' + _page44.split('<style lang="scss">', 1)[1].split(
+    '</style>', 1)[0]
+check("the page does not pin itself to a desktop-width column",
+      'max-width: 980px' not in _css44 and 'max-width: 1000px' not in _css44
+      and _re44.search(r'#app \{[^}]*box-sizing: border-box[^}]*'
+                       r'max-width: none', _css44) is not None,
+      'and border-box is not decoration: width:100% plus padding overflows '
+      'the viewport without it. `max-width: none` is the other half -- the '
+      'min(1680px,100%) cap it replaces is what left the two gutters in the '
+      'screenshot the user pointed at')
+check("no key/value table re-digs those gutters inside its own card",
+      _re44.search(r'\.status-table \{[^}]*max-width:\s*[0-9]+px', _css_all44)
+      is None,
+      'the row length belongs to the column the card sits in, not to a constant')
+check("the viewport meta is still there for the phone case",
+      'name="viewport"' in _page44 and 'width=device-width' in _page44, '')
+check("card rows fill columns by themselves instead of at a breakpoint",
+      _re44.search(r'\.pane \{[^}]*display: grid[^}]*'
+                   r'repeat\(auto-fit, minmax\(', _css44) is not None,
+      'auto-fit, not auto-fill: a row of two cards must not leave the rest of '
+      'the row empty')
+
+# The mirror tab cannot use that grid. Which cards appear there is decided by
+# mirror_view.py per state, so the count is not known when the CSS is written,
+# and auto-fit only collapses a track that is empty in *every* row: four cards
+# in a three-track net still strand the last one against two thirds of an empty
+# row -- the very gutter the user circled on the status tab. Flex-wrap has no
+# tracks to leave behind; the row that does not fill simply spreads out.
+check("the mirror tab flows instead of gridding, because its card count moves",
+      _re44.search(r'\.mirror-wrap \{[^}]*display: flex[^}]*flex-wrap: wrap',
+                   _css44) is not None
+      and _re44.search(r'\.mirror-wrap > \* \{[^}]*flex: 1 1 [0-9]+px',
+                       _css44) is not None
+      and _re44.search(r'\.mirror-wrap \{[^}]*grid-template-columns', _css44)
+      is None,
+      'and the cards that must own a row say so -- pane-wide is a grid '
+      'property, so it needs a flex-basis of 100% here')
+check("the mirror tab's full-width cards are pinned to a whole row",
+      _re44.search(r'\.mirror-wrap > \.pane-wide, \.mirror-wrap > \.mirror-strip '
+                   r'\{[^}]*flex: 0 0 100%', _css44) is not None,
+      'the banner strips share the flow, so they need the same pin')
+check("but a grid of many same-shaped cards keeps its columns aligned",
+      _re44.search(r'\.macast-plugins \{[^}]*repeat\(auto-fill, minmax\(',
+                   _css_all44) is not None
+      and _re44.search(r'\.module-pane \{[^}]*repeat\(auto-fill, minmax\(',
+                       _css44) is not None,
+      'auto-fit would stretch one lone plugin card across the page')
+check("a narrow viewport gets an explicit single-column pass",
+      _re44.search(r'@media \(max-width: \d+px\)[\s\S]*?grid-template-columns: 1fr',
+                   _css44) is not None, '')
+check("no dialog carries a pixel width in an attribute, where CSS could not "
+      "outvote it",
+      _re44.search(r'<el-dialog[^>]*\bwidth="', _page44) is None
+      and '.help-dialog' in _css44 and '.macast-dialog' in _css44,
+      _re44.findall(r'<el-dialog[^>]*', _page44)[:2])
+check("no control carries a pixel width inline either",
+      _re44.search(r'style="[^"]*\bwidth:\s*[0-9]+px', _page44) is None,
+      'inline widths beat the responsive layer')
+_status44 = _page44.split('label="状态"', 1)[1].split('label="电脑投屏"', 1)[0]
+# Match the class *token*: `class="pane-block pane-wide"` is the same wrapper,
+# and an exact-string count of `class="pane-block"` makes it invisible -- which
+# is how a heading ended up looking unpaired here the first time this ran.
+_block44 = r'class="[^"]*\bpane-block\b'
+_orphan44 = _re44.split(r'class="[^"]*\bpane-block\b', _status44, 1)[0]
+check("a heading and the table it labels are one grid item, not two",
+      '<h3 class="section">' not in _orphan44
+      and len(_re44.findall(_block44, _status44))
+      >= _status44.count('<h3 class="section">') > 0,
+      '%d headings, %d before the first pane-block' % (
+          _status44.count('<h3 class="section">'),
+          _orphan44.count('<h3 class="section">')))
+check("the cards the page must not split across columns ask for the whole row",
+      _status44.count('pane-wide') >= 4
+      and _page44.split('label="电脑投屏"', 1)[1].split(
+          'label="高级设置"', 1)[0].count('pane-wide') >= 3,
+      'the two tool cards, the progress bar and the client table read across '
+      'the page; %d in the status pane' % _status44.count('pane-wide'))
+
+# 「状态」is the one tab whose blocks differ by an order of magnitude in height
+# (a dozen network cards next to a six-row table), so it does not use the
+# auto-filling card net at all: the page declares its shape -- full-width rows,
+# then the four middle blocks as exactly two stacks of two. This is the layout
+# the user asked for off a screenshot, so it is written down as a contract:
+# a future edit that drops back to one loose grid should have to say why.
+check("the status tab names its own layout instead of falling back to the grid",
+      _re44.search(r'\.status-pane \{[^}]*grid-template-columns: 1fr', _css44)
+      is not None
+      and 'class="pane status-pane"' in _status44
+      and _status44.count('class="status-col"') == 2
+      and _status44.count('class="status-cols"') == 1,
+      'cols=%d, stacks=%d' % (_status44.count('class="status-cols"'),
+                             _status44.count('class="status-col"')))
+check("every block on the status tab is a card, not a bare div",
+      _re44.search(r'\.pane-block \{[^}]*background: var\(--panel\)[^}]*'
+                   r'border: 1px solid var\(--border\)', _css44) is not None
+      and _re44.search(r'\.pane-block \{[^}]*border-radius', _css44) is not None,
+      '.pane-block used to have no rule at all: three block kinds on one page '
+      'is what "乱" reads as')
+check("long lists scroll inside their card instead of lengthening the page",
+      _re44.search(r'\.pane-scroll \{[^}]*max-height: clamp\(', _css44)
+      is not None
+      and _re44.search(r'\.pane-scroll \{[^}]*overflow-y: auto', _css44)
+      is not None
+      and _status44.count('pane-scroll') >= 2
+      and 'pane-scroll' in _page44.split('label="模块设置"', 1)[1].split(
+          'label="日志"', 1)[0],
+      'the clamp is in viewport units on purpose: a fixed px cap overflows a '
+      'short window')
+
+# The plugin net is the other half of the complaint: fifteen cards whose height
+# followed the length of their description, so nothing lined up. The row height
+# now belongs to the grid and only the description scrolls -- which is also why
+# everything else in the card is pinned `flex: none`.
+check("plugin cards are one size and only their description scrolls",
+      _re44.search(r'\.macast-plugins \{[^}]*grid-auto-rows: [0-9]+px',
+                   _css_all44) is not None
+      and _re44.search(r'\.plugin-card \{[^}]*box-sizing: border-box[^}]*'
+                       r'height: 100%[^}]*overflow: hidden', _css_all44)
+      is not None
+      and _re44.search(r'\.plugin-card-desc \{[^}]*overflow-y: auto',
+                       _css_all44) is not None
+      and _re44.search(r'\.plugin-card-desc \{[^}]*min-height: [0-9]+px',
+                       _css_all44) is not None,
+      'a flex:1 description in a fixed-height card needs min-height to shrink, '
+      'and the fixed height itself needs border-box -- this page has no global '
+      'box-sizing, so a 244px row with 12px padding measures 270px and the '
+      'cards overlap the row below them (measured in the browser, 2026-09-24)')
+check("the rest of the plugin card refuses to shrink so the buttons stay put",
+      all(_re44.search(r'\.%s \{[^}]*flex: none' % _cls, _css_all44)
+          for _cls in ('plugin-card-head', 'plugin-card-meta', 'plugin-card-foot'))
+      and _re44.search(r'\.plugin-alert \{[^}]*flex: none', _css_all44)
+      is not None,
+      'otherwise a long blocked_reason pushes the footer out of the card')
+
+# Element UI paints .el-dialog white and .el-dialog__body #606266, while this
+# page puts its text colour on <body>. Dark mode therefore opened the help over
+# a white card with near-white text -- caught by looking at a screenshot, which
+# is exactly the check the rest of this Part cannot do. The dialog has to carry
+# both halves of the pair: a themed surface, and a colour that is not inherited
+# from the surface underneath it.
+check("the dialog carries its own surface and text colour, in both themes",
+      _re44.search(r'\.macast-dialog \{[^}]*background: var\(--panel\)', _css44)
+      is not None
+      and _re44.search(r'\.macast-dialog \.el-dialog__body \{[^}]*'
+                       r'color: var\(--text\)', _css44) is not None,
+      'white-on-white is what shipping without these two rules looks like')
+
+# --------------------------------------------------------------------------
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
