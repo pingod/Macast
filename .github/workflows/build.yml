@@ -21,23 +21,36 @@
 # only ship x86_64 wheels on PyPI. Skip on tag-only releases.
 #
 # Triggers:
-#   - push to main                     (build + upload artefacts, no release)
+#   - push to main                     (build all four platforms, store nothing)
 #   - pull_request                     (build only, no upload)
 #   - workflow_dispatch (release=true) (build + GitHub release with all artefacts)
 #   - push of a v*.* tag               (build + GitHub release)
 #
+# Only the last two upload artefacts, because only they have a reader; see the
+# storage note below.
+#
 # Manual release:   GitHub UI -> Actions -> Build Macast -> Run workflow -> release=true
 #
-# Artefact retention is 2 days, not the action's default: the release job
-# downloads everything from the same run, so retention only serves manual
-# "download that build again" clicks. Four platforms are ~170 MB per run and
-# this repo's free plan caps Actions storage at 500 MB, so a 14-day window
-# lets a busy fortnight wedge every later upload with
-# "Artifact storage quota has been hit" -- which is what happened on
-# 2026-09-21, when 193 artefacts had piled up to 8.2 GB. Note this only
-# slows that drift: it is not a fix if main keeps being pushed many times a
-# day. Release downloads are unaffected either way -- they live under
-# GitHub Releases, which is a different bucket from Actions artefacts.
+# Artefact storage is capped, so uploads are gated and swept:
+#   - The four `Upload artefact` steps run only when a release will consume
+#     them (tag push, or dispatch with release=true). A plain push to main
+#     still builds all four platforms -- it just publishes nothing to Actions
+#     storage. Need a throwaway main build? Dispatch with release=true, or
+#     `git push` a `v*.*` tag.
+#   - `Free artefact storage` deletes the run's artefacts once the Release has
+#     been created. GitHub Releases is a different bucket (it kept all four
+#     assets for v0.7.15 through v0.8.10 while Actions was full), so a
+#     published release has no remaining reader.
+#   - `retention-days: 2` stays as the backstop if the sweep job fails.
+# Why this is worth two mechanisms: one four-platform run is ~170 MB and the
+# free plan caps Actions storage at 500 MB, so *three* builds inside the
+# retention window wedge every later upload with
+# "Artifact storage quota has been hit". That happened twice: 2026-09-21
+# (193 artefacts / 8.2 GB) and again 2026-09-25 (84 / 3.5 GB). The second one
+# is mostly the no-reader builds: of the last 27 runs, 14 were plain pushes to
+# main, and each of them still stored four artefacts (~2.4 GB of the pile).
+# The recovery both times was a manual delete-by-id loop whose effect GitHub
+# only applies 6-12 hours later.
 
 name: Build Macast
 
@@ -202,6 +215,11 @@ jobs:
           cd ..
 
       - name: Upload artefact
+        # See the header: only upload when this run's release job will consume
+        # it. A push to main builds everything and stores nothing.
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.release == true)
         uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
@@ -305,6 +323,9 @@ jobs:
           cd ..
 
       - name: Upload artefact
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.release == true)
         uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
@@ -401,6 +422,9 @@ jobs:
           cd ..
 
       - name: Upload artefact
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.release == true)
         uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
@@ -522,6 +546,9 @@ jobs:
           cd ..
 
       - name: Upload artefact
+        if: |
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && inputs.release == true)
         uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
@@ -616,3 +643,53 @@ jobs:
             artefacts/**/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # -----------------------------------------------------------------------
+  # Free artefact storage — once the Release exists, this run's artefacts have
+  # no remaining reader: GitHub Releases is its own bucket and is what anyone
+  # downloads. Keeping them is what filled the 500 MB free-plan cap twice
+  # (2026-09-21: 193 artefacts / 8.2 GB; 2026-09-25: 84 / 3.5 GB), and the
+  # recovery each time was a manual delete loop whose effect GitHub only
+  # applies 6-12 hours later -- during which every build fails at upload.
+  #
+  # Deliberately *not* run when `release` fails: a failed release is retried
+  # with `gh run rerun --failed`, and that re-runs only the release job, which
+  # downloads this run's artefacts. Sweeping then would turn a one-step retry
+  # into a full four-platform rebuild.
+  # -----------------------------------------------------------------------
+  clean-up:
+    name: Free artefact storage
+    needs: release
+    if: needs.release.result == 'success'
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+    steps:
+      - name: Delete this run's artefacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          api="repos/$GITHUB_REPOSITORY/actions"
+          ids=$(gh api --paginate "$api/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+                  --jq '.artifacts[].id' || true)
+          if [ -z "$ids" ]; then
+            echo "This run uploaded nothing (main-push build). Nothing to free."
+            exit 0
+          fi
+          freed=0; failed=0
+          for id in $ids; do
+            size=$(gh api "$api/artifacts/$id" --jq '.size_in_bytes' || echo 0)
+            if gh api -X DELETE "$api/artifacts/$id" --silent; then
+              freed=$((freed + size))
+            else
+              failed=$((failed + 1))
+            fi
+          done
+          echo "Freed $((freed / 1048576)) MB of Actions artefact storage."
+          if [ "$failed" -ne 0 ]; then
+            # Not fatal: retention-days: 2 is the backstop, and a red job
+            # after a published release reads like the release broke.
+            echo "::warning::$failed artefact(s) survived the sweep; " \
+                 "they expire on their own within the retention window."
+          fi

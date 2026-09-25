@@ -15997,6 +15997,112 @@ except Exception as _e45:
     check("Part 45 runs", False, "{}: {}".format(type(_e45).__name__, _e45))
 
 # --------------------------------------------------------------------------
+# Part 46: what the CI workflow *promises* about artefact storage. Both halves
+# of the promise (a push to main stores nothing; a published release sweeps its
+# own upload) live in YAML that no other check reads, and the failure mode is
+# a build that goes red at `Upload artefact` while every real step is green.
+# It happened twice: 2026-09-21 (193 artefacts / 8.2 GB) and 2026-09-25
+# (84 / 3.5 GB, twelve releases in two days). Each recovery was a manual
+# delete-by-id loop whose effect GitHub only applies 6-12 hours later, so the
+# repo cannot afford to relearn this.
+# --------------------------------------------------------------------------
+print("\n=== Part 46: CI uploads are gated to releases, and swept afterwards ===")
+
+import re as _re46
+
+try:
+    with open(os.path.join(REPO, '.github', 'workflows', 'build.yml'),
+              encoding='utf-8') as _fh46:
+        _wf46 = _fh46.read()
+    _wf46_lines = _wf46.splitlines()
+
+    def _norm46(text):
+        return _re46.sub(r'\s+', ' ', text).strip()
+
+    def _cond_block46(lines, start):
+        for _j46 in range(start + 1, min(start + 12, len(lines))):
+            _s46 = lines[_j46].strip()
+            if _s46.startswith('if:'):
+                _rest = _s46[3:].strip()
+                _body = [] if _rest in ('|', '') else [_rest]
+                _k46 = _j46 + 1
+                while _k46 < len(lines) and lines[_k46].strip().startswith('('):
+                    _body.append(lines[_k46].strip())
+                    _k46 += 1
+                return ' '.join(_body)
+            if _s46.startswith('uses:'):
+                return ''
+        return ''
+
+    _gates46 = [_norm46(_cond_block46(_wf46_lines, _i46))
+                for _i46, _l46 in enumerate(_wf46_lines)
+                if '- name: Upload artefact' in _l46]
+
+    check("all four platforms still have an upload step", len(_gates46) == 4,
+          "%d step(s)" % len(_gates46))
+    check("every upload step is gated", all(_gates46), repr(_gates46))
+    check("the four gates are one condition, not four that can drift",
+          len(set(_gates46)) == 1, repr(sorted(set(_gates46))))
+
+    _gate46 = _gates46[0] if _gates46 else ''
+    check("a gate opens for a tag push and for a manual release",
+          "refs/tags/v" in _gate46 and "inputs.release" in _gate46, _gate46)
+    check("a gate stays shut for a plain push to main",
+          "refs/heads/main" not in _gate46, _gate46)
+
+    # The uploader and the publisher must agree: if the upload gate ever opened
+    # wider or narrower than the release job's, the release would be created
+    # from an empty artefacts/ dir -- and softprops publishes a Release with
+    # zero assets without complaining.
+    _relgate46 = ''
+    for _i46, _l46 in enumerate(_wf46_lines):
+        if _l46.strip() == 'release:':
+            _relgate46 = _norm46(_cond_block46(_wf46_lines, _i46))
+    check("the release job asks for exactly the runs that uploaded",
+          _relgate46 == _gate46 and bool(_relgate46),
+          "release=%r upload=%r" % (_relgate46, _gate46))
+
+    # Only count real keys: the workflow's own prose names `retention-days: 2`
+    # twice (the header note and the sweep job's comment), and matching those
+    # turned a correct build.yml into a failing check.
+    _ret46 = _re46.findall(r'^\s+retention-days: (\d+)\s*$', _wf46, _re46.M)
+    check("retention is still the 2-day backstop on every upload",
+          _ret46 == ['2'] * 4, repr(_ret46))
+
+    # The sweep. It must run only after a *successful* release: a failed one is
+    # retried with `gh run rerun --failed`, which re-runs the release job alone
+    # and downloads this run's artefacts -- sweeping them would turn a one-step
+    # retry into a four-platform rebuild.
+    check("a sweep job exists and waits for the release",
+          _re46.search(r'\n  clean-up:\n.*needs: release', _wf46, _re46.S) is not None,
+          "no job wired to `needs: release`")
+    check("the sweep only fires on a published release",
+          "if: needs.release.result == 'success'" in _wf46,
+          "a looser condition deletes artefacts a rerun still needs")
+    check("the sweep is allowed to delete artefacts",
+          _re46.search(r'clean-up:.*?actions: write', _wf46, _re46.S) is not None,
+          "without `actions: write` the API call 403s and the job warns forever")
+    check("the sweep deletes this run's artefacts by id",
+          'runs/$GITHUB_RUN_ID/artifacts' in _wf46
+          and '-X DELETE "$api/artifacts/$id"' in _wf46,
+          "the reason it must be scoped: another run's artefacts are not its trash")
+    check("the sweep survives a failed delete without failing the release",
+          '::warning::' in _wf46.split('clean-up:')[-1],
+          "a red job after a published release reads like the release broke")
+
+    # Header honesty: the triggers list used to advertise main-push uploads, and
+    # a comment that lies about CI is worse than none.
+    _trig46 = _wf46.split('# Triggers:')[1].split('# Manual release')[0] \
+        if '# Triggers:' in _wf46 else ''
+    check("the header stops promising main-push artefacts",
+          'push to main' in _trig46 and 'upload artefacts, no release' not in _trig46,
+          _trig46.strip()[:120])
+except Exception as _e46:
+    _traceback46 = __import__('traceback')
+    _traceback46.print_exc()
+    check("Part 46 runs", False, "{}: {}".format(type(_e46).__name__, _e46))
+
+# --------------------------------------------------------------------------
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
