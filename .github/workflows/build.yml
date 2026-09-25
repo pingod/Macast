@@ -87,6 +87,55 @@ concurrency:
 
 jobs:
   # -----------------------------------------------------------------------
+  # Verification — the regression suite, run before anything is built.
+  #
+  # This job exists because nothing else in this workflow ever ran a check:
+  # four platforms would build, sign and cut a Release from a commit whose
+  # ~1.7k assertions had never been asked (found 2026-09-25, AGENTS.md §6).
+  #
+  # Linux is the deliberate runner, not the cheap one. `macast/gui.py` imported
+  # pystray at module scope, and pystray's Linux backend opens an X display in
+  # its own module body, so on a headless box `import macast.macast` — i.e. the
+  # documented `macast-cli` — raised before any of our code ran. Only a Linux
+  # runner can see that, and Part 50 now does.
+  #
+  # `--ci` because Part 34 (the provenance ledger) is red in *every* clone of
+  # this repository: the fork point's 215 upstream commits are in neither this
+  # working copy nor GitHub (`gh api repos/pingod/Macast/commits/19879235...`
+  # -> 424). "Everything green" is therefore a rule that can never fire, and a
+  # permanent red only teaches a reader to ignore FAILED. The gate excuses
+  # exactly that set, refuses anything else, and refuses a Part 34 that goes
+  # green without history — i.e. it stays able to block this release.
+  # -----------------------------------------------------------------------
+  verify:
+    name: Regression suite (Linux, headless)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install system deps
+        # `binutils` for netifaces, same as the Linux build jobs.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils
+
+      - name: Install dependencies
+        # The declared dependency set, not a subset: Part 30 compares plugin
+        # imports against what `requirements/*.txt` names, so a partial install
+        # would go red for reasons that are this job's own.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements/common.txt
+
+      - name: Verification suite (--ci gate)
+        run: python scripts/verify_cast_airplay.py --ci
+
+  # -----------------------------------------------------------------------
   # macOS arm64 — Apple Silicon .app (the primary artefact for M1+ users)
   # -----------------------------------------------------------------------
   build-macos-arm64:
@@ -563,6 +612,7 @@ jobs:
   release:
     name: GitHub Release
     needs:
+      - verify
       - build-macos-arm64
       - build-linux-x86_64
       - build-linux-arm64

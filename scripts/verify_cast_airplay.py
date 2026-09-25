@@ -1063,7 +1063,13 @@ try:
     for _name in ("rumps", "pystray"):
         try:
             __import__(_name)
-        except ImportError:
+        except Exception:
+            # Not just ImportError: on headless Linux pystray *is* installed and
+            # its backend raises `Xlib.error.DisplayNameError` at import time.
+            # Catching only ImportError let that kill this Part -- and with it
+            # `macast_mod`, which a later module-level line dereferences, so the
+            # whole suite died at line ~2160 before printing anything useful.
+            # That is how CI runs (no display), so this stub must be total.
             sys.modules[_name] = _AnyModule(_name)
     try:
         import PIL.Image  # noqa: F401
@@ -2794,7 +2800,8 @@ try:
     for _name in ("rumps", "pystray"):
         try:
             __import__(_name)
-        except ImportError:
+        except Exception:      # see the note in Part 5: pystray raises
+            # DisplayNameError, not ImportError, on a box with no X display
             sys.modules.setdefault(_name, _AnyModule(_name))
 
     # Part 5 installed a *stub* for `macast_renderer.mpv` (macast.py only needed
@@ -3071,7 +3078,12 @@ try:
         external = _ExtRenderer()
         external.set_media_url('http://host/movie file.mp4')
         check("the cast url really reaches the player's argv",
-              _wait_until(lambda: os.path.exists(_argv6))
+              # Same rule as the shairport argv below: wait for the line, not
+              # for the file, because `printf '%s\n' "$@"` writes one line per
+              # argument and existence is true mid-write.
+              _wait_until(lambda: os.path.exists(_argv6) and
+                          open(_argv6, encoding='utf-8').read().split('\n')[0]
+                          == 'http://host/movie file.mp4', timeout=10)
               and open(_argv6, encoding='utf-8').read().split('\n')[0]
               == 'http://host/movie file.mp4',
               open(_argv6, encoding='utf-8').read() if os.path.exists(_argv6) else 'no argv')
@@ -3392,7 +3404,11 @@ try:
         _argv9 = os.path.join(_tmp9, "argv.txt")
         _fake_shair = _write_fake(
             _bin9, "shairport-sync",
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n"
+            # `>>`, not `>`: the fake is exec'd once per supervisor start, and a
+            # truncating writer let the *second* start erase the first one's
+            # argv between "the file exists" and the read -- which on a slow
+            # runner showed up as a config check that saw only `-v`.
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> {}\n"
             "echo 'Connection from 10.0.0.9:1234.'\n"
             "exec sleep 30\n".format(_argv9))
         os.environ['PATH'] = _bin9 + os.pathsep + _saved_path9
@@ -3406,8 +3422,14 @@ try:
         check("a config carrying the Macast name is written",
               os.path.exists(config9) and 'name = ' in open(config9, encoding='utf-8').read(),
               open(config9, encoding='utf-8').read() if os.path.exists(config9) else 'missing')
+        # Wait for the *fact*, not for the file: `printf '%s\n' "$@"` prints one
+        # argument per line, so existence is true while the line is still being
+        # written. On macOS the whole argv landed before the first poll; on a
+        # slower Linux runner this check read exactly `-v` and went red.
         check("the config file is what the binary was pointed at",
-              _wait_until(lambda: os.path.exists(_argv9))
+              _wait_until(lambda: os.path.exists(_argv9) and
+                          config9 in open(_argv9, encoding='utf-8').read(),
+                          timeout=10)
               and config9 in open(_argv9, encoding='utf-8').read(),
               open(_argv9, encoding='utf-8').read() if os.path.exists(_argv9) else 'no argv')
         check("an AirPlay client connecting is surfaced to the user",
@@ -4127,6 +4149,10 @@ try:
         cherrypy.engine.subscribe('app_notify', _notify21_rec)
 
         mirror = _load_plugin("screen_mirror_plugin", "screen_mirror.py")
+        # Part 21 probes an avfoundation-shaped fake ffmpeg, so it is a macOS
+        # Part even when the runner is not: pin the seam the module reads.
+        _saved_platform21 = mirror.sys.platform
+        mirror.sys.platform = 'darwin'
         fake_ffmpeg21 = _write_fake(os.path.join(_tmp21, "bin"), "ffmpeg", r"""#!/bin/sh
 case "$*" in
   *list_devices*)
@@ -4555,6 +4581,8 @@ done
             utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Aggregate)
             utils.Setting.unset(mirror.SettingProperty.Mirror_Audio_Original)
     finally:
+        mirror.sys.platform = globals().pop('_saved_platform21',
+                                            mirror.sys.platform)
         mirror.find_ffmpeg = _saved_find21
         mirror.start_search = _saved_search21
         mirror._devices = _saved_devices21
@@ -4604,6 +4632,9 @@ try:
         cherrypy.engine.subscribe('app_notify', _notify22_rec)
 
         mirror = _load_plugin("screen_mirror_plugin_v04", "screen_mirror.py")
+        # Part 22's capture fakes are avfoundation-shaped: a macOS Part.
+        _saved_platform22 = mirror.sys.platform
+        mirror.sys.platform = 'darwin'
         fake_ffmpeg22 = _write_fake(os.path.join(_tmp22, "bin"), "ffmpeg", r"""#!/bin/sh
 case "$*" in
   *list_devices*)
@@ -5416,6 +5447,8 @@ done
         if _mir22 is not None:
             _mir22.stop_mirror()
         cherrypy.engine.unsubscribe('app_notify', _notify22_rec)
+        mirror.sys.platform = globals().pop('_saved_platform22',
+                                            mirror.sys.platform)
         utils.SETTING_DIR = _saved_dir22
         utils.Setting.setting, utils.Setting.setting_path = _saved_setting22
         _shutil.rmtree(_tmp22, ignore_errors=True)
@@ -5446,6 +5479,9 @@ try:
         cherrypy.engine.subscribe('app_notify', _notify23_rec)
 
         mirror = _load_plugin("screen_mirror_plugin_v05", "screen_mirror.py")
+        # Part 23's capture fakes are avfoundation-shaped: a macOS Part.
+        _saved_platform23 = mirror.sys.platform
+        mirror.sys.platform = 'darwin'
         fake_ffmpeg23 = _write_fake(os.path.join(_tmp23, "bin"), "ffmpeg", r"""#!/bin/sh
 case "$*" in
   *list_devices*)
@@ -7137,6 +7173,8 @@ done
         if _mir23 is not None:
             _mir23.stop_mirror()
         cherrypy.engine.unsubscribe('app_notify', _notify23_rec)
+        mirror.sys.platform = globals().pop('_saved_platform23',
+                                            mirror.sys.platform)
         utils.SETTING_DIR = _saved_dir23
         utils.Setting.setting, utils.Setting.setting_path = _saved_setting23
         _shutil.rmtree(_tmp23, ignore_errors=True)
@@ -7748,9 +7786,18 @@ try:
         check("the OFFER the device saw offers one 720p stream",
               device24.offer['offer']['supportedStreams'][0]['resolutions']
               == [{'width': 1280, 'height': 720}], str(device24.offer))
+        # The OFFER is deliberately sent *before* the encoder and the server
+        # exist (a device that refuses the channel must not cost a spawned
+        # ffmpeg to unwind -- see the caststream red line in AGENTS.md §4.8), so
+        # "the device saw an OFFER" does not yet mean the session handed its
+        # sink over. Waiting for that state is the contract; reading it in the
+        # same instant as the OFFER is what made this line red on a slower
+        # runner (`server=None sink=None url=''`) while passing on a Mac.
         check("nothing is served over HTTP for this target",
-              mir24._server is None and mir24._sink is not None
-              and mir24.playing_url() == '')
+              _wait_until(lambda: mir24._server is None and mir24._sink is not None
+                          and mir24.playing_url() == '', timeout=20),
+              "server={} sink={} url={!r}".format(mir24._server, mir24._sink,
+                                                  mir24.playing_url()))
         check("the LOAD path is not used: no media app, no LOAD",
               'LOAD' not in _types24 and mirror.DEFAULT_MEDIA_APP_ID
               not in [d.get('appId') for (_n, t, d) in device24.received
@@ -9727,7 +9774,9 @@ try:
         # $UXPLAYRC pointing at a file that is not there makes uxplay read the
         # user's ~/.uxplayrc instead -- a silent betrayal of the settings page.
         check("the user's own uxplay configuration is neither read nor written",
-              _wait_until(lambda: os.path.exists(_env26))
+              _wait_until(lambda: os.path.exists(_env26) and
+                          'UXPLAYRC=[]' in open(_env26, encoding='utf-8').read(),
+                          timeout=10)
               and 'UXPLAYRC=[]' in open(_env26, encoding='utf-8').read()
               and os.path.exists(_user_rc26) == _had_user_rc26,
               open(_env26, encoding='utf-8').read() if os.path.exists(_env26) else 'no env')
@@ -10477,6 +10526,10 @@ try:
     _tmp29 = _tempfile.mkdtemp(prefix="macast-mirror29-")
     _opener29 = _urlreq29.build_opener(_urlreq29.ProxyHandler({}))
     mirror29 = _load_plugin("screen_mirror_plugin_v07", "screen_mirror.py")
+    # Part 29 tests the macOS-only assisted install; without this the
+    # plugin's own platform gate refuses to run the repair on a Linux runner.
+    _saved_platform29 = mirror29.sys.platform
+    mirror29.sys.platform = 'darwin'
     utils.Setting.setting = {}
     utils.Setting.setting_path = os.path.join(_tmp29, "macast_setting.json")
     try:
@@ -11158,6 +11211,8 @@ try:
               'plist=%s plugin=%s' % ("'NSMicrophoneUsageDescription'" in _py2app29,
                                       'NSMicrophoneUsageDescription' in _src29))
     finally:
+        mirror29.sys.platform = globals().pop('_saved_platform29',
+                                           mirror29.sys.platform)
         mirror29._capture_cache.clear()
         (utils.Setting.setting, utils.Setting.setting_path) = _saved_setting29
         _shutil.rmtree(_tmp29, ignore_errors=True)
@@ -11940,6 +11995,63 @@ except Exception as _e33:
 
 
 # --------------------------------------------------------------------------
+# The `--ci` decision, as a function so Part 50 can ask it questions.
+#
+# Part 34 needs the fork point `19879235...` to be reachable from this clone.
+# It is not reachable here, and as of 2026-09-25 it is not reachable on GitHub
+# either (`gh api repos/pingod/Macast/commits/<sha>` -> 424/422): the fork was
+# started from a squashed initial commit, so those 215 upstream objects exist in
+# no clone of *this* repository. So Part 34 is red always, CI included, and CI
+# needs a rule that is narrower than "is everything green".
+#
+# Without a rule, a permanent red is worse than no red at all: it trains anyone
+# who reads the run to ignore the word FAILED. So the gate asserts that the red
+# set is *exactly* the group of checks that can only be red where history is
+# missing, and that nothing else moved. Two ways to refuse: an unexpected red
+# (a real regression), or one of those checks going green in a clone with no
+# history (the check stopped asking anything -- §4.2's "不提问的检查等于通过的
+# 检查"). The gate's own premise is therefore a question, not an assumption:
+# `CI_SENTINEL` must be red exactly when the history is absent.
+# --------------------------------------------------------------------------
+CI_SENTINEL = "the ledger is computable here (a full clone, not a shallow one)"
+
+
+def ci_gate(reds, part34_names, history_present):
+    """Return `(ok, lines)`: may `--ci` call this run a pass?
+
+    `reds` are the names of every failed check; `part34_names` the names that
+    belong to Part 34. Anything outside that set is a regression, and inside it
+    only a *missing-history* clone may be red at all.
+    """
+    lines = ["fork point in this clone: {}".format(history_present),
+             "{} checks belong to Part 34, {} of them red".format(
+                 len(part34_names), sum(1 for n in reds if n in part34_names))]
+    if CI_SENTINEL not in part34_names:
+        lines.append("  the sentinel check is gone from Part 34 -- "
+                     "the gate has no premise")
+        premise = False
+    elif (CI_SENTINEL in reds) == history_present:
+        lines.append("  the sentinel contradicts the history: "
+                     "red={} present={}".format(CI_SENTINEL in reds,
+                                                history_present))
+        premise = False
+    else:
+        premise = True
+    unexpected = [n for n in reds if history_present or n not in part34_names]
+    for n in unexpected:
+        lines.append("  UNEXPECTED RED: {}".format(n))
+    ok = premise and not unexpected
+    if ok:
+        lines.append("CI GATE: PASSED ({})".format(
+            "all green" if history_present else
+            "the red set is Part 34, which cannot be computed here"))
+    else:
+        lines.append("CI GATE: FAILED -- the red set is not "
+                     "'the history gap and nothing else'")
+    return ok, lines
+
+
+# --------------------------------------------------------------------------
 # Part 34: who wrote what, and does the tree say so
 #
 # `scripts/provenance.py` counts, per file, how many lines `git blame`
@@ -11962,6 +12074,7 @@ except Exception as _e33:
 # reported as a failure with its cause, never as a pass.
 # --------------------------------------------------------------------------
 print("\n=== Part 34: the provenance ledger and the notices that track it ===")
+_P34_FIRST = len(RESULTS)  # the CI gate's allow-list is exactly this Part's checks
 try:
     import re as _re34
     import subprocess as _sub34
@@ -11976,8 +12089,17 @@ try:
                          '--json', '--check'], cwd=REPO, env=_env34,
                        stdout=_sub34.PIPE, stderr=_sub34.PIPE, text=True)
 
-    _shallow34 = 'cannot read history' in _run34.stderr
-    check("the ledger is computable here (a full clone, not a shallow one)",
+    # "History is not here" arrives in two shapes, and both must be read as the
+    # same thing. The tool's own marker is the shallow-clone case (the fork
+    # commit is missing). The other is *no repository at all* -- a source
+    # tarball, or a container copy like the one the Linux runner is built in --
+    # where `git blame` dies before provenance.py reaches its own message and
+    # what comes back is git's fatal plus a traceback. Reading that as "the
+    # ledger is computable and it is green" is the lie this sentinel exists to
+    # prevent; the CI gate caught exactly this on a real headless run.
+    _shallow34 = ('cannot read history' in _run34.stderr
+                  or 'not a git repository' in _run34.stderr)
+    check(CI_SENTINEL,
           not _shallow34,
           "git history is missing, so every line count below would be a guess: "
           "%s" % _run34.stderr.strip().splitlines()[:1])
@@ -12196,6 +12318,7 @@ except Exception as _e34:
     traceback.print_exc()
     check("the provenance ledger is checkable", False,
           "{}: {}".format(type(_e34).__name__, _e34))
+_P34_LAST = len(RESULTS)
 
 
 # --------------------------------------------------------------------------
@@ -14005,6 +14128,10 @@ try:
     utils.Setting.setting = {}
     utils.Setting.setting_path = os.path.join(_tmp38, "macast_setting.json")
     mirror38 = _load_plugin("screen_mirror_plugin_v38", "screen_mirror.py")
+    # Part 38 drives the avfoundation capture path, so it is a macOS Part
+    # whatever the runner is; the pin below is what Parts 21/22/23/29 do too.
+    _saved_platform38 = mirror38.sys.platform
+    mirror38.sys.platform = 'darwin'
     m38 = mirror38
 
     # -- what a *healthy* avfoundation capture prints on stderr --------------
@@ -14330,6 +14457,7 @@ finally:
     if mirror38 is None:
         print('Part 38 setup error: %s' % _traceback38.format_exc())
     utils.Setting.setting = {}
+    m38.sys.platform = globals().pop('_saved_platform38', m38.sys.platform)
     _shutil.rmtree(_tmp38, ignore_errors=True)
 
 
@@ -15734,8 +15862,19 @@ check("the config dir is still one appdirs call with these exact arguments",
       if _re44.search(r'SETTING_DIR = .*', _utils44) else 'no SETTING_DIR')
 _real_dir44 = os.path.normpath(utils.appdirs.user_config_dir('Macast',
                                                              'xfangfang'))
-_rows44 = _re44.findall(r'<td>(macOS|Linux|Windows)</td>\s*<td><code>([^<]+)',
-                        _help_raw44)
+_rows44 = _re44.findall(r'<td>(macOS|Linux|Windows)</td>\s*'
+                        r'<td><code>([^<]*Macast[^<]*)</code>', _help_raw44)
+# The help has a *second* platform table -- where mpv keeps its own config --
+# and its rows share these two cell shapes. Matching on "ends with Macast" is
+# what tells the two apart; `dict()` would otherwise let the later mpv row
+# silently overwrite the Linux config dir. That is exactly what happened on a
+# Linux host (help read `~/.config/mpv/mpv.conf`, and macOS never collided
+# because its mpv row is the same string as its config row).
+check("each platform's config-dir row is quoted exactly once, and the mpv "
+      "table is not mistaken for it",
+      len(_rows44) == 3 and len({p for p, _ in _rows44}) == 3
+      and all('Macast' in path for _, path in _rows44),
+      str(_rows44))
 _row44 = dict(_rows44).get(_platform_row44)
 check("the config directory the help prints for this platform is the one the "
       "app writes to",
@@ -17028,6 +17167,13 @@ try:
                     p.removed_device_queue.put(sid)
                 p._reap_timed_out_clients()
                 p._sync_subscribe_list()
+                # Yield the GIL deliberately. Without this the writer is a tight
+                # CPU loop, and on a box where one core is shared the reader is
+                # starved: the `add_subscribe` reader measured 4 reads in 2 s on
+                # a Linux container against 500+ here, which is a scheduler
+                # artifact, not the race. Sleep-0 makes "did the reader run" a
+                # statement about the code rather than about the machine.
+                time.sleep(0)
                 n += 1
 
         def _reader():
@@ -17188,7 +17334,293 @@ except Exception as _e49:
     _traceback49.print_exc()
     check("Part 49 runs", False, "{}: {}".format(type(_e49).__name__, _e49))
 
+
 # --------------------------------------------------------------------------
+# Part 50: two things the suite never asked, found on 2026-09-25
+#
+# (a) **A machine with no display could not import this application.**
+#     `macast/gui.py` imported pystray at module scope on the non-macOS branch,
+#     and pystray's package `__init__` selects a backend whose module body
+#     (`pystray/_xorg.py`) opens an X display. So on headless Linux
+#     `import pystray` raises `Xlib.error.DisplayNameError` -- and because
+#     `macast/macast.py` imports `.gui` at module scope, so did
+#     `import macast.macast`. That is the documented entry point
+#     (`macast-cli = macast.macast:cli`, README_ZH), whose own `cli()` builds a
+#     `Service` and never touches a tray: the command Linux users are told to
+#     run could not start on a server. Measured in a `python:3.12-slim`
+#     container with `requirements/common.txt` installed and no `DISPLAY`:
+#     before the fix the import raised, after it the import succeeds and
+#     `pystray` is absent from `sys.modules`.
+#     The fix is `_pystray()`: import the backend the first time something
+#     actually needs a tray. (§4.3's family: an import that is fine on the
+#     developer's machine and fatal on the target's.)
+#
+# (b) **CI never ran this suite at all.** `.github/workflows/build.yml` built
+#     four platforms and cut a Release without a single check from the ~1.7k
+#     that AGENTS.md calls the only thing preventing regressions -- so a push
+#     that breaks DLNA still ships. `ci_gate` (defined above, tested below) is
+#     what makes a `verify` job sayable at all: Part 34 is red in every clone of
+#     this repository, because the fork point's 215 upstream objects are in
+#     neither this working copy nor GitHub (`gh api
+#     repos/pingod/Macast/commits/19879235...` -> 424), so "everything is
+#     green" is a rule that can never fire -- and a permanent red is worse than
+#     no red, because it trains the reader to ignore FAILED.
+# --------------------------------------------------------------------------
+print("\n=== Part 50: the headless import, and the gate that reads it ===")
+try:
+    import ast as _ast50
+
+    def _imports_in50(stmts):
+        """Import names reachable from these statements *without* entering a function.
+
+        Recursing through `if`/`try` is the whole point: `gui.py` picks its
+        tray backend with a module-level `if sys.platform == 'darwin'`, so a
+        checker that only read the top line of the module would call that bug
+        "not at module scope".
+        """
+        found = set()
+        for _st in stmts:
+            if isinstance(_st, _ast50.Import):
+                found.update(_a.name.split(".")[0] for _a in _st.names)
+            elif isinstance(_st, _ast50.ImportFrom) and _st.module:
+                found.add(_st.module.split(".")[0])
+            elif isinstance(_st, _ast50.If):
+                found |= _imports_in50(_st.body)
+                found |= _imports_in50(_st.orelse or [])
+            elif type(_st).__name__.startswith("Try"):
+                found |= _imports_in50(_st.body)
+                found |= _imports_in50(getattr(_st, "orelse", None) or [])
+                for _h in _st.handlers:
+                    found |= _imports_in50(_h.body)
+                found |= _imports_in50(_st.finalbody)
+        return found
+
+    def _file50(path):
+        with open(path, encoding="utf-8") as _fh50:
+            return _ast50.parse(_fh50.read())
+
+    _gui_file50 = os.path.join(MACAST, "gui.py")
+    _gui_tree50 = _file50(_gui_file50)
+    check("macast/gui.py keeps its tray backend out of module scope",
+          "pystray" not in _imports_in50(_gui_tree50.body),
+          "an import here runs on every `import macast`, display server or not")
+
+    _core50 = [os.path.join(_dir50, _name50)
+               for _dir50 in (MACAST, os.path.join(REPO, "macast_renderer"))
+               for _name50 in sorted(os.listdir(_dir50))
+               if _name50.endswith(".py")]
+    _wide50 = [p for p in _core50
+               if {"pystray", "Xlib"} & _imports_in50(_file50(p).body)]
+    check("no core module opens an X display by being imported",
+          not _wide50 and len(_core50) > 10,
+          "{} / scanned {}".format(_wide50, len(_core50)))
+
+    # Every place that *uses* the backend has to have asked for it. A stale
+    # `pystray.Menu(...)` left behind by a half-done lazy-import edit would be
+    # a NameError on Windows/Linux only -- i.e. invisible from this machine.
+    _orphan50 = []
+    for _fn in [n for n in _ast50.walk(_gui_tree50)
+                if isinstance(n, _ast50.FunctionDef)]:
+        _uses = any(isinstance(_x, _ast50.Name) and _x.id == "pystray"
+                    for _x in _ast50.walk(_fn))
+        _binds = (_fn.name == "_pystray"
+                  or any(isinstance(_x, _ast50.Call)
+                         and isinstance(_x.func, _ast50.Name)
+                         and _x.func.id == "_pystray" for _x in _ast50.walk(_fn)))
+        if _uses and not _binds:
+            _orphan50.append(_fn.name)
+    check("each user of the tray backend binds it first (`pystray = _pystray()`)",
+          not _orphan50, str(_orphan50))
+
+    # --- (a2) the same claim, executed on a machine with no display ----------
+    _boot50 = os.path.join(_tempfile.mkdtemp(prefix="macast50-"), "boot.py")
+    with open(_boot50, "w", encoding="utf-8") as _fh50:
+        _fh50.write(
+            "import sys, types\n"
+            "class _NoTray(object):\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name.split('.')[0] == 'pystray':\n"
+            "            raise ImportError('pystray blocked by the harness')\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, _NoTray())\n"
+            "_ni = types.ModuleType('netifaces')\n"
+            "_ni.AF_INET = 2; _ni.AF_LINK = 17\n"
+            "_ni.gateways = lambda f=None: {}\n"
+            "_ni.ifaddresses = lambda i: {2: [{'addr': '127.0.0.1',"
+            " 'netmask': '255.0.0.0'}]}\n"
+            "_ni.interfaces = lambda: ['lo']\n"
+            "sys.modules['netifaces'] = _ni\n"
+            # pyperclip is imported at the top of macast.py on every platform, so
+            # a bare box without it would fail this harness for the wrong reason:
+            # the question here is the tray backend and the display, not the clipboard.
+            "_pc = types.ModuleType('pyperclip')\n"
+            "_pc.copy = lambda *a, **k: None\n"
+            "_pc.paste = lambda *a, **k: ''\n"
+            "sys.modules['pyperclip'] = _pc\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "sys.platform = 'linux'   # the branch that used to pull in pystray\n"
+            "import macast.macast as _app\n"
+            "print('IMPORT-OK', 'pystray' in sys.modules, callable(_app.cli))\n"
+            "try:\n"
+            "    import pystray\n"
+            "except ImportError:\n"
+            "    print('BLOCKER-WORKS')\n")
+    _env50 = dict(os.environ)
+    _env50.pop("PYTHONPATH", None)
+    _env50.pop("DISPLAY", None)     # with X available the bug would hide
+
+    def _run50(root):
+        return subprocess.run([sys.executable, _boot50, root], cwd=REPO,
+                              env=_env50, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=180)
+
+    _real50 = _run50(REPO)
+    check("with no display and no importable pystray, `import macast.macast` works",
+          _real50.returncode == 0
+          and "IMPORT-OK False True" in _real50.stdout
+          and "BLOCKER-WORKS" in _real50.stdout,
+          "rc={} out={} err={}".format(_real50.returncode,
+                                       _real50.stdout.strip()[-300:],
+                                       _real50.stderr.strip()[-500:]))
+
+    # Teeth: put the module-level import back and the same harness must fail.
+    # The copy is real (`macast/` minus nothing) so this proves the harness
+    # would have caught the bug it exists for, not just that a stub imported.
+    _farm50 = os.path.join(os.path.dirname(_boot50), "mutant")
+    _shutil.copytree(MACAST, os.path.join(_farm50, "macast"))
+    os.symlink(os.path.join(REPO, "macast_renderer"),
+               os.path.join(_farm50, "macast_renderer"))
+    _gui_mut50 = os.path.join(_farm50, "macast", "gui.py")
+    with open(_gui_mut50, encoding="utf-8") as _fh50:
+        _mut_src50 = _fh50.read()
+    with open(_gui_mut50, "w", encoding="utf-8") as _fh50:
+        _fh50.write(_mut_src50.replace("import sys\nimport logging",
+                                       "import sys\nimport logging\nimport pystray",
+                                       1))
+    _mut_run50 = _run50(_farm50)
+    check("the mutant with the module-level import restored is refused",
+          _mut_run50.returncode != 0
+          and "IMPORT-OK" not in _mut_run50.stdout
+          and "pystray" in _mut_run50.stderr,
+          "rc={} out={} err={}".format(_mut_run50.returncode,
+                                      _mut_run50.stdout.strip()[-200:],
+                                      _mut_run50.stderr.strip()[-300:]))
+    _shutil.rmtree(os.path.dirname(_boot50), ignore_errors=True)
+
+    # --- (a3) the entry point this all serves -------------------------------
+    _mac_tree50 = _file50(os.path.join(MACAST, "macast.py"))
+    _cli50 = [n for n in _ast50.walk(_mac_tree50)
+              if isinstance(n, _ast50.FunctionDef) and n.name == "cli"]
+    check("cli() runs a Service and never builds the tray shell",
+          len(_cli50) == 1
+          and not [n.func.id for n in _ast50.walk(_cli50[0])
+                   if isinstance(n, _ast50.Call)
+                   and isinstance(n.func, _ast50.Name)
+                   and n.func.id in ("Macast", "App", "gui")],
+          "if it did, a headless box could not start it at all")
+    _setup50 = open(os.path.join(REPO, "setup.py"), encoding="utf-8").read()
+    _pyproj50 = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
+    check("the two entry-point tables still name `macast-cli = macast.macast:cli`",
+          "macast-cli = macast.macast:cli" in _setup50
+          and 'macast-cli = "macast.macast:cli"' in _pyproj50,
+          "this Part guards the function those names point at")
+
+    # --- (b) the gate's own arithmetic -------------------------------------
+    # The names here must be *disjoint*: an "outside Part 34" red that is also
+    # in the Part 34 set tests nothing. The first draft of these six lines made
+    # exactly that mistake, and the gate -- run over the real results at the end
+    # of this same process -- named it as an UNEXPECTED RED.
+    _in34_50 = {CI_SENTINEL, "no file's notices contradict its line counts"}
+    _out50 = "Part 12 keeps the web cast entry behind the token"
+    _ok50, _50 = ci_gate([CI_SENTINEL], _in34_50, False)
+    check("--ci excuses a red Part 34 in a clone with no history", _ok50, str(_50))
+    _ok50, _50 = ci_gate([CI_SENTINEL, _out50], _in34_50, False)
+    check("--ci refuses anything outside Part 34, even in that clone",
+          not _ok50 and "UNEXPECTED RED: {}".format(_out50) in "\n".join(_50),
+          str(_50))
+    _ok50, _50 = ci_gate([], _in34_50, False)
+    check("--ci refuses a *green* Part 34 where history is missing",
+          not _ok50 and "contradicts the history" in "\n".join(_50),
+          "a check that stopped asking questions must not read as a pass")
+    _ok50, _50 = ci_gate([CI_SENTINEL], _in34_50, True)
+    check("--ci refuses Part 34 red when the history *is* present",
+          not _ok50, str(_50))
+    _ok50, _50 = ci_gate([], _in34_50, True)
+    check("--ci passes an all-green run in a full clone", _ok50, str(_50))
+    _ok50, _50 = ci_gate([CI_SENTINEL], {"an unrelated name"}, False)
+    check("--ci refuses to excuse anything once the sentinel leaves Part 34",
+          not _ok50 and "has no premise" in "\n".join(_50), str(_50))
+
+    # The gate is bound to a live check, not to a string that happens to match.
+    _part34_now50 = set(n for n, _, _ in RESULTS[_P34_FIRST:_P34_LAST])
+    check("the sentinel is a check Part 34 actually ran in this process",
+          CI_SENTINEL in _part34_now50 and len(_part34_now50) >= 5,
+          "{} of {}".format(CI_SENTINEL in _part34_now50, len(_part34_now50)))
+    check("--ci is what the release pipeline runs, and the release waits for it",
+          "verify_cast_airplay.py --ci" in
+          open(os.path.join(REPO, ".github", "workflows", "build.yml"),
+               encoding="utf-8").read(),
+          "the gate is dead code while no workflow asks for it")
+
+    # --- (c) the same premise, applied to this file -------------------------
+    # Parts 21/22/23/29/38 feed the parser avfoundation-shaped fakes and were
+    # written on a Mac, so they pin `screen_mirror.sys.platform` to be macOS
+    # Parts with or without a Mac under them; Part 31 passes the seam per call,
+    # and Part 37 states both branches of `sys.platform ==` where the answer
+    # really does follow the host.
+    #
+    # There is deliberately no static rule here ("a Part that calls a
+    # platform-dependent plugin function must pin it"). The first draft was
+    # written three times and each version flagged Parts that were correct --
+    # windows bled across Part boundaries, aliases (`m38 = mirror38`) hid the
+    # pin, and "does this assertion actually change with the host?" turned into
+    # four heuristics, none of which asks the real question. The check that
+    # replaces them is the `verify` job in build.yml, which runs these same
+    # assertions on Linux: an assumption that a Mac alone satisfies goes red
+    # there, which is how all 21 of the lines this Round fixed were found. Its
+    # evidence is the totals matching: 1674/1680 on macOS and on Linux, so
+    # nothing there is being skipped rather than run.
+except Exception as _e50:
+    import traceback as _traceback50
+    _traceback50.print_exc()
+    check("Part 50 runs", False, "{}: {}".format(type(_e50).__name__, _e50))
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# The CI gate, applied (see `ci_gate` above for why the rule is this narrow).
+# --------------------------------------------------------------------------
+if "--ci" in sys.argv:
+    import re as _re_ci
+    _src_ci = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "provenance.py"), encoding="utf-8").read()
+    _fork_ci = _re_ci.search(r'^FORK_POINT\s*=\s*"([0-9a-f]{40})"',
+                             _src_ci, _re_ci.M).group(1)
+    try:
+        _have_history = subprocess.call(
+            ["git", "cat-file", "-e", _fork_ci + "^{commit}"],
+            cwd=REPO, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL) == 0
+    except OSError:
+        # No git binary at all (a source tarball, a slim container): that is
+        # the same "history is not here" state the gate exists for, and it
+        # must not abort the run on its way to the summary.
+        _have_history = False
+    _ci_ok, _ci_lines = ci_gate(
+        [n for n, ok, _ in RESULTS if not ok],
+        set(n for n, _, _ in RESULTS[_P34_FIRST:_P34_LAST]),
+        _have_history)
+    print("\n=== CI GATE ===")
+    for _line in _ci_lines:
+        print(_line)
+    # Not an exit here: the summary below carries the count and each red's
+    # detail, and a refused run is exactly when a reader needs them. The exit
+    # code is still the gate's verdict.
+    _ci_exit = 0 if _ci_ok else 1
+    _ci_excused = True
+else:
+    _ci_excused = False
+    _ci_exit = 0
 
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
@@ -17198,5 +17630,8 @@ if failed:
     for name, ok, detail in RESULTS:
         if not ok:
             print("  - {}  ({})".format(name, detail))
-    sys.exit(1)
-print("All checks passed.")
+    if not _ci_excused:
+        sys.exit(1)
+elif not _ci_excused:
+    print("All checks passed.")
+sys.exit(_ci_exit)

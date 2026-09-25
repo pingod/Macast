@@ -10,9 +10,30 @@ from .utils import Setting
 if sys.platform == 'darwin':
     import rumps
 else:
-    import pystray
     import webbrowser
     from PIL import Image
+
+
+_pystray_module = None
+
+
+def _pystray():
+    """The tray backend, imported the first time something actually needs a tray.
+
+    Importing pystray on Linux is not a cheap name binding: its package `__init__`
+    picks a backend and `pystray/_xorg.py` opens an X display **at module scope**,
+    so on a machine with no display server it raises `Xlib.error.DisplayNameError`
+    right there. That poisoned every import of this module -- including
+    `macast.macast`, whose `cli()` never builds a tray and whose `Service` the
+    settings page drives just fine headless. The documented Linux entry point
+    (`macast-cli`, README_ZH) therefore could not start on a server at all.
+    """
+    global _pystray_module
+    if _pystray_module is None:
+        import pystray
+        _pystray_module = pystray
+    return _pystray_module
+
 
 logger = logging.getLogger("gui")
 logger.setLevel(logging.INFO)
@@ -149,6 +170,7 @@ class App:
                                  quit_button=None)
             rumps.debug_mode(True)
         else:
+            pystray = _pystray()
             self.app = pystray.Icon(self.name,
                                     Image.open(self.icon),
                                     menu=pystray.Menu(
@@ -184,6 +206,7 @@ class App:
         return menu_item
 
     def _build_menu_pystray(self, menu):
+        pystray = _pystray()
         items = []
         for item in menu:
             if item is None:
@@ -254,7 +277,8 @@ class App:
             self.app.menu.clear()
             self.app.menu = self._build_menu_rumps(menu)
         else:
-            self.app.menu = pystray.Menu(lambda: self._build_menu_pystray(menu))
+            self.app.menu = _pystray().Menu(
+                lambda: self._build_menu_pystray(menu))
 
     def _find_menu_item_index_by_id(self, id):
         #  TODO find all items
