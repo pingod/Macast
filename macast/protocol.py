@@ -1246,6 +1246,77 @@ def read_log_all(path, max_bytes=LOG_ALL_MAX_BYTES):
 MIRROR_SNAPSHOT_MIME = 'image/png'
 
 
+def site_of(target):
+    """`(host, port)` out of a URL or Host header value; `(None, None)` if unusable.
+
+    One normaliser for both sides of the same-site comparison, because the two
+    spellings differ in exactly the ways that would otherwise silently mismatch:
+    `Origin` is an absolute URL with no path, `Referer` has a path, and `Host`
+    has neither scheme nor path but does carry the port. Lowercased, a trailing
+    dot dropped, a default 80/443 dropped so `http://host` and `host` agree, and
+    IPv6 without its brackets (`[::1]` and `::1` are the same site).
+    """
+    from urllib.parse import urlsplit
+    if not target:
+        return None, None
+    target = str(target).strip()
+    if '://' not in target:
+        # A bare `Host` value: no scheme, so nothing to tell us the port is 80.
+        target = 'http://' + target
+    try:
+        parts = urlsplit(target)
+        host = parts.hostname
+    except ValueError:
+        return None, None
+    if not host:
+        return None, None
+    try:
+        port = parts.port
+    except ValueError:
+        return None, None
+    if port in (80, 443, None):
+        port = None
+    return host.lower().rstrip('.'), port
+
+
+def _page_host_names():
+    """Host names the settings page may legitimately be opened on.
+
+    The comparison is not "does this resolve to us" -- under DNS rebinding the
+    attacker's own domain *does* resolve to 127.0.0.1, and that is the whole
+    attack. So the list is the names this machine answers on regardless of what
+    anyone's resolver says: loopback, the addresses we advertise on the LAN, and
+    this host's own names.
+    """
+    names = {'127.0.0.1', 'localhost', '::1'}
+    try:
+        names.update(addr for addr in advertisable_addresses() if addr)
+    except Exception:  # pragma: no cover - enumeration is best-effort
+        pass
+    try:
+        # The DLNA-side list too: it falls back to the unfiltered interfaces, so
+        # a host whose only address looks unusual to us still recognises the
+        # page the user actually opened.
+        names.update(addr for addr in Setting.get_advertisable_ip() if addr)
+    except Exception:  # pragma: no cover - ditto
+        pass
+    try:
+        import socket
+        host = (socket.gethostname() or '').lower().rstrip('.')
+        if host:
+            names.add(host)
+            names.add(host.split('.')[0])
+            if not host.endswith('.local'):
+                names.add(host + '.local')
+    except Exception:  # pragma: no cover - ditto
+        pass
+    return {n for n in names if n}
+
+
+class SameSiteError(Exception):
+    """Raised by `Handler._same_site` with the message the caller should answer."""
+
+
 @cherrypy.expose
 class Handler:
 
@@ -1305,6 +1376,39 @@ class Handler:
         if getattr(cherrypy.request, 'scheme', 'http') == 'https':
             return True
         return self._token_present()
+
+    def _same_site(self):
+        """Whether this request could have come from our own settings page.
+
+        "Loopback means the user's own machine" has always been the weak link in
+        `_management_allowed`: any page the user visits can post a *simple* form
+        (urlencoded or multipart, so CORS never prefilters it and the browser
+        asks nothing first) straight at http://127.0.0.1:<port>/api, and the one
+        thing that gives a drive-by away is the `Origin` it carries. Requests
+        with no `Origin` and no `Referer` are not browsers -- `curl`, a phone
+        Shortcut, Home Assistant -- and stay judged by address and token alone.
+
+        The port is deliberately not compared: a page we serve on one port
+        posting to another port of the same host is the same site for our
+        purposes (there is no cookie here to ride), and pinning it would break
+        the port-fallback Macast itself does when 58880 is taken.
+
+        Raises `SameSiteError` so the caller answers with a message that says
+        what to do, instead of a 403 that reads like a broken token.
+        """
+        headers = cherrypy.request.headers
+        origin = headers.get('Origin') or headers.get('Referer')
+        if not origin:
+            return
+        host, port = site_of(origin)
+        if host is None:
+            raise SameSiteError('无法识别的来源站点')
+        if host not in _page_host_names():
+            logger.warning('blocked a cross-site API post from origin %s', origin)
+            raise SameSiteError(
+                '禁止跨站操作：这个请求来自「{}」，而设置页只服务本机自己。'
+                '如果你是从别的网址打开的页面，请改用 http://127.0.0.1:{}/ 再试。'.format(
+                    host, Setting.get_port()))
 
     def _cast_url(self, url, title=''):
         """Push an absolute URL to the renderer, as a JSON-ready result.
@@ -1821,6 +1925,34 @@ class Handler:
                           # because this one would accept plain loopback.
                           'mirror-action')
 
+    #: The subset of those that runs code we were handed, so `_management_allowed`
+    #: is not enough for them even from this machine -- see `_code_execution_allowed`.
+    #:  * `install-plugin` downloads a `.py` and the plugin manager imports it on
+    #:    the spot (measured: module-level code runs before any "enable" click);
+    #:  * `save-launch-param` replaces the whole settings dict from JSON and
+    #:    restarts the app with whatever it now says;
+    #:  * `set-module-setting` writes a plugin's own keys, and 自动化钩子's keys
+    #:    (`Hook_On_Cast` & co.) are handed to `subprocess(shell=True)` the next
+    #:    time anything is cast -- so writing one *is* running it, given a cast
+    #:    the same drive-by can also trigger.
+    #: `mirror-action` has its own copy of this check for the same reason; it is
+    #: not in the list because its payload is an action name, not code.
+    _CODE_EXECUTION_PARAMS = ('install-plugin', 'save-launch-param',
+                              'set-module-setting')
+
+    def _code_execution_allowed(self):
+        """Whether a request may run code on this machine: token, always.
+
+        Loopback proves *where* a request came from, and an `Origin` check proves
+        no other website sent it, but neither proves the caller is our own page:
+        DNS rebinding serves the attacker's origin from 127.0.0.1 itself, so
+        same-site and loopback both hold and the page can even read the reply.
+        The one thing such a page cannot get is the management token -- it is
+        handed out by `query=cast-info`, whose response a cross-origin reader
+        cannot see, because Macast never sends `Access-Control-Allow-Origin`.
+        """
+        return self._token_present()
+
     def _set_renderer(self, title):
         manager = self._plugin_manager()
         plugin = next((item for item in manager.renderer_list
@@ -1942,6 +2074,18 @@ class Handler:
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
         res = {'code': 0, 'message': 'success'}
+        # Every POST here changes something, and every one of them used to be
+        # judged only by *where* it came from. A browser does not ask permission
+        # to submit a plain form to http://127.0.0.1:<port>/api, so "loopback"
+        # never meant "the user's own settings page" -- it meant "this machine's
+        # network stack, including whatever page is open on it". Ask the browser
+        # who sent it before anything else is considered.
+        try:
+            self._same_site()
+        except SameSiteError as e:
+            res['code'] = 403
+            res['message'] = str(e)
+            return json.dumps(res, indent=4).encode()
         # Uploads are dispatched by *field name*: the cast flow, the subtitle
         # flow and plugin installation all post a file to the same endpoint.
         file_part = None
@@ -1958,6 +2102,13 @@ class Handler:
                 res['message'] = 'Forbidden: management API requires local access or token'
                 return json.dumps(res, indent=4).encode()
             if file_field == 'plugin-file':
+                # An uploaded plugin is code we are about to import, so the
+                # token is required of it too -- from this machine included.
+                if not self._code_execution_allowed():
+                    res['code'] = 403
+                    res['message'] = ('Forbidden: installing a plugin requires '
+                                      'the api token')
+                    return json.dumps(res, indent=4).encode()
                 return self.__install_uploaded_plugin(file_part, kwargs)
             upload = file_part
             filename = os.path.basename(getattr(upload, 'filename', 'cast.bin'))
@@ -1986,6 +2137,15 @@ class Handler:
             if not self._management_allowed():
                 res['code'] = 403
                 res['message'] = 'Forbidden: management API requires local access or token'
+                return json.dumps(res, indent=4).encode()
+        # ...and the ones among them that end up running a file we were handed
+        # need more than that: see `_code_execution_allowed`.
+        if any(kwargs.get(p, None) is not None
+               for p in self._CODE_EXECUTION_PARAMS):
+            if not self._code_execution_allowed():
+                res['code'] = 403
+                res['message'] = ('Forbidden: installing code requires the api '
+                                  'token (设置页「状态 → 网页投屏入口」)')
                 return json.dumps(res, indent=4).encode()
         if kwargs.get('set-interface', None) is not None:
             res = self._set_network_interface(kwargs.get('set-interface'))
