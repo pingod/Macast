@@ -21,8 +21,8 @@
 | R2 | 单体热点：验证套件 16,010 行 / `screen_mirror.py` 8,046 行 / `protocol.py` 的 `Handler` 类 ~846 行 / `setting.html` 2,908 行 | 可维护性、可审计性 | 高 | 高 | 已确认 |
 | R3 | DLNA `event_subscribes` 无锁：worker 线程边迭代、事件线程边插入 → `dictionary changed size during iteration` | 可靠性 | 中→**高**（读路径 B 无人兜底，控制点吃 HTTP 500 后永久静默） | **高（两条读路径均真线程复现：8 s/110 次与 20 s/148,302 次）** | **已修**（2026-09-25，套件 Part 49） |
 | R4 | `app_notify` 订阅者在**发布它的 CherryPy 线程**上直接操作托盘，未走主线程 hop（与菜单重建不一致） | 可靠性 | 中 | 高（离线线程）/ 中（缓解后是否仍出问题） | **已修**（2026-09-25，套件 Part 47） |
-| R5 | 回归护栏有被"常态化"的盲区：套件全打桩网络、Part 34 永久红、Cast Streaming 全族未见过真电视 | 可测试性 | 中 | 高 | 已确认（部分为已知取舍） |
-| R6 | import 期与读取期副作用：`SETTING_DIR` 导入时定死、`Setting.get` 读带写、多实例回写端口/USN | 可维护性、正确性 | 低-中 | 高 | 已确认（部分为已知取舍） |
+| R5 | 回归护栏有被"常态化"的盲区：套件全打桩网络、Part 34 永久红、Cast Streaming 全族未见过真电视 | 可测试性 | 中 | 高 | **部分已修**（2026-09-25，套件进 CI 的 Linux headless `verify` job + `--ci` 门把"红集恰好等于 Part 34"变成断言；e2e 定时仍未做） |
+| R6 | import 期与读取期副作用：`SETTING_DIR` 导入时定死、`Setting.get` 读带写、多实例回写端口/USN | 可维护性、正确性 | 低-中 | 高 | 已确认（部分为已知取舍）；**其中"目录不存在"这一支已修**（2026-09-25，见下面 R6 末尾） |
 | R7 | 202 处 `except Exception`（screen_mirror 57 / cast_local_file 25）——密度高，与"静默失效"反复出现同源 | 可靠性 | 低 | 中 | 已确认 |
 
 ---
@@ -143,6 +143,10 @@
 
 **修复方向**：① CI 把"红集恰好等于 {Part 34}"作为断言，而不是容忍任意红；② 把 `e2e_smoke.py` 接入每日定时（它会在本机起第二个实例，适合夜间专用机）；③ 未真机验证的通道在设置页 UI 上继续显式标注"未经真电视验证"（已部分做到，保持）。
 
+**① 已落地（2026-09-25，套件 Part 50）**：`build.yml` 新增 `verify` job（ubuntu-22.04、headless、`--ci`），`release` 等它；`ci_gate()` 只豁免 Part 34 那 6 条，且豁免的前提（"台账在这里算不出来"）必须自己成立。选 Linux 不是图便宜 —— `import pystray` 那个"模块体就开 X display"的坑只有无头 Linux runner 看得见。
+**这个 job 第一次真跑就交付了一条产品 bug**：runner 上没有 `~/.config/Macast`，`_ensure_self_signed_cert()` 让 openssl 往不存在的目录里写 ⇒ 生成失败 ⇒ `load_cert_chain` 抛 `FileNotFoundError` ⇒ **Cast 的 TLS 接收端在真 8009 上根本没起来**，而日志唯一那行把锅甩给 `-addext`（旧代码对任何非零退出都说这句话）。修复与用例见 `AGENTS.md` §4.2「写文件的代码要自己把目录建出来」。同一趟还暴露了套件自己违反 §10：Part 3 的真 socket 段落一直往开发者真实配置目录写证书，现在改指临时目录。
+② 仍未做（跑真应用的 `e2e_smoke.py` 只在发版前手动）。
+
 ---
 
 ## R6 — import 期 / 读取期副作用
@@ -159,6 +163,8 @@
 
 202 处 `except Exception`（`screen_mirror.py` 57、`cast_local_file.py` 25、`protocol.py` 19）。多数是有意的边界（监督外部进程、可选依赖降级），但 `AGENTS.md` 反复出现"静默失效 / 静默丢弃 / 静默黑屏"字样，说明**吞异常 + 不上报状态**这一组合在本仓库是反复复发的根因。
 **建议约定**：`except` 必须记到能落到文件的级别；热路径吞异常时必须在 `console_state()` / 页面可见状态里留一个可 surfacing 的标记（screen_mirror 的 `audio_dropped()` 就是这个模式的正例，推广它）。
+
+**已按这条约定收口的一例（2026-09-25，Part 40）**：`screen_mirror._default_pulse_monitor()` 原来是 `except Exception: return None` —— 三种机器状态（`pactl` 根本不在 / pactl 在但答不出默认 sink / pactl 报错）被吞成同一个 `None`，而用户侧那句「系统声音：未启用（需要 PulseAudio）」既不给门也不分原因，正是本节说的"吞异常 + 不上报状态"。现在按 `OSError` 与其余分开记 `logger.debug`（探测有缓存，不在热路径），页面那一句换成 `PULSE_DOOR`（点名 `pactl get-default-sink`、`pulseaudio-utils`、「重新探测采集」）。同一条里另有一处**接缝说谎**：`_audio_line(renderer, platform=...)` 的 docstring 明说 `platform` 是测试接缝，三条「未启用」分支却读 `sys.platform` —— 于是"该去哪个系统面板"这句话随**跑代码的那台机器**变，而不随被问的那台。用例与三个变异体见 `AGENTS.md` §4.8 的 screen_mirror 行。
 
 ---
 

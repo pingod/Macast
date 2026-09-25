@@ -15174,6 +15174,72 @@ try:
           not _win_line40.startswith('系统声音：已启用'),
           _win_line40[:60])
 
+    # The same seam has to hold for the *no tap found* row. The first version
+    # documented `platform` as the seam and then read `sys.platform` for its
+    # three「未启用」branches -- so a Linux runner asking for platform='win32'
+    # was handed the Linux sentence, and the row lied about which machine it
+    # ran on exactly where it names the settings panel to open.
+    _kept40 = dict(m40._capture_cache)
+    m40._capture_cache.clear()
+    m40._capture_cache['part40-none'] = type('C40b', (), {
+        'audio_map': None, 'label': ''})()
+    try:
+        _linux40 = _holder40._audio_line(None, platform='linux')
+        _win40row = _holder40._audio_line(None, platform='win32')
+        _mac40row = _holder40._audio_line(None, platform='darwin')
+    finally:
+        m40._capture_cache.clear()
+        m40._capture_cache.update(_kept40)
+    check("the「未启用」row answers about the platform it was asked about",
+          'pactl' in _linux40 and '立体声混音' in _win40row
+          and 'BlackHole' in _mac40row,
+          'linux={!r} win={!r} mac={!r}'.format(_linux40[:36], _win40row[:36],
+                                                _mac40row[:36]))
+    check("and the Linux answer is a door, not just a missing dependency",
+          'pulseaudio-utils' in _linux40 and '默认输出设备' in _linux40
+          and '重新探测采集' in _linux40,
+          _linux40)
+
+    # Why pactl said nothing is three different machine states, and the probe
+    # used to discard all of them into the same `None`.
+    _saved_run40 = m40.subprocess.run
+    _said40p = []
+    import logging as _logging40  # noqa: E402
+
+    class _Sink40p(_logging40.Handler):
+        def emit(self, record):
+            _said40p.append(record.getMessage())
+
+    _sink40p = _Sink40p()
+    _level40p = m40.logger.level
+    m40.logger.setLevel(_logging40.DEBUG)
+    m40.logger.addHandler(_sink40p)
+    try:
+        def _no_pactl(*a, **k):
+            err = OSError(2, 'No such file or directory')
+            err.filename = 'pactl'
+            raise err
+        m40.subprocess.run = _no_pactl
+        _missing40 = m40._default_pulse_monitor()
+
+        def _silent(*a, **k):
+            return type('P40', (), {'returncode': 1, 'stdout': b'',
+                                    'stderr': b'Connection refused'})()
+        m40.subprocess.run = _silent
+        _refused40 = m40._default_pulse_monitor()
+    finally:
+        m40.logger.removeHandler(_sink40p)
+        m40.logger.setLevel(_level40p)
+        m40.subprocess.run = _saved_run40
+    check("a missing pactl and a silent pactl both still mean no tap",
+          _missing40 is None and _refused40 is None,
+          '{!r} {!r}'.format(_missing40, _refused40))
+    check("but the two say which of them happened, in the log",
+          len(_said40p) == 2 and 'cannot run pactl' in _said40p[0]
+          and 'No such file' in _said40p[0]
+          and 'Connection refused' in _said40p[1],
+          str(_said40p))
+
     # -- the build flag ----------------------------------------------------
     _yml40 = open(os.path.join(_root40, '.github', 'workflows', 'build.yml'),
                   encoding='utf-8').read()

@@ -1518,10 +1518,21 @@ def _default_pulse_monitor():
     try:
         proc = subprocess.run(['pactl', 'get-default-sink'],
                               stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, timeout=3)
-        sink = proc.stdout.decode('utf-8', 'replace').strip()
-    except Exception:
+                              stderr=subprocess.PIPE, timeout=3)
+    except OSError as e:
+        # Usually no pactl at all, i.e. no PulseAudio/PipeWire on this box --
+        # a different answer than "pactl is there but says nothing", and the
+        # probe used to discard both.
+        logger.debug("pulse tap probe: cannot run pactl: %s", e)
         return None
+    except Exception as e:
+        logger.debug("pulse tap probe: pactl failed: %s", e)
+        return None
+    sink = proc.stdout.decode('utf-8', 'replace').strip()
+    if not sink:
+        logger.debug("pulse tap probe: pactl exited %s without a sink name (%s)",
+                     proc.returncode,
+                     proc.stderr.decode('utf-8', 'replace').strip()[:200])
     return sink + '.monitor' if sink else None
 
 
@@ -1707,6 +1718,14 @@ PERMISSION_DOOR = '请在「系统设置 → 隐私与安全性 → 屏幕录制
 #: avfoundation 把系统声音当作**输入**设备，所以它吃的是麦克风授权，不是屏幕录制
 #: —— 两道门，两个后果。降级成功的那一句要说出少了什么、去哪补。
 MICROPHONE_DOOR = '请在「系统设置 → 隐私与安全性 → 麦克风」中允许 Macast'
+
+#: Linux 的声音口同样不是我们装的：`<sink>.monitor` 一直在那儿，只要 `pactl`
+#: 问得出默认输出设备。所以这一句必须说出缺的是哪个命令、去哪确认，而不是
+#: 只报一个「需要 PulseAudio」—— 那是 §4.2「每一条失败必须给出门」的同一条。
+PULSE_DOOR = ('系统声音：未启用 —— Linux 要把系统声音录回来，需要 '
+              'PulseAudio/PipeWire 的 monitor 源：`pactl get-default-sink` 得问得出'
+              '一块默认输出设备（没有 pactl 就装 pulseaudio-utils，PipeWire 也提供它）。'
+              '确认系统音量里有输出设备后，点上面的「重新探测采集」，本次镜像要重启一次。')
 
 AUDIO_DROPPED_SUFFIX = (
     '（本次镜像没有系统声音：带上它就一直取不到帧，已改为只采集画面。'
@@ -8028,9 +8047,9 @@ class ScreenMirrorSetting(RendererSetting):
                          '设置」里做一个包含它的多输出设备').format(
                     MACAST_AGGREGATE_NAME)
             return line
-        if sys.platform == 'darwin':
+        if platform == 'darwin':
             return '系统声音：未启用（可一键安装 BlackHole）'
-        if sys.platform == 'win32':
+        if platform == 'win32':
             # Windows 的回环录音设备不是我们装的：要么驱动自带「立体声混音」，
             # 要么用户自己装了虚拟声卡。所以这里必须给出去哪打开它，而不是
             # 只说一句「仅画面」—— 那正是「Windows 投屏没声音」的原始答案。
@@ -8039,7 +8058,7 @@ class ScreenMirrorSetting(RendererSetting):
                     '空白处勾选「显示已禁用的设备」，启用「立体声混音 (Stereo '
                     'Mix)」；驱动没提供就装一块虚拟声卡（VB-Cable / VoiceMeeter），'
                     '装好后点上面的「重新探测采集」，本次镜像要重启一次。')
-        return '系统声音：未启用（需要 PulseAudio）'
+        return PULSE_DOOR
 
 
 if __name__ == '__main__':
