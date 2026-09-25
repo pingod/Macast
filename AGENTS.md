@@ -28,7 +28,7 @@ cd <repo>
 # 1) 静态检查（能秒抓"删代码块时误删变量赋值"这类错误）
 env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 
-# 2) 回归验证（2026-09-25 本机实测 1689/1695 通过，同一份代码在 Linux 容器里 1684/1690（红的都是下面那 6 条）；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
+# 2) 回归验证（2026-09-25 本机实测 1713/1719 通过，同一份代码在 Linux 容器里 1708/1714（红的都是下面那 6 条）；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
 #    8009/58880，甚至 8443 —— 那会把 Part 19 的 4 条 TLS 用例换成 2 条"端口被占就静默降级"）时真实 socket 的那几段没跑就是没跑，套件不会替它承认。所以先看总数，
 #    再信"全绿"；跑之前按 §4.2 杀干净实例。
 #    **但这台机器上有一组永远红的**：Part 34（来源台账）的 6 条 —— 见 §4.12 末条，
@@ -419,7 +419,8 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
   （github.com / raw.githubusercontent.com / api.github.com → 加 `https://ghproxy.net/` 前缀），
   **jsDelivr 本身就是国内可达的镜像，绝不再加前缀**。全部逻辑在 `plugin_repo.py`
   （`to_mirror_url` 纯函数 / `mirror_url` 按开关 / `index_urls` / `describe`），页面只发
-  `POST set-github-mirror`（在 `_MANAGEMENT_PARAMS` 门控名单里），**页面里不允许出现镜像前缀
+  `POST set-github-mirror`（在 `Handler.POST_ROUTES` 表里，门 = 管理，见 §4.7c），
+  **页面里不允许出现镜像前缀
   字符串** —— Part 5c 有 `"ghproxy" not in _html` 这条用例。切换成功后后端直接回传新的
   `describe()`，页面立刻按新地址重拉索引。
 - 往 `plugins/info.json` 里加条目时：`renderer`/`protocol` 字段是「本机装没装」的判定键，
@@ -471,8 +472,8 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 - **GET 版必须带令牌，loopback 也不例外**：任何网页都能发一个
   `GET http://127.0.0.1:58880/api?query=cast&...`（`<img>` / `fetch`）。若沿用
   「本机即可信」，就等于随便哪个网页都能指使你的 Mac 开始播片。POST 版没这条通道，
-  所以继续信任 loopback —— 但 `cast-uri` 不在 `_MANAGEMENT_PARAMS` 里，它靠的正是
-  `_management_allowed()` 的本机判定，**动这里之前先想清楚 CSRF**。
+  所以继续信任 loopback —— 但 `cast-uri` 在表里的门就是 `GATE_MANAGEMENT`（§4.7c），
+  它靠的正是 `_management_allowed()` 的本机判定，**动这里之前先想清楚 CSRF**。
 - **令牌常驻**：`protocol.api_token()` 存在 `macast_setting.json` 的 `Api_Token`，
   首次使用时生成（`threading.Lock` 串行化，避免并发首用生成两个）。以前它是
   `secrets.token_hex(16)` 每进程随机、且从不显示在任何地方 —— 等于管理 API 对
@@ -516,6 +517,8 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
    **loopback 在这一层不算数** —— 重绑定下"本机"这个事实毫无信息量。`mirror-action`
    不在名单里，它早有自家令牌判定（§4.7 的先例）。
    用例还钉住"这一名单必须是 `_MANAGEMENT_PARAMS` 的子集"，否则可能出现"落代码却不受管"的字段。
+   （自 §4.7c 起，这两份名单都从 `Handler.POST_ROUTES` 派生，所以这条子集关系是**结构成立**的；
+   真正还钉着的是另一头 —— 表里 `GATE_CODE` 那三行必须恰好是这一名单。）
 
 **页面侧必须带令牌，且取不到就不发**：共享的 `management_token()`（令牌来自本机门控的
 `query=cast-info`）+ `require_management_token(fd)`，五条流程各就各位 ——
@@ -532,6 +535,62 @@ python3 -c "import zipfile;print([n for n in zipfile.ZipFile('$Z').namelist() if
 没有改成"再信 `Host` 头"，因为 `Host` 在重绑定下同样毫无信息量 —— 那条路挡不住要挡的东西。
 **仍然成立的边界**：拿到令牌 = 能落代码（这是设计如此，PoC 的正控就是这么写的），
 所以令牌的保密性就是这条链的强度；局域网侧拿不到令牌（`cast-info` 在门控名单里）。
+
+### 4.7c 一张表决定所有 POST 的门（`Handler.POST_ROUTES`，Part 51）
+
+§4.7b 那两道门当初是**手写在 `POST()` 的十几个 `elif` 里的**，每条分支自己决定用令牌、
+用本机、还是不用门 —— 这正是 R1 的成因：**"漏一个端点没加门"这类错误在结构上看不见**。
+现在门是**数据**：`Handler.POST_ROUTES` 一行一个端点 `(字段, 门, 方法名)`，
+`FILE_ROUTES` 管上传（按字段名，`plugin-file` = `GATE_CODE`；没登记的文件字段吃
+`FILE_GATE_DEFAULT` = 管理门），`POST()` 只做两件事 —— `_same_site()` 和按表走一遍。
+三条门名 `GATE_MANAGEMENT` / `GATE_TOKEN` / `GATE_CODE`，各自那句 403 收在
+`GATE_REFUSALS` 里（**一条路由不能自己写拒绝文案，也不能不写**）。
+
+- **顺序即语义**：`POST_ROUTES` 是 **tuple 不是 dict** —— 一个请求带两个 action 字段时，
+  排在前面的那条赢，后面的根本不跑（Part 51 有 precedence 用例）。旧代码同样是"第一个
+  匹配的 `elif` 赢"，所以这次改造**逐行保住了原顺序**，没有改任何一条的判定。
+- **`_MANAGEMENT_PARAMS` / `_CODE_EXECUTION_PARAMS` 现在是从表里派生的**，不是另抄一份。
+  旧文档里"某某在 `_MANAGEMENT_PARAMS` 名单里"这类说法，读法改成"某某在表里，门是 X"。
+  顺带记一条**语义没变、名单变了**：旧的那份字面名单只有 12 条，`cast-uri`、
+  `set-subtitle-show`、`clear-play-history`、`clear-log` 不在其中 —— 它们各自在分支里
+  就地调 `_management_allowed()`，所以从不经过顶部那道批量检查。派生名单现在把它们算进去
+  （= 表里全部 16 条），因为按定义"能被 POST 的都至少受管理门"；这不影响任何一条的判定，
+  但谁要拿这个名单去推断"旧版谁走了顶部批量检查"，答案已经不再是它。
+- **`_gate_refusal()` 的三道检查是累积且有序的**：`token` 与 `code-execution` 都先要过
+  管理门，所以局域网无令牌的请求听到的仍是管理那句 —— 和当初手写分支的措辞逐字一致。
+  **门名不认识就拒绝**（fail closed）：表里写错一个门，后果是那个端点谁都进不来，
+  而不是谁都进得来。
+- **fall-through 从"报成功"改成了"报没做"**：这是这一趟顺手抓到的**真 bug** ——
+  旧 `POST()` 走到末尾返回 `{'code': 0, 'message': 'success'}`，于是字段名拼错
+  （`clear-logg`）、或页面加了一个后端从没听过的按钮，用户读到的是"已保存"而什么都没发生。
+  现在回 `code: 1` 并把不认识的字段**念回给调用方**，同时 `logger.error` 一条。
+  `POST_HELPER_PARAMS` 是"贴在 action 旁边的字段"（token / key / value / plugin-url …），
+  它们不该被念成"不认识的字段"，也不该单独构成一次操作。
+- **Part 51 的门覆盖是"按表循环"，不是按记忆点名**：把表里**每一行**都拿一个局域网、
+  无令牌的请求打一遍，断言 403 **且那条路由的方法一次都没被调用**（逐行装 spy），
+  再带令牌打一遍，断言每一行真的被服务到；另有一条"这个循环不为空（≥16 行）"，
+  防止哪天把表读成空元组、于是"全部端点都被验证过"是一句真空话。
+  还有 AST 扫描（范围**限定在 `class Handler` 内**）钉住：`POST` 恰好一个、
+  不直接调用任何门判定（`_same_site` 除外，它就是那条链的第一问）、
+  必须读 `POST_ROUTES` / `FILE_ROUTES` / `_gate_refusal`、且不许把任何路由字段名
+  硬编码进 `POST` —— **否则这张表就变成文档，而文档正是 R1 写下的那种东西**。
+- **页面侧对齐**：用例从 `setting.html` 抽出所有 `append('字段'…)`、三元表达式里的字段名、
+  以及 `name="…"`（后者只与 `FILE_ROUTES` 求交，避免撞上普通表单输入），要求
+  **页面能 POST 的每个字段都在表里登记**，且至少有 10 个 action。这是"新增按钮悄悄落到
+  一个不认识它的分发器上"唯一能被机器抓住的时刻。
+- **诚实的一条**：这一趟 `Handler` 类**变大了**（≈846 行 → ≈980 行），因为 16 个 `_post_*` 薄包装
+  现在都住在类里，而旧的分支体本来就挤在同一个函数里。省下的不是行数，是"读一处就知道所有门"。
+  下一步如果是拆，方向是**按面拆文件**（管理 API / DLNA 收流 / 页面资源），那是独立一步，
+  别和改判定混在同一次提交里。
+- 四个变异体各自只在自己那一句话上变红：**A** 把未识别请求的返回值改回 "success" ⇒ 3 条；
+  **B** 删掉表里的一行（`set-module-setting`）⇒ 9 条（派生名单、按表循环、页面侧对齐三处同时塌，
+  这正是"少一条在结构上可见"的意思）；**C** 把 `mirror-action` 的门从 `GATE_TOKEN` 降成
+  `GATE_MANAGEMENT` ⇒ 3 条；**D** 让未知门名放行（fail open）⇒ 1 条。
+  还原后 `protocol.py` 与改动前逐字节一致（md5 比对）。
+  其中一个（B）抓出的是**测试自己的**休眠分支：
+  `gate_of()` 读模块而非类，只在被扫到那一行才 `AttributeError` ——
+  已改读 `protocol.Handler.FILE_ROUTES`，并补一条 `gate_of('plugin-file') == GATE_CODE`
+  让这条分支每次跑都被经过。
 
 ### 4.8 内置插件目录（`macast/plugins/`）：15 个插件，各自的红线
 
@@ -758,7 +817,8 @@ PATH 上放假 uxplay 走完 启动→连接→断开→停止→reload 全生�
 - **给插件加新的持久化键时，必须同步往对应标签表加条目**，否则漂移用例当场变红。
   没写枚举的老安装副本不会被显示幽灵键（标签 ∩ 实际加载的枚举）。
 - **读写都在门控内**：GET `query=module-settings` 返回分组，POST `set-module-setting`
-  （`_MANAGEMENT_PARAMS`）改值/删值；拒绝无归属的键；list/dict 值只读（引导去「高级设置」JSON）。
+  （表里 `GATE_CODE`，§4.7c —— 它能写自动化钩子的键，值下次投屏就进 `subprocess(shell=True)`）
+  改值/删值；拒绝无归属的键；list/dict 值只读（引导去「高级设置」JSON）。
 - 由此 raop 升到 **v0.2**：新增 `RAOP_Device_Name`（覆盖 shairport-sync 服务名，缺省仍跟随
   DLNA 友好名），这是它第一个自己的持久化配置。
 
@@ -927,8 +987,8 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 | 脚本 | 用途 |
 |---|---|
 | `run-from-source.sh` | 从源码启动（会 unset PYTHONPATH） |
-| `verify_cast_airplay.py` | **主验证套件**（2026-09-25 本机实测 1689/1695 通过、`--ci` 同一趟在 Linux 容器里 1684/1690（连跑两次一致，另在 `HOME` 全新的容器里也全绿 —— 那台"干净机器"就是 §4.2 证书目录那条 bug 的现场），红的 6 条都是 Part 34 —— 见 §4.12 末条；**这套件现在真的在 CI 里跑**：`build.yml` 的 `verify` job（ubuntu-22.04、headless、`--ci`），`release` 等它 —— 见本行末的 Part 50；它随数据规模伸缩：索引清空后，按条目循环的那些用例
-不再产出，v0.7.15 时的 1121 条里含有 9 个索引条目各自的用例）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个内置插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页 + v0.9 的五态判定（盘上有驱动就不再下载、不再开安装器；CoreAudio 有而 ffmpeg 没有 ⇒ 麦克风权限而不是重装））+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 内置插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）+ **端到端冒烟脚本与应用的耦合**（Part 33：`e2e_smoke.py` 是唯一跑真应用的检查，而它的隔离性全靠**字符串**——端口的设置键名、appdirs 打桩、只开 DLNA 的协议表、代理变量名单、它问的 `/api?query=` 键名、`get_status` 的 server 键名。应用侧改个名就会让这些**静默失效**，冒烟照样全绿。所以逐条拿应用源码比对这些字符串，并守住" BOOTSTRAP 里 `import macast` 之前先打桩""不出现 `Setting.set(`""退出码由失败数决定"。这一 Part 是纯文本检查，从不 import 那个脚本）+ **来源与署名**（Part 34：`git blame` 按 fork 点把每个 `.py` 数成 upstream/vendored/mixed/ours 四态，双向守声明 —— 上游行还在就不许没有上游归属，一行都不是我们的就不许有我们的，`macast/ssdp.py` 里那层 MIT 作者群不许消失；再比 `docs/Provenance.md` 的台账行与两张表的数字；并把 `provenance.py` 当模块导入，用合成行证明"删掉上游声明＝报红""最后一行上游代码被重写完＝不再要求上游归属"这两个方向都测得出，另加"插入点必须留在插件清单块内"+ 用**自家解析器**验盖过名的插件仍被识别。三个变异体（删 `protocol.py` 上游头 / 给 `web.py` 盖我们的头 / 删 ssdp 的 MIT 块）逐个验过，各自必红）+ **镜像控制台与实时链路**（Part 35 页面读的端点、`mirror_view.py` 的派生规则、页面与后端共享的拼写；Part 36 菜单栏自己的内容，含"不许出现电脑投屏行"这条用户裁定；Part 37 实时链路的算术 —— 队列的秒预算、丢弃切在容器边界、DLNA 预填的秒数、没动过设置时 `auto` 选哪个编码器；Part 38 采集开了却一帧不返回 —— 挡掉"正常采集也会打"的运行时噪声、弃掉读不到的音频口重起一次、每一条"没有返回画面"都必须给出门与重启、弃声的会话在页面上不再被那一行「已启用」谎称有声音；Part 39 Windows 系统声音的真实设备表 + 一条 M-SEARCH 到底出不出本机 + 延迟预算 + 真 TCP socket 上的 Nagle 修复；Part 40 只有**打包后的** Windows 才教得了的三件事（首帧预算杀死了声音口已谈拢的采集、把 Windows 用户送去 macOS 的麦克风面板、`cheroot.ssl` 没进包 —— §4.3 那一族）；**Part 40 另管 `_audio_line` 的 `platform` 接缝在三条「未启用」分支上真的生效**（在 Linux runner 上问 `platform='win32'` 必须拿到 Windows 那句 —— 曾经读到的是 `sys.platform`，于是"该去哪个系统面板"随跑代码的机器变），**Linux 的那一句必须给出门**（`PULSE_DOOR`：`pactl get-default-sink` 问得出默认输出设备、装 `pulseaudio-utils`、点「重新探测采集」，只报"需要 PulseAudio"不算答案），**`_default_pulse_monitor` 必须把「pactl 根本不在」与「pactl 说不出 sink」两种原因留在日志里**（`logger.debug`，探测是缓存的、不在热路径）；三个变异体各自变红：改回 `sys.platform` ⇒ 2 条、删掉两条 debug ⇒ 1 条、把 `PULSE_DOOR` 压回原来那一句 ⇒ 2 条；Part 41 `.exe` 不许弹控制台窗口（`--noconsole` 与每个子进程的 no-window 标志缺一不可，还有 windowed 进程根本没有 `stdout`）；Part 42 真 TCL 85T8G「下载了 26 MB 却仍然不播」⇒ 响应必须带上 DIDL 承诺的 `DLNA.ORG_PN`、一次交换要落在**用户真会留的日志**里且不能被重试刷爆、对端关掉的连接要认出自己这一半的 CLOSE_WAIT；Part 43 第二个观看端加入实时 Matroska —— 输入是**真编码器管道**产出的 `scripts/fixtures/live-mkv-h264.bin`，元素树在下面用**另一个**解析器重读一遍，免得 fixture 与实现共谋；**Part 44 设置页「帮助」弹层与页宽（见 §4.13）—— 弹层里每一句可核对的陈述都被要求由决定它的那段代码回答**：端口问 `cast.CAST_PORT` / `airplay.AIRPLAY_PORT`、HTTPS 问 `utils.py` 的 +1、配置目录问 `user_config_dir('Macast', 'xfangfang')`、镜像目标与「哪条没有声音」逐 bullet 比对 `screen_mirror.OUTPUTS`、低延迟上限比对 `CAST_STREAM_MAX_BITRATE`、DLNA 档位与预填秒数比对 `DLNA_PROFILES` / `DLNA_PREFILL_SECONDS`、无帧超时比对 `NO_FRAME_SECONDS`、字幕扩展名比对 `protocol.py` 的 `sub_exts`、日志上限比对 `RotatingFileHandler` 的 `maxBytes`/`backupCount`、标签页列表比对页面里的 `el-tab-pane`；页宽一侧则守 `box-sizing`、`min(1680px,100%)`、`.pane-duo` 用 `auto-fit`（两张卡的行不许在宽屏留半页空白）、以及弹层自带 `background: var(--panel)` + `color: var(--text)`（深色模式白底压白字）；**Part 46 CI 的 Actions 存储配额（见 §4.3）—— 四个 `Upload artefact` 步骤必须带同一个门（只有 tag push 与 `release=true` 的手工 dispatch 才上传）、清扫 job 必须 `needs: release` 且只在发布成功时按 id 删除本轮 artefacts、`actions: write` 与 `::warning::` 缺一不可、留存仍是 2 天兜底；三条变异体（改开一个门 / 删权限 / 放宽成 `always()`）逐个验过各自必红**；**Part 47 菜单栏的线程纪律（见 §4.2 末条）—— `App.notification` 与 `Macast.update_service_status` 必须把 AppKit 那一跳交给主线程队列：用例从 `CHERRYPY_WORKER_47`/`SERVICE_THREAD` 两个假线程各打一次，要求"就地什么都没发生、排队的东西在 MainThread 落地"，并扫 `macast.py`（七处写入点逐条登记主线程理由）与 `macast/plugins/**`（只许 `build_menu*`/`on_*`）；两个变异体（把 notification 改回就地调用 / 把 relabel 改回就地赋值）各自红 5 条与 7 条；另有四条把"被守的调用点有多少"这个数交给 **AST 现数**（注释掉的 `publish` 不算、跨行的算一处），再拿它去比对**两处散文**（Part 47 的抬头与 §4.2 本条，含 `macast/` + `macast_renderer/` 的拆分）—— §4.13 的"每个数字问两遍"同样适用于我们自己的文档。延后到底能不能落地是**真机**问题，已用真 rumps 循环探过：`app.run()` 之前排的队，循环一起来就执行**；**Part 48 管理 POST 的两道门（见 §4.7b）—— 先证明这道门真的挡不住（PoC 打真应用：无令牌 form-POST `install-plugin` 4/4 拿到可 import 的 `.py`），再修：`_same_site()` 挡跨站表单（Origin 缺失退 `Referer`，比对**名字**不是地址，所以 DNS rebinding 也算跨站），`_CODE_EXECUTION_PARAMS` 那三条会落代码的 POST 另加一道**令牌**门（本机也不算，因为环回挡不住浏览器）。断言分三层：门本身（喂真 `cherrypy.serving.request`，四种来源各判一次）、页面侧文本契约（`management_token` / `require_management_token` 必须在，`before-upload` 必须是 `async` 且 `:data` 带 token）、以及**前提自己也要扫**（全仓扫一遍"没有任何地方发 CORS 头"这句仍然成立；这条用例第一次写错成"字符串出现过就算红"，被自己的扫描误伤，所以现在扫的是**行**并要求那一行真在做 `tools`/`headers` 赋值，另外三条合成行反过来证明扫描器会红）。四个变异体各自变红（删 same-site 调用 5 条 / 把令牌门降级成 `_management_allowed` 7 条 / 页面某条流程漏带令牌 1 条 / 把门改成"什么都不放行" 15 条 —— Part 12/20/21/22/28/48 都从这条路上过，正向契约同样有牙齿），拒绝类用例都配正控（带令牌的两次必须真的过）**；**Part 49 订阅表是发布的、不是就地改的（见 §4.2「copy-on-write」条）—— 先用两个真线程把崩溃复现出来再修**：状态页那条合并表读 8 秒 110 次（被 try/except 吃掉 ⇒ 「客户端信息」整块消失），`add_subscribe` 那条 20 秒 148,302 次且**没人兜** ⇒ 控制点吃 HTTP 500 后永久不再收事件（症状长得像发送端的锅）。修复取 copy-on-write 而不是锁，因为广播那条读**横跨对每个订阅者的网络 I/O**；29 条用例分五层（发布契约 / 五条读路径各自对打一个真在 churn 的写线程且**同时要求读数过阈值** / 修复前的行为 / 两条"全仓库不许再出现就地扩容"的文本规则 / 订阅路径在 stdout 上一言不发），四个变异体各自红 8、1、1、1 条（就地写表 / 把绑定挪到排空队列之前 / 那行 `print` 回来 / 每轮都无条件发布）。**诚实的一条**：`add_subscribe` 自己的 race 在 600 entry 表下**没撞上**（扫描太短），那条路径靠发布契约与文本扫描守着，不靠计时；**Part 50 CI 的盲区与无头导入（见 §4.2 的 pystray 条与 §4.12 末条）—— 它问的是「这套件在 CI 里到底会不会真的拦住什么」**：① `ci_gate()` 的算术用六条合成用例双向测（豁免 Part 34 的红 / 拒绝名单外的任何红 / 没有历史时 Part 34 反而全绿也拒绝 / 哨兵一旦离开 Part 34 名单就不再豁免任何东西），并且它跑在**本进程真实的 RESULTS** 上 —— 第一版用例因为 in/out 名单不互斥，被自己抓住；② `macast/*.py` 顶层不许 import pystray/Xlib（AST 扫，核心文件数 <10 直接红 —— 「扫描器自己坏了」不许读成通过），再用子进程真的 boot 一次 `macast.macast`（pystray 用 meta_path 拦掉、netifaces/pyperclip 打桩、`sys.platform=linux`），并跑**变异体**：把模块顶部的 import 放回去，这一条必须红；③ `--ci` 必须是 workflow 真正调用的那个字符串（用例去读 `.github/workflows/build.yml`）。**这一轮 CI 第一次真的跑这套件**：`build.yml` 新增 `verify` job（ubuntu-22.04、headless、`pip install -r requirements/common.txt`、`python scripts/verify_cast_airplay.py --ci`），`release` 的 `needs` 第一个就是它。**而这个 job 第一次真跑就交付了**：`1667/1679` + 门拒绝，抓住的**不是测试的错，是一条产品 bug** —— runner 上没有配置目录 ⇒ 自签证书生成失败 ⇒ Cast 的 TLS 接收端整个起不来，而日志把锅甩给 `-addext`（见 §4.2「写文件的代码要自己把目录建出来」）。同一趟还顺手暴露了套件自己违反 §10：Part 3 的真 socket 段落一直往用户真实配置目录写证书。选 Linux 不是图便宜，而是 `import pystray` 那个「模块体就开 X display」的坑**只有 Linux runner 看得见**（见 §4.2）。同一趟在 Linux 上量出来的还有三条**测试自己**的错（Part 44 两张配置目录表撞键、Part 49 写线程饿死读线程、Part 26 假二进制把第一次 argv 截断），外加一条门的错：`--ci` 拒绝时原先在 SUMMARY 之前 `sys.exit(1)`，读者恰好看不到那份清单——现在门只决定退出码。它们都不是产品 bug，但都只在非 macOS runner 上现形，这就是那个 job 的价值|
+| `verify_cast_airplay.py` | **主验证套件**（2026-09-25 本机实测 1713/1719 通过、`--ci` 同一趟在 Linux 容器里 1708/1714（总数差 5 条是环境计数的用例，红的 6 条两边同一批），红的 6 条都是 Part 34 —— 见 §4.12 末条；**这套件现在真的在 CI 里跑**：`build.yml` 的 `verify` job（ubuntu-22.04、headless、`--ci`），`release` 等它 —— 见本行末的 Part 50；它随数据规模伸缩：索引清空后，按条目循环的那些用例
+不再产出，v0.7.15 时的 1121 条里含有 9 个索引条目各自的用例）：协议逻辑 + 真实 socket 端到端 + mDNS/网卡/插件热插拔 + 内置插件加载 + 插件索引/条目与清单一致性 + 国内镜像开关（Part 5c/7/12）+ 网页投屏入口与令牌门控 + 9 个内置插件（下载器/外部播放器/小窗/钩子/中继/RAOP/屏幕镜像/本地文件投屏/AirPlay 镜像接收）+ Cast 接收端一致性（Part 18）与 8443 HTTPS setup API（Part 19）+ 日志轮转/尾部读取/清空（Part 20）+ 屏幕镜像发送端（Part 21 假 ffmpeg 对打自家 Cast 接收端；Part 22 浏览器目标与采集预设；Part 23 DLNA 电视＝伪装成文件 + 用自家接收端校验 SOAP；Part 24 Cast Streaming 低延迟通道＝自家假设备对打（真 TLS + 真 UDP）；Part 29 一键设置修复 + 分步进度页 + v0.9 的五态判定（盘上有驱动就不再下载、不再开安装器；CoreAudio 有而 ffmpeg 没有 ⇒ 麦克风权限而不是重装））+ 本地文件投屏（Part 25 ffprobe 决策表 + Range/206 服务 + 假 Cast 设备与自家接收端 + DLNA 发送序列）+ 按模块独立日志（Part 27）+ 模块设置面板与归属漂移守卫（Part 28）+ AirPlay 镜像接收（Part 26 假 uxplay 走完生命周期）+ 内置插件的 import 允许面（Part 30：只允许 Macast 自己声明过的包；pyobjc 那条已定性）+ 采集设备探测的输入形状（Part 31：真机 `ffmpeg -list_devices` 逐字输出喂解析器，并扫测试文件自己，不许再出现虚构的带引号无索引设备行）+ 自检脚本与插件的一致性（Part 32：读 `selfcheck.py` 的文本要求它和两个发送端插件**说的是同一套编码器 / 同一批查找目录 / 同一个 mDNS 与 SSDP 目标 / 只读不写用户设置**）+ **端到端冒烟脚本与应用的耦合**（Part 33：`e2e_smoke.py` 是唯一跑真应用的检查，而它的隔离性全靠**字符串**——端口的设置键名、appdirs 打桩、只开 DLNA 的协议表、代理变量名单、它问的 `/api?query=` 键名、`get_status` 的 server 键名。应用侧改个名就会让这些**静默失效**，冒烟照样全绿。所以逐条拿应用源码比对这些字符串，并守住" BOOTSTRAP 里 `import macast` 之前先打桩""不出现 `Setting.set(`""退出码由失败数决定"。这一 Part 是纯文本检查，从不 import 那个脚本）+ **来源与署名**（Part 34：`git blame` 按 fork 点把每个 `.py` 数成 upstream/vendored/mixed/ours 四态，双向守声明 —— 上游行还在就不许没有上游归属，一行都不是我们的就不许有我们的，`macast/ssdp.py` 里那层 MIT 作者群不许消失；再比 `docs/Provenance.md` 的台账行与两张表的数字；并把 `provenance.py` 当模块导入，用合成行证明"删掉上游声明＝报红""最后一行上游代码被重写完＝不再要求上游归属"这两个方向都测得出，另加"插入点必须留在插件清单块内"+ 用**自家解析器**验盖过名的插件仍被识别。三个变异体（删 `protocol.py` 上游头 / 给 `web.py` 盖我们的头 / 删 ssdp 的 MIT 块）逐个验过，各自必红）+ **镜像控制台与实时链路**（Part 35 页面读的端点、`mirror_view.py` 的派生规则、页面与后端共享的拼写；Part 36 菜单栏自己的内容，含"不许出现电脑投屏行"这条用户裁定；Part 37 实时链路的算术 —— 队列的秒预算、丢弃切在容器边界、DLNA 预填的秒数、没动过设置时 `auto` 选哪个编码器；Part 38 采集开了却一帧不返回 —— 挡掉"正常采集也会打"的运行时噪声、弃掉读不到的音频口重起一次、每一条"没有返回画面"都必须给出门与重启、弃声的会话在页面上不再被那一行「已启用」谎称有声音；Part 39 Windows 系统声音的真实设备表 + 一条 M-SEARCH 到底出不出本机 + 延迟预算 + 真 TCP socket 上的 Nagle 修复；Part 40 只有**打包后的** Windows 才教得了的三件事（首帧预算杀死了声音口已谈拢的采集、把 Windows 用户送去 macOS 的麦克风面板、`cheroot.ssl` 没进包 —— §4.3 那一族）；**Part 40 另管 `_audio_line` 的 `platform` 接缝在三条「未启用」分支上真的生效**（在 Linux runner 上问 `platform='win32'` 必须拿到 Windows 那句 —— 曾经读到的是 `sys.platform`，于是"该去哪个系统面板"随跑代码的机器变），**Linux 的那一句必须给出门**（`PULSE_DOOR`：`pactl get-default-sink` 问得出默认输出设备、装 `pulseaudio-utils`、点「重新探测采集」，只报"需要 PulseAudio"不算答案），**`_default_pulse_monitor` 必须把「pactl 根本不在」与「pactl 说不出 sink」两种原因留在日志里**（`logger.debug`，探测是缓存的、不在热路径）；三个变异体各自变红：改回 `sys.platform` ⇒ 2 条、删掉两条 debug ⇒ 1 条、把 `PULSE_DOOR` 压回原来那一句 ⇒ 2 条；Part 41 `.exe` 不许弹控制台窗口（`--noconsole` 与每个子进程的 no-window 标志缺一不可，还有 windowed 进程根本没有 `stdout`）；Part 42 真 TCL 85T8G「下载了 26 MB 却仍然不播」⇒ 响应必须带上 DIDL 承诺的 `DLNA.ORG_PN`、一次交换要落在**用户真会留的日志**里且不能被重试刷爆、对端关掉的连接要认出自己这一半的 CLOSE_WAIT；Part 43 第二个观看端加入实时 Matroska —— 输入是**真编码器管道**产出的 `scripts/fixtures/live-mkv-h264.bin`，元素树在下面用**另一个**解析器重读一遍，免得 fixture 与实现共谋；**Part 44 设置页「帮助」弹层与页宽（见 §4.13）—— 弹层里每一句可核对的陈述都被要求由决定它的那段代码回答**：端口问 `cast.CAST_PORT` / `airplay.AIRPLAY_PORT`、HTTPS 问 `utils.py` 的 +1、配置目录问 `user_config_dir('Macast', 'xfangfang')`、镜像目标与「哪条没有声音」逐 bullet 比对 `screen_mirror.OUTPUTS`、低延迟上限比对 `CAST_STREAM_MAX_BITRATE`、DLNA 档位与预填秒数比对 `DLNA_PROFILES` / `DLNA_PREFILL_SECONDS`、无帧超时比对 `NO_FRAME_SECONDS`、字幕扩展名比对 `protocol.py` 的 `sub_exts`、日志上限比对 `RotatingFileHandler` 的 `maxBytes`/`backupCount`、标签页列表比对页面里的 `el-tab-pane`；页宽一侧则守 `box-sizing`、`min(1680px,100%)`、`.pane-duo` 用 `auto-fit`（两张卡的行不许在宽屏留半页空白）、以及弹层自带 `background: var(--panel)` + `color: var(--text)`（深色模式白底压白字）；**Part 46 CI 的 Actions 存储配额（见 §4.3）—— 四个 `Upload artefact` 步骤必须带同一个门（只有 tag push 与 `release=true` 的手工 dispatch 才上传）、清扫 job 必须 `needs: release` 且只在发布成功时按 id 删除本轮 artefacts、`actions: write` 与 `::warning::` 缺一不可、留存仍是 2 天兜底；三条变异体（改开一个门 / 删权限 / 放宽成 `always()`）逐个验过各自必红**；**Part 47 菜单栏的线程纪律（见 §4.2 末条）—— `App.notification` 与 `Macast.update_service_status` 必须把 AppKit 那一跳交给主线程队列：用例从 `CHERRYPY_WORKER_47`/`SERVICE_THREAD` 两个假线程各打一次，要求"就地什么都没发生、排队的东西在 MainThread 落地"，并扫 `macast.py`（七处写入点逐条登记主线程理由）与 `macast/plugins/**`（只许 `build_menu*`/`on_*`）；两个变异体（把 notification 改回就地调用 / 把 relabel 改回就地赋值）各自红 5 条与 7 条；另有四条把"被守的调用点有多少"这个数交给 **AST 现数**（注释掉的 `publish` 不算、跨行的算一处），再拿它去比对**两处散文**（Part 47 的抬头与 §4.2 本条，含 `macast/` + `macast_renderer/` 的拆分）—— §4.13 的"每个数字问两遍"同样适用于我们自己的文档。延后到底能不能落地是**真机**问题，已用真 rumps 循环探过：`app.run()` 之前排的队，循环一起来就执行**；**Part 48 管理 POST 的两道门（见 §4.7b）—— 先证明这道门真的挡不住（PoC 打真应用：无令牌 form-POST `install-plugin` 4/4 拿到可 import 的 `.py`），再修：`_same_site()` 挡跨站表单（Origin 缺失退 `Referer`，比对**名字**不是地址，所以 DNS rebinding 也算跨站），`_CODE_EXECUTION_PARAMS` 那三条会落代码的 POST 另加一道**令牌**门（本机也不算，因为环回挡不住浏览器）。断言分三层：门本身（喂真 `cherrypy.serving.request`，四种来源各判一次）、页面侧文本契约（`management_token` / `require_management_token` 必须在，`before-upload` 必须是 `async` 且 `:data` 带 token）、以及**前提自己也要扫**（全仓扫一遍"没有任何地方发 CORS 头"这句仍然成立；这条用例第一次写错成"字符串出现过就算红"，被自己的扫描误伤，所以现在扫的是**行**并要求那一行真在做 `tools`/`headers` 赋值，另外三条合成行反过来证明扫描器会红）。四个变异体各自变红（删 same-site 调用 5 条 / 把令牌门降级成 `_management_allowed` 7 条 / 页面某条流程漏带令牌 1 条 / 把门改成"什么都不放行" 15 条 —— Part 12/20/21/22/28/48 都从这条路上过，正向契约同样有牙齿），拒绝类用例都配正控（带令牌的两次必须真的过）**；**Part 49 订阅表是发布的、不是就地改的（见 §4.2「copy-on-write」条）—— 先用两个真线程把崩溃复现出来再修**：状态页那条合并表读 8 秒 110 次（被 try/except 吃掉 ⇒ 「客户端信息」整块消失），`add_subscribe` 那条 20 秒 148,302 次且**没人兜** ⇒ 控制点吃 HTTP 500 后永久不再收事件（症状长得像发送端的锅）。修复取 copy-on-write 而不是锁，因为广播那条读**横跨对每个订阅者的网络 I/O**；29 条用例分五层（发布契约 / 五条读路径各自对打一个真在 churn 的写线程且**同时要求读数过阈值** / 修复前的行为 / 两条"全仓库不许再出现就地扩容"的文本规则 / 订阅路径在 stdout 上一言不发），四个变异体各自红 8、1、1、1 条（就地写表 / 把绑定挪到排空队列之前 / 那行 `print` 回来 / 每轮都无条件发布）。**诚实的一条**：`add_subscribe` 自己的 race 在 600 entry 表下**没撞上**（扫描太短），那条路径靠发布契约与文本扫描守着，不靠计时；**Part 50 CI 的盲区与无头导入（见 §4.2 的 pystray 条与 §4.12 末条）—— 它问的是「这套件在 CI 里到底会不会真的拦住什么」**：① `ci_gate()` 的算术用六条合成用例双向测（豁免 Part 34 的红 / 拒绝名单外的任何红 / 没有历史时 Part 34 反而全绿也拒绝 / 哨兵一旦离开 Part 34 名单就不再豁免任何东西），并且它跑在**本进程真实的 RESULTS** 上 —— 第一版用例因为 in/out 名单不互斥，被自己抓住；② `macast/*.py` 顶层不许 import pystray/Xlib（AST 扫，核心文件数 <10 直接红 —— 「扫描器自己坏了」不许读成通过），再用子进程真的 boot 一次 `macast.macast`（pystray 用 meta_path 拦掉、netifaces/pyperclip 打桩、`sys.platform=linux`），并跑**变异体**：把模块顶部的 import 放回去，这一条必须红；③ `--ci` 必须是 workflow 真正调用的那个字符串（用例去读 `.github/workflows/build.yml`）。**这一轮 CI 第一次真的跑这套件**：`build.yml` 新增 `verify` job（ubuntu-22.04、headless、`pip install -r requirements/common.txt`、`python scripts/verify_cast_airplay.py --ci`），`release` 的 `needs` 第一个就是它。**而这个 job 第一次真跑就交付了**：`1667/1679` + 门拒绝，抓住的**不是测试的错，是一条产品 bug** —— runner 上没有配置目录 ⇒ 自签证书生成失败 ⇒ Cast 的 TLS 接收端整个起不来，而日志把锅甩给 `-addext`（见 §4.2「写文件的代码要自己把目录建出来」）。同一趟还顺手暴露了套件自己违反 §10：Part 3 的真 socket 段落一直往用户真实配置目录写证书。选 Linux 不是图便宜，而是 `import pystray` 那个「模块体就开 X display」的坑**只有 Linux runner 看得见**（见 §4.2）。同一趟在 Linux 上量出来的还有三条**测试自己**的错（Part 44 两张配置目录表撞键、Part 49 写线程饿死读线程、Part 26 假二进制把第一次 argv 截断），外加一条门的错：`--ci` 拒绝时原先在 SUMMARY 之前 `sys.exit(1)`，读者恰好看不到那份清单——现在门只决定退出码。它们都不是产品 bug，但都只在非 macOS runner 上现形，这就是那个 job 的价值；**Part 51 一张表决定所有 POST 的门（见 §4.7c）—— 它测的不是"某条端点有没有门"，而是"门这条规则还活在结构里吗"**：表的良构（字段不重复、是 tuple 不是 dict、每一行的门名与方法名都存在、派生的两份名单确实等于按门筛出来的结果），AST 限定在 `class Handler` 内钉住"`POST` 恰好一个、不直接叫任何门（`_same_site` 除外）、必须读 `POST_ROUTES`/`FILE_ROUTES`/`_gate_refusal`、且一个路由字段名都不许多写在 `POST` 里），**按表循环**把 16 行逐行喂一个局域网无令牌请求（403 且那一行的方法 spy 一次都没响）再逐行带令牌（每行真的被服务到），加一条"这个循环 ≥16 行"防它读成空表，加拒绝文案的累积顺序（局域网无令牌听到的是管理那句）、两字段 precedence、未知门 fail closed、fall-through 三种形状（只有 helper 字段 / 拼错的 `clear-logg` / 空 POST）都不许回"success"，上传侧（局域网 `media-file` 403、本机存下并投出、`plugin-file` 的门是 code-execution），以及**页面侧对齐**：从 `setting.html` 抽出它能 POST 的每个字段名，要求在表里都登记得到。四个变异体各自红 3/9/3/1 条（未识别请求改回"success" / 删一条表项 / 把 `mirror-action` 降成管理门 / 未知门名改成放行），其中"删一条表项"那一个抓出的是**测试自己的**休眠分支：`gate_of()` 读模块而非类，只在被扫到那一行才 `AttributeError`|
 | `cast_conformance.py` | **用真实 pychromecast 栈打真实接收端**（见 §4.9）。`verify_cast_airplay.py` 把网络打桩，所以抓不到"发送端不认账"；`vlc_sender_sim.py` 只复刻 VLC。这个跑的是手机/HA 实际用的那套代码 |
 | `e2e_smoke.py` | **唯一跑真应用的检查**（33 条）：用临时配置目录 + 错开的端口（58999，只开 DLNA）在**本机拉起第二个 Macast**，走完发现→设置页→API→SSDP，可选走播放。**代价要明说：那 ~30 秒里局域网内的 DLNA 电视会短暂看到第二个设备**（`Macast E2E Smoke`）。隔离手法是 `appdirs.user_config_dir` 在 `import macast` **之前**打桩（§4.9 那条），种子设置直接写 JSON（绝不 `Setting.set`），所以它不动用户配置、不杀他的实例；跑完自己验一遍"真实配置目录的摘要前后一致"。它导不了 `macast`（自己就是启动者），因此对应用的耦合全是字符串——那些字符串由 Part 33 守着。`--play` 才做真正的播放回环（自己找 ffmpeg、生成 12 秒测试片、起一个支持 Range 的小 HTTP 服务、经带令牌的 GET 入口投出去、要求进度真的在动 + 日志里有 `video-reconfig`）；`--keep` 保留临时目录。**它是端到端冒烟，不是套件的替代**：跑套件仍然不需要它，跑它之前要确认用户不在演示 |
 | `selfcheck.py` | 收屏前的环境自检：依赖、端口占用者身份、可广播网卡、组播出口、mpv/`--input-ipc-server`、代理变量。端口占用会区分"Macast 自己在跑"/"macOS 自带 AirPlay"/"别的进程"。被监督的外部程序（`uxplay`、`shairport-sync`）**是 warn 不是 fail** —— 插件是可选的；uxplay 那条直接把编译配方写进 fix，因为没有包可装。**发送端插件那一半（§「sender plugins」段）**：ffprobe 在不在、`-encoders` 里有没有 libx264 / h264_videotoolbox / mpeg2video / ac3（**这四个各自对应一条会静默失效的链路**）、有没有 libass（没有 ⇒ 字幕只能走 WebVTT）、avfoundation 到底列没列出屏幕（**这一条就是 v0.1–v0.7 那个解析 bug 想骗过去的问题**）、系统音频采集口（mac 看 HAL 里的 BlackHole 驱动、Linux 问 `pactl` 要 sink monitor）、转码临时目录剩余空间、以及**局域网里到底有没有东西可投**（mDNS browse `_googlecast._tcp` + 一次 SSDP `MediaRenderer` 探测）。它**只读**设置（直接读 JSON 文本，不碰 `Setting`），所以跑它不会改用户配置。Part 32 守着它和插件的一致性 |

@@ -1342,6 +1342,25 @@ class SameSiteError(Exception):
     """Raised by `Handler._same_site` with the message the caller should answer."""
 
 
+#: The checks a POST endpoint can be told to pass. They are names in a table
+#: (`Handler.POST_ROUTES`) rather than `if` statements inside the dispatcher.
+GATE_MANAGEMENT = 'management'
+#: The api token, even from this machine. Only the mirror flow uses this name
+#: today, which is why its refusal is worded for that flow.
+GATE_TOKEN = 'token'
+#: The api token, because whatever the request carries ends up being run.
+GATE_CODE = 'code-execution'
+
+#: What each gate answers when the request does not pass it. A route cannot word
+#: its own refusal, and cannot leave one out.
+GATE_REFUSALS = {
+    GATE_MANAGEMENT: ('Forbidden: management API requires local access or token'),
+    GATE_TOKEN: 'Forbidden: mirroring requires the api token',
+    GATE_CODE: ('Forbidden: installing code requires the api token '
+                '(设置页「状态 → 网页投屏入口」)'),
+}
+
+
 @cherrypy.expose
 class Handler:
 
@@ -1636,7 +1655,7 @@ class Handler:
         cherrypy.engine.publish('plugins_changed')
         return {'code': 0, 'message': message}
 
-    def __install_uploaded_plugin(self, upload, kwargs):
+    def _install_uploaded_plugin(self, upload, kwargs):
         """Install a plugin the user uploaded from their own machine.
 
         The upload is staged in a temp path first and removed afterwards, so a
@@ -1938,19 +1957,59 @@ class Handler:
         # Cached at init time; avoids re-reading the file from disk on every GET.
         return self.setting_page
 
-    #: Parameters that mutate state. They are only honoured from a trusted
-    #: channel (loopback / HTTPS / valid token) -- see `_management_allowed`.
-    _MANAGEMENT_PARAMS = ('save-launch-param', 'install-plugin', 'plugin-enable',
-                          'plugin-disable', 'plugin-uninstall', 'set-interface',
-                          'set-github-mirror', 'set-module-setting',
-                          'set-renderer', 'toggle-protocol', 'app-action',
-                          # In the list so a future edit that drops the explicit
-                          # token check below still cannot be driven from the
-                          # LAN; that check is the one that actually applies,
-                          # because this one would accept plain loopback.
-                          'mirror-action')
+    #: --- the POST routing table: one place decides who may do what ----------
+    #: Every field a client can post that *does* something is listed once, with
+    #: the gate it must pass and the method that runs it. Before this table the
+    #: same question was answered in three different places — a param tuple above
+    #: the dispatcher, an inline `if not self._management_allowed()` inside five
+    #: branches, and one branch that checked for a token — and that is how
+    #: `install-plugin` ended up reachable from any page the user happens to open
+    #: (docs/architecture-review-2026-09.md R1).
+    #:
+    #: Order is dispatch order: a request that carries two action fields is
+    #: served by whichever comes first here, so the list is a tuple, not a dict.
+    #: A field that is not listed cannot dispatch anything at all — see `POST`,
+    #: which now answers "no action" instead of "success".
+    POST_ROUTES = (
+        ('set-interface', GATE_MANAGEMENT, '_post_set_interface'),
+        ('plugin-enable', GATE_MANAGEMENT, '_post_plugin_enable'),
+        ('plugin-disable', GATE_MANAGEMENT, '_post_plugin_disable'),
+        ('plugin-uninstall', GATE_MANAGEMENT, '_post_plugin_uninstall'),
+        ('set-github-mirror', GATE_MANAGEMENT, '_post_set_github_mirror'),
+        ('set-renderer', GATE_MANAGEMENT, '_post_set_renderer'),
+        ('toggle-protocol', GATE_MANAGEMENT, '_post_toggle_protocol'),
+        ('app-action', GATE_MANAGEMENT, '_post_app_action'),
+        # Starting a capture of the user's desktop is not something a page can
+        # be allowed to ask for from loopback; see `_mirror_action`.
+        ('mirror-action', GATE_TOKEN, '_post_mirror_action'),
+        ('save-launch-param', GATE_CODE, '_post_save_launch_param'),
+        ('install-plugin', GATE_CODE, '_post_install_plugin'),
+        ('set-subtitle-show', GATE_MANAGEMENT, '_post_set_subtitle_show'),
+        ('cast-uri', GATE_MANAGEMENT, '_post_cast_uri'),
+        ('clear-play-history', GATE_MANAGEMENT, '_post_clear_play_history'),
+        ('clear-log', GATE_MANAGEMENT, '_post_clear_log'),
+        ('set-module-setting', GATE_CODE, '_post_set_module_setting'),
+    )
 
-    #: The subset of those that runs code we were handed, so `_management_allowed`
+    #: Uploads are dispatched by *field name*, because the cast flow, the subtitle
+    #: flow and plugin installation all post a file to the same path. Everything
+    #: that is not listed here is media, and gets `FILE_GATE_DEFAULT`.
+    FILE_ROUTES = {'plugin-file': (GATE_CODE, '_install_uploaded_plugin')}
+    FILE_GATE_DEFAULT = GATE_MANAGEMENT
+
+    #: Fields the settings page posts *beside* an action. They carry no authority
+    #: of their own. Part 51 fails if the page grows a posted field that is
+    #: neither a route, a file route, nor listed here — that is how a new button
+    #: is kept from quietly arriving at a dispatcher that never heard of it.
+    POST_HELPER_PARAMS = ('token', 'key', 'value', 'remove', 'module',
+                          'cast-title', 'mirror-args', 'plugin-key',
+                          'plugin-url', 'plugin-type')
+
+    #: Parameters that mutate state, derived from the table: everything posted
+    #: has to be at least management-gated, so this is the whole list.
+    _MANAGEMENT_PARAMS = tuple(name for name, gate, _ in POST_ROUTES)
+
+    #: The subset that ends up running code we were handed, so `_management_allowed`
     #: is not enough for them even from this machine -- see `_code_execution_allowed`.
     #:  * `install-plugin` downloads a `.py` and the plugin manager imports it on
     #:    the spot (measured: module-level code runs before any "enable" click);
@@ -1960,10 +2019,8 @@ class Handler:
     #:    (`Hook_On_Cast` & co.) are handed to `subprocess(shell=True)` the next
     #:    time anything is cast -- so writing one *is* running it, given a cast
     #:    the same drive-by can also trigger.
-    #: `mirror-action` has its own copy of this check for the same reason; it is
-    #: not in the list because its payload is an action name, not code.
-    _CODE_EXECUTION_PARAMS = ('install-plugin', 'save-launch-param',
-                              'set-module-setting')
+    _CODE_EXECUTION_PARAMS = tuple(name for name, gate, _ in POST_ROUTES
+                                   if gate == GATE_CODE)
 
     def _code_execution_allowed(self):
         """Whether a request may run code on this machine: token, always.
@@ -2098,7 +2155,10 @@ class Handler:
 
     def POST(self, *args, **kwargs):
         cherrypy.response.headers['Content-Type'] = 'application/json;charset:utf-8'
-        res = {'code': 0, 'message': 'success'}
+
+        def _body(res):
+            return json.dumps(res, indent=4).encode()
+
         # Every POST here changes something, and every one of them used to be
         # judged only by *where* it came from. A browser does not ask permission
         # to submit a plain form to http://127.0.0.1:<port>/api, so "loopback"
@@ -2108,173 +2168,185 @@ class Handler:
         try:
             self._same_site()
         except SameSiteError as e:
-            res['code'] = 403
-            res['message'] = str(e)
-            return json.dumps(res, indent=4).encode()
+            return _body({'code': 403, 'message': str(e)})
         # Uploads are dispatched by *field name*: the cast flow, the subtitle
         # flow and plugin installation all post a file to the same endpoint.
-        file_part = None
-        file_field = ''
-        for key, v in kwargs.items():
+        for key, part in kwargs.items():
             # An uploaded file part has .file (file-like) and .filename; a
             # plain form field is just a string, so detect by attribute.
-            if hasattr(v, 'file') and hasattr(v, 'filename'):
-                file_part, file_field = v, key
-                break
-        if file_part is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            if file_field == 'plugin-file':
-                # An uploaded plugin is code we are about to import, so the
-                # token is required of it too -- from this machine included.
-                if not self._code_execution_allowed():
-                    res['code'] = 403
-                    res['message'] = ('Forbidden: installing a plugin requires '
-                                      'the api token')
-                    return json.dumps(res, indent=4).encode()
-                return self.__install_uploaded_plugin(file_part, kwargs)
-            upload = file_part
-            filename = os.path.basename(getattr(upload, 'filename', 'cast.bin'))
-            ext = os.path.splitext(filename)[1].lower()
-            sub_exts = ('.srt', '.ass', '.ssa', '.vtt', '.sub', '.sup', '.idx')
-            try:
-                path = os.path.join(self.local_dir, filename)
-                with open(path, 'wb') as f:
-                    f.write(upload.file.read())
-                url = 'http://127.0.0.1:{}/?local&file={}'.format(Setting.get_port(), filename)
-                if ext in sub_exts:
-                    # Subtitle file: attach to the currently playing media.
-                    res['url'] = url
-                    cherrypy.engine.publish('set_media_sub_file',
-                                            {'url': url, 'title': filename})
-                else:
-                    res['url'] = url
-                    cherrypy.engine.publish('cast_local_file', url, filename)
-            except Exception as e:
-                logger.error('local file upload error: %s' % e)
-                res['code'] = 1
-                res['message'] = 'upload failed'
-            return json.dumps(res, indent=4).encode()
-        # Management endpoints: only allow from loopback or with a valid token.
-        if any(kwargs.get(p, None) is not None for p in self._MANAGEMENT_PARAMS):
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-        # ...and the ones among them that end up running a file we were handed
-        # need more than that: see `_code_execution_allowed`.
-        if any(kwargs.get(p, None) is not None
-               for p in self._CODE_EXECUTION_PARAMS):
-            if not self._code_execution_allowed():
-                res['code'] = 403
-                res['message'] = ('Forbidden: installing code requires the api '
-                                  'token (设置页「状态 → 网页投屏入口」)')
-                return json.dumps(res, indent=4).encode()
-        if kwargs.get('set-interface', None) is not None:
-            res = self._set_network_interface(kwargs.get('set-interface'))
-        elif kwargs.get('plugin-enable', None) is not None:
-            res = self._plugin_change('enable', key=kwargs.get('plugin-key', ''))
-        elif kwargs.get('plugin-disable', None) is not None:
-            res = self._plugin_change('disable', key=kwargs.get('plugin-key', ''))
-        elif kwargs.get('plugin-uninstall', None) is not None:
-            res = self._plugin_change('uninstall', key=kwargs.get('plugin-key', ''))
-        elif kwargs.get('set-github-mirror', None) is not None:
-            res = self._set_github_mirror(kwargs.get('set-github-mirror'))
-        elif kwargs.get('set-renderer', None) is not None:
-            res = self._set_renderer(kwargs.get('set-renderer'))
-        elif kwargs.get('toggle-protocol', None) is not None:
-            res = self._toggle_protocol(kwargs.get('toggle-protocol'))
-        elif kwargs.get('app-action', None) is not None:
-            res = self._app_action(kwargs.get('app-action'))
-        elif kwargs.get('mirror-action', None) is not None:
-            # Start/stop a capture of this machine's screen, posted by the
-            # settings page. Token always -- the generic gate above would wave
-            # through anything from loopback, and a page the user visits can post
-            # a form to 127.0.0.1 just as easily as it can GET one.
-            if not self._token_present():
-                res['code'] = 403
-                res['message'] = 'Forbidden: mirroring requires the api token'
-                return json.dumps(res, indent=4).encode()
-            res = self._mirror_action(kwargs)
-        elif kwargs.get('save-launch-param', None) is not None:
-            setting = kwargs.get('save-launch-param', None)
-            try:
-                setting = json.loads(setting)
-            except Exception:
-                res['code'] = 1
-                res['message'] = 'json format error'
-            else:
-                Setting.setting = setting
-                Setting.save()
-                Setting.restart()
-                # cherrypy.engine.restart()
-        elif kwargs.get('install-plugin', None) is not None:
-            # Accept both the flat form fields the settings page sends and the
-            # older JSON blob, so an already-open page keeps working.
-            raw = kwargs.get('install-plugin')
-            payload = {}
-            if isinstance(raw, str) and raw.strip().startswith('{'):
-                try:
-                    payload = json.loads(raw)
-                except ValueError:
-                    return json.dumps({'code': 1, 'message': 'json format error'},
-                                      indent=4).encode()
-            res = self._plugin_change(
-                'install',
-                url=kwargs.get('plugin-url') or payload.get('url', ''),
-                type=kwargs.get('plugin-type') or payload.get('type', 'renderer'))
-        elif kwargs.get('set-subtitle-show', None) is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            show = str(kwargs.get('set-subtitle-show')).lower() in ('1', 'true', 'yes', 'on')
-            cherrypy.engine.publish('set_media_sub_show', show)
-        elif kwargs.get('cast-uri', None) is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            res = self._cast_url(kwargs.get('cast-uri'), kwargs.get('cast-title', ''))
-        elif kwargs.get('clear-play-history', None) is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            try:
-                self.protocol.clear_play_history()
-            except Exception as e:
-                logger.error('clear play history error: %s' % e)
-                res['code'] = 1
-                res['message'] = 'clear failed'
-        elif kwargs.get('clear-log', None) is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            path, module = self._log_path(kwargs.get('module'))
-            if path is None:
-                res = {'code': 1, 'message': 'unknown log module'}
-            elif module:
-                res = {'code': 0, 'message': 'success',
-                       'removed': logsplit.clear(module)}
-            else:
-                res = self._clear_log()
-        elif kwargs.get('set-module-setting', None) is not None:
-            if not self._management_allowed():
-                res['code'] = 403
-                res['message'] = 'Forbidden: management API requires local access or token'
-                return json.dumps(res, indent=4).encode()
-            res = module_settings.set_value(
-                kwargs.get('key'), kwargs.get('value', ''),
-                remove=str(kwargs.get('remove', '')).lower() in
-                       ('1', 'true', 'yes', 'on'))
-        else:
-            logger.info(kwargs)
+            if not (hasattr(part, 'file') and hasattr(part, 'filename')):
+                continue
+            handler = self.FILE_ROUTES.get(key)
+            gate, method = handler if handler else (self.FILE_GATE_DEFAULT, None)
+            refusal = self._gate_refusal(gate)
+            if refusal:
+                return _body({'code': 403, 'message': refusal})
+            if method is not None:
+                return _body(getattr(self, method)(part, kwargs))
+            return _body(self._store_uploaded_media(part, kwargs))
+        for name, gate, method in self.POST_ROUTES:
+            if kwargs.get(name) is None:
+                continue
+            refusal = self._gate_refusal(gate)
+            if refusal:
+                return _body({'code': 403, 'message': refusal})
+            return _body(getattr(self, method)(kwargs))
+        # Nothing recognised. This used to fall through to
+        # `{'code': 0, 'message': 'success'}`, so a misspelled field name -- or a
+        # page that grew a button the backend never learned about -- read to the
+        # user as "saved" while nothing had happened.
+        unknown = sorted(k for k in kwargs if k not in self.POST_HELPER_PARAMS
+                         and k not in self.FILE_ROUTES)
+        logger.error('POST /api with no recognised action: %s', sorted(kwargs))
+        return _body({'code': 1,
+                      'message': '没有可执行的操作' +
+                                 ('：不认识字段 {}'.format('、'.join(unknown))
+                                  if unknown else '')})
 
-        return json.dumps(res, indent=4).encode()
+    def _store_uploaded_media(self, upload, kwargs):
+        """A posted file that is media or a subtitle, not code.
+
+        Anything the user drops on the page is written under `local_files/` and
+        served back from there; a subtitle goes to the player instead of the
+        cast list, which is why the two flows share an endpoint and differ only
+        by extension.
+        """
+        res = {'code': 0, 'message': 'success'}
+        filename = os.path.basename(getattr(upload, 'filename', 'cast.bin'))
+        ext = os.path.splitext(filename)[1].lower()
+        sub_exts = ('.srt', '.ass', '.ssa', '.vtt', '.sub', '.sup', '.idx')
+        try:
+            path = os.path.join(self.local_dir, filename)
+            with open(path, 'wb') as f:
+                f.write(upload.file.read())
+            url = 'http://127.0.0.1:{}/?local&file={}'.format(
+                Setting.get_port(), filename)
+            res['url'] = url
+            if ext in sub_exts:
+                # Subtitle file: attach to the currently playing media.
+                cherrypy.engine.publish('set_media_sub_file',
+                                        {'url': url, 'title': filename})
+            else:
+                cherrypy.engine.publish('cast_local_file', url, filename)
+        except Exception as e:
+            logger.error('local file upload error: %s' % e)
+            res['code'] = 1
+            res['message'] = 'upload failed'
+        return res
+
+    def _gate_refusal(self, gate):
+        """The 403 a gate hands back, or None when the request passes it.
+
+        The checks are cumulative and ordered: `token` and `code-execution` both
+        demand management first, so a request from the LAN with no token hears
+        the management sentence -- exactly what the per-branch checks said when
+        they were written out by hand. An unknown gate refuses: a table entry
+        that does not name a real check has to fail closed, because the whole
+        point of the table is that nobody re-reads the branches behind it.
+        """
+        if gate not in GATE_REFUSALS:
+            logger.error('a POST route declared a gate nobody knows: %r', gate)
+            return ('Forbidden: this endpoint is misconfigured on the server '
+                    '(no such gate: {})'.format(gate))
+        if not self._management_allowed():
+            return GATE_REFUSALS[GATE_MANAGEMENT]
+        # `code-execution` asks the named predicate rather than `_token_present`
+        # directly: that method carries the argument for why a token is the only
+        # proof that survives DNS rebinding (see its docstring), and a route that
+        # reaches code execution should trip over it.
+        if gate == GATE_CODE and not self._code_execution_allowed():
+            return GATE_REFUSALS[GATE_CODE]
+        if gate == GATE_TOKEN and not self._token_present():
+            return GATE_REFUSALS[GATE_TOKEN]
+        return None
+
+    # -- the POST routes named by `POST_ROUTES`; one small method each, so the
+    # -- table is the only place that knows about gates and field names.
+
+    def _post_set_interface(self, kwargs):
+        return self._set_network_interface(kwargs.get('set-interface'))
+
+    def _post_plugin_enable(self, kwargs):
+        return self._plugin_change('enable', key=kwargs.get('plugin-key', ''))
+
+    def _post_plugin_disable(self, kwargs):
+        return self._plugin_change('disable', key=kwargs.get('plugin-key', ''))
+
+    def _post_plugin_uninstall(self, kwargs):
+        return self._plugin_change('uninstall', key=kwargs.get('plugin-key', ''))
+
+    def _post_set_github_mirror(self, kwargs):
+        return self._set_github_mirror(kwargs.get('set-github-mirror'))
+
+    def _post_set_renderer(self, kwargs):
+        return self._set_renderer(kwargs.get('set-renderer'))
+
+    def _post_toggle_protocol(self, kwargs):
+        return self._toggle_protocol(kwargs.get('toggle-protocol'))
+
+    def _post_app_action(self, kwargs):
+        return self._app_action(kwargs.get('app-action'))
+
+    def _post_mirror_action(self, kwargs):
+        return self._mirror_action(kwargs)
+
+    def _post_save_launch_param(self, kwargs):
+        raw = kwargs.get('save-launch-param')
+        try:
+            setting = json.loads(raw)
+        except Exception:
+            return {'code': 1, 'message': 'json format error'}
+        Setting.setting = setting
+        Setting.save()
+        Setting.restart()
+        return {'code': 0, 'message': 'success'}
+
+    def _post_install_plugin(self, kwargs):
+        # Accept both the flat form fields the settings page sends and the
+        # older JSON blob, so an already-open page keeps working.
+        raw = kwargs.get('install-plugin')
+        payload = {}
+        if isinstance(raw, str) and raw.strip().startswith('{'):
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                return {'code': 1, 'message': 'json format error'}
+        return self._plugin_change(
+            'install',
+            url=kwargs.get('plugin-url') or payload.get('url', ''),
+            type=kwargs.get('plugin-type') or payload.get('type', 'renderer'))
+
+    def _post_set_subtitle_show(self, kwargs):
+        show = str(kwargs.get('set-subtitle-show')).lower() in (
+            '1', 'true', 'yes', 'on')
+        cherrypy.engine.publish('set_media_sub_show', show)
+        return {'code': 0, 'message': 'success'}
+
+    def _post_cast_uri(self, kwargs):
+        return self._cast_url(kwargs.get('cast-uri'), kwargs.get('cast-title', ''))
+
+    def _post_clear_play_history(self, kwargs):
+        try:
+            self.protocol.clear_play_history()
+        except Exception as e:
+            logger.error('clear play history error: %s' % e)
+            return {'code': 1, 'message': 'clear failed'}
+        return {'code': 0, 'message': 'success'}
+
+    def _post_clear_log(self, kwargs):
+        path, module = self._log_path(kwargs.get('module'))
+        if path is None:
+            return {'code': 1, 'message': 'unknown log module'}
+        if module:
+            return {'code': 0, 'message': 'success',
+                    'removed': logsplit.clear(module)}
+        return self._clear_log()
+
+    def _post_set_module_setting(self, kwargs):
+        return module_settings.set_value(
+            kwargs.get('key'), kwargs.get('value', ''),
+            remove=str(kwargs.get('remove', '')).lower() in
+                   ('1', 'true', 'yes', 'on'))
 
 
 @cherrypy.expose

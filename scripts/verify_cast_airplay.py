@@ -196,6 +196,23 @@ def _rejects(fn):
     return False
 
 
+def gate_of(field):
+    """Which gate `Handler.POST_ROUTES` declares for one posted field.
+
+    '' when nothing is declared for it. Part 5c / 28 / 51 ask the table this way
+    instead of reading a tuple out of the source text: a name sitting anywhere
+    inside `_MANAGEMENT_PARAMS = (...)` proved nothing about whether that field
+    is checked, which is the difference between a gate and a comment.
+    """
+    for name, gate, _method in protocol.Handler.POST_ROUTES:
+        if name == field:
+            return gate
+    declared = protocol.Handler.FILE_ROUTES.get(field)
+    if declared:
+        return declared[0]
+    return ""
+
+
 def _recv_exact(sock, n):
     buf = b""
     while len(buf) < n:
@@ -1591,9 +1608,8 @@ try:
     check("plugin-info hands the index coordinates to the page",
           "plugin_repo.describe()" in _proto_src)
     check("the mirror toggle is a gated management endpoint",
-          "set-github-mirror" in _proto_src[
-              _proto_src.index("_MANAGEMENT_PARAMS = ("):
-              _proto_src.index(")", _proto_src.index("_MANAGEMENT_PARAMS = ("))])
+          gate_of("set-github-mirror") == "management",
+          gate_of("set-github-mirror"))
     with open(os.path.join(MACAST, "macast.py"), "r", encoding="utf-8") as _f:
         _macast_src = _f.read()
     check("plugin downloads honour the mirror switch",
@@ -10560,10 +10576,9 @@ try:
             "_management_allowed()", _gate_at28)]
         check("module-settings sits in the gated query list",
               "'module-settings'" in _gate_txt28, _gate_txt28)
-        _mp28 = _proto_src28[_proto_src28.index("_MANAGEMENT_PARAMS = ("):]
-        _mp28 = _mp28[:_mp28.index(")")]
-        check("set-module-setting sits in the gated POST params",
-              "set-module-setting" in _mp28, _mp28)
+        check("set-module-setting sits behind the strongest POST gate",
+              gate_of("set-module-setting") == "code-execution",
+              gate_of("set-module-setting"))
         with open(os.path.join(MACAST, "xml", "setting.html"), "r",
                   encoding="utf-8") as _f:
             _html28 = _f.read()
@@ -17752,6 +17767,275 @@ except Exception as _e50:
     import traceback as _traceback50
     _traceback50.print_exc()
     check("Part 50 runs", False, "{}: {}".format(type(_e50).__name__, _e50))
+
+# --------------------------------------------------------------------------
+# Part 51: the POST dispatcher asks one table who may do what.
+#
+# `Handler.POST` used to answer that question in three places at once: a tuple
+# of param names above the dispatcher, an inline `if not self._management_allowed()`
+# repeated inside five branches, and one branch that checked for a token by hand.
+# The first CVE-shaped bug in this repo (`install-plugin` reachable from any page
+# the user opens -- docs/architecture-review-2026-09.md R1) was a field present in
+# one of those places and weaker than the author assumed in the other two.
+#
+# Now there is `Handler.POST_ROUTES`: (field, gate, method), in dispatch order.
+# What this Part holds to: the table is well-formed, the dispatcher contains no
+# gate of its own, and **every declared field is actually refused** from the LAN
+# without a token -- asked as a loop over the table, so an endpoint cannot be
+# added without being covered. Before, coverage was per-endpoint and had to be
+# remembered; that is the same failure mode, moved up one level.
+#
+# The last check is the one that was never asked at all: a POST that matches
+# nothing used to fall through and answer `{'code': 0, 'message': 'success'}`,
+# so a misspelled field name read to the user as "saved".
+# --------------------------------------------------------------------------
+print("\n=== Part 51: one table decides every POST gate ===")
+try:
+    import io as _io51
+    import re as _re51
+    import ast as _ast51
+
+    _saved51 = (utils.Setting.setting, utils.Setting.setting_path,
+                utils.SETTING_DIR, protocol.SETTING_DIR)
+    _tmp51 = _tempfile.mkdtemp(prefix="macast-route51-")
+    utils.SETTING_DIR = _tmp51
+    protocol.SETTING_DIR = _tmp51
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp51, "macast_setting.json")
+    _token51 = protocol.api_token()
+
+    class _Tgt51(object):
+        def cast_uri(self, uri, title=''):
+            pass
+
+    _tgt51 = _Tgt51()
+
+    class _H51(protocol.Handler):
+        def __init__(self):
+            self.local_dir = _tmp51
+
+        @property
+        def protocol(self):
+            return _tgt51
+
+    handler51 = _H51()
+    from cherrypy import serving as _serving51
+    req51 = _serving51.request
+    _sp51 = (req51.params, getattr(req51, 'remote', None), req51.scheme,
+             dict(req51.headers))
+    _saved_running51 = utils.Setting.is_service_running
+    utils.Setting.is_service_running = staticmethod(lambda: True)
+    try:
+        def _as51(ip='127.0.0.1', token=None, scheme='http'):
+            req51.headers.clear()
+            for _k, _v in _sp51[3].items():
+                req51.headers[_k] = _v
+            req51.params = {'token': token} if token else {}
+            req51.remote = types.SimpleNamespace(ip=ip)
+            req51.scheme = scheme
+
+        def _post51(**kw):
+            return json.loads(handler51.POST(**kw).decode())
+
+        # -- (a) the table itself ------------------------------------------
+        _routes51 = protocol.Handler.POST_ROUTES
+        _names51 = [n for n, _g, _m in _routes51]
+        check("no field is declared twice, so precedence is not a accident",
+              len(_names51) == len(set(_names51)), str(_names51))
+        check("dispatch order is declared, not dict-iteration luck",
+              isinstance(_routes51, tuple), type(_routes51).__name__)
+        _bad_gate51 = [n for n, g, _m in _routes51
+                       if g not in protocol.GATE_REFUSALS]
+        check("every route names one of the gates that exist",
+              not _bad_gate51, str(_bad_gate51))
+        _missing51 = [(n, m) for n, _g, m in _routes51
+                      if not callable(getattr(protocol.Handler, m, None))]
+        check("every route names a method the handler has",
+              not _missing51, str(_missing51))
+        check("the gate that runs code is still exactly the three measured paths",
+              set(protocol.Handler._CODE_EXECUTION_PARAMS)
+              == {'install-plugin', 'save-launch-param', 'set-module-setting'},
+              str(protocol.Handler._CODE_EXECUTION_PARAMS))
+        check("and both legacy lists are derived from the table, not retyped",
+              protocol.Handler._MANAGEMENT_PARAMS == tuple(_names51)
+              and protocol.Handler._CODE_EXECUTION_PARAMS == tuple(
+                  n for n, g, _m in _routes51 if g == protocol.GATE_CODE),
+              str(protocol.Handler._MANAGEMENT_PARAMS))
+
+        # The dispatcher must hold no decision of its own -- otherwise the table
+        # is documentation, and documentation is what R1 was written in.
+        _psrc51 = open(os.path.join(MACAST, "protocol.py"), encoding="utf-8").read()
+        _ptree51 = _ast51.parse(_psrc51)
+        # protocol.py exposes two POST methods: the settings API dispatcher and the
+        # UPnP service endpoint. Only the first one is this table's business, so
+        # the scan is scoped to the `Handler` class instead of the whole file.
+        _postfn51 = [nd for _cls in _ast51.walk(_ptree51)
+                     if isinstance(_cls, _ast51.ClassDef) and _cls.name == "Handler"
+                     for nd in _ast51.walk(_cls)
+                     if isinstance(nd, _ast51.FunctionDef) and nd.name == "POST"]
+        _postbody51 = [nd for _p in _postfn51 for nd in _ast51.walk(_p)
+                       if _p is not nd]
+        _calls51 = {nd.func.id for nd in _postbody51
+                    if isinstance(nd, _ast51.Call)
+                    and isinstance(nd.func, _ast51.Name)}
+        _attrs51 = {nd.attr for nd in _postbody51 if isinstance(nd, _ast51.Attribute)}
+        check("there is exactly one settings dispatcher in Handler",
+              len(_postfn51) == 1, "{} POST defs in Handler".format(len(_postfn51)))
+        _gate_calls51 = sorted({'_management_allowed', '_token_present',
+                                '_code_execution_allowed'}
+                               & (_calls51 | _attrs51))
+        check("and it calls no gate of its own -- `_same_site` is the one "
+              "exception, because that check is not per-endpoint",
+              not _gate_calls51,
+              "gate calls in POST: {}".format(_gate_calls51))
+        check("which is to say it does consult the table, and the upload routes",
+              {'POST_ROUTES', 'FILE_ROUTES', '_gate_refusal'} <= _attrs51,
+              str(sorted(_attrs51)))
+        _field_lits51 = {nd.value for nd in _postbody51
+                         if isinstance(nd, _ast51.Constant)
+                         and isinstance(nd.value, str)}
+        _leaked51 = sorted(n for n in _names51 if n in _field_lits51)
+        check("and no endpoint is named inside the dispatcher any more",
+              not _leaked51, "hardcoded fields in POST: {}".format(_leaked51))
+
+        # -- (b) every declared endpoint is refused from the LAN, and only --
+        # --     because the table says so. Coverage by construction.      --
+        _ran51 = []
+
+        def _spy51(route_name):
+            def _run(_kwargs):
+                _ran51.append(route_name)
+                return {'code': 0, 'message': 'ran'}
+            return _run
+
+        for _name51, _gate51, _method51 in _routes51:
+            setattr(handler51, _method51, _spy51(_name51))
+        _as51(ip='192.168.1.99')
+        _refused51 = []
+        for _name51, _gate51, _method51 in _routes51:
+            _ran51[:] = []
+            _res51 = _post51(**{_name51: '1'})
+            if _res51.get('code') != 403 or _ran51:
+                _refused51.append('{} -> {} {}'.format(_name51, _res51, _ran51))
+        check("every field the table declares is refused from the LAN with no "
+              "token, before its method runs",
+              not _refused51, '; '.join(_refused51))
+        check("and the loop is not empty, because an empty loop passes",
+              len(_routes51) >= 16, str(len(_routes51)))
+        _as51(ip='192.168.1.99')
+        _res51 = _post51(**{'install-plugin': '1', 'plugin-url': 'http://x/y.py'})
+        check("a LAN request hears the management sentence, not the code one, "
+              "because the checks are cumulative",
+              'local access or token' in _res51.get('message', ''), _res51)
+        _as51(token=_token51)
+        _reached51 = []
+        for _name51, _gate51, _method51 in _routes51:
+            _ran51[:] = []
+            _res51 = _post51(**{_name51: '1'})
+            if _ran51 != [_name51]:
+                _reached51.append('{} -> {} {}'.format(_name51, _res51, _ran51))
+        check("with the token the same fields are all served -- the table is a "
+              "gate, not a wall",
+              not _reached51, '; '.join(_reached51))
+        _ran51[:] = []
+        _post51(**{'cast-uri': 'http://x/a.mp4', 'clear-play-history': '1'})
+        check("two action fields in one request are served in table order, and "
+              "the later one never runs",
+              _ran51 == ['cast-uri'], str(_ran51))
+
+        # -- (c) a route that misdeclares its gate fails closed ------------
+        _orig_routes51 = protocol.Handler.POST_ROUTES
+        _ran51[:] = []
+        protocol.Handler.POST_ROUTES = tuple(
+            list(_orig_routes51) + [('evil-field', 'not-a-gate', '_post_app_action')])
+        try:
+            _as51()
+            _res51 = _post51(**{'evil-field': 'quit'})
+            check("an unknown gate is refused even from this machine, with the "
+                  "token in hand",
+                  _res51.get('code') == 403 and 'not-a-gate' in _res51.get('message', ''),
+                  str(_res51))
+        finally:
+            protocol.Handler.POST_ROUTES = _orig_routes51
+
+        # -- (d) the fall-through that used to answer "success" ------------
+        _as51()
+        _ran51[:] = []
+        _res51 = _post51(**{'plugin-key': 'whatever'})
+        check("a helper field on its own is not an action, and does not say "
+              "'success'",
+              _res51.get('code') == 1 and '没有可执行的操作' in _res51.get('message', ''),
+              str(_res51))
+        _res51 = _post51(**{'clear-logg': '1'})
+        check("a misspelled endpoint is named back at the caller",
+              _res51.get('code') == 1 and 'clear-logg' in _res51.get('message', ''),
+              str(_res51))
+        _res51 = _post51()
+        check("and an empty post is refused too rather than reported as done",
+              _res51.get('code') == 1, str(_res51))
+
+        # -- (e) uploads, dispatched by field name -------------------------
+        check("an uploaded plugin is declared as code execution",
+              gate_of('plugin-file') == protocol.GATE_CODE, gate_of('plugin-file'))
+        _up51 = types.SimpleNamespace(file=_io51.BytesIO(b'x'), filename='a.mp4')
+        _as51(ip='192.168.1.99')
+        _res51 = json.loads(handler51.POST(**{'media-file': _up51}).decode())
+        check("a file field the table does not know still gets the default gate",
+              _res51.get('code') == 403, str(_res51))
+        _casts51 = []
+
+        def _on_cast51(url, fn):
+            _casts51.append(url)
+
+        cherrypy.engine.subscribe('cast_local_file', _on_cast51)
+        try:
+            _as51()
+            _res51 = json.loads(handler51.POST(**{'media-file': _up51}).decode())
+            check("from this machine the same upload is stored and cast",
+                  _res51.get('code') == 0 and os.path.exists(
+                      os.path.join(_tmp51, 'a.mp4')) and len(_casts51) == 1,
+                  "{} / {}".format(_res51, _casts51))
+        finally:
+            cherrypy.engine.unsubscribe('cast_local_file', _on_cast51)
+
+        # -- (f) the page and the table must speak the same names ----------
+        _page51 = open(os.path.join(REPO, 'macast', 'xml', 'setting.html'),
+                       encoding='utf-8').read()
+        _posted51 = set(_re51.findall(r"append\(\s*'([^']+)'", _page51))
+        # ... including the ones the page picks at runtime:
+        # `fd.append(enabled ? 'plugin-disable' : 'plugin-enable', '1')`.
+        for _pair51 in _re51.findall(
+                r"append\(\s*[^?)]*\?\s*'([a-z][a-z-]+)'\s*:\s*'([a-z][a-z-]+)'",
+                _page51):
+            _posted51.update(_pair51)
+        _posted51.update(m for m in
+                         _re51.findall(r'name="([a-z-]+)"', _page51)
+                         if m in protocol.Handler.FILE_ROUTES)
+        _declared51 = (set(_names51) | set(protocol.Handler.FILE_ROUTES)
+                       | set(protocol.Handler.POST_HELPER_PARAMS))
+        _undeclared51 = sorted(_posted51 - _declared51)
+        check("every field the page can post is declared somewhere",
+              not _undeclared51 and 'cast-uri' in _posted51,
+              "undeclared: {} (posted {})".format(_undeclared51, sorted(_posted51)))
+        _actions51 = _posted51 & set(_names51)
+        check("and what it posts as an action is a row of the table, not a "
+              "string the dispatcher happens to recognise",
+              {n for n in _actions51} <= set(_names51) and len(_actions51) >= 10,
+              str(sorted(_actions51)))
+    finally:
+        req51.params, req51.remote, req51.scheme, _ = _sp51
+        req51.headers.clear()
+        for _k, _v in _sp51[3].items():
+            req51.headers[_k] = _v
+        utils.Setting.is_service_running = _saved_running51
+        utils.SETTING_DIR = _saved51[2]
+        protocol.SETTING_DIR = _saved51[3]
+        utils.Setting.setting, utils.Setting.setting_path = _saved51[0], _saved51[1]
+        _shutil.rmtree(_tmp51, ignore_errors=True)
+except Exception as _e51:
+    import traceback as _traceback51
+    _traceback51.print_exc()
+    check("Part 51 runs", False, "{}: {}".format(type(_e51).__name__, _e51))
 
 # --------------------------------------------------------------------------
 
