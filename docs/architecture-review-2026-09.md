@@ -20,7 +20,7 @@
 | R1 | `install-plugin` / `save-launch-param` 走"本机即可信"门，且无 Origin/CSRF 校验 → 恶意网页可对 `127.0.0.1` 发 form-POST 触发**任意代码执行** | 安全 | **高** | 高（代码事实）/ 中（端到端利用，未做实时 PoC） | 已确认代码路径 |
 | R2 | 单体热点：验证套件 16,010 行 / `screen_mirror.py` 8,046 行 / `protocol.py` 的 `Handler` 类 ~846 行 / `setting.html` 2,908 行 | 可维护性、可审计性 | 高 | 高 | 已确认 |
 | R3 | DLNA `event_subscribes` 无锁：worker 线程边迭代、事件线程边插入 → `dictionary changed size during iteration` | 可靠性 | 中 | 中（时序相关，频率未证实） | 已确认代码路径 |
-| R4 | `app_notify` 订阅者在**发布它的 CherryPy 线程**上直接操作托盘，未走主线程 hop（与菜单重建不一致） | 可靠性 | 中 | 高（离线线程）/ 中（缓解后是否仍出问题） | 已确认 |
+| R4 | `app_notify` 订阅者在**发布它的 CherryPy 线程**上直接操作托盘，未走主线程 hop（与菜单重建不一致） | 可靠性 | 中 | 高（离线线程）/ 中（缓解后是否仍出问题） | **已修**（2026-09-25，套件 Part 47） |
 | R5 | 回归护栏有被"常态化"的盲区：套件全打桩网络、Part 34 永久红、Cast Streaming 全族未见过真电视 | 可测试性 | 中 | 高 | 已确认（部分为已知取舍） |
 | R6 | import 期与读取期副作用：`SETTING_DIR` 导入时定死、`Setting.get` 读带写、多实例回写端口/USN | 可维护性、正确性 | 低-中 | 高 | 已确认（部分为已知取舍） |
 | R7 | 202 处 `except Exception`（screen_mirror 57 / cast_local_file 25）——密度高，与"静默失效"反复出现同源 | 可靠性 | 低 | 中 | 已确认 |
@@ -91,10 +91,11 @@
 
 ## R4 — 通知在发布线程上直接操作托盘
 
-**证据**：`App.call_on_main_thread`（`gui.py:222`）正确地把菜单重建（`_rebuild_menu` `gui.py:1059`、`_apply_app_menu` `1489`、`_refresh_ip_menu` `1343`）marshal 回主线程。但 `app_notify` 订阅者 `notification()`（`gui.py:319`）由 `macast.py:954` 的 `cherrypy.engine.publish('app_notify', …)` **直接在 CherryPy worker 线程**上调用（screen_mirror 约 30 处 publish，如 `screen_mirror.py:757`）。
+**证据**：`App.call_on_main_thread`（`gui.py:222`）正确地把菜单重建（`macast.py:1061` 的 `_apply_app_menu`、`1351` 的 `_refresh_ip_menu`、`1497` 的 `_rebuild_menu`）marshal 回主线程。但 `app_notify` 订阅者 `notification()`（`gui.py:319`）由 `cherrypy.engine.publish('app_notify', …)` **直接在发布它的那个线程**上调用。**publish 调用点的数量按 AST 现数为 52 处**（`macast/` 49 + `macast_renderer/mpv.py` 3；`screen_mirror.py` 只有 1 处，本条最初写的"约 30 处"是把别的东西数了进来 —— 现已由 Part 47 拿这个数字反过来比对文档），分布在 CherryPy 工作线程、mpv 的 IPC 线程与镜像线程上。
 **关联**：`AGENTS.md` §4.8 记录的 Windows pystray 气泡崩溃正是这条路径；当前修复（`fit_notification` + `gui.py:330` 的 try/except）**治的是"消息过长"与"异常冒泡"，没治"离线线程调 AppKit/Win32 托盘"**。菜单不敢离线改，通知却离线发——不一致。
 **修复**：`notification()` 也走 `call_on_main_thread`（Darwin 尤其重要）。
 **置信度**：离线线程=高；"缓解后仍会因线程问题出问题"=中。
+**已修（2026-09-25）**：这一条被用户报的实症状坐实了 —— "菜单有时要点好几次，点一次就又消失了"。上游事实量过：**rumps 0.4.0 里 `callAfter` 出现 0 次**，它自己一次都不做主线程派发，所以正在 tracking 的 NSMenu 一旦被别的线程改动就当场收起。两处违规一起收了：`App.notification`（Darwin 分支走队列，pystray 分支**故意不动**，因为 §4.8"通知失败不许吃掉 teardown"的契约是按它就地截断/就地抛写的）与 `Macast.update_service_status`（cherrypy 的 `start`/`stop` 钩子跑在 SERVICE_THREAD，它写的 `toggle_menuitem.text` 就是 `NSMenuItem setTitle_`，正落在用户点服务开关的那一瞬间）。套件 Part 47（24 条）钉住这条纪律：从两个假线程各打一次，要求"就地什么都没发生、排队的东西在 MainThread 落地"，并扫 `macast.py` 与 `macast/plugins/**` 的菜单写入点（每处必须报得出"我为什么在主线程上"）；两个变异体各自红 5 条与 7 条。延后能否真落地是**真机**问题，已用真 rumps 事件循环探过 4/4：`app.run()` 之前排的队，循环一起来就执行。见 `AGENTS.md` §4.2 末条。
 
 ---
 
@@ -133,6 +134,6 @@
 
 1. **先坐实 R1**：本机 `curl` 模拟无令牌 form-POST 打 `install-plugin`，确认现状可利用 → 按 `mirror-action` 模式升级到令牌门 + 补套件用例。（高优先、改动小、可逆）
 2. 把 `Handler.POST` 改成声明式路由表（同时收 R1 的可审计性与 R2）。
-3. R4 通知走主线程 hop；R3 订阅表读迭代取快照。
+3. R4 通知走主线程 hop（**已修 2026-09-25**：`App.notification` 与 `Macast.update_service_status` 都走 `call_on_main_thread`，Part 47 24 条 + 真 rumps 循环探针）；R3 订阅表读迭代取快照。
 4. R5 CI 断言"红集 == {Part 34}"、e2e 进夜间。
 5. R2 / R6 的结构性拆分列入中期重构队列。

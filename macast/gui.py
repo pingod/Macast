@@ -321,7 +321,13 @@ class App:
             logger.info('%s: %s', title, content)
             return
         if self.platform == Platform.Darwin:
-            rumps.notification(title, "", content, sound=sound)
+            # rumps marshals nothing of its own -- this reaches
+            # NSUserNotificationCenter and NSApp directly on the caller's
+            # thread -- and `app_notify` is published from CherryPy workers,
+            # the player's IPC thread and the mirror threads. Talking to AppKit
+            # from there is what dismisses a menu the user is still holding.
+            self.call_on_main_thread(
+                lambda: rumps.notification(title, "", content, sound=sound))
         else:
             try:
                 self.app.notify(

@@ -16002,9 +16002,10 @@ except Exception as _e45:
 # own upload) live in YAML that no other check reads, and the failure mode is
 # a build that goes red at `Upload artefact` while every real step is green.
 # It happened twice: 2026-09-21 (193 artefacts / 8.2 GB) and 2026-09-25
-# (84 / 3.5 GB, twelve releases in two days). Each recovery was a manual
-# delete-by-id loop whose effect GitHub only applies 6-12 hours later, so the
-# repo cannot afford to relearn this.
+# (84 / 3.5 GB). The second pile was mostly builds nobody could download: of the
+# last 27 runs, 14 were plain pushes to main and each still stored four
+# artefacts. Each recovery was a manual delete-by-id loop whose effect GitHub
+# only applies 6-12 hours later, so the repo cannot afford to relearn this.
 # --------------------------------------------------------------------------
 print("\n=== Part 46: CI uploads are gated to releases, and swept afterwards ===")
 
@@ -16101,6 +16102,384 @@ except Exception as _e46:
     _traceback46 = __import__('traceback')
     _traceback46.print_exc()
     check("Part 46 runs", False, "{}: {}".format(type(_e46).__name__, _e46))
+
+# --------------------------------------------------------------------------
+# Part 47: every AppKit call the tray makes lands on one thread.
+#
+# The report was 「有时候菜单要点好几次，而且点一次后菜单就消失了」. The mechanism
+# is in the vendor code: rumps 0.4.0 contains **no** main-thread marshalling of
+# its own (`callAfter` appears zero times in rumps/rumps.py), so
+# `rumps.notification`, `Menu.clear`, `insertItem_atIndex_` and `setTitle_` all
+# execute on whichever thread asked for them. AppKit survives that until the
+# menu is open -- mutating an NSMenu that is being tracked dismisses it, and the
+# click already in flight is lost.
+#
+# Macast already knows the rule; `App.call_on_main_thread` guards the structural
+# rebuilds. Two paths kept touching AppKit inline anyway, and both fire at the
+# worst possible moment:
+#   * `App.notification`, reached from 52 `publish('app_notify', ...)` sites on
+#     CherryPy workers, the player's IPC thread and the mirror threads;
+#   * `Macast.update_service_status`, run by cherrypy's `start`/`stop` hooks on
+#     SERVICE_THREAD, which writes `NSMenuItem setTitle_` -- i.e. it lands while
+#     the user is clicking the service switch.
+#
+# What this Part proves is the *discipline*, not AppKit's reaction: there is no
+# Cocoa run loop to hand work to here, so the pump is stood in by a queue that
+# only the main thread drains. The claim under test -- "the call was handed over
+# rather than made from this thread" -- is the half that is checkable without a
+# GUI; the rest was read off the vendor source and is confirmed by hand on a
+# real menu bar (AGENTS.md 10).
+# --------------------------------------------------------------------------
+print("\n=== Part 47: tray AppKit calls all land on the menu's own thread ===")
+
+_MAIN47 = threading.main_thread().name
+_WORKER47 = 'CHERRYPY_WORKER_47'
+_SVC47 = 'SERVICE_THREAD'
+
+
+class _NativeItem47(object):
+    """The NSMenuItem behind `gui.MenuItem.view`: records *who* wrote the title."""
+
+    def __init__(self):
+        self.writes = []
+        self._title = ''
+
+    @property
+    def title(self):
+        return self._title
+
+    @title.setter
+    def title(self, value):
+        self.writes.append((threading.current_thread().name, value))
+        self._title = value
+
+
+class _TrayBackend47(object):
+    """rumps / pystray as the two notification paths use them."""
+
+    def __init__(self):
+        self.notes = []
+        self.balloons = []
+
+    def notification(self, title, subtitle, message, sound=True):
+        self.notes.append((threading.current_thread().name, title, subtitle,
+                           message, sound))
+
+    def notify(self, **kw):
+        self.balloons.append((threading.current_thread().name, kw))
+
+
+class _Pump47(object):
+    """A main-thread pump: it takes work and holds it, it never runs it here."""
+
+    def __init__(self):
+        self.queued = []
+
+    def call_on_main_thread(self, fn):
+        self.queued.append(fn)
+
+    def drain(self):
+        pending, self.queued = self.queued, []
+        for fn in pending:
+            fn()
+
+
+def _app_from47(platform, pump, backend=None, mode='tray'):
+    """An `App` that never met a tray backend, so no Cocoa is touched."""
+    app = gui_mod.App.__new__(gui_mod.App)
+    app.mode = mode
+    app.platform = platform
+    app.app = backend
+    app.menu = []
+    app.menuDict = {}
+    app.call_on_main_thread = pump.call_on_main_thread
+    return app
+
+
+class _ServiceApp47(_Pump47):
+    """A `Macast` with the real relabel method and nothing else."""
+
+    def __init__(self):
+        _Pump47.__init__(self)
+        self.toggle_menuitem = gui_mod.MenuItem('Start Cast')
+        #: Force the branch even when the suite runs on Linux: it is the
+        #: Darwin setter that reaches into AppKit, and `.text` only does so
+        #: when the item believes it is on macOS.
+        self.toggle_menuitem.platform = gui_mod.Platform.Darwin
+        self.native = _NativeItem47()
+        self.toggle_menuitem.view = self.native
+        self.refreshes = 0
+
+    def update_menu(self):
+        self.refreshes += 1
+
+
+_ServiceApp47.update_service_status = (
+    macast_mod.Macast.__dict__['update_service_status'])
+
+
+def _from_thread(fn, name):
+    t = threading.Thread(target=fn, name=name)
+    t.start()
+    t.join()
+
+
+import inspect as _inspect47
+import re as _re47
+import ast as _ast47
+
+
+def _body47(owner, name):
+    """The source of a method, so a text rule can be checked against it."""
+    _attr47 = getattr(owner, name)
+    return _inspect47.getsource(getattr(_attr47, '__func__', _attr47))
+
+
+try:
+    _backend47 = _TrayBackend47()
+    #: On Linux and Windows `gui` never imported rumps at all; binding the name
+    #: is what the Darwin branch looks up, so the rule holds on every runner.
+    _rumps47 = getattr(gui_mod, 'rumps', None)
+    gui_mod.rumps = _backend47
+    try:
+        # -- the notification path, reported from a CherryPy worker ----------
+        _pump47 = _Pump47()
+        _app47 = _app_from47(gui_mod.Platform.Darwin, _pump47)
+        _from_thread(lambda: _app47.notification('Error', 'Stop playback failed'),
+                     _WORKER47)
+        check("a report from a worker thread does not reach rumps on that thread",
+              _backend47.notes == [],
+              "it called AppKit from {!r}: {}".format(
+                  _WORKER47, _backend47.notes))
+        check("...instead it is handed to the thread that owns the menu",
+              len(_pump47.queued) == 1, "{} queued".format(len(_pump47.queued)))
+        _pump47.drain()
+        check("...and it still arrives, wording and sound flag intact",
+              _backend47.notes == [(_MAIN47, 'Error', '', 'Stop playback failed',
+                                    True)],
+              str(_backend47.notes))
+
+        _pump47 = _Pump47()
+        _app47 = _app_from47(gui_mod.Platform.Darwin, _pump47)
+        _reports47 = [(u'Macast is hidden', u'running at menu bar', False),
+                      (u'Info', u'Protocols updated.', True),
+                      (u'Error', u'Cast failed', True)]
+        for _t47, _c47, _s47 in _reports47:
+            _from_thread(lambda t=_t47, c=_c47, s=_s47: _app47.notification(
+                t, c, sound=s), _WORKER47)
+        _pump47.drain()
+        check("three reports from the same worker become three notifications, "
+              "not one",
+              [n[1:] for n in _backend47.notes[1:]] ==
+              [(t, '', c, s) for t, c, s in _reports47],
+              str(_backend47.notes))
+        check("none of them was sent from the reporting thread",
+              set(n[0] for n in _backend47.notes) == {_MAIN47},
+              str(sorted(set(n[0] for n in _backend47.notes))))
+
+        # -- the branches this Part deliberately leaves alone ------------------
+        _pump47 = _Pump47()
+        _app47 = _app_from47(gui_mod.Platform.Darwin, _pump47, mode='headless')
+        _app47.notification('Info', 'nothing to click')
+        check("headless still only logs: no queue, no tray call",
+              _pump47.queued == [] and len(_backend47.notes) == 4,
+              "{} queued, {} notes".format(len(_pump47.queued),
+                                           len(_backend47.notes)))
+        _backend47.balloons = []
+        _pump47 = _Pump47()
+        _app47 = _app_from47(gui_mod.Platform.Win32, _pump47,
+                             backend=_backend47)
+        _from_thread(lambda: _app47.notification('Info', 'long enough to clamp'),
+                     _WORKER47)
+        check("the pystray branch keeps its inline contract (§4.8): it clamps "
+              "and swallows here, and pystray pumps its own loop",
+              len(_backend47.balloons) == 1
+              and _backend47.balloons[0][0] == _WORKER47
+              and _pump47.queued == [],
+              "balloons={}, queued={}".format(_backend47.balloons,
+                                              len(_pump47.queued)))
+
+        # -- the service switch's label --------------------------------------
+        _isr47 = utils.Setting.__dict__.get('is_service_running')
+        _want47 = [True]
+        utils.Setting.is_service_running = staticmethod(lambda: _want47[0])
+        try:
+            for _want47[0], _label47 in ((True, 'Stop Cast'),
+                                         (False, 'Start Cast')):
+                _svc47 = _ServiceApp47()
+                _from_thread(_svc47.update_service_status, _SVC47)
+                check("the engine's {} hook does not write a native title from "
+                      "{}".format('start' if _label47 == 'Stop Cast' else 'stop',
+                                  _SVC47),
+                      _svc47.native.writes == [],
+                      "setTitle_ ran on {}".format(_svc47.native.writes))
+                check("...it queues the relabel to {}".format(_MAIN47),
+                      len(_svc47.queued) == 1,
+                      "{} queued".format(len(_svc47.queued)))
+                _svc47.drain()
+                check("and drained, the switch reads {} on {}".format(
+                    _label47, _MAIN47),
+                    _svc47.native.writes == [(_MAIN47, _label47)]
+                    and _svc47.toggle_menuitem.text == _label47,
+                    str(_svc47.native.writes))
+                check("the tray's own refresh still runs once",
+                      _svc47.refreshes == 1, str(_svc47.refreshes))
+        finally:
+            if _isr47 is not None:
+                utils.Setting.is_service_running = _isr47
+
+        # -- anti-drift: a new path must not rebuild the menu off the queue ----
+        with open(os.path.join(MACAST, "macast.py"), encoding="utf-8") as _f47:
+            _src47 = _f47.read().splitlines()
+        _mains47 = ('_apply_app_menu', 'on_menubar_icon_change_click')
+
+        #: Why each of these may touch a live menu item at all. Anything else
+        #: that starts writing one has to answer the same question -- rumps does
+        #: no marshalling, so the writer is the thread that owns the menu or the
+        #: menu is going to move under the user's cursor.
+        _writers47 = {
+            '_refresh_ip_menu': 'only reached through call_on_main_thread',
+            'update_service_status': 'queues the relabel (this Part)',
+            'build_setting_menu': 'the item has no live view yet',
+            'on_auto_check_update_click': 'a Cocoa menu callback',
+            'on_menubar_icon_change_click': 'a Cocoa menu callback',
+            'on_protocol_toggle_click': 'a Cocoa menu callback',
+            'on_start_at_login_click': 'a Cocoa menu callback',
+        }
+        _enclosing47, _offenders47, _found47 = '<module>', [], set()
+        for _line47 in _src47:
+            if _line47.startswith('def ') or _line47.startswith('    def '):
+                #: Attribute by *method*, not by innermost closure: the reason
+                #: is about who owns the call, and `update_service_status`'s
+                #: closure is still `update_service_status` reaching for AppKit.
+                _enclosing47 = _line47.split('def ', 1)[1].split('(')[0]
+            if _re47.search(r'\.\b(text|checked|enabled)\s*=[^=]', _line47) \
+                    and 'etree' not in _line47:
+                _found47.add(_enclosing47)
+                if _enclosing47 not in _writers47:
+                    _offenders47.append(_enclosing47)
+        check("every write to a live menu item names a main-thread reason",
+              not _offenders47, str(_offenders47))
+        check("and the reasons on file are all still real",
+              _found47 == set(_writers47),
+              "gone: {} new: {}".format(sorted(set(_writers47) - _found47),
+                                        sorted(_found47 - set(_writers47))))
+
+        _enclosing47, _offenders47 = '', []
+        for _line47 in _src47:
+            if _line47.startswith('    def '):
+                _enclosing47 = _line47[8:].split('(')[0]
+            elif _re47.search(r'self\.(set_menu|update_icon|app\.menu)\b',
+                              _line47):
+                if _enclosing47 not in _mains47:
+                    _offenders47.append(_enclosing47)
+        check("only a queued method still mutates the native menu",
+              not _offenders47, str(_offenders47))
+
+        # The same rule for the twelve renderer plugins, stated as a name they
+        # may match: a plugin may write a menu item while building it or from
+        # its own click handler -- never from a download, IPC or probe thread.
+        _enclosing47, _offenders47 = '<module>', []
+        for _dir47 in ('renderer', 'protocol'):
+            _p47 = os.path.join(MACAST, 'plugins', _dir47)
+            for _file47 in sorted(os.listdir(_p47)):
+                if not _file47.endswith('.py'):
+                    continue
+                with open(os.path.join(_p47, _file47), encoding='utf-8') as _pf47:
+                    for _line47 in _pf47:
+                        _def47 = _re47.match(r'(?:|    )def (\w+)', _line47)
+                        if _def47:
+                            _enclosing47 = _def47.group(1)
+                        elif _re47.search(r'\.\b(text|checked|enabled)\s*=[^=]',
+                                          _line47):
+                            if not _re47.match(r'(build_menu|on_)',
+                                               _enclosing47):
+                                _offenders47.append('{}/{}'.format(_file47,
+                                                                   _enclosing47))
+        check("a plugin only writes a menu item while building it or on click",
+              not _offenders47, str(_offenders47))
+        check("the two fixed paths still name the queue in source",
+              'call_on_main_thread' in _body47(gui_mod.App, 'notification')
+              and 'call_on_main_thread' in _body47(macast_mod.Macast,
+                                                   'update_service_status'),
+              "a re-inlined call would reopen the menu-dismiss bug")
+
+        # How many call sites does this guard? The figure is in two pieces of
+        # prose (this header and AGENTS.md 4.2), and both had been carried over
+        # from a review document instead of counted. AGENTS.md 4.13's rule
+        # applies to our own documentation too: ask every number twice, once of
+        # the prose and once of the source that decides it.
+        _site_counts47 = {}
+        _unparsed47 = []
+        for _pkg47 in ('macast', 'macast_renderer'):
+            _n47 = 0
+            for _root47, _dirs47, _files47 in os.walk(
+                    os.path.join(REPO, _pkg47)):
+                for _file47 in _files47:
+                    if not _file47.endswith('.py'):
+                        continue
+                    _path47 = os.path.join(_root47, _file47)
+                    try:
+                        with open(_path47, encoding='utf-8') as _sh47:
+                            _tree47 = _ast47.parse(_sh47.read(), _path47)
+                    except SyntaxError:
+                        _unparsed47.append(_path47)
+                        continue
+                    # Parsed, not grepped: a commented-out report is not a call
+                    # site (two of the lines `grep` counted in utils.py were
+                    # written off years ago and still announce a notification
+                    # nobody sends), and a call split over two lines is one site
+                    # that a line-based scan counts as none.
+                    for _node47 in _ast47.walk(_tree47):
+                        if not isinstance(_node47, _ast47.Call):
+                            continue
+                        _fn47 = _node47.func
+                        if (isinstance(_fn47, _ast47.Attribute)
+                                and _fn47.attr == 'publish'
+                                and _node47.args
+                                and isinstance(_node47.args[0], _ast47.Constant)
+                                and _node47.args[0].value == 'app_notify'):
+                            _n47 += 1
+            _site_counts47[_pkg47] = _n47
+        _sites47 = sum(_site_counts47.values())
+        check("the guarded call sites were counted, not inherited",
+              _sites47 > 0 and not _unparsed47,
+              "{} sites, unparsed: {}".format(_sites47, _unparsed47))
+
+        with open(os.path.join(REPO, 'scripts', 'verify_cast_airplay.py'),
+                  encoding='utf-8') as _sh47:
+            _own47 = _sh47.read()
+        _here47 = _re47.search(r"reached from (\d+) "
+                               r"`publish\('app_notify'", _own47)
+        check("this Part's header states the counted number",
+              _here47 is not None and int(_here47.group(1)) == _sites47,
+              "says %r, counted %d" % (_here47 and _here47.group(1), _sites47))
+
+        with open(os.path.join(REPO, 'AGENTS.md'), encoding='utf-8') as _sh47:
+            _agents47 = _sh47.read()
+        _there47 = _re47.search(r"\*\*(\d+) 处 `publish\('app_notify'",
+                                _agents47)
+        _split47 = _re47.search(r"`macast/` (\d+) \+ `macast_renderer/[^`]*` (\d+)",
+                                _agents47)
+        check("AGENTS.md 4.2 states the same counted number",
+              _there47 is not None and int(_there47.group(1)) == _sites47,
+              "says %r, counted %d" % (_there47 and _there47.group(1), _sites47))
+        check("...and its per-package split adds up to it",
+              _split47 is not None
+              and [_site_counts47['macast'],
+                   _site_counts47['macast_renderer']]
+              == [int(_g47) for _g47 in _split47.groups()],
+              "says %r, counted %r" % (_split47 and _split47.groups(),
+                                       _site_counts47))
+    finally:
+        if _rumps47 is None:
+            del gui_mod.rumps
+        else:
+            gui_mod.rumps = _rumps47
+except Exception as _e47:
+    _traceback47 = __import__('traceback')
+    _traceback47.print_exc()
+    check("Part 47 runs", False, "{}: {}".format(type(_e47).__name__, _e47))
 
 # --------------------------------------------------------------------------
 

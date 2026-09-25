@@ -1299,12 +1299,18 @@ class Macast(App):
     # The followings are the callback function of program event
 
     def update_service_status(self):
-        if Setting.is_service_running():
+        """Relabel the service switch -- on the thread that owns the menu.
+
+        Both engine hooks land on SERVICE_THREAD, and on Darwin assigning
+        `.text` is an `NSMenuItem setTitle_` (AGENTS.md 4.2).
+        """
+        def apply_label():
             if self.toggle_menuitem is not None:
-                self.toggle_menuitem.text = _('Stop Cast')
-        else:
-            if self.toggle_menuitem is not None:
-                self.toggle_menuitem.text = _('Start Cast')
+                self.toggle_menuitem.text = (
+                    _('Stop Cast') if Setting.is_service_running()
+                    else _('Start Cast'))
+
+        self.call_on_main_thread(apply_label)
         self.update_menu()
 
     def service_start(self):
