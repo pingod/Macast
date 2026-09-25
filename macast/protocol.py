@@ -329,7 +329,6 @@ class ObserveClient:
         self.seq = 0
         self.host = re.findall(r"//([0-9:.]*)", url)[0]
         self.path = re.findall(r"//[0-9:.]*(.*)$", url)[0]
-        print("-----------------------------", self.host)
         self.error = 0
 
     def is_timeout(self):
@@ -468,7 +467,15 @@ class DLNAProtocol(Protocol):
         self.state_list = {}
         self.action_list = {}
         self.event_thread = None
-        self.event_subscribes = {}  # subscribe devices
+        # Subscribe devices. **Copy-on-write**: only the event thread publishes
+        # a new dict into this name (`_sync_subscribe_list`), and every reader
+        # binds this attribute once and iterates that snapshot. Mutating it in
+        # place is what made `for x in protocol.event_subscribes` raise
+        # `dictionary changed size during iteration` while a control point was
+        # subscribing, and that exception escaped `DLNAHandler.SUBSCRIBE` as a
+        # 500 to the client (Part 49). A lock would be the wrong tool:
+        # `send_states_to_clients` holds its iteration across network I/O.
+        self.event_subscribes = {}
         self.state_queue = Queue()  # states needed be send to subscribe devices
         self.removed_device_queue = Queue()  # devices needed be removed
         self.append_device_queue = Queue()  # devices needed be added
@@ -569,15 +576,17 @@ class DLNAProtocol(Protocol):
         """Add a DLNA client to subscribe list
         """
         logger.error("SUBSCRIBE: " + url)
-        for client in self.event_subscribes:
-            if self.event_subscribes[client].url == url and \
-                    self.event_subscribes[client].service == service:
-                s = self.event_subscribes[client]
-                s.update(timeout)
+        # One binding, then iterate that snapshot: another subscriber landing
+        # mid-loop used to raise `dictionary changed size during iteration`,
+        # and the control point got a 500 instead of a SID.
+        subscribers = self.event_subscribes
+        for client in subscribers.values():
+            if client.url == url and client.service == service:
+                client.update(timeout)
                 logger.error("SUBSCRIBE UPDATE")
                 return {
-                    "SID": s.sid,
-                    "TIMEOUT": "Second-{}".format(s.timeout)
+                    "SID": client.sid,
+                    "TIMEOUT": "Second-{}".format(client.timeout)
                 }
         logger.error("SUBSCRIBE ADD")
         client = ObserveClient(service, url, timeout)
@@ -620,10 +629,14 @@ class DLNAProtocol(Protocol):
     def renew_subscribe(self, sid, timeout=1800):
         """Renew a DLNA client in subcribe list
         """
-        if sid in self.event_subscribes:
-            self.event_subscribes[sid].update(timeout)
-            return 200
-        return 412
+        client = self.event_subscribes.get(sid)
+        if client is None:
+            # Two attribute reads ("is it there?" then "give it to me") can
+            # straddle a publish, and then this raised KeyError at the exact
+            # moment a control point was renewing.
+            return 412
+        client.update(timeout)
+        return 200
 
     def _sync_subscribe_list(self):
         """Apply pending subscriber additions/removals to `event_subscribes`.
@@ -640,26 +653,36 @@ class DLNAProtocol(Protocol):
         Returns True if anything changed.
         """
         changed = False
+        updated = None  # built lazily: a quiet tick must not copy the table
         while not self.removed_device_queue.empty():
             sid = self.removed_device_queue.get()
             logger.info("Remove client: {}".format(sid))
-            self.event_subscribes.pop(sid, None)
+            if updated is None:
+                updated = dict(self.event_subscribes)
+            updated.pop(sid, None)
             self.removed_device_queue.task_done()
             changed = True
         while not self.append_device_queue.empty():
             client = self.append_device_queue.get()
             # `add_subscribe` runs on a CherryPy worker thread; registering
             # here (the event thread) is what keeps the dict single-writer.
-            self.event_subscribes[client.sid] = client
+            if updated is None:
+                updated = dict(self.event_subscribes)
+            updated[client.sid] = client
             self.append_device_queue.task_done()
             logger.info("Add client: {} ({})".format(client.sid, client.url))
             changed = True
+        if updated is not None:
+            # The publish point. One attribute assignment, so a reader that
+            # bound `self.event_subscribes` a moment ago keeps iterating a dict
+            # that nothing will resize under it -- see the note in __init__.
+            self.event_subscribes = updated
         return changed
 
     def _reap_timed_out_clients(self):
         """Queue every subscriber whose TIMEOUT has elapsed for removal."""
-        for sid in list(self.event_subscribes):
-            if self.event_subscribes[sid].is_timeout():
+        for sid, client in self.event_subscribes.items():
+            if client.is_timeout():
                 self.remove_subscribe(sid)
 
     def send_states_to_clients(self, state_change_list):
@@ -671,8 +694,10 @@ class DLNAProtocol(Protocol):
             return
         self._sync_subscribe_list()
         # send stateChangeList to client
-        for sid in list(self.event_subscribes):
-            client = self.event_subscribes[sid]
+        # Bound after the sync so a subscriber that just registered is
+        # included, and iterated as a snapshot: this loop does network I/O per
+        # client, which is exactly the window a lock would have to cover.
+        for sid, client in self.event_subscribes.items():
             try:
                 if client.is_timeout():
                     self.remove_subscribe(client.sid)

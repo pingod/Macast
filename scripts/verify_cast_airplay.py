@@ -16878,6 +16878,318 @@ except Exception as _e48:
 
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Part 49: the DLNA subscriber table is published, not resized.
+#
+# `event_subscribes` is written by one thread (the protocol's event loop) and
+# read by several others: every status-page poll goes through ProtocolGroup's
+# property, and every SUBSCRIBE / RENEW / UNSUBSCRIBE from a control point
+# reaches into the same dict. The writer used to mutate it in place, so a
+# reader could be mid-iteration when the table changed size:
+#
+#   RuntimeError: dictionary changed size during iteration
+#
+# Both real reader paths were reproduced against the un-fixed code, with plain
+# threads:
+#   A. ProtocolGroup.event_subscribes -- 110 hits in 8 s with ~40 subscribers
+#      churning. That read sits in a try/except, so the visible symptom is the
+#      settings page losing its "客户端信息" table.
+#   B. DLNAProtocol.add_subscribe -- 148,302 hits in 20 s with a fat table.
+#      B is NOT caught: it escapes `DLNAHandler.SUBSCRIBE` as an HTTP 500 to
+#      the control point, which then stops receiving events. That is the
+#      "投屏后进度条不再动" shape, and it is ours, not the sender's.
+#
+# The fix is copy-on-write rather than a lock, because `send_states_to_clients`
+# holds its iteration across network I/O to each client: a lock would let one
+# dead subscriber block SUBSCRIBE handling for a connect timeout. The event
+# thread now builds a new dict and publishes it with a single assignment; each
+# reader binds the attribute once and iterates that snapshot.
+#
+# Checks: (a) the publish contract, (b) every reader against a real churning
+# writer thread, (c) the behaviour that predates the fix, (d) a text rule so no
+# module reaches back for in-place mutation, (e) the subscribe path staying off
+# stdout.
+#
+# Teeth, measured by putting the old in-place writer back and re-running
+# (mutant 1): 8 of this Part's checks go red -- the three publish-contract
+# checks, the races on the status page's merged table (errors across 27k reads)
+# and on the periodic reap (86 errors), both text guards, and the broadcast
+# reader's work threshold. `add_subscribe`'s own race did *not* collide at a
+# 600-entry table -- its scan is short and the reader spends most of its time
+# outside the loop, so that path is carried by the publish contract and the
+# mutation scan rather than by timing. Say so rather than implying all five
+# races break the old writer.
+# --------------------------------------------------------------------------
+print("\n=== Part 49: the subscriber table cannot be resized under a reader ===")
+try:
+    _PG49 = _load("protocol_group", "protocol_group.py").ProtocolGroup
+    _ROOT49 = os.path.dirname(MACAST)
+
+    class _Sub49(object):
+        """A subscriber that does not answer the door."""
+
+        def __init__(self, service='AVTransport', url='http://10.9.8.7:4000/ev',
+                     timeout=1800):
+            self.service = service
+            self.url = url
+            self.host = '10.9.8.7'
+            self.path = '/event'
+            self.sid = "uuid:sub-{}".format(uuid.uuid4().hex[:12])
+            self.timeout = timeout
+            self.startTime = int(time.time())
+            self.seq = 0
+            self.error = 0
+            self.sent = []
+
+        def is_timeout(self):
+            return int(time.time()) - self.startTime > self.timeout
+
+        def update(self, timeout=1800):
+            self.startTime = int(time.time())
+            self.timeout = timeout
+
+        def send_event_callback(self, data):
+            if len(self.sent) < 5:  # the race would otherwise memorise everything
+                self.sent.append(dict(data))
+            self.sends += 1
+
+    def _table49(*subs):
+        p = protocol.DLNAProtocol()
+        for s in subs:
+            p.append_device_queue.put(s)
+        p._sync_subscribe_list()
+        return p
+
+    # --- (a) the publish contract ------------------------------------------
+    first = _Sub49(url='http://10.9.8.7:1/ev')
+    p49 = _table49(first)
+    held = p49.event_subscribes          # what a reader would be iterating
+
+    added = _Sub49(url='http://10.9.8.7:2/ev')
+    p49.append_device_queue.put(added)
+    p49._sync_subscribe_list()
+    check("an addition is published as a new table, not a resize",
+          p49.event_subscribes is not held
+          and added.sid in p49.event_subscribes
+          and added.sid not in held,
+          "same dict={} new={} old={}".format(
+              p49.event_subscribes is held,
+              len(p49.event_subscribes), len(held)))
+    check("a snapshot a reader is still holding keeps its own membership",
+          [s.sid for s in held.values()] == [first.sid],
+          str([s.sid for s in held.values()]))
+
+    p49.removed_device_queue.put(first.sid)
+    published = p49.event_subscribes
+    p49._sync_subscribe_list()
+    check("a removal is published the same way",
+          first.sid not in p49.event_subscribes and first.sid in published)
+
+    before = p49.event_subscribes
+    quiet = p49._sync_subscribe_list()
+    check("a quiet tick neither copies the table nor claims to have changed it",
+          quiet is False and p49.event_subscribes is before,
+          "{} / {}".format(quiet, p49.event_subscribes is before))
+
+    # --- (b) every reader, against a real churning writer -------------------
+    def _race49(read, seconds=2.0, size=600):
+        """Run `read(proto, group)` flat out while the event thread churns.
+
+        Returns (errors, reads_done, table size). `errors` is the thing under
+        test; the reader has to survive a publish landing mid-iteration.
+
+        The table is kept *fat and steady* (one in, one out per tick) rather
+        than small: `add_subscribe`'s dedupe scan only takes long enough to
+        straddle a publish when there are hundreds of subscribers to walk, and
+        hundreds is exactly what a busy living room with several control points
+        plus a TV polling every service produces. A 40-entry table let the
+        original bug hide here in an early draft of this check.
+        """
+        p = protocol.DLNAProtocol()
+        g = _PG49([("DLNA Protocol", p)])
+        for i in range(size):
+            p.append_device_queue.put(
+                _Sub49(url="http://10.1.{}.{}:9/ev".format(i % 250, i % 251)))
+        p._sync_subscribe_list()
+        stop = threading.Event()
+        errors = []
+        done = [0]
+
+        def _writer():
+            n = 0
+            while not stop.is_set():
+                p.append_device_queue.put(
+                    _Sub49(url="http://10.2.{}.{}:9/ev".format(n % 250, n % 251)))
+                # Keep the table in its band. `add_subscribe` as a reader adds
+                # clients of its own, so the trim has to be by count and not a
+                # fixed "one in, one out".
+                excess = len(p.event_subscribes) - size
+                for sid in list(p.event_subscribes)[:max(1, excess)]:
+                    p.removed_device_queue.put(sid)
+                p._reap_timed_out_clients()
+                p._sync_subscribe_list()
+                n += 1
+
+        def _reader():
+            while not stop.is_set():
+                try:
+                    read(p, g)
+                except Exception as _e:  # noqa: B902 - catching is the point
+                    errors.append("{}: {}".format(type(_e).__name__, _e))
+                done[0] += 1
+
+        wt = threading.Thread(target=_writer, daemon=True)
+        rt = threading.Thread(target=_reader, daemon=True)
+        wt.start()
+        rt.start()
+        time.sleep(seconds)
+        stop.set()
+        wt.join(5)
+        rt.join(5)
+        return errors, done[0], len(p.event_subscribes)
+
+    # Each reader states the table size it races against and the number of
+    # reads that counts as "the reader actually ran". The broadcast reader is
+    # deliberately on a small table: one call walks every subscriber, so on a
+    # 600-entry table it managed a single read per two seconds -- the point of
+    # that reader is the bind-after-drain ordering, and the fat tables are what
+    # the other four are for. Thresholds sit ~50x under this machine's observed
+    # counts so a slower CI box cannot turn "got work to do" into a flake.
+    for _name49, _fn49, _size49, _min49 in (
+            ("the status page's merged table (ProtocolGroup.event_subscribes)",
+             lambda p, g: len(g.event_subscribes), 600, 500),
+            ("a SUBSCRIBE arriving (add_subscribe scans the table to dedupe)",
+             lambda p, g: p.add_subscribe("AVTransport",
+                                          "http://10.9.9.9:1/ev", 1800), 600, 20),
+            ("the periodic reap (_reap_timed_out_clients)",
+             lambda p, g: p._reap_timed_out_clients(), 600, 500),
+            ("a broadcast in flight (send_states_to_clients)",
+             lambda p, g: p.send_states_to_clients({"TransportState": "PLAYING"}),
+             25, 3),
+            ("a RENEW whose sid vanished underneath it (renew_subscribe)",
+             lambda p, g: [p.renew_subscribe(s, 1800)
+                           for s in list(p.event_subscribes) + ["uuid:gone"]],
+             600, 50)):
+        _errs49, _done49, _live49 = _race49(_fn49, size=_size49)
+        check("no resize error while " + _name49,
+              not _errs49, "{} reads against a table of ~{}: {} {}".format(
+                  _done49, _live49, len(_errs49), _errs49[:2]))
+        check("and that reader actually got work to do (" + _name49 + ")",
+              _done49 > _min49, "{} reads (wanted >{})".format(_done49, _min49))
+
+    # --- (c) the behaviour that predates the fix ----------------------------
+    a = _Sub49(url='http://10.5.5.5:1/ev')
+    p49 = _table49(a)
+    again = p49.add_subscribe('AVTransport', 'http://10.5.5.5:1/ev', 60)
+    check("a repeat SUBSCRIBE from the same client renews instead of adding",
+          again['SID'] == a.sid and len(p49.event_subscribes) == 1,
+          "{} vs {} / {}".format(again['SID'], a.sid, len(p49.event_subscribes)))
+    check("and the renewal really landed on that subscriber",
+          a.timeout == 60, repr(a.timeout))
+
+    check("a RENEW for an unknown sid answers 412 instead of raising",
+          p49.renew_subscribe("uuid:nope", 1800) == 412)
+
+    # `send_states_to_clients` binds the table *after* draining the append
+    # queue. Bind before the drain and the client that just subscribed hears
+    # nothing until the following state change -- which may never come (§4.2,
+    # the same window that made the client table read "暂无订阅客户端").
+    fresh = _Sub49(url='http://10.6.6.6:1/ev')
+    p49 = protocol.DLNAProtocol()
+    p49.append_device_queue.put(fresh)
+    p49.send_states_to_clients({'TransportState': 'PLAYING'})
+    check("a subscriber registered during this pass receives this state change",
+          {'TransportState': 'PLAYING'} in fresh.sent, repr(fresh.sent))
+
+    dying = _Sub49(url='http://10.7.7.7:1/ev')
+    dying.drops = 0
+
+    def _refuse49(data):
+        dying.drops += 1
+        raise OSError("connection refused")
+
+    dying.send_event_callback = _refuse49
+    dying.error = 11
+    p49 = _table49(dying)
+    p49.send_states_to_clients({'TransportState': 'STOPPED'})
+    check("a subscriber dropped mid-broadcast is gone by the end of the call",
+          dying.sid not in p49.event_subscribes
+          and p49.removed_device_queue.qsize() == 0 and dying.drops == 1,
+          "subs={} pending={} sends={}".format(len(p49.event_subscribes),
+                                               p49.removed_device_queue.qsize(),
+                                               dying.drops))
+
+    # A child's published table must still reach the group's merged view --
+    # copy-on-write is only a win if the aggregation follows the publish.
+    merged_child = _table49(_Sub49(url='http://10.8.8.8:1/ev'))
+    g49 = _PG49([("DLNA Protocol", merged_child)])
+    check("the group's view is the child's published table",
+          set(g49.event_subscribes) == set(merged_child.event_subscribes)
+          and len(g49.event_subscribes) == 1,
+          "{} vs {}".format(list(g49.event_subscribes),
+                            list(merged_child.event_subscribes)))
+
+    # --- (d) nobody reaches back for in-place mutation ---------------------
+    import re as _re49
+    _mut49 = _re49.compile(
+        r'event_subscribes\s*(\[[^\]]*\]\s*=[^=]'
+        r'|\.pop\(|\.clear\(|\.update\(|\.setdefault\(|\.del\s)')
+    _src49 = open(os.path.join(MACAST, 'protocol.py'), encoding='utf-8').read()
+    _hit49 = _mut49.search(_src49)
+    check("protocol.py resizes the table in place nowhere",
+          _hit49 is None, repr(_hit49 and _hit49.group(0)))
+    _assigns49 = _re49.findall(r'^\s*self\.event_subscribes\s*=', _src49, _re49.M)
+    check("and binds it exactly twice: the empty table and the publish",
+          len(_assigns49) == 2, repr(_assigns49))
+
+    _else49 = []
+    for _root_a, _dirs, _files in os.walk(_ROOT49):
+        if any(seg in _root_a for seg in ('.git', '.venv', 'node_modules', 'build', 'dist')):
+            continue
+        for _f in _files:
+            if not _f.endswith('.py'):
+                continue
+            if _f in ('protocol.py', 'verify_cast_airplay.py'):
+                continue
+            _path49 = os.path.join(_root_a, _f)
+            try:
+                with open(_path49, encoding='utf-8') as _fh49:
+                    _txt49 = _fh49.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if _mut49.search(_txt49):
+                _else49.append(os.path.relpath(_path49, _ROOT49))
+    check("no other file in the repo resizes someone else's table",
+          not _else49, str(_else49))
+
+    # --- (e) the subscribe path stays off stdout ----------------------------
+    #
+    # `ObserveClient.__init__` used to `print()` the subscriber's host: one
+    # line per subscription into a stream nobody reads (the file §1 points
+    # people at is macast.log), which a stress run measured at tens of
+    # megabytes -- and in the windowed Windows build there is no stdout at all
+    # (Part 41).
+    import io as _io49
+    import contextlib as _cl49
+    _buf49 = _io49.StringIO()
+    with _cl49.redirect_stdout(_buf49):
+        _c49 = protocol.ObserveClient('AVTransport', 'http://10.1.2.3:56780/ev', 300)
+    check("a new subscriber says nothing on stdout",
+          _buf49.getvalue() == '', repr(_buf49.getvalue()[:80]))
+    # `host` keeps the port because it is what `HTTPConnection` is handed, and
+    # `path` is everything after it; the two are re-joined into the NOTIFY, so
+    # a "tidy" regex that dropped the colon would send events to port 80.
+    check("and still splits the callback URL the way NOTIFY re-joins it",
+          _c49.host == '10.1.2.3:56780' and _c49.path == '/ev'
+          and _c49.timeout == 300,
+          "{} + {} / {}".format(_c49.host, _c49.path, _c49.timeout))
+except Exception as _e49:
+    import traceback as _traceback49
+    _traceback49.print_exc()
+    check("Part 49 runs", False, "{}: {}".format(type(_e49).__name__, _e49))
+
+# --------------------------------------------------------------------------
+
 passed = sum(1 for _, ok, _ in RESULTS if ok)
 failed = len(RESULTS) - passed
 print("\n=== SUMMARY: {}/{} passed ===".format(passed, len(RESULTS)))

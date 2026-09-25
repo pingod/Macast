@@ -298,6 +298,13 @@ class ProtocolGroup(Protocol):
         """
         merged = {}
         for title, protocol in list(self._children):
+            # One read of the attribute per child, then iterate that: the
+            # owning protocol's event thread *replaces* its subscriber dict
+            # rather than resizing it (see the note in `DLNAProtocol.__init__`),
+            # so the dict behind this reference cannot change under the loop.
+            # This property is called from CherryPy workers on every status
+            # poll, and it used to raise `dictionary changed size during
+            # iteration` there.
             subscribers = getattr(protocol, "event_subscribes", None)
             if not isinstance(subscribers, dict):
                 continue
