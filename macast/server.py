@@ -40,6 +40,25 @@ def auto_change_port(fun):
     return wrapper
 
 
+def _openssl_error(exc):
+    """The first line openssl actually printed for this failure, or ''.
+
+    `subprocess.run(check=True)` throws away the useful half of a failed
+    certificate run -- the string repr is the command and the exit status -- so
+    every message about cert generation used to say nothing a reader could act
+    on. stderr is where openssl writes the reason.
+    """
+    raw = getattr(exc, 'stderr', None)
+    if not raw:
+        return ''
+    text = raw.decode('utf-8', 'replace') if isinstance(raw, bytes) else str(raw)
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line
+    return ''
+
+
 class AutoPortServer(Server):
     """
     The modified Server can give priority to the preset port (Setting.DEFAULT_PORT).
@@ -324,6 +343,18 @@ class Service:
             logger.error("Failed to generate self-signed certificate: "
                          "no openssl binary found")
             return None, None
+        # openssl will not create a file inside a directory that does not exist,
+        # and on a fresh install nothing has made it yet -- Setting.save() is the
+        # only other writer, and the HTTPS/cast channels can be reached before
+        # the first save. Without this the generation failed, the cast receiver
+        # then raised FileNotFoundError out of load_cert_chain on the real port,
+        # and the one line in the log blamed '-addext'.
+        try:
+            os.makedirs(SETTING_DIR, exist_ok=True)
+        except OSError as e:
+            logger.error("Cannot create the config directory %s: %s",
+                         SETTING_DIR, e)
+            return None, None
         cmd = [
             openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
             '-keyout', key_path, '-out', cert_path,
@@ -333,11 +364,15 @@ class Service:
         try:
             try:
                 subprocess.run(cmd, check=True, capture_output=True, timeout=30)
-            except subprocess.CalledProcessError:
+            except subprocess.CalledProcessError as first:
                 # LibreSSL / older OpenSSL cannot parse -addext: retry with a
                 # plain self-signed cert (works, but has no subjectAltName).
-                logger.warning("-addext unsupported by %s, retrying without it",
-                               openssl)
+                # Quote what openssl actually said -- this branch used to claim
+                # '-addext unsupported' for *every* non-zero exit, so a failure
+                # with another cause (a directory that vanished, a read-only
+                # home) was logged as a flag-compatibility problem.
+                logger.warning("%s rejected -addext (%s), retrying without it",
+                               openssl, _openssl_error(first))
                 subprocess.run(cmd[:-2], check=True, capture_output=True,
                                timeout=30)
             logger.info("Generated self-signed certificate: {}".format(cert_path))
@@ -345,7 +380,8 @@ class Service:
             Setting.set(SettingProperty.Https_Key, key_path)
             return cert_path, key_path
         except Exception as e:
-            logger.error("Failed to generate self-signed certificate: {}".format(e))
+            logger.error("Failed to generate self-signed certificate: %s (%s)",
+                         _openssl_error(e) or e, openssl)
             return None, None
 
     def notify(self):

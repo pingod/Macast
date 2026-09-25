@@ -568,6 +568,26 @@ finally:
 # --------------------------------------------------------------------------
 print("\n=== Part 3: end-to-end over real sockets ===")
 
+# The cast server cannot start without a certificate, and the certificate is
+# written into the config directory -- which `Setting.save()` is the only thing
+# that ever creates. So this section used to run against the developer's real
+# `~/Library/Application Support/Macast`: on a machine that has one it passed
+# while quietly writing Https_Cert/Https_Key into his settings, and on a machine
+# that does not (every CI runner, every fresh install) all of the cast checks
+# died with `FileNotFoundError` out of load_cert_chain -- and the single log
+# line about it claimed "-addext unsupported", which was never the reason.
+# Redirect the whole config surface at a directory that does not exist yet, so
+# what runs here is the clean-machine path.
+_tmp3 = _tempfile.mkdtemp(prefix="macast-e2e-")
+_saved3_dirs = (utils.SETTING_DIR, cast.SETTING_DIR)
+_saved3_setting = (utils.Setting.setting, utils.Setting.setting_path)
+server = _load("server", "server.py")
+_saved3_server_dir = server.SETTING_DIR
+os.rmdir(_tmp3)
+utils.SETTING_DIR = cast.SETTING_DIR = server.SETTING_DIR = _tmp3
+utils.Setting.setting = {}
+utils.Setting.setting_path = os.path.join(_tmp3, "macast_setting.json")
+
 
 def cast_send(sock, src, dst, ns, payload, binary=False):
     blob = cast.encode_cast_message(src, dst, ns, payload, binary)
@@ -838,6 +858,87 @@ check("airplay mDNS advertises the port actually bound",
       any(port == ap.rtsp_port for _, _, port in MockAdvertiser.calls),
       "bound={} advertised={}".format(ap.rtsp_port, MockAdvertiser.calls))
 
+# 3d: the certificate that made the TLS receiver above possible.
+#
+# `openssl req -keyout <path>` exits non-zero when the parent directory is
+# missing, and the only thing in the app that ever created that directory was
+# `Setting.save()`. So on a machine that had not saved settings yet, every one
+# of the cast checks died in `load_cert_chain`, and the log's single line about
+# it claimed "-addext unsupported" -- a guess that sent the reader to LibreSSL
+# instead of to the missing directory.
+import logging as _logging3  # noqa: E402
+
+_cert3 = os.path.join(_tmp3, "macast.crt")
+_key3 = os.path.join(_tmp3, "macast.key")
+check("the cast receiver above ran on a directory it had to create itself",
+      os.path.isdir(_tmp3) and os.path.exists(_cert3) and os.path.exists(_key3),
+      "dir={} cert={} key={}".format(os.path.isdir(_tmp3),
+                                     os.path.exists(_cert3),
+                                     os.path.exists(_key3)))
+check("the settings that generator wrote stayed inside the redirected directory",
+      os.path.exists(os.path.join(_tmp3, "macast_setting.json")),
+      utils.Setting.setting_path)
+
+_nest3 = os.path.join(_tempfile.mkdtemp(prefix="macast-cert-"),
+                      "no", "such", "directory")
+_saved_dir3b = server.SETTING_DIR
+try:
+    server.SETTING_DIR = _nest3
+    _c3, _k3 = server.Service._ensure_self_signed_cert()
+    check("the certificate generator creates the directory it writes into",
+          _c3 and _k3 and os.path.isdir(_nest3) and os.path.exists(_c3),
+          "got {!r} nested={!r}".format((_c3, _k3), os.path.isdir(_nest3)))
+
+    # 3e: and when it cannot make a certificate, the message must be openssl's
+    # own words. The failure path is the only thing a user with a broken HTTPS
+    # channel ever reads.
+    class _Collect3(_logging3.Handler):
+        def __init__(self):
+            _logging3.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append((record.levelno, record.getMessage()))
+
+    _sink3 = _Collect3()
+    _real_run3 = server.subprocess.run
+
+    def _boom(*a, **k):
+        raise subprocess.CalledProcessError(
+            1, a[0] if a else [], output=b'',
+            stderr=b'Unable to load number sequence: readonly filesystem')
+
+    # A second, still-empty directory: the generator returns the certificate it
+    # already made, so pointing the failure path at the directory above would
+    # have exercised nothing (and the first draft of these checks passed
+    # exactly that nothing -- the call answered with the previous run's files).
+    _nest3b = os.path.join(os.path.dirname(_nest3), "empty")
+    server.SETTING_DIR = _nest3b
+    server.subprocess.run = _boom
+    server.logger.addHandler(_sink3)
+    try:
+        _failed = server.Service._ensure_self_signed_cert()
+    finally:
+        server.logger.removeHandler(_sink3)
+        server.subprocess.run = _real_run3
+    _said3 = " | ".join(m for _lv, m in _sink3.lines)
+    _errs3 = " | ".join(m for lv, m in _sink3.lines
+                        if lv >= _logging3.ERROR)
+    check("a failed certificate run is refused, not half-generated",
+          _failed == (None, None), str(_failed))
+    check("the retry warning quotes what openssl said, instead of guessing "
+          "at -addext", "readonly filesystem" in _said3, _said3)
+    check("and so does the error the reader is left with",
+          "readonly filesystem" in _errs3, _errs3)
+finally:
+    server.SETTING_DIR = _saved_dir3b
+
+utils.SETTING_DIR, cast.SETTING_DIR = _saved3_dirs
+server.SETTING_DIR = _saved3_server_dir
+utils.Setting.setting, utils.Setting.setting_path = _saved3_setting
+_shutil.rmtree(_tmp3, ignore_errors=True)
+_shutil.rmtree(os.path.dirname(_nest3), ignore_errors=True)
+
 # 4b: the advertised instance name must be a legal DNS-SD label.
 #
 # Regression: Macast's default friendly name is "Macast(Hostname.local)" —
@@ -964,7 +1065,8 @@ check("bare hostname gets a .local suffix",
 # no longer answered, and switching back announced nothing.
 print("\n=== Part 4c: SSDP follows the active protocol ===")
 try:
-    server = _load("server", "server.py")
+    # Already loaded above, for the real-socket cast server's certificate.
+    server = sys.modules.get("macast.server") or _load("server", "server.py")
 
     class _FakePlugin(object):
         def __init__(self, *a, **k):
