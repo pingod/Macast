@@ -4814,9 +4814,14 @@ done
               and mirror.QUALITIES['source'][0] == 0, str(mirror.QUALITIES))
         check("no preset outruns a Wi-Fi link, because an uncapped bitrate is "
               "the latency the user complains about and a blurred picture",
+              # Half a second of VBV, not the one second it was: a full second
+              # of buffer is a full second the encoder may spend before it owes
+              # us a byte, and this round is about the latency the user feels.
+              # Google's own tab-cast sender sets rc_buffer_size = bitrate/2.
               max(rate for _h, rate in mirror.QUALITIES.values()) <= 8000000
               and all(mirror.rate_caps(rate) == [
-                  '-maxrate', str(int(rate * 1.5)), '-bufsize', str(rate)]
+                  '-maxrate', str(int(rate * 1.5)), '-bufsize',
+                  str(int(rate) // 2)]
                   for _h, rate in mirror.QUALITIES.values()),
               str(mirror.QUALITIES))
         check("the source preset asks for no scaling at all",
@@ -5731,10 +5736,20 @@ done
               and _tsh23[_tsh23.index('-muxdelay') - 1] == 'mpegts'
               and _tsh23[_tsh23.index('-g') + 1] == str(mirror.live_gop(25))
               and 'mpeg2video' not in _tsh23, str(_tsh23))
+        #: Derived from the code's own decision instead of typed in, because two
+        #: things moved under these numbers in the 2026-10 latency round: the
+        #: VBV is half a second rather than one, and the VideoToolbox path asks
+        #: for 1.5x the wire rate because it undershoots `-b:v` by a third.
+        #: What has to stay true is the *relationship* -- a ceiling computed
+        #: from a different number than the target is not a ceiling -- and
+        #: pinning that reads the same on a Linux runner as it does here.
+        _bvh23 = int(_tsh23[_tsh23.index('-b:v') + 1])
         check("the H.264 shapes are rate-capped, MPEG-2 keeps its CBR triplet",
               '-maxrate' in _tsh23 and '-bufsize' in _tsh23
-              and _tsh23[_tsh23.index('-maxrate') + 1] == '9000000'
-              and _tsh23[_tsh23.index('-bufsize') + 1] == '6000000'
+              and _bvh23 == mirror.rate_target(_h26423.bitrate, 'hardware')
+              and int(_tsh23[_tsh23.index('-maxrate') + 1])
+              == int(_bvh23 * 1.5)
+              and int(_tsh23[_tsh23.index('-bufsize') + 1]) == _bvh23 // 2
               and '-minrate' not in _tsh23
               and _ps23[_ps23.index('-minrate') + 1]
               == _ps23[_ps23.index('-maxrate') + 1]
@@ -7612,7 +7627,7 @@ try:
         check("the frame size and rate are claimed up front",
               stream['resolutions'] == [{'width': 1280, 'height': 720}]
               and stream['maxFrameRate'] == '24000/1000'
-              and stream['maxBitRate'] == mirror.CAST_STREAM_MAX_BITRATE
+              and stream['maxBitRate'] == mirror.cast_stream_bitrate_cap()
               and stream['targetDelay'] == 200, str(stream))
         _key, _mask = mirror.aes_material()
         check("the sender invents both key and mask, sixteen bytes each",
@@ -7956,24 +7971,44 @@ try:
               _stats24.get('kind') == 'caststream' and _stats24['frames'] >= 1
               and _stats24['clients'] == 1, str(_stats24))
 
-        check("twelve un-acknowledged frames is the window, then frames shed",
+        #: The window is a *duration* now, not a count. With nothing being
+        #: acknowledged it closes `MIN_WINDOW_MS` after the first un-acked
+        #: picture, so what is in flight is however many this fake encoder
+        #: managed to push in that time -- six at its 10 ms cadence -- and the
+        #: 120-frame ceiling never comes into it. That is the whole point of the
+        #: change: twelve frames at 24 fps was 500 ms of queue against a
+        #: protocol that promises a 200 ms target delay, i.e. 7.6x the budget,
+        #: and it was most of what「低延迟」was actually doing. So the claim
+        #: pinned here is about the time the queue spans, not its length.
+        _win24 = mir24._sink._window_ms()
+        check("an un-acknowledged stream fills the window and then sheds frames",
               _wait_until(lambda: mir24._sink.drops > 0
-                          and mir24._sink.in_flight()
-                          == mirror.MAX_IN_FLIGHT_FRAMES, timeout=20),
+                          and mir24._sink.in_flight() > 0, timeout=20),
               'drops={} in_flight={}'.format(mir24._sink.drops,
                                              mir24._sink.in_flight()))
-        # The encoder produces a picture every 10 ms and the window is twelve
-        # deep, so a freed window refills long before a 0.1 s poll can notice.
-        # Pausing the fake encoder is what turns this from a race into a claim.
+        _queue24 = list(mir24._sink._in_flight)
+        _span24 = (_queue24[-1][3] - _queue24[0][3]) * 1000.0
+        check("...and what it holds is bounded by that duration, not by a frame "
+              "count: the whole un-acked queue spans less than one window",
+              _win24 == mirror.MIN_WINDOW_MS
+              and 0 < _span24 < _win24 + 25.0
+              and len(_queue24) < mirror.MAX_IN_FLIGHT_FRAMES,
+              '{} frames spanning {:.1f} ms of a {:.0f} ms window (ceiling {})'
+              .format(len(_queue24), _span24, _win24,
+                      mirror.MAX_IN_FLIGHT_FRAMES))
+        # The encoder produces a picture every 10 ms and the window is a few
+        # frames deep, so a freed window refills long before a 0.1 s poll can
+        # notice. Pausing the fake encoder is what turns this from a race into a
+        # claim.
         _before24 = mir24._sink.frames
         open(_pause24, 'w').close()
-        device24.ack(mirror.MAX_IN_FLIGHT_FRAMES - 1)
+        _newest24 = mir24._sink._in_flight[-1][0] & 0xFF
+        device24.ack(_newest24)
         check("a checkpoint frees the whole window at once",
               _wait_until(lambda: mir24._sink.in_flight() == 0
-                          and mir24._sink.acked
-                          == mirror.MAX_IN_FLIGHT_FRAMES - 1, timeout=10),
-              'in_flight={} acked={}'.format(mir24._sink.in_flight(),
-                                             mir24._sink.acked))
+                          and mir24._sink.acked == _newest24, timeout=10),
+              'in_flight={} acked={} (checkpointed {})'.format(
+                  mir24._sink.in_flight(), mir24._sink.acked, _newest24))
         os.remove(_pause24)
         check("and the frames start flowing again",
               _wait_until(lambda: mir24._sink.frames > _before24, timeout=10),
@@ -7994,7 +8029,7 @@ try:
             # This fake device only ever acknowledges when the test tells it to,
             # and a full window is allowed to hold back even a key frame -- so
             # watching for the redraw without reopening the credit would race
-            # the 12-frame window rather than test the picture-loss path.
+            # the in-flight window rather than test the picture-loss path.
             device24.ack((mir24._sink._frame_id - 1) & 0xFF)
             return _keys24_seen() - _keys_before24 \
                 and mir24._sink._awaiting_key is False
@@ -8011,7 +8046,15 @@ try:
         utils.Setting.set(mirror.SettingProperty.Mirror_Quality, 'source')
         _note24 = mirror.ScreenMirrorSetting._quality_note()
         check("the console admits what the low-latency channel caps",
-              '4.5 Mbps' in _note24 and '1920x1080' in _note24, _note24)
+              # The ceiling is asked of the code rather than typed in, because
+              # it stopped being one number: it is 8 Mbps while an OS AES backend
+              # is carrying the keystream and `CAST_STREAM_DEGRADED_BITRATE`
+              # while the pure-Python one is. A literal here would pass on the
+              # machine that wrote it and fail on every runner that has no
+              # libcrypto -- i.e. exactly the machines where the degraded path
+              # is the one being shipped.
+              '%.1f Mbps' % (mirror.cast_stream_bitrate_cap() / 1e6) in _note24
+              and '1920x1080' in _note24, _note24)
         utils.Setting.set(mirror.SettingProperty.Mirror_Quality, '720')
         check("and a 720p request keeps its own size",
               '1280x720' in mirror.ScreenMirrorSetting._quality_note())
@@ -15881,7 +15924,10 @@ _CN44 = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7,
 def _num44(pattern, text=_help44):
     """The number the prose states -- Arabic digits (whole or decimal) or a
     Chinese numeral. The decimals are not decoration: the bitrate ceiling that
-    caps the low-latency channel is written "4.5 Mbps"."""
+    caps the low-latency channel is written "8.0 Mbps" in the help overlay, and
+    a pattern that only matched integers would read the 8 of some other
+    sentence. (It said 4.5 here until the ceiling moved; a docstring quoting a
+    constant is a second place that constant lives.)"""
     m = _re44.search(pattern, text)
     if not m:
         return None
@@ -18036,6 +18082,523 @@ except Exception as _e51:
     import traceback as _traceback51
     _traceback51.print_exc()
     check("Part 51 runs", False, "{}: {}".format(type(_e51).__name__, _e51))
+
+# --------------------------------------------------------------------------
+# Part 52: the 2026-10 latency round -- what carries the keystream, how big the
+# in-flight window is, what the encoder is asked for, and the two knobs that
+# used to be constants.
+#
+# Four things changed in `screen_mirror.py` and each one is the kind of change
+# that leaves no trace in a stubbed suite:
+#
+#   * AES-128-CTR moved off the pure-Python schedule and onto the operating
+#     system's cipher (CommonCrypto / bcrypt / libcrypto, all through ctypes --
+#     no new import root, which is why Part 30 and the packaging tables did not
+#     move). The bitrate ceiling that pinned this channel below both Google's
+#     default and Chrome's for its whole life was a *crypto* limit, not a
+#     network one, so it moved with it: 4.5 Mbps -> 8 Mbps, and 4.5 survives
+#     only as the degraded-mode number for a machine where no OS backend loads.
+#   * The in-flight window stopped being a frame count. 12 frames at 24 fps is
+#     500 ms of queue against a protocol that promises a 200 ms target delay --
+#     7.6x the budget, and it was most of what「低延迟」was actually doing.
+#   * The encoder argv picked up three flags from Google's own reference sender
+#     (`+low_delay`, `-thread_type slice`, and a half-second VBV instead of a
+#     one-second one), and VideoToolbox now asks for 1.5x the wire rate because
+#     it undershoots `-b:v` by a third.
+#   * `DLNA_PREFILL_SECONDS` and `LIVE_EDGE_SECONDS` became user knobs. Both are
+#     numbers the user *feels* as delay, and the DLNA one cannot be measured
+#     here (no such television on this LAN), so it ships as a knob with the cost
+#     printed next to it rather than as a guess.
+#
+# Group B is the one that did not exist before: every earlier AES case built a
+# fresh cipher per call, so none of them ever exercised the production shape --
+# ONE handle, reseeded per access unit, released at the end. That shape is where
+# a per-frame reset that silently drifts would live.
+#
+# Groups A and B are written to be non-vacuous on a runner that has no OS cipher
+# at all: the degrade path is driven by a *synthetic* backend rather than by
+# whatever this machine happens to have, so the same case means the same thing
+# here and in CI.
+# --------------------------------------------------------------------------
+print("\n=== Part 52: the 2026-10 latency round ===")
+import traceback as _traceback52
+
+_tmp52 = _tempfile.mkdtemp(prefix="macast-latency52-")
+_srv52 = None
+_saved52 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+try:
+    import re as _re52
+    import inspect as _inspect52
+    import hashlib as _hashlib52
+
+    utils.SETTING_DIR = _tmp52
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp52, "macast_setting.json")
+    mirror52 = _load_plugin("screen_mirror_plugin_v52", "screen_mirror.py")
+    m52 = mirror52
+
+    # -- A. what is carrying the keystream, and can the code say ---------------
+    _native52 = m52._NATIVE_AES
+    _expected52 = ('commoncrypto' if sys.platform == 'darwin'
+                   else 'bcrypt' if os.name == 'nt' else 'libcrypto')
+    check("the OS cipher slot is either empty or a named 4-tuple",
+          _native52 is None
+          or (len(_native52) == 4 and isinstance(_native52[0], str)
+              and _native52[0] and all(callable(f) for f in _native52[1:])),
+          repr(_native52 if _native52 is None else (_native52[0],)))
+    check("and `native_aes_name()` is slot 0, so no call site indexes the tuple",
+          m52.native_aes_name() == (_native52[0] if _native52 else ''),
+          repr(m52.native_aes_name()))
+    check("the name is the one this platform's chain offers -- a backend from "
+          "another OS would mean the chain stopped being platform-disjoint",
+          m52.native_aes_name() in ('', _expected52),
+          '{} on {}'.format(m52.native_aes_name() or '(none)', sys.platform))
+    check("the ceiling follows the cipher: 8 Mbps on an OS backend, and the "
+          "degraded number only when there is none",
+          m52.cast_stream_bitrate_cap() == (
+              m52.CAST_STREAM_MAX_BITRATE if _native52 is not None
+              else m52.CAST_STREAM_DEGRADED_BITRATE)
+          and m52.CAST_STREAM_MAX_BITRATE == 8000000
+          and m52.CAST_STREAM_DEGRADED_BITRATE
+          < m52.CAST_STREAM_MAX_BITRATE,
+          '{} ({} / {})'.format(m52.cast_stream_bitrate_cap(),
+                                m52.CAST_STREAM_MAX_BITRATE,
+                                m52.CAST_STREAM_DEGRADED_BITRATE))
+    check("the two numbers stayed two: a degraded-mode constant collapsed back "
+          "into the design constant is how this channel spent its whole life "
+          "under both Google's 10 Mbps and Chrome's 5",
+          m52.CAST_STREAM_DEGRADED_BITRATE == 4500000, '')
+
+    _key52 = bytes(range(16))
+    _mask52 = b'\x11' * 16
+    #: The reference answer, on the pure-Python schedule, with the native slot
+    #: held empty for the whole Part. Every comparison below is against this.
+    _saved_native52 = m52._NATIVE_AES
+    m52._NATIVE_AES = None
+    _pure52 = m52.Aes128Ctr(_key52)
+    m52._NATIVE_AES = _saved_native52
+
+    check("the live backend passes the known-answer test it was admitted by",
+          _native52 is None or m52._aes_known_answer(_native52[1:]) is True,
+          m52.native_aes_name() or '(degraded)')
+    check("...and a backend that hands the plaintext back is refused, not "
+          "trusted because it did not raise",
+          m52._aes_known_answer(
+              (lambda key: object(), lambda h, iv, data: data,
+               lambda h: None)) is False, '')
+    _drift_calls52 = []
+
+    def _drift52(handle, iv, data):
+        _drift_calls52.append(len(data))
+        good = _pure52.crypt(iv, data)
+        if len(_drift_calls52) == 3:      # the reseed of the odd-length buffer
+            return bytes(bytearray(b ^ 0xFF for b in good))
+        return good
+
+    check("...and one that loses the counter block when it is reseeded is "
+          "refused on the reseed, not on the first call",
+          m52._aes_known_answer(
+              (lambda key: object(), _drift52, lambda h: None)) is False
+          and len(_drift_calls52) == 3, str(_drift_calls52))
+    check("...and one that invents a byte for an empty buffer is refused "
+          "(create_string_buffer(0).raw is b'\\x00', not b'')",
+          m52._aes_known_answer(
+              (lambda key: object(),
+               lambda h, iv, d: _pure52.crypt(iv, d) if d else b'\x00',
+               lambda h: None)) is False, '')
+
+    # -- B. ONE cipher, reseeded per access unit ------------------------------
+    _live52 = m52.Aes128Ctr(_key52)
+    check("the instance really is on the slot this module loaded -- a "
+          "byte-for-byte comparison between two pure-Python ciphers would pass "
+          "and mean nothing",
+          (_live52._native is not None) == (_saved_native52 is not None),
+          'native={} module={}'.format(_live52._native is not None,
+                                       _saved_native52 is not None))
+    _ids52 = (list(range(256)) + [256, 1000, 65535, 65536,
+                                  2 ** 31 - 1, 2 ** 31, 2 ** 32 - 1])
+    _payload52 = lambda fid: bytes(bytearray(
+        (fid * 7 + i) & 0xFF for i in range(1009 if fid % 37 else 1)))
+    _bad52 = []
+    for _fid52 in _ids52:
+        _iv52 = m52.frame_iv(_mask52, _fid52)
+        _p52 = _payload52(_fid52)
+        if _live52.crypt(_iv52, _p52) != _pure52.crypt(_iv52, _p52):
+            _bad52.append(_fid52)
+    check("{} frames through one reused handle, each reseeded with its own "
+          "nonce, are the bytes a fresh cipher would have produced".format(
+              len(_ids52)),
+          not _bad52, str(_bad52[:8]))
+
+    if os.path.exists('/usr/bin/openssl'):
+        def _openssl52(iv, data):
+            _d52 = _tempfile.mkdtemp(prefix="macast-ssl52-")
+            try:
+                _in52 = os.path.join(_d52, 'in')
+                with open(_in52, 'wb') as _fh52:
+                    _fh52.write(data)
+                return subprocess.run(
+                    ['/usr/bin/openssl', 'enc', '-aes-128-ctr',
+                     '-K', _key52.hex(), '-iv', iv.hex(), '-in', _in52],
+                    capture_output=True, check=True).stdout
+            finally:
+                _shutil.rmtree(_d52, ignore_errors=True)
+
+        _long52 = bytes(bytearray(range(256))) * 163 + bytes(bytearray(range(243)))
+        _ssl52 = []
+        for _fid52, _data52 in ((9, b'\x07'), (9, bytes(bytearray(range(37)))),
+                                (9, _long52)):
+            _iv52 = m52.frame_iv(_mask52, _fid52)
+            _ssl52.append((_fid52, len(_data52),
+                           _live52.crypt(_iv52, _data52)
+                           == _openssl52(_iv52, _data52)))
+        check("openssl agrees with the reused handle on 1 byte, an unaligned "
+              "tail and 41,667 bytes",
+              all(ok for _f, _n, ok in _ssl52), str(_ssl52))
+    else:
+        check("openssl agrees with the reused handle on 1 byte, an unaligned "
+              "tail and 41,667 bytes", True, 'no /usr/bin/openssl here')
+
+    check("all four known-answer vectors still pass through the class, the "
+          "empty one included",
+          _live52.crypt(m52._AES_KAT_IV, m52._AES_KAT_SHORT)
+          == m52._AES_KAT_SHORT_OUT
+          and _live52.crypt(m52._AES_KAT_IV, m52._AES_KAT_ODD)
+          == m52._AES_KAT_ODD_OUT
+          and _live52.crypt(m52._AES_KAT_IV, b'') == b''
+          and _hashlib52.sha256(
+              _live52.crypt(m52._AES_KAT_IV, m52._AES_KAT_LONG)).hexdigest()
+          == m52._AES_KAT_LONG_SHA, '')
+
+    #: The three routing cases below install a *synthetic* backend, so they
+    #: mean the same thing on a machine that has an OS cipher and on one that
+    #: does not. Nothing here depends on `_saved_native52`.
+    _handle52 = ('handle', _key52)
+    _routed52 = []
+    _ok_backend52 = ('synthetic', lambda key: _handle52,
+                     lambda h, iv, d: (_routed52.append(h),
+                                       _pure52.crypt(iv, d))[1],
+                     lambda h: None)
+    m52._NATIVE_AES = _ok_backend52
+    _syn52 = m52.Aes128Ctr(_key52)
+    m52._NATIVE_AES = _saved_native52
+    _iv52 = m52.frame_iv(_mask52, 3)
+    _data52 = os.urandom(5000)
+    check("the class routes through the backend tuple and carries its own "
+          "handle to it -- nothing indexes `_NATIVE_AES` by position",
+          _syn52.crypt(_iv52, _data52) == _pure52.crypt(_iv52, _data52)
+          and _routed52 == [_handle52], str(len(_routed52)))
+
+    _released52 = []
+
+    def _boom52(handle, iv, data):
+        raise OSError('device gone')
+
+    m52._NATIVE_AES = ('doomed', lambda key: _handle52, _boom52,
+                       lambda h: _released52.append(h))
+    _doomed52 = m52.Aes128Ctr(_key52)
+    m52._NATIVE_AES = _saved_native52
+    _out52 = _doomed52.crypt(_iv52, _data52)
+    check("a backend that dies mid-stream degrades to the pure-Python "
+          "keystream, releases the handle it will never touch again, and still "
+          "returns the right bytes",
+          _doomed52._native is None and _released52 == [_handle52]
+          and _out52 == _pure52.crypt(_iv52, _data52), str(_released52))
+
+    m52._NATIVE_AES = ('refuser',
+                       lambda key: (_ for _ in ()).throw(OSError('no key')),
+                       lambda h, iv, d: d, lambda h: None)
+    _refused52 = m52.Aes128Ctr(_key52)
+    m52._NATIVE_AES = _saved_native52
+    check("and a backend that refuses the key at construction leaves an "
+          "instance that still encrypts, on the slow path",
+          _refused52._native is None
+          and _refused52.crypt(_iv52, _data52) == _pure52.crypt(_iv52, _data52),
+          '')
+
+    # -- C. the window is a duration -----------------------------------------
+    _wm52 = m52._CastStreamSender._window_ms
+    _ms52 = lambda rtt: _wm52(types.SimpleNamespace(_rtt_ms=rtt))
+    _cap52 = m52.TARGET_DELAY_MS / 3.0
+    _flat52 = [_ms52(rtt) for rtt in (None, 0.0, 1.0, 10.0, 33.0)]
+    _ramp52 = [(rtt, _ms52(rtt)) for rtt in range(34, 400, 7)]
+    check("an unmeasured RTT gets the floor, and so does every RTT up to half "
+          "of it -- 2 x RTT is the rule, not a guess",
+          all(v == m52.MIN_WINDOW_MS for v in _flat52), str(_flat52))
+    check("above that the window grows with the measured RTT...",
+          all(b[1] > a[1] for a, b in zip(_ramp52, _ramp52[1:])
+              if a[1] < _cap52 and b[1] <= _cap52)
+          and _ramp52[-1][1] > _flat52[0], str(_ramp52[:3] + _ramp52[-2:]))
+    check("...and saturates at a third of the protocol's own target delay, so "
+          "a slow link buys queue instead of buying latency",
+          _ms52(1000.0) == _cap52 == _ms52(5000.0)
+          and all(m52.MIN_WINDOW_MS <= _ms52(r) <= _cap52
+                  for r in (0.0, 5.0, 50.0, 200.0, 999.0)),
+          '{} vs {}'.format(_ms52(1000.0), _cap52))
+    check("the ceiling on the frame-id span is inside the 8-bit frame number "
+          "the Cast header carries, because past it an ack stops naming a frame",
+          m52.MAX_IN_FLIGHT_FRAMES == 120 and m52.MAX_IN_FLIGHT_FRAMES < 256,
+          str(m52.MAX_IN_FLIGHT_FRAMES))
+    _held52 = _ms52(None) / (1000.0 / m52.FPS)
+    check("at {} fps that window holds {:.2f} frames -- the old fixed 12 was "
+          "{:.0f} ms of queue against a {} ms target delay".format(
+              m52.FPS, _held52, 12 * 1000.0 / m52.FPS, m52.TARGET_DELAY_MS),
+          _held52 < 12, '{:.2f} frames'.format(_held52))
+    _wf52 = m52._CastStreamSender._window_full
+    #: `_window_full` asks `self._window_ms()`, so the stub has to answer that
+    #: too -- binding one unbound method to a namespace that lacks the other
+    #: is an AttributeError, not a failed assertion, and it takes the whole
+    #: Part with it.
+    _st52 = lambda span, rtt=None: types.SimpleNamespace(
+        _rtt_ms=rtt, _in_flight=[(0, b'x', 0, 0.0)], _frame_id=span,
+        _window_ms=lambda: _ms52(rtt))
+    check("the frame-id span closes the window even one milligram into it",
+          _wf52(_st52(m52.MAX_IN_FLIGHT_FRAMES), 0.001) is True
+          and _wf52(_st52(m52.MAX_IN_FLIGHT_FRAMES - 1), 0.001) is False, '')
+    check("and inside the span the window is the clock, not a frame count",
+          _wf52(_st52(1), 0.010) is False
+          and _wf52(_st52(1), (_ms52(None) + 4.0) / 1000.0) is True
+          and _wf52(types.SimpleNamespace(
+              _rtt_ms=None, _in_flight=[], _frame_id=9,
+              _window_ms=lambda: _ms52(None)), 99.0) is False, '')
+
+    # -- D. the encoder argv matches the reference sender ---------------------
+    def _pair52(argv, flag):
+        return argv[argv.index(flag) + 1] if flag in argv else None
+
+    _sw52 = m52.encoder_args('software')
+    _vt52 = m52.encoder_args('hardware', platform='darwin')
+    check("x264 is asked for low delay and slice threading, the two flags "
+          "Google's own tab-cast sender sets and we did not",
+          _pair52(_sw52, '-flags') == '+low_delay'
+          and _pair52(_sw52, '-thread_type') == 'slice', str(_sw52))
+    check("VideoToolbox gets the low-delay flag but not `-thread_type`: it "
+          "reports no threading capability, so the flag would be an unknown "
+          "option and ffmpeg would refuse to start",
+          _pair52(_vt52, '-flags') == '+low_delay'
+          and '-thread_type' not in _vt52
+          and _pair52(_vt52, '-c:v') == 'h264_videotoolbox', str(_vt52))
+    check("the VBV is half a second of picture, not the one second it was -- "
+          "a full second of buffer is a full second the encoder may spend "
+          "before it owes us a byte",
+          m52.rate_caps(4000000) == ['-maxrate', '6000000', '-bufsize',
+                                     '2000000'], str(m52.rate_caps(4000000)))
+    check("and only the VideoToolbox path inflates the request, because only "
+          "it undershoots `-b:v` by a third",
+          m52.rate_target(4000000, 'hardware', 'darwin') == 6000000
+          and m52.rate_target(4000000, 'hardware', 'linux') == 4000000
+          and m52.rate_target(4000000, 'software', 'darwin') == 4000000
+          and m52.VT_BITRATE_MULT == 1.5,
+          str([m52.rate_target(4000000, k, p)
+               for k in ('hardware', 'software') for p in ('darwin', 'linux')]))
+    check("`uses_videotoolbox` honours an explicit platform, so this Part says "
+          "the same thing on a Linux runner as it does here",
+          m52.uses_videotoolbox('hardware', 'darwin') is True
+          and m52.uses_videotoolbox('software', 'darwin') is False
+          and m52.uses_videotoolbox('hardware', 'win32') is False, '')
+
+    _cap52b = types.SimpleNamespace(
+        inputs=[['-f', 'avfoundation', '-i', '1:none']], audio_map=None)
+    _cmd52 = m52.build_ffmpeg_command('ffmpeg', _cap52b, 1080, 6000000,
+                                      kind='caststream', encoder='software')
+    _bv52 = _pair52(_cmd52, '-b:v')
+    check("the flags survive to the real argv, and the muxer is still the last "
+          "thing on it",
+          _pair52(_cmd52, '-flags') == '+low_delay'
+          and _pair52(_cmd52, '-thread_type') == 'slice'
+          and _cmd52[-3:] == list(m52.OUTPUTS['caststream'][3])
+          and _pair52(_cmd52, '-bufsize') == str(int(_bv52) // 2)
+          and _pair52(_cmd52, '-maxrate') == str(int(int(_bv52) * 1.5)),
+          str(_cmd52[-12:]))
+    _over52 = m52.build_ffmpeg_command('ffmpeg', _cap52b, 1080, 20000000,
+                                       kind='caststream', encoder='software')
+    check("a preset above the channel's ceiling is clamped before the rate is "
+          "decided, so the OFFER and the encoder cannot disagree -- reversing "
+          "those two would either overshoot the promise or underfill it",
+          _pair52(_over52, '-b:v') == str(m52.cast_stream_bitrate_cap()),
+          '{} vs cap {}'.format(_pair52(_over52, '-b:v'),
+                                m52.cast_stream_bitrate_cap()))
+
+    # -- E. the two knobs ----------------------------------------------------
+    def _set52(prop, value):
+        if value is None:
+            utils.Setting.unset(prop)
+        else:
+            utils.Setting.set(prop, value)
+
+    _le52 = [(None, 1.0), (0.1, 0.5), (0.5, 0.5), (2.0, 2.0), (99.0, 5.0),
+             ('nonsense', 1.0)]
+    _le_got52 = []
+    for _stored52, _want52 in _le52:
+        _set52(m52.SettingProperty.Mirror_Live_Edge, _stored52)
+        _le_got52.append((_stored52, m52.live_edge_seconds(), _want52))
+    check("the player's park distance is clamped at both ends and a value that "
+          "is not a number falls back to the default instead of raising",
+          all(got == want for _s, got, want in _le_got52), str(_le_got52))
+    _pf52 = [(None, 4), (0, 1), (1, 1), (6, 6), (40, 8), ('nonsense', 4)]
+    _pf_got52 = []
+    for _stored52, _want52 in _pf52:
+        _set52(m52.SettingProperty.Mirror_Dlna_Prefill, _stored52)
+        _pf_got52.append((_stored52, m52.dlna_prefill_seconds_setting(),
+                          _want52))
+    check("and so is the DLNA prefill -- a hand-edited settings file must not "
+          "be able to produce a television that will not play",
+          all(got == want for _s, got, want in _pf_got52), str(_pf_got52))
+    check("both pill rows offer only values their own clamp accepts, and both "
+          "defaults are in their row (the prefill default is the measured 4, "
+          "not the floor)",
+          all(m52.LIVE_EDGE_MIN_SECONDS <= v <= m52.LIVE_EDGE_MAX_SECONDS
+              for v in m52.LIVE_EDGE_OPTIONS)
+          and m52.LIVE_EDGE_SECONDS in m52.LIVE_EDGE_OPTIONS
+          and all(m52.DLNA_PREFILL_MIN_SECONDS <= v
+                  <= m52.DLNA_PREFILL_MAX_SECONDS
+                  for v in m52.DLNA_PREFILL_OPTIONS)
+          and m52.DLNA_PREFILL_SECONDS in m52.DLNA_PREFILL_OPTIONS
+          and m52.DLNA_PREFILL_SECONDS == 4 and m52.LIVE_EDGE_SECONDS == 1.0,
+          '{} / {}'.format(m52.LIVE_EDGE_OPTIONS, m52.DLNA_PREFILL_OPTIONS))
+
+    _prof52 = types.SimpleNamespace(total_bitrate=8000000)
+    _bytes52 = []
+    for _sec52 in m52.DLNA_PREFILL_OPTIONS:
+        _set52(m52.SettingProperty.Mirror_Dlna_Prefill, _sec52)
+        _b52 = m52.dlna_prefill_bytes(_prof52)
+        _bytes52.append((_sec52, _b52,
+                         m52.dlna_prefill_seconds(_prof52),
+                         max(1, _b52 * 8 // _prof52.total_bitrate)))
+    check("the byte budget follows the knob and stays inside its own floor and "
+          "ceiling -- so at 1 s the floor wins and the delay reported is the "
+          "one the user actually gets",
+          all(m52.DLNA_PREFILL_MIN_BYTES <= b <= m52.DLNA_PREFILL_MAX_BYTES
+              for _s, b, _d, _w in _bytes52)
+          and all(d == w for _s, _b, d, w in _bytes52)
+          and [b for _s, b, _d, _w in _bytes52]
+          == sorted(b for _s, b, _d, _w in _bytes52),
+          str(_bytes52))
+    check("`dlna_prefill_seconds` is derived from the byte budget rather than "
+          "read back from the setting, so the two answers cannot disagree",
+          _bytes52[0][2] >= 2 and _bytes52[0][0] == 1, str(_bytes52[0]))
+    check("and `dlna_prefill_bytes` still takes exactly one positional "
+          "argument: the suite stubs it with that shape to take the buffer out "
+          "of a test, and a second parameter turns every such stub into a "
+          "TypeError somewhere unrelated",
+          len(_inspect52.signature(m52.dlna_prefill_bytes).parameters) == 1,
+          str(_inspect52.signature(m52.dlna_prefill_bytes)))
+
+    _set52(m52.SettingProperty.Mirror_Dlna_Prefill, 6)
+    check("the card the page renders tracks the knob, while the module literal "
+          "it was derived from does not -- a card saying「先攒约 4 秒」over a "
+          "session that buffers 6 is the same lie as a stats overlay that "
+          "disagrees with the counter it shows",
+          '6 秒' in m52.output_hint('dlna')
+          and '6 秒' not in m52.OUTPUT_HINTS['dlna']
+          and all(m52.output_hint(k) == m52.OUTPUT_HINTS[k]
+                  for k in m52.OUTPUT_HINTS if k != 'dlna'),
+          m52.output_hint('dlna'))
+    check("and the low-latency card names the cipher and the ceiling it "
+          "actually got, instead of a number typed into the literal",
+          '%.1f Mbps' % (m52.cast_stream_bitrate_cap() / 1e6)
+          in m52.OUTPUT_HINTS['caststream']
+          and (m52.native_aes_name() in m52.OUTPUT_HINTS['caststream']
+               if _native52 is not None else '降级' in
+               m52.OUTPUT_HINTS['caststream']),
+          m52.OUTPUT_HINTS['caststream'])
+
+    _set52(m52.SettingProperty.Mirror_Live_Edge, 3.0)
+    _sess52 = m52._Session('browser', bitrate=4000000)
+    _srv52 = m52.start_stream_server(_sess52)
+    _port52 = _srv52.server_address[1]
+
+    def _get52(path):
+        conn = http.client.HTTPConnection('127.0.0.1', _port52, timeout=5)
+        try:
+            conn.request('GET', path)
+            resp = conn.getresponse()
+            return resp.status, resp.read(1 << 17).decode('utf-8')
+        finally:
+            conn.close()
+
+    _page_path52 = '{}?token={}'.format(m52.BROWSER_PATH, _sess52.page_token)
+    _st52p, _html52 = _get52(_page_path52)
+    check("the park distance is injected when the page is served, so the one "
+          "knob here that needs no restart really needs no restart",
+          _st52p == 200
+          and 'LIVE_EDGE={}'.format(repr(3.0)) in _html52
+          and 'STALL_MS=8000' in _html52, str(_st52p))
+    _holes52 = _re52.findall(r'@[A-Z_]+@', _html52)
+    check("and no template hole survives into the served page -- one left "
+          "behind is a JS SyntaxError that every Python-side assertion about "
+          "this page still passes (§4.8 red line ④)",
+          not _holes52 and '@LIVE_EDGE@' in m52.PLAYER_PAGE, str(_holes52[:4]))
+    _set52(m52.SettingProperty.Mirror_Live_Edge, 0.5)
+    _st52q, _html52q = _get52(_page_path52)
+    check("re-serving the same running session picks the new value up, which "
+          "is the whole reason it is read at request time and not baked into "
+          "the constant",
+          _st52q == 200 and 'LIVE_EDGE={}'.format(repr(0.5)) in _html52q
+          and 'LIVE_EDGE={}'.format(repr(3.0)) not in _html52q, str(_st52q))
+    with open(m52.__file__, encoding='utf-8') as _mf52:
+        _src52 = _mf52.read()
+    check("PLAYER_PAGE is still a raw string: a non-raw one ate the overlay's "
+          "'\\n' once and the panel came up empty with 18 green Python cases",
+          _re52.search(r'^PLAYER_PAGE = r"""', _src52, _re52.M) is not None, '')
+
+    _con52 = m52.ScreenMirrorSetting()
+    _restarts52 = []
+    _con52._restart = lambda: _restarts52.append(1)
+    check("both knobs are console actions, so the HTTP endpoint's whitelist is "
+          "the thing that admits them rather than a dispatcher that happens to "
+          "recognise the string",
+          'set-dlna-prefill' in _con52.CONSOLE_ACTIONS
+          and 'set-live-edge' in _con52.CONSOLE_ACTIONS, '')
+    _off52 = [_con52.console_action('set-dlna-prefill', {'value': '40'}),
+              _con52.console_action('set-dlna-prefill', {'value': 'abc'}),
+              _con52.console_action('set-live-edge', {'value': '0.25'}),
+              _con52.console_action('set-live-edge', {'value': 'abc'})]
+    check("a value off the pill row is refused -- the clamp exists for a "
+          "hand-edited settings file, and accepting anything here would make "
+          "the page the only thing enforcing the list",
+          all(r['code'] == 1 for r in _off52) and not _restarts52,
+          str([r['message'] for r in _off52]))
+    _set52(m52.SettingProperty.Mirror_Dlna_Prefill, None)
+    _on52 = _con52.console_action('set-dlna-prefill', {'value': '6'})
+    check("the prefill knob takes, persists, and restarts -- the budget became "
+          "a byte count when the session was built and a running television is "
+          "already reading from the head of the buffer it was given",
+          _on52['code'] == 0 and _restarts52 == [1]
+          and m52.dlna_prefill_seconds_setting() == 6, str(_on52))
+    _edge52 = _con52.console_action('set-live-edge', {'value': '2.0'})
+    check("the park-distance knob takes, persists, and deliberately does not "
+          "restart: restarting a capture to change a number the player reads "
+          "from its own HTML is the expensive way to do nothing",
+          _edge52['code'] == 0 and _restarts52 == [1]
+          and m52.live_edge_seconds() == 2.0
+          and '不用重启' in _edge52['message'], str(_edge52))
+
+    _lab52 = __import__('macast.module_settings', fromlist=['PLUGIN_LABELS'])
+    _own52 = _lab52.PLUGIN_LABELS.get('screen_mirror', {})
+    _cjk52 = lambda s: any(u'\u4e00' <= ch <= u'\u9fff' for ch in s)
+    check("both new persisted keys are owned by the module-settings table with "
+          "Chinese labels, or Part 28's drift case goes red and the settings "
+          "panel shows a raw key name",
+          all(k in _own52 and _cjk52(_own52[k][0])
+              for k in ('Mirror_Dlna_Prefill', 'Mirror_Live_Edge'))
+          and all(hasattr(m52.SettingProperty, k)
+                  for k in ('Mirror_Dlna_Prefill', 'Mirror_Live_Edge')),
+          str([_own52.get(k) for k in
+               ('Mirror_Dlna_Prefill', 'Mirror_Live_Edge')]))
+except Exception as _e52:
+    _traceback52.print_exc()
+    check("Part 52 runs", False, "{}: {}".format(type(_e52).__name__, _e52))
+finally:
+    if _srv52 is not None:
+        try:
+            _srv52.shutdown()
+            _srv52.server_close()
+        except Exception:
+            pass
+    utils.Setting.setting, utils.Setting.setting_path = _saved52[0], _saved52[1]
+    utils.SETTING_DIR = _saved52[2]
+    _shutil.rmtree(_tmp52, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

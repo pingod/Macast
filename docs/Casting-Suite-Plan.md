@@ -118,10 +118,22 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 立刻醒（`_ByteLog.close()` 唤醒所有 parked reader，teardown 才不会挂在 `server.shutdown()`）。
 **未验证项**（诚实记录）：真实老电视兼容矩阵 —— 打桩用例能证明「我们发出去的字节和 SOAP 连自家
 接收端都认账」，**不能**证明某台 2014 年的电视认账（AGENTS.md §4.9 同一族陷阱）。
-**2026-09-23 又偏了一次**：预填不再是固定的 20 MiB，而是 `DLNA_PREFILL_SECONDS = 6` 秒画面
-按档位码率折算、夹在 3–8 MiB（`dlna_prefill_bytes`）。上面那句「约 20-25 s 延迟是物理代价」
+**2026-09-23 又偏了一次**：预填不再是固定的 20 MiB，而是 `DLNA_PREFILL_SECONDS` 秒画面
+按档位码率折算、夹在一个字节区间里（`dlna_prefill_bytes`）。上面那句「约 20-25 s 延迟是物理代价」
 只对参考项目成立 —— 固定的**字节**预算在这几档码率下就是 27–37 秒，那部分延迟与"老电视能播"
 无关，只是预算单位选错了。开始提示与状态行报的是折算出来的秒数。
+
+**2026-10 第三次修这一格，这次修的是文档自己**：上一条写的是「`= 6` 秒、夹在 3–8 MiB」，
+而代码里一直是 `DLNA_PREFILL_SECONDS = 4`、`DLNA_PREFILL_MIN_BYTES = 2 << 20`、
+`DLNA_PREFILL_MAX_BYTES = 8 << 20`（AGENTS.md §4.8 与 Part 37/39/44 绑的都是这一组）。
+同一趟把它从常量变成了**用户旋钮**：`Mirror_Dlna_Prefill`（1–8 秒，`dlna_prefill_seconds_setting()`
+越界夹住而不是拒绝，因为拒绝的后果是一台不肯播的电视加上没有任何解释），默认仍是**实测过的 4**
+而不是下限 —— 理由写在 `DLNA_PREFILL_MIN_SECONDS` 的注释里：MirrorCast 在真 Philips
+43PFS5301（2016，非 Android）上预填约 20 MiB ≈ 20–25 秒且明说，所以"要得比我们下限更多"的
+固件存在，而这台机器上没有那样的电视可以量出**我们的**下限在哪。量不出来的数就交给能量它的人，
+代价印在旋钮旁边（`DLNA_PREFILL_HINT`：「这个数字就是看得见的延迟」）。
+`dlna_prefill_bytes(profile)` 保持**一个位置参数**：Part 21/23/37/39 都用
+`lambda profile: …` 的形状把它打桩掉，多一个参数就会在与打桩无关的地方炸成 TypeError。
 
 ### 2.2 omacast：Chromecast 真正的低延迟镜像走的是 Cast Streaming，不是 LOAD
 
@@ -159,11 +171,72 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   是二期：参考实现报的 192 kbps 上限、双声道、PT 127 都记在上面，代码没写。
 - **纯 Python AES-128-CTR**（单文件插件不能加依赖），实测约 1.3 MB/s ⇒ 码率天花板
   `CAST_STREAM_MAX_BITRATE = 4.5 Mbps`。这是**加密速度**的上限，不是网络的；菜单会直说。
+  **2026-10 这一条整条作废**（原文保留，因为它是当时的事实）：加密改走操作系统的原生
+  AES-128-CTR —— macOS CommonCrypto（`CCCryptorCreateWithMode` / `CCCryptorReset` +
+  一次 `CCCryptorUpdate`）/ Windows bcrypt（`BCryptOpenAlgorithmProvider` +
+  `BCryptEncrypt`，**chaining-mode 用 `ChainingModeCTR`**）/ Linux libcrypto
+  （`EVP_CIPHER_CTX` + `EVP_EncryptInit_ex` 走 `EVP_aes_128_ctr`），全部经 `ctypes`，
+  **一个新依赖都没有**（这是它能进第一批的原因：Part 30 的白名单不用动，
+  三处打包配置也不用动）。纯 Python 的密钥流**降为最后的兜底**，启动时跑一次
+  known-answer 自检（`_aes_known_answer`，四条向量含空输入），过了才认这个后端，
+  并且后端**有名字**（`_NATIVE_AES = (name, make, crypt, release)`，`native_aes_name()`
+  读它）—— 三个闭包叫 make/crypt/release 时长得一模一样，"某个 OS 后端加载了"
+  是日志、页面提示和用例能做出的最强陈述，而那不够用。
+  于是 `CAST_STREAM_MAX_BITRATE` 提到 **8 Mbps**（`CAST_STREAM_DEGRADED_BITRATE = 4.5 Mbps`
+  只在降级时生效，`cast_stream_bitrate_cap()` 是唯一的判定点）。**8 Mbps 是我们选的数，
+  不是量出来的**：Google 自己的 `kDefaultVideoMaxBitRate` 是 10 Mbps，Chrome 标签页投屏默认 5 Mbps。
+  本机的余量：按真实链路形状（复用句柄 + 每帧重算 counter block + 41,667 字节的访问单元）
+  **5,367 MB/s、每帧 7.8 µs**，纯 Python 同负载 1.35 MB/s ⇒ 约 4000×，对 8 Mbps 有约 5000× 余量。
+  三条实现上的红线，都被量过：① **`CCCryptorReset` 每帧重播 IV，与新建一个 cryptor 逐字节相同**
+  （frame id 0/1/2/3/7/255/256/65535/2³¹ 都验过），这才是复用句柄值得的原因（4,994 → 11,297 MB/s）；
+  ② **一个访问单元只调一次 `Update`，绝不切块** —— 按 1,200 字节切会把 CommonCrypto 打到
+  811 MB/s（ctypes 调用本身约 1.4 µs）；③ **每个后端的 `crypt` 都要有 `if not data: return b''`**，
+  因为 `ctypes.create_string_buffer(0)` 给的是一个 1 字节缓冲、`.raw` 是 `b'\x00'`，
+  空输入那条 KAT 会红。另外两条**故意不做**的：Windows 上"每 16 字节调一次 `BCryptEncrypt`
+  当 ECB 拼 CTR"的退路**被否掉了**（一次调用比它要替代的那段 Python 密钥表还贵，
+  那不是兜底，是戴着原生徽章的降级）；`libgcrypt.so.20` 从 Linux 那条链里**删掉了**
+  （一个没法测的第四后端是负债不是兜底）。**macOS 上绝不去探 `libcrypto`**：
+  `ctypes.CDLL('libcrypto.dylib')` 按裸 soname 加载会**直接把解释器 abort 掉**
+  （SIGABRT，退出码 134），因为 CPython 自己已经载了一个不同版本的 libcrypto，
+  扁平命名空间下的符号冲突是致命的。**还有一句诚实的话必须留在这里**：
+  KAT **永远区分不出**"只加低 64 位计数器"与"整个 128 位级联加"—— 那要 2⁶⁴ 个块才现形。
+  安全性靠的是 `frame_iv` 的布局（frame id 在字节 8..12，12..16 是零 ⇒ 每个访问单元有
+  2³² 个块 = 68.7 GB 余量；要进位到固定的高半区，需要 `aesIvMask[8:16]` 落在距 2⁶⁴
+  约 2,600 以内，每会话概率约 2⁻⁵¹）。那条自检是**"操作系统换了"的绊线**，不是安全论证。
 - 编码器形状与参考实现差两处，且都是**实测出来的**：
   ① `-tune zerolatency` 已含 `bframes=0` 与 lookahead=0，所以不必再写 `bf=0`；
   ② x264 参数名是 `keyint` / `min_keyint` / `scenecut`（写 `i-frame-min`、`sc_threshold`
   只会打印一行 error 然后**静默忽略**）。另外 **`-aud` 是 AVOption，必须带值 `1`**，
   否则它把下一个选项吞成自己的值。
+- **2026-10 又对齐了三处**（都是拿 Google 参考发送端 Chromium 标签页投屏那段
+  `context->flags |= AV_CODEC_FLAG_LOW_DELAY; max_b_frames = 0; thread_type = FF_THREAD_SLICE;
+  pix_fmt = YUV420P; framerate = {30,1}; bit_rate = rc_max_rate = target_bitrate;` 逐条比出来的）：
+  ① `-flags +low_delay`；② `-thread_type slice`（**只加在 x264 上** —— VideoToolbox 报告
+  **没有**线程能力，且 `-tune` / `-preset` / `-entropy` / `-forced-idr` 经确认对 videotoolbox
+  **不存在**）；③ `rc_buffer_size = bitrate / 2`（`rate_caps()`，原来是 1 秒 —— 一秒的 VBV
+  意味着允许攒一秒，而这一条通道的全部预算是 200 ms）。`-maxrate` **不在**那三处差异里，
+  所以留在 1.5×。**`-flags +low_delay` 对 VideoToolbox 也安全**：上游 `videotoolboxenc.c`
+  至今还在按它改行为（`c1dc2e2b7` 2025-09-10「ensure bitrate is set in low_delay mode」、
+  `d87210745` 2025-09-06「allow low latency RC with HEVC」），说明它读这个 flag。
+- **2026-10：VideoToolbox 要 1.5× 的线速码率**（`rate_target()`，`VT_BITRATE_MULT = 1.5`），
+  因为 VT **实测把 `-b:v` 少给 30–33%**（要 4 Mbps 只出 2802 kbit）。这是保守不是画质差：
+  同样 4 Mbps 目标下 VT 得 **91.47 VMAF**，libx264 ultrafast+zerolatency 是 **90.78 @ 4216 kbit**。
+- **2026-10：`ENCODER_AUTO` 上面那段注释被证伪并改写了。** 它原来写「x264 ultrafast 撑不住
+  Retina 桌面的实时帧率，用户报的『不开硬件编码几乎看不到画面』就是这个意思」——
+  吞吐那一半**在我们发过的任何分辨率上都不成立**：本机 libx264 ultrafast+zerolatency 编**桌面**
+  是 1080p **17.9×**、2560×1600 **10.5×**、3456×2234 **6.2×**、4K **5.65×** 实时。
+  那位用户报的是另一件事（见 `NO_FRAME_SECONDS`：采集一帧都不返回，不是编码器跟不上）。
+  真实的取舍是**延迟换 CPU**，两个轴方向相反：x264 ultrafast+zl 首字节 **41–49 ms**、
+  约 **4.5 核**；`h264_videotoolbox` 首字节 **200.9–253.1 ms**、约 **0.2 核**。
+  VT 那约 190 ms **不是我们忘了关的某个开关**：`-realtime`、`-prio_speed`、`+constant_bit_rate`、
+  `+max_ref_frames 1`、`-bf 0`、`-coder cabac` 逐个试过，没有一个能挪动它
+  （而 `-realtime 1` 与不传它产出**逐字节相同**——它只是选低延迟码控路径，在这里买不到延迟）。
+  它是硬件流水线自己的深度。所以 `auto` 仍然落在硬件（笔记本上 4.5 核是风扇和电池，
+  而 190 ms 不是多数人说「投屏卡」时指的东西），但它是**默认值不是判决**：
+  页面必须把这笔账说出来（`ENCODER_TRADEOFF` → `_capture_state()['encoder_note']` →
+  「采集」卡上那行提示），否则那个开关读起来就是「硬件=好，软件=差」，没人会去关它。
+  **没有加第四档 `lowlatency`**（原计划里有）：`encoder_args('software')` 已经就是
+  x264 `ultrafast` + `zerolatency`，再加一档是两个菜单项做同一件事。
 - **多 slice 图像是这一阶段最大的坑**：`-tune zerolatency` 下 720p 一帧切成 **10 个 slice NAL**
   （真 ffmpeg 实测），所以访问单元只能按 `first_mb_in_slice == 0`（NAL 头后第一字节的最高位，
   即 ue(v) 0）判定新帧起点。按「一个 NAL = 一张图」写的结果是电视上永远只有十分之一张画。
@@ -324,7 +397,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | **P0** | 本文档 + 台账 | 取证与许可判定 | — | 无 |
 | **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
 | **P2** ✅ | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的直播 HTTP：对外 `Content-Length` = 按档位码率算出的固定值且 **< 2³¹**（`DLNA_MAX_ADVERTISED_SIZE = 1.9e9`）、探测请求**恰好回 n 字节**（不足补 MPEG-PS 填充包）、`Accept-Ranges` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`、**48 MiB**（`DLNA_RING_BYTES`，计划里的 64 KiB 太小：按 4.5 Mbps 只有 0.1 秒余量）按绝对字节偏移的阻塞式重连 + 20 MiB 预填（`DLNA_PREFILL_BYTES` ⇒ 菜单明说的 ~35 s 延迟）、stdlib SSDP/SOAP（`urllib`，不打第三方）、`GetTransportInfo` 看门狗 + `RelTime` 前进才算活着、**5 档 profile**（ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264，PAL/NTSC 用 AC-3）、连续失败自动换档并在用尽后提示手选 | **Part 23**（93 条） | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端当替身；真实兼容矩阵必须标注「未验证」 |
-| **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**纯 Python AES-128-CTR**（无新依赖）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/在途 12 帧；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
+| **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**OS 原生 AES-128-CTR**（ctypes，无新依赖；2026-10 前是纯 Python，见 §2.2 末的偏差段）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/**在途窗口按时长算**（`clamp(2×RTT, 66 ms, targetDelay/3)` + 120 帧硬顶；2026-10 前是固定 12 帧 = 24 fps 下 500 ms 排队）；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
 | **P4** ✅ | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗。**偏差见 §2.6 末**（含"这一阶段动了 `protocol_cast.py` 的会话账本"） | **Part 25**（155 条） | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有；**真机一台没验** |
 | **P5** | `airplay_mirror` v0.1（protocol 插件，`uses_ssdp=False`）+ §9 边界改写 + `selfcheck` uxplay 探测 | 监督 uxplay：**`-rc <file>` 生成在 Macast 自己的配置目录**（不是 `$UXPLAYRC`，它静默回落 `~/.uxplayrc`）、**不带 `-p`**（legacy 7000 与自家 AirPlay 接收端撞车）、默认 `vsync no` + macOS `vs osxvideosink`、**stdout 挂 pty** 才拿得到即时事件（C 侧块缓冲）、日志解析 连接/断开/被拒/mDNS 失败/自行退出、不映射 DLNA 播放状态、与 `raop.py` 同名竞争只提示一次。一期让它自己开窗，二期再试 `-vrtp/-artp → mpv`。**偏差见 §2.5 末** | **Part 26**（43 条）+ Part 24 两条（teardown 先排空再挂断） | 中：macOS **确认**没有现成二进制（无 formula、release 只有 spec/PKGBUILD）→ 必须**明确标注需要用户自备**，且 Apple 砍 Legacy 会静默失效 |
 | **P6** | 文档与发布 | `docs/Casting-Suite.md` 用户指南（含每目标的首次设置流程）、`plugins/README.md` + `info.json` 条目（**两步提交：先插件文件，再指 SHA/version**）、AGENTS.md §4.8/§9 更新、复核 §4.8 里 pyobjc 依赖是否与「只用自带库」矛盾（`_create_aggregate` 用了 `Foundation`，而 `requirements/*.txt` 没有 pyobjc —— 要么去掉，要么按 §4.4 三处同步）、**`scripts/selfcheck.py` 补齐 §3.2 承诺的随行项**（P1-P4 都没动它：现在只报「ffmpeg 在不在」，缺 编码器能力 / ffprobe 在不在 / 系统音频采集口 / DLNA 渲染器与 Chromecast 探测 / 转码临时目录剩余空间）、**复核 `screen_mirror._avfoundation_lists` 的引号解析**（本机真实 `ffmpeg -list_devices` 输出是 `AVFoundation audio devices:` + 不带引号的 `[0] 名称`，P4 已按这份实测重写了 `cast_local_file` 的解析，那条老路径要用同一条实测输出重验）、版本号两处 + tag | 5c 一致性 | 无（但 pyobjc 与 avfoundation 解析这两条是**已知不一致**，必须给结论） |

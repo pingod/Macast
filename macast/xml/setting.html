@@ -995,6 +995,16 @@
                                 「直播流」是默认：不报长度、不声明可拖动，现代电视和播放器都认。
                                 换形状会立刻重启镜像。
                             </div>
+                            <template v-if="mirror_state.shape.prefill">
+                                <h3 style="margin-top:16px;">预填秒数</h3>
+                                <div class="mirror-pills">
+                                    <span class="mirror-pill"
+                                          :class="{sel: pf.key === String(mirror_state.shape.prefill.current)}"
+                                          v-for="pf in mirror_state.shape.prefill.options" :key="pf.key"
+                                          @click="mirror_run('set-dlna-prefill', {value: pf.key})">{{ pf.label }}</span>
+                                </div>
+                                <div class="hint" style="margin-top:8px;">{{ mirror_state.shape.prefill.note }}</div>
+                            </template>
                         </div>
 
                         <div class="status-card" v-if="sec === 'profiles'" key="profiles">
@@ -1043,7 +1053,10 @@
                                            @change="mirror_run('set-encoder', {value: $event ? 'hardware' : 'software'})"
                                            active-text="VideoToolbox 硬件编码"></el-switch>
                             </div>
-                            <div class="hint" v-else-if="mirror_state.capture.hardware_supported && !mirror_state.capture.hardware_probed">
+                            <div class="hint"
+                                 v-if="mirror_state.capture.encoder_note"
+                                 style="margin-top:6px;">{{ mirror_state.capture.encoder_note }}</div>
+                            <div class="hint" v-if="mirror_state.capture.hardware_supported && !mirror_state.capture.hardware_probed">
                                 正在探测这台机器有没有硬件编码…
                             </div>
                         </div>
@@ -1081,6 +1094,16 @@
                             <div class="hint" v-if="mirror_state.viewer.hint">
                                 {{ mirror_state.viewer.hint }}
                             </div>
+                            <template v-if="mirror_state.viewer.live_edge">
+                                <h3 style="margin-top:16px;">延迟下限</h3>
+                                <div class="mirror-pills">
+                                    <span class="mirror-pill"
+                                          :class="{sel: le.key === String(mirror_state.viewer.live_edge.current)}"
+                                          v-for="le in mirror_state.viewer.live_edge.options" :key="le.key"
+                                          @click="mirror_run('set-live-edge', {value: le.key})">{{ le.label }}</span>
+                                </div>
+                                <div class="hint" style="margin-top:8px;">{{ mirror_state.viewer.live_edge.note }}</div>
+                            </template>
                         </div>
 
                         <div class="status-card pane-wide" v-if="sec === 'preview'" key="preview">
@@ -1415,14 +1438,24 @@
                     <li><strong>Chromecast / Google TV</strong>（兼容通道，默认）：走标准的 LOAD + MPEG-TS，
                         有声音。</li>
                     <li><strong>Chromecast 低延迟</strong>（实验）：完全不走 HTTP，直接往设备的 UDP 端口推
-                        RTP。代价写在那张卡片上——加密是纯 Python 实现的，码率上限约 4.5 Mbps，
-                        <strong>而且这条通道没有声音</strong>；电视不认这条通道时会自己回落到上面那条有声音的。</li>
+                        RTP。代价写在那张卡片上——加密走操作系统的原生 AES（macOS CommonCrypto /
+                        Windows bcrypt / Linux libcrypto，都不是新装的依赖），码率上限约 8.0 Mbps，
+                        <strong>而且这条通道没有声音</strong>；电视不认这条通道时会自己回落到上面那条有声音的。
+                        拿不到任何一个系统 AES 时它会退回纯 Python 的密钥流，那时上限自动降到 4.5 Mbps，
+                        卡片上会写明「已自动降级」——所以看到 4.5 就说明该看日志了。</li>
                     <li><strong>DLNA 电视</strong>（老电视，不用在电视上装东西）：把直播<em>伪装成一个文件</em>
                         交给电视下载，所以开局要先攒约 4 秒的数据才交出去——这几秒是设计如此，不是卡住。
-                        准备了五种兼容档位（不同的封装/ codec / 帧率组合），因为第一种常被电视拒掉；
+                        <strong>这个秒数就是这条通道看得见的延迟</strong>，「投屏形状」卡上给了 1–8 秒的旋钮；
+                        默认停在实测过的那一档而不是最小值，因为"多小才不会被老电视判成坏文件"这件事
+                        我们手上没有那样的电视可量。准备了五种兼容档位（不同的封装/ codec / 帧率组合），
+                        因为第一种常被电视拒掉；
                         连续被拒时本次镜像会自己往下换档，<strong>不会改写你选的档位</strong>。</li>
                     <li><strong>浏览器</strong>：任何能打开网址的设备都能看，观看地址带每会话随机的
-                        token（不是那个常驻的管理令牌），复制到群里等于把这台电脑的屏幕交出去。</li>
+                        token（不是那个常驻的管理令牌），复制到群里等于把这台电脑的屏幕交出去。
+                        播放页会把自己停在直播边缘后面 1 秒并且一直停在那里，所以<strong>这 1 秒就是
+                        这一路端到端延迟的下限</strong>，「观看页」卡上有 0.5–5 秒的旋钮；
+                        改它不用重启镜像，刷新观看页就生效。下限是 0.5 秒而不是 0，因为这一路每 0.5 秒
+                        才封出一个分片，停在写入头上的话编码器打个嗝就是一次卡顿。</li>
                 </ul>
                 <p>三条会让镜像「开了却看不到画面」的前提：</p>
                 <ol>

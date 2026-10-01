@@ -179,7 +179,7 @@ env -u PYTHONPATH .venv/bin/python scripts/cast_streaming_probe.py 192.168.1.30
 | 有 ANSWER、`帧` 在涨、`最新已确认帧` 一直是 -1 | 包发出去了，电视没解出可确认的帧（头格式或加密 nonce） | `--dump` 出来的 Annex-B 先过 `ffprobe`，再对照 openscreen 的表 |
 | `收到的 RTCP 事件` 有 `checkpoint`，但**没画面** | 分帧/参数集问题：SPS/PPS 没跟在每个 IDR 前面，或访问单元切错 | 看 `--dump` 的第一个单元是否 `AUD+SPS+PPS+IDR`；**多 slice** 是这里最常见的坑 |
 | 画面**静止不动** | 发送线程死了而编码器还活着 | 记下 `--seconds` 与是否切过 `--encoder hardware` |
-| 画面动，但**越来越卡**（延迟持续增长） | 纯 Python 加密跟不上码率（4.5 Mbps 是算出来的天花板） | 降 `--height 360` 复测；若 360p 也不跟手，才是协议问题 |
+| 画面动，但**越来越卡**（延迟持续增长） | 加密跟不上码率。**先看日志里 `AES-128-CTR is running on <name>` 那一行**：2026-10 起加密走系统原生 AES（macOS CommonCrypto / Windows bcrypt / Linux libcrypto），本机 5,367 MB/s，8 Mbps 的上限有约 5000× 余量，**这一格几乎不可能是它**；若日志说的是 `no OS AES-128-CTR backend is usable`（或中途 `the OS AES backend <name> failed mid-stream`），才真的掉回了 1.3 MB/s 的纯 Python 密钥流，那时代码会自动把上限压到 `CAST_STREAM_DEGRADED_BITRATE = 4.5 Mbps` 并在页面写明「已自动降级」 | 先确认那一行日志报的是哪个后端；降级了就贴出它给的失败原因（`%s` 是 OS 库自己说的）。没降级却仍然越来越卡 ⇒ 降 `--height 360` 复测，360p 也不跟手才是协议问题 |
 | `电视报告的播放延迟 ms` 有值、丢帧偶发 | 链路活着 | 记录型号 + 固件 + 肉眼延迟（秒表拍一次手机与电视同屏） |
 
 验完请把结果补进 `docs/Casting-Suite-Plan.md` §6 台账的 P3 行（或它下面的偏差段）——

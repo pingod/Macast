@@ -78,6 +78,12 @@ PLUGIN_LABELS = {
         'Mirror_Dlna_Shape': ('DLNA 投屏形状',
                               "'live' 直播流（默认）| 'file' 伪装成文件"
                               '（只认有限文件的老电视）。'),
+        'Mirror_Dlna_Prefill': ('DLNA 预填秒数',
+                                '「伪装成文件」先攒多少秒画面再交给电视，1–8；'
+                                '这个数字就是该目标看得见的延迟。'),
+        'Mirror_Live_Edge': ('播放页延迟下限',
+                             '浏览器播放页停在直播边缘后多少秒，0.5–5；'
+                             '它是这一路端到端延迟的下限，刷新观看页生效。'),
     },
     'cast_local_file': {
         'Target_Kind': ('目标类型', "'cast'（Chromecast）或 'dlna'（电视）。"),

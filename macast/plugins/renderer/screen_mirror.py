@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.17</macast.version>
+# <macast.version>0.18</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的延迟下限（0.5–5，默认 1.0，原来是 3）。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -97,6 +97,7 @@
 #     loop the user reported ("装不完"), and CoreAudio-yes/ffmpeg-no is a
 #     microphone permission, which no download fixes either.
 
+import ctypes
 import json
 import locale
 import logging
@@ -134,7 +135,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.17'
+PLUGIN_VERSION = '0.18'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -164,6 +165,56 @@ EARLY_DEATH_SECONDS = 5.0
 #: bitrates and stayed there. 2 MiB is still four GOPs at the highest preset
 #: and cuts that to under three seconds.
 REPLAY_BYTES = 2 << 20
+#: How far behind the live edge the browser player parks itself, in seconds.
+#: Like `REPLAY_BYTES` and the DLNA prefill, this is a *standing* delay: the
+#: player seeks back to it once and then never catches up, so it is the floor
+#: on this target's end-to-end latency and no sender-side change can beat it.
+#:
+#: 3 s was transcribed from Mac-Screencast and never questioned. The floor it
+#: has to clear is one fragment, and a fragment on this target is
+#: `gop_size('browser')` = FPS // 2 = 12 frames = **0.5 s**, so 1.0 s leaves
+#: two fragments of slack -- the player is never waiting on bytes that have not
+#: been written yet. That is also why `movflags=+frag_every_frame` is *not*
+#: part of this change: it would cut the fragment interval to one frame and buy
+#: nothing at a 0.5 s cadence, while adding a `moof` per frame (~40 kbps at
+#: 24 fps) that the same LAN has to carry.
+#:
+#: Half a second is the floor rather than zero because a park distance of zero
+#: means the player is always exactly at the write head, where one encoder
+#: hiccup is a stall and a stall past `STALL_MS` is a full page reload.
+LIVE_EDGE_SECONDS = 1.0
+LIVE_EDGE_MIN_SECONDS = 0.5
+LIVE_EDGE_MAX_SECONDS = 5.0
+
+
+def live_edge_seconds():
+    """The park distance the browser player should use, clamped.
+
+    Read at request time and injected into the page, never baked into
+    `PLAYER_PAGE`, because the page is a module-level constant string and a
+    setting is not.
+    """
+    try:
+        value = float(Setting.get(SettingProperty.Mirror_Live_Edge,
+                                  LIVE_EDGE_SECONDS))
+    except (TypeError, ValueError):
+        return LIVE_EDGE_SECONDS
+    return max(LIVE_EDGE_MIN_SECONDS,
+               min(LIVE_EDGE_MAX_SECONDS, value))
+
+
+#: The pill row for the browser player's park distance. Same reason as
+#: DLNA_PREFILL_OPTIONS: values the clamp accepts, and a default the comment
+#: above derives from the fragment cadence rather than picking out of the air.
+LIVE_EDGE_OPTIONS = (LIVE_EDGE_MIN_SECONDS, LIVE_EDGE_SECONDS, 2.0, 3.0,
+                     LIVE_EDGE_MAX_SECONDS)
+
+#: What the control has to say about itself. The number is a floor on latency,
+#: and the page has to name the failure mode of pushing it down, or「更快」is
+#: the only thing the user reads.
+LIVE_EDGE_HINT = ('播放页会把自己停在直播边缘后面这么多秒，而且一直停在这里、'
+                  '不会追上来——所以它就是这一路端到端延迟的下限。调小更快，'
+                  '但小于一个分片（本机是 0.5 秒）时播放会卡，卡够 8 秒整页重载。')
 #: A system-audio tap (BlackHole on macOS, a PulseAudio monitor on Linux) is
 #: clocked by whatever the audio stack feels like, not by ffmpeg. Left alone,
 #: the two clocks slide past each other by a sample at a time and every slip
@@ -172,7 +223,10 @@ REPLAY_BYTES = 2 << 20
 #: repeating or dropping input samples instead of passing the gap through.
 AUDIO_RESAMPLE = ['-af', 'aresample=async=1']
 
-#: height -> (label, video bitrate). height 0 means "do not scale".
+#: key -> (target height, video bitrate). A height of 0 means "do not scale",
+#: which is what the 'source' preset is; the label the page shows comes from
+#: `quality_text()` and is *not* in this tuple -- the comment used to claim it
+#: was, which is the kind of drift that makes the next reader add a field.
 #:
 #: These are rates for 24 fps of *desktop*, not for film: a mostly-static
 #: screen costs very little, and the bandwidth a frame asks for beyond what the
@@ -186,15 +240,21 @@ QUALITIES = {'360': (360, 2000000),
 
 
 def rate_caps(bitrate):
-    """Constrained VBV: a 1.5x peak inside a one-second buffer.
+    """Constrained VBV: a 1.5x peak inside a half-second buffer.
 
     Without a ceiling, one frame that redraws the whole screen (a window drag,
     a video, a terminal scroll) is emitted at whatever size it wants. Every
     consumer downstream is sized for the average, so that one frame is exactly
     what overflows the queue -- and the drop is audible, not just visible.
+
+    The buffer is half a second, not a full one, because that is what Google's
+    own reference sender uses (`rc_buffer_size = bitrate / 2`) and a full second
+    of VBV is a full second the encoder is allowed to spend catching up on a
+    burst before the rate control reacts. Half a second still smooths a window
+    drag; it just stops paying for it with latency.
     """
     return ['-maxrate', str(int(bitrate * 1.5)),
-            '-bufsize', str(int(bitrate))]
+            '-bufsize', str(int(bitrate) // 2)]
 
 
 def quality_preset(key=None):
@@ -506,17 +566,60 @@ def _ebml_size(buf, pos):
 DLNA_PREFILL_SECONDS = 4
 DLNA_PREFILL_MIN_BYTES = 2 << 20
 DLNA_PREFILL_MAX_BYTES = 8 << 20
+#: The knob's ends. 1 s is the smallest that still covers several keyframe
+#: intervals, which is all the receiver's sniff actually needs; 8 s is where
+#: "buffering" stops being a compromise and starts being a recording.
+#:
+#: The **default stays at the measured 4** rather than dropping to the floor,
+#: and that is a decision, not an oversight: MirrorCast's own measurement on a
+#: real Philips 43PFS5301 (2016, non-Android) prefills ~20 MiB, i.e. 20-25 s,
+#: and says so openly -- so firmware that needs more than our floor exists in
+#: the wild, and we have no such television here to find where ours is. A
+#: number we cannot measure becomes a knob the user can, with the cost printed
+#: next to it; guessing a smaller default would just move the failure to a
+#: machine we cannot see.
+DLNA_PREFILL_MIN_SECONDS = 1
+DLNA_PREFILL_MAX_SECONDS = 8
+
+
+def dlna_prefill_seconds_setting():
+    """How many seconds the user asked the DLNA target to buffer.
+
+    A stored value outside the range is clamped rather than rejected: the
+    alternative is a television that stops playing because somebody typed 40
+    into the settings JSON, and that failure arrives with no explanation.
+    """
+    try:
+        value = int(Setting.get(SettingProperty.Mirror_Dlna_Prefill,
+                                DLNA_PREFILL_SECONDS))
+    except (TypeError, ValueError):
+        return DLNA_PREFILL_SECONDS
+    return max(DLNA_PREFILL_MIN_SECONDS,
+               min(DLNA_PREFILL_MAX_SECONDS, value))
 
 
 def dlna_prefill_bytes(profile):
-    """The prefill budget for one DLNA shape, in bytes."""
+    """The prefill budget for one DLNA shape, in bytes.
+
+    One positional argument on purpose. The regression suite replaces this
+    function with a stub of exactly that shape to take the buffer out of a
+    test, and a second parameter would turn every such stub into a TypeError
+    somewhere that has nothing to do with what the stub is testing.
+    """
     return int(max(DLNA_PREFILL_MIN_BYTES,
                    min(DLNA_PREFILL_MAX_BYTES,
-                       profile.total_bitrate * DLNA_PREFILL_SECONDS // 8)))
+                       profile.total_bitrate
+                       * dlna_prefill_seconds_setting() // 8)))
 
 
 def dlna_prefill_seconds(profile):
-    """What that budget costs the user, in seconds -- the start message says so."""
+    """What that budget costs the user, in seconds -- the start message says so.
+
+    Derived from the byte budget and not read back from the setting, so that a
+    budget the clamp moved (2 MiB floor, 8 MiB ceiling) still reports the
+    delay the user is actually getting. Those two answers disagreeing is worse
+    than either of them being approximate.
+    """
     return max(1, dlna_prefill_bytes(profile) * 8 // profile.total_bitrate)
 
 #: Ring size: 48 MiB of produced bytes stay addressable by absolute offset.
@@ -795,6 +898,14 @@ class SettingProperty(Enum):
     #: DLNA_SHAPES: the live shape is the default because it is the only one
     #: measured to play on both clients we can test against.
     Mirror_Dlna_Shape = 12
+    #: Seconds of picture the DLNA target buffers before handing the stream to
+    #: the television. Its own key because on that target this number *is* the
+    #: latency -- see DLNA_PREFILL_SECONDS.
+    Mirror_Dlna_Prefill = 13
+    #: Seconds the browser player parks itself behind the live edge. Same
+    #: shape of fact as the one above, on the other end of the pipe: it is a
+    #: standing delay the viewer never catches up from -- see LIVE_EDGE_SECONDS.
+    Mirror_Live_Edge = 14
 
 
 # -- ffmpeg ----------------------------------------------------------------
@@ -884,12 +995,51 @@ def output_kind():
     return kind if kind in OUTPUTS else DEFAULT_OUTPUT
 
 
-#: What an untouched install holds. VideoToolbox is a *better* default on a Mac
-#: -- x264 at `ultrafast` cannot keep a Retina desktop at a watchable frame rate,
-#: which is what "不开硬件就几乎看不到画面" was -- but the choice has to be
-#: resolved from a probe that may not have answered yet, so `auto` means
-#: "hardware if something already proved it exists, otherwise software".
+#: What an untouched install holds. VideoToolbox stays the default on a Mac, but
+#: the reason it used to give was measured and found false, so here is the reason
+#: that survives measurement.
+#:
+#: This comment used to say "x264 at `ultrafast` cannot keep a Retina desktop at
+#: a watchable frame rate, which is what「不开硬件就几乎看不到画面」was". It
+#: cannot: libx264 ultrafast+zerolatency on this machine encodes a *desktop*
+#: at **17.9x realtime at 1080p, 10.5x at 2560x1600, 6.2x at 3456x2234 and
+#: 5.65x at 4K** -- the throughput half of that sentence was never true at any
+#: resolution we ship, and a user who reported「看不到画面」was reporting
+#: something else (see NO_FRAME_SECONDS: the cause there was a capture that
+#: returned no frames at all, not an encoder that fell behind).
+#:
+#: The tradeoff that *is* real is latency against CPU, and it runs the opposite
+#: way on each axis:
+#:
+#:     x264 ultrafast+zl   first byte out 41-49 ms     ~4.5 cores
+#:     h264_videotoolbox   first byte out 200.9-253.1 ms   ~0.2 cores
+#:
+#: VideoToolbox's ~190 ms is not a setting we forgot to turn: `-realtime`,
+#: `-prio_speed`, `+constant_bit_rate`, `+max_ref_frames 1`, `-bf 0` and
+#: `-coder cabac` were each tried and none of them moved it (and `-realtime 1`
+#: produced byte-identical output to not passing it -- it only selects the
+#: low-delay rate-control path, it does not buy latency here). It is the
+#: hardware pipeline's own depth.
+#:
+#: So `auto` still lands on hardware, because 4.5 cores on a laptop is a fan and
+#: a battery, and 190 ms is not what most people mean by「投屏卡」. But it is a
+#: *default*, not a verdict: 软件编码 buys that 190 ms back and the page now says
+#: so out loud (ENCODER_TRADEOFF). The resolution has to come from a probe that
+#: may not have answered yet, hence "hardware if something already proved it
+#: exists, otherwise software".
 ENCODER_AUTO = 'auto'
+
+#: The one sentence the encoder switch on the page has to carry, because without
+#: it the switch reads as「硬件 = 好，软件 = 差」and nobody turns it off. Both
+#: numbers are measured on this machine, on a desktop capture, and they are the
+#: whole tradeoff -- there is no third axis (VT also undershoots its bitrate
+#: target by 30%, which is why rate_target() asks it for 1.5x, but that is
+#: correctness, not a quality difference the user has to choose between).
+ENCODER_TRADEOFF = ('关掉硬件编码可以省下约 190 毫秒的延迟'
+                    '（x264 出首帧 41-49 毫秒，VideoToolbox 200-253 毫秒），'
+                    '代价是约 4.5 个 CPU 核心：笔记本上会发热、耗电。'
+                    '两者都能撑住 4K 桌面的实时帧率（x264 实测 5.65-17.9 倍速），'
+                    '所以这不是「软件编码跟不上」，只是延迟换 CPU。')
 
 
 def encoder_kind():
@@ -1553,16 +1703,54 @@ def _probe_linux(ffmpeg, cursor=True):
     return _Capture('屏幕 (X11)', inputs)
 
 
+def uses_videotoolbox(kind, platform=None):
+    """Whether `encoder_args` will really select h264_videotoolbox.
+
+    Its own predicate because two other things have to agree with
+    `encoder_args` about which encoder is live -- the bitrate it asks for
+    (`rate_target`) and the flags it may carry -- and a second copy of this
+    condition is exactly how they stop agreeing.
+    """
+    return kind == 'hardware' and (platform or sys.platform) == 'darwin'
+
+
+#: VideoToolbox's rate control undershoots whatever `-b:v` it is handed by
+#: 30-33%: asked for 4 Mbps it emits 2802 kbit. That is conservatism, not a
+#: quality loss -- at a 4 Mbps target VT scores 91.47 VMAF against libx264
+#: ultrafast+zerolatency's 90.78 at 4216 kbit, a better picture at two thirds
+#: the bitrate. So when VT is the encoder we ask for 1.5x, and the number that
+#: reaches the wire is the number the quality menu promised.
+VT_BITRATE_MULT = 1.5
+
+
+def rate_target(bitrate, kind, platform=None):
+    """The `-b:v` value that actually produces `bitrate` on the wire."""
+    if uses_videotoolbox(kind, platform):
+        return int(bitrate * VT_BITRATE_MULT)
+    return int(bitrate)
+
+
 def encoder_args(kind, platform=None):
     """Video encoder flags. Hardware encoding is opt-in and macOS-only:
     ffmpeg's h264_videotoolbox is the one tap Apple actually ships, and unlike
     the Castify reference (which never probes for it and always lands on CPU
-    x264 on a Mac) we ask first -- see has_hardware_encoder()."""
-    if kind == 'hardware' and (platform or sys.platform) == 'darwin':
+    x264 on a Mac) we ask first -- see has_hardware_encoder().
+
+    Both branches carry `-flags +low_delay`: it is the first flag Google's own
+    reference sender sets, and upstream `videotoolboxenc.c` keeps adding
+    support for it ("ensure bitrate is set in low_delay mode"), so it is not an
+    x264-only idea. `-thread_type slice` rides on the x264 branch alone,
+    because videotoolbox reports *no* threading capability at all and asking
+    it for a thread type is asking for an option it does not have. x264 already
+    gets sliced threads implicitly from `-tune zerolatency`; naming it is cheap
+    insurance against a preset change quietly costing a frame of latency.
+    """
+    if uses_videotoolbox(kind, platform):
         return ['-c:v', 'h264_videotoolbox', '-profile:v', 'high',
-                '-level', '42', '-realtime', '1']
+                '-level', '42', '-flags', '+low_delay', '-realtime', '1']
     return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-            '-profile:v', 'high']
+            '-profile:v', 'high', '-flags', '+low_delay',
+            '-thread_type', 'slice']
 
 
 def has_hardware_encoder(ffmpeg, platform=None):
@@ -1615,7 +1803,7 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
         # The OFFER promised a frame of exactly this size, so pin it and
         # letterbox rather than scaling by height and hoping.
         _width, height, video_filter = cast_stream_shape(height)
-        bitrate = min(bitrate, CAST_STREAM_MAX_BITRATE)
+        bitrate = min(bitrate, cast_stream_bitrate_cap())
         cmd += ['-vf', video_filter]
         if encoder == 'software':
             # `-aud` makes every picture start with an access unit delimiter,
@@ -1632,9 +1820,16 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
         # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
         cmd += ['-vf', 'scale=-2:{}'.format(height)]
     cmd += encoder_args(encoder)
+    # Decided once, then used for both `-b:v` and the VBV that bounds it: a
+    # ceiling computed from a different number than the target is not a
+    # ceiling. Note the ordering against the caststream clamp above -- that one
+    # bounds the *wire* rate the OFFER promised, and `rate_target` then inflates
+    # the request so the wire actually lands there. Reversing the two would
+    # either overshoot the promise or underfill it.
+    target = rate_target(bitrate, encoder)
     cmd += ['-pix_fmt', 'yuv420p', '-g', str(gop_size(kind)),
-            '-b:v', str(bitrate)]
-    cmd += rate_caps(bitrate)
+            '-b:v', str(target)]
+    cmd += rate_caps(target)
     # Encoder private options only resolve after -c:v, so they ride at the end.
     cmd += extra
     cmd += OUTPUTS[kind][3]
@@ -1661,9 +1856,16 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
         # Matroska the cluster holding it cannot be published before that IDR
         # arrives. See `live_gop` for what that buys and what it costs.
         cmd += encoder_args(encoder)
+        # `profile.total_bitrate` is what the fake-file shape advertises as a
+        # Content-Length and what the prefill budget is derived from, so it
+        # describes the wire. `rate_target` turns that into the request that
+        # actually produces it -- on VideoToolbox the two differ by 1.5x, and
+        # before this they differed by 30% in the other direction, which made
+        # every advertised number on this target a mild fiction.
+        target = rate_target(profile.bitrate, encoder)
         cmd += ['-pix_fmt', 'yuv420p', '-g', str(live_gop(profile.fps)),
-                '-r', str(profile.fps), '-b:v', str(profile.bitrate)]
-        cmd += rate_caps(profile.bitrate)
+                '-r', str(profile.fps), '-b:v', str(target)]
+        cmd += rate_caps(target)
     cmd += profile.muxer + ['pipe:1']
     return cmd
 
@@ -1673,8 +1875,13 @@ def capture_unavailable_hint():
         return 'ffmpeg 没有列出任何屏幕采集设备（avfoundation）'
     if sys.platform == 'win32':
         return '这个 ffmpeg 构建不支持 gdigrab'
+    #: Derived, not written out: this sentence used to say「三种目标」and stayed
+    #: saying it for two releases after the fourth target shipped, which is the
+    #: failure mode a count in prose always has -- nobody re-reads it when they
+    #: add the row. `len(OUTPUTS)` cannot drift.
     return ('没有 DISPLAY：x11grab 只认 X11 会话（Wayland 下 ffmpeg 无法截屏，'
-            '本插件的三种目标都收不到画面；请切到 XWayland/X11 会话）')
+            '本插件的{}种目标都收不到画面；请切到 XWayland/X11 会话）').format(
+                len(OUTPUTS))
 
 
 #: How long the encoder may stay silent before we call the capture dead. A
@@ -3802,6 +4009,7 @@ class _StreamHandler(BaseHTTPRequestHandler):
             return
         body = PLAYER_PAGE.replace('@STREAM@', self.session.stream_path()) \
                           .replace('@CODECS@', self.session.codecs) \
+                          .replace('@LIVE_EDGE@', repr(live_edge_seconds())) \
                           .replace('@DIAG@', json.dumps(page_diag(self.session))) \
                           .replace('@TITLE@', self.session.page_title).encode('utf-8')
         self.send_response(200)
@@ -4160,7 +4368,7 @@ PLAYER_PAGE = r"""<!doctype html>
 <div id="stats"></div>
 <video id="v" autoplay playsinline muted></video>
 <script>
-var STREAM='@STREAM@',CODECS='@CODECS@',LIVE_EDGE=3,STALL_MS=8000;
+var STREAM='@STREAM@',CODECS='@CODECS@',LIVE_EDGE=@LIVE_EDGE@,STALL_MS=8000;
 var DIAG=@DIAG@||{};
 var v=document.getElementById('v'),st=document.getElementById('st'),
     err=document.getElementById('err'),panel=document.getElementById('stats'),
@@ -5284,22 +5492,473 @@ def _aes_encrypt_block(w, s0, s1, s2, s3):
     return out
 
 
+#: ---------------------------------------------------------------------------
+#: AES-128-CTR, from the operating system.
+#:
+#: The Cast Streaming target encrypts every access unit before slicing it into
+#: RTP packets, so the keystream rate *is* the channel's bitrate ceiling. The
+#: pure-Python schedule below runs at 1.33 MB/s on this hardware -- about 10
+#: Mbps of keystream per eight Mbps of picture, which is what pinned
+#: `CAST_STREAM_MAX_BITRATE` to 4.5. That number has nothing to do with the
+#: protocol, the radio, or the receiver: it is a Python interpreter.
+#:
+#: Every platform already ships hardware AES-128-CTR and `ctypes` reaches it
+#: without one new dependency: macOS `libcommonCrypto` (in the dyld shared
+#: cache, so it loads by absolute path even though `find /usr/lib` cannot see
+#: it), Windows `bcrypt.dll`, and OpenSSL's `EVP_aes_128_ctr` everywhere else
+#: (already resident, because CPython's `_ssl` links libcrypto). Measured on an
+#: Apple-silicon Mac, on the production shape -- one reused handle, a fresh
+#: `frame_iv` and a 41,667-byte access unit per call -- **5,367 MB/s**, 7.8 us
+#: per frame, ~4,000x the Python path and byte-identical to `/usr/bin/openssl
+#: enc -aes-128-ctr` at every length from 1 to 262,144 bytes. (The crypto
+#: alone, without `frame_iv` and the IV buffer, measures 11,297 MB/s; the lower
+#: figure is the honest one because it is what a frame actually costs.)
+#:
+#: Two rules came out of that measurement and matter more than the speed:
+#:
+#:   * **One call per access unit, never chunked.** The same bytes fed in
+#:     1,200-byte pieces drop CommonCrypto to 811 MB/s: the ctypes call itself
+#:     costs ~1.4 us. This is why `crypt` takes a whole buffer.
+#:   * **A known-answer test gates every backend, at import.** It cannot tell a
+#:     full-128-bit counter from a low-64-bit one (that takes 2^64 blocks), but
+#:     it does tell "the OS changed underneath us" from "we are silently
+#:     sending frames no receiver can decode". CommonCrypto increments only the
+#:     low 64 bits and treats the high half as a fixed nonce; `frame_iv` puts
+#:     the frame id in bytes 8..12 and leaves 12..16 zero, so the counter has
+#:     2^32 blocks -- 68.7 GB -- of headroom per access unit, and a carry into
+#:     the fixed half would need `aesIvMask[8:16]` within ~2,600 of 2^64
+#:     (probability ~2^-51 per session). That arithmetic is the safety argument;
+#:     the test is the tripwire.
+#:
+#: When nothing loads, or something loads and fails the test, we keep the
+#: pure-Python keystream and the 4.5 Mbps cap. The cap is then a *degraded
+#: mode* constant, not a design constant -- which is why it says so.
+
+def _commoncrypto_backend():
+    """macOS: `CCCryptor` in CTR mode, one reset + one update per access unit.
+
+    `CCCryptorReset` on a keyed handle is bit-exact against creating a fresh
+    cryptor per frame (verified for frame ids 0, 1, 2, 3, 7, 255, 256, 65535
+    and 2^31 through this plugin's own `frame_iv`), and it is what makes the
+    reused handle worth keeping: creating one per frame measures 4,994 MB/s
+    against 11,297 MB/s with the reset.
+    """
+    lib = ctypes.CDLL('/usr/lib/system/libcommonCrypto.dylib')
+    create = lib.CCCryptorCreateWithMode
+    create.argtypes = ([ctypes.c_uint] * 4 + [ctypes.c_void_p] * 2
+                       + [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int,
+                          ctypes.c_int, ctypes.c_uint,
+                          ctypes.POINTER(ctypes.c_void_p)])
+    create.restype = ctypes.c_int
+    update = lib.CCCryptorUpdate
+    update.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+                       ctypes.c_void_p, ctypes.c_size_t,
+                       ctypes.POINTER(ctypes.c_size_t)]
+    update.restype = ctypes.c_int
+    reset = lib.CCCryptorReset
+    reset.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    reset.restype = ctypes.c_int
+    release = lib.CCCryptorRelease
+    release.argtypes = [ctypes.c_void_p]
+    release.restype = ctypes.c_int
+
+    def make(key):
+        ref = ctypes.c_void_p()
+        # The IV here is a placeholder: `crypt` resets it per access unit, and
+        # CommonCrypto requires a valid one at creation time.
+        if create(0, 4, 0, 0,                       # encrypt, CTR, AES, no pad
+                  ctypes.create_string_buffer(key[:16], 16),
+                  key, len(key), None, 0, 0, 0,
+                  ctypes.byref(ref)) != 0 or not ref.value:
+            raise OSError('CCCryptorCreateWithMode refused the key')
+        return ref
+
+    def crypt(ref, iv, data):
+        if not data:
+            return b''
+        if reset(ref, ctypes.create_string_buffer(iv, 16)) != 0:
+            raise OSError('CCCryptorReset refused the counter block')
+        out = ctypes.create_string_buffer(len(data))
+        moved = ctypes.c_size_t(0)
+        if update(ref, data, len(data), out, len(data),
+                  ctypes.byref(moved)) != 0:
+            raise OSError('CCCryptorUpdate failed')
+        if moved.value != len(data):
+            raise OSError('CCCryptorUpdate held back {} of {} bytes'.format(
+                len(data) - moved.value, len(data)))
+        return out.raw
+
+    return make, crypt, release
+
+
+def _bcrypt_backend():
+    """Windows: CNG `BCryptEncrypt` in CTR mode.
+
+    `pbIV` is documented `[in, out]` -- the call rewrites the buffer with the
+    *next* counter block -- so there is no reset to call and every frame gets a
+    fresh mutable IV. CTR chaining arrived with Windows 8 / Server 2012; on
+    anything older `BCryptSetProperty` fails and we fall through to the
+    pure-Python keystream rather than emulating CTR out of ECB blocks. That
+    emulation is the obvious idea and it is a bad one: one `BCryptEncrypt` per
+    16-byte block costs more than the Python schedule it would replace, so the
+    "fallback" would be a downgrade wearing a native badge.
+    """
+    lib = ctypes.WinDLL('bcrypt')
+    open_alg = lib.BCryptOpenAlgorithmProvider
+    open_alg.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_wchar_p,
+                         ctypes.c_wchar_p, ctypes.c_ulong]
+    set_prop = lib.BCryptSetProperty
+    set_prop.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_void_p,
+                         ctypes.c_ulong, ctypes.c_ulong]
+    gen_key = lib.BCryptGenerateSymmetricKey
+    gen_key.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+                        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p,
+                        ctypes.c_ulong, ctypes.c_ulong]
+    encrypt = lib.BCryptEncrypt
+    encrypt.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong,
+                        ctypes.c_void_p, ctypes.c_ulong,
+                        ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong]
+    destroy_key = lib.BCryptDestroyKey
+    destroy_key.argtypes = [ctypes.c_void_p]
+    close_alg = lib.BCryptCloseAlgorithmProvider
+    close_alg.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+
+    def make(key):
+        if len(key) != 16:
+            raise OSError('BCrypt wants a sixteen-byte key for AES-128')
+        alg = ctypes.c_void_p()
+        if open_alg(ctypes.byref(alg), 'AES', None, 0) != 0:
+            raise OSError('BCryptOpenAlgorithmProvider failed')
+        # A null-terminated UTF-16 property value, as the CNG docs require.
+        mode = 'ChainingModeCTR'.encode('utf-16-le') + b'\x00\x00'
+        if set_prop(alg, 'ChainingMode', mode, len(mode), 0) != 0:
+            close_alg(alg, 0)
+            raise OSError('this Windows has no CTR chaining mode')
+        handle = ctypes.c_void_p()
+        if gen_key(alg, ctypes.byref(handle), None, 0, key, len(key), 0) != 0:
+            close_alg(alg, 0)
+            raise OSError('BCryptGenerateSymmetricKey failed')
+        return (alg, handle)
+
+    def crypt(pair, iv, data):
+        if not data:
+            return b''
+        out = ctypes.create_string_buffer(len(data))
+        moved = ctypes.c_ulong(0)
+        if encrypt(pair[1], data, len(data), None,
+                   ctypes.create_string_buffer(iv, 16), 16,
+                   out, len(data), ctypes.byref(moved), 0) != 0:
+            raise OSError('BCryptEncrypt failed')
+        if moved.value != len(data):
+            raise OSError('BCryptEncrypt returned {} of {} bytes'.format(
+                moved.value, len(data)))
+        return out.raw
+
+    def release(pair):
+        destroy_key(pair[1])
+        close_alg(pair[0], 0)
+
+    return make, crypt, release
+
+
+def _mapped_libcrypto():
+    """The absolute path of a libcrypto this process already has mapped.
+
+    The sonames below cover the common case, but a distribution that ships
+    libcrypto under some other name (musl, a vendored build) still has it
+    resident -- CPython's `_ssl` links it -- and the loader's own record of
+    what is mapped is a better witness than a directory listing.
+    """
+    try:
+        with open('/proc/self/maps', 'r', errors='replace') as maps:
+            for line in maps:
+                path = line.rsplit(' ', 1)[-1].strip()
+                if (os.path.basename(path).startswith('libcrypto.so')
+                        and os.path.isabs(path)):
+                    return path
+    except OSError:
+        pass
+    return None
+
+
+def _libcrypto_backend():
+    """OpenSSL's EVP: `EVP_aes_128_ctr`, one `Init` per access unit.
+
+    Re-`Init`ing a live context with a new IV is the documented way to restart
+    a cipher, so the context and its key schedule are built once per session
+    and only the IV moves per frame.
+    """
+    lib = None
+    for soname in ('libcrypto.so.3', 'libcrypto.so.1.1', 'libcrypto.so.1.0.0'):
+        try:
+            lib = ctypes.CDLL(soname)
+            break
+        except OSError:
+            continue
+    if lib is None:
+        mapped = _mapped_libcrypto()
+        if mapped is None:
+            raise OSError('no libcrypto is mapped into this process')
+        lib = ctypes.CDLL(mapped)
+    new_ctx = lib.EVP_CIPHER_CTX_new
+    new_ctx.restype = ctypes.c_void_p
+    new_ctx.argtypes = []
+    free_ctx = lib.EVP_CIPHER_CTX_free
+    free_ctx.argtypes = [ctypes.c_void_p]
+    free_ctx.restype = None
+    cipher = lib.EVP_aes_128_ctr
+    cipher.restype = ctypes.c_void_p
+    cipher.argtypes = []
+    init = lib.EVP_EncryptInit_ex
+    init.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                     ctypes.c_void_p, ctypes.c_void_p]
+    init.restype = ctypes.c_int
+    update = lib.EVP_EncryptUpdate
+    update.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                       ctypes.POINTER(ctypes.c_int), ctypes.c_void_p,
+                       ctypes.c_int]
+    update.restype = ctypes.c_int
+    final = lib.EVP_EncryptFinal_ex
+    final.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                      ctypes.POINTER(ctypes.c_int)]
+    final.restype = ctypes.c_int
+
+    def make(key):
+        if len(key) != 16:
+            raise OSError('EVP_aes_128_ctr wants a sixteen-byte key')
+        ctx = new_ctx()
+        if not ctx:
+            raise OSError('EVP_CIPHER_CTX_new returned NULL')
+        return (ctx, cipher(), key)
+
+    def crypt(triple, iv, data):
+        if not data:
+            return b''
+        ctx, one_ctr, key = triple
+        if init(ctx, one_ctr, None, key, iv) != 1:
+            raise OSError('EVP_EncryptInit_ex failed')
+        # Room for a Final that never has anything to say on a stream cipher,
+        # so that "Update buffered a partial block" cannot pass as success.
+        out = ctypes.create_string_buffer(len(data) + 32)
+        moved = ctypes.c_int(0)
+        if update(ctx, out, ctypes.byref(moved), data, len(data)) != 1:
+            raise OSError('EVP_EncryptUpdate failed')
+        done = moved.value
+        tail = ctypes.c_int(0)
+        if final(ctx, ctypes.addressof(out) + done, ctypes.byref(tail)) != 1:
+            raise OSError('EVP_EncryptFinal_ex failed')
+        return out.raw[:done + tail.value]
+
+    def release(triple):
+        free_ctx(triple[0])
+
+    return make, crypt, release
+
+
+#: Known-answer vectors, all of them computed with
+#: `/usr/bin/openssl enc -aes-128-ctr -K 000102...0f -iv 0f0f0f0f0f0f0f0f0f0f0f080f0f0f0f`.
+#: The counter block is `frame_iv(b'\x0f' * 16, 7)` spelled out as a literal,
+#: because this test runs at import and `frame_iv` is defined further down.
+_AES_KAT_KEY = bytes(range(16))
+_AES_KAT_IV = b'\x0f' * 8 + b'\x0f\x0f\x0f\x08' + b'\x0f' * 4
+#: Two whole blocks: block 0 pins the keystream, block 1 pins the counter
+#: increment across a block boundary -- the one place a low-64-bit counter and
+#: a full-128-bit one could part ways within a length we can actually test.
+_AES_KAT_SHORT = bytes(range(32))
+_AES_KAT_SHORT_OUT = bytes.fromhex(
+    '54be03754f76e8a02f70d7bd5e6414fc2f00a09be1da68133b93b4f3fe1c07f8')
+#: An unaligned tail. A real access unit is never a multiple of sixteen, so a
+#: backend that parks a partial block instead of emitting keystream for it
+#: would encrypt every frame wrong and still look healthy on the vector above.
+_AES_KAT_ODD = bytes(range(37))
+_AES_KAT_ODD_OUT = bytes.fromhex(
+    '54be03754f76e8a02f70d7bd5e6414fc2f00a09be1da68133b93b4f3fe1c07f8'
+    'b8ce93d2c8')
+#: A realistic access unit, pinned by digest, on a **reused** handle -- which
+#: is what production does (one cipher per session at `_CastStream.__init__`,
+#: reseeded per frame). Every pin already in the suite builds a fresh cipher
+#: per call, so none of them exercise this path.
+_AES_KAT_LONG = bytes(range(256)) * 16
+_AES_KAT_LONG_SHA = ('de71b7bd3d02e63cbc436109587c4cf8'
+                     'b5d3ff169cd23e3d29e112e604d17868')
+
+
+def _aes_known_answer(backend):
+    """Whether `backend` reproduces `/usr/bin/openssl enc -aes-128-ctr`.
+
+    A failure is logged as an error, not a debug line: the alternative is a
+    session that sends frames no receiver can decode, with a log that has
+    nothing to say about why.
+    """
+    import hashlib
+    make, crypt, release = backend
+    handle = None
+    try:
+        handle = make(_AES_KAT_KEY)
+        if crypt(handle, _AES_KAT_IV, _AES_KAT_SHORT) != _AES_KAT_SHORT_OUT:
+            logger.error('the OS AES backend disagrees with openssl on two '
+                         'whole blocks; falling back to the pure-Python '
+                         'keystream')
+            return False
+        if crypt(handle, _AES_KAT_IV, _AES_KAT_ODD) != _AES_KAT_ODD_OUT:
+            logger.error('the OS AES backend disagrees with openssl on an '
+                         'unaligned tail; falling back to the pure-Python '
+                         'keystream')
+            return False
+        # Reseeding twice must land back on the same IV, or the per-frame reset
+        # is lying about what it reset.
+        if crypt(handle, _AES_KAT_IV, _AES_KAT_ODD) != _AES_KAT_ODD_OUT:
+            logger.error('the OS AES backend does not return to the same '
+                         'counter block when reseeded; falling back to the '
+                         'pure-Python keystream')
+            return False
+        if crypt(handle, _AES_KAT_IV, b'') != b'':
+            logger.error('the OS AES backend invents bytes for an empty '
+                         'buffer; falling back to the pure-Python keystream')
+            return False
+        digest = hashlib.sha256(crypt(handle, _AES_KAT_IV, _AES_KAT_LONG))
+        if digest.hexdigest() != _AES_KAT_LONG_SHA:
+            logger.error('the OS AES backend disagrees with openssl over a '
+                         '4 KiB buffer on a reused handle; falling back to '
+                         'the pure-Python keystream')
+            return False
+        return True
+    except Exception as exc:
+        logger.error('the OS AES backend failed its known-answer test: %s', exc)
+        return False
+    finally:
+        if handle is not None:
+            try:
+                release(handle)
+            except Exception:
+                pass
+
+
+def _load_native_aes():
+    """The OS AES-128-CTR backend for this platform, or None.
+
+    The three backends are platform-disjoint on purpose, and macOS never probes
+    libcrypto at all: `ctypes.CDLL('libcrypto.dylib')` by bare soname **aborts
+    the interpreter** there, because CPython already has a different libcrypto
+    loaded and the flat-namespace collision is fatal. None is a supported
+    answer -- it is exactly the degraded mode `CAST_STREAM_MAX_BITRATE` is
+    written for.
+    """
+    if sys.platform == 'darwin':
+        builders = (('commoncrypto', _commoncrypto_backend),)
+    elif os.name == 'nt':
+        builders = (('bcrypt', _bcrypt_backend),)
+    else:
+        builders = (('libcrypto', _libcrypto_backend),)
+    for name, build in builders:
+        try:
+            backend = build()
+        except Exception as exc:
+            logger.info('no OS AES backend from %s: %s', name, exc)
+            continue
+        if _aes_known_answer(backend):
+            logger.info('AES-128-CTR is running on %s', name)
+            #: The name rides along in slot 0. Without it the tuple is anonymous:
+            #: three closures called make/crypt/release look identical no matter
+            #: which operating system produced them, so "some OS backend loaded"
+            #: would be the strongest statement anything could make -- and that
+            #: is not the statement a log line, the console note or a test needs.
+            return (name,) + backend
+    logger.error('no OS AES-128-CTR backend is usable; the low-latency '
+                 'channel runs on the pure-Python keystream and its bitrate '
+                 'cap (see CAST_STREAM_MAX_BITRATE)')
+    return None
+
+
+#: The backend `_load_native_aes()` settled on -- `(name, make, crypt, release)`
+#: -- or None.
+_NATIVE_AES = _load_native_aes()
+
+
+def native_aes_name():
+    """Which OS cipher is carrying the low-latency channel, or ''.
+
+    '' means the pure-Python keystream, which is the degraded mode the bitrate
+    cap is written for. Its own accessor because slot 0 of that tuple is the
+    only place the fact lives, and three call sites spelling `_NATIVE_AES[0]`
+    is three places to get the index wrong.
+    """
+    return _NATIVE_AES[0] if _NATIVE_AES else ''
+
+
 class Aes128Ctr(object):
     """AES-128 in counter mode, over a whole buffer.
 
     Cast Streaming restarts the counter for every access unit with a nonce the
     receiver can rebuild from the frame id, so the caller supplies the full
     16-byte initial counter and we keep keystream generation in one place that
-    a test can pin against the NIST vectors.
+    a test can pin against `/usr/bin/openssl enc -aes-128-ctr`.
+
+    The keystream comes from the operating system when a backend loaded and
+    passed its known-answer test at import, and from the pure-Python schedule
+    above when it did not. Both produce the same bytes; only one of them is
+    fast enough to carry a picture.
     """
 
-    __slots__ = ('_w',)
+    __slots__ = ('_native', '_w')
 
     def __init__(self, key):
+        self._native = None
         self._w = _aes_expand_key(key)
+        backend = _NATIVE_AES
+        if backend is not None:
+            #: Unpacked by name and then held as `(handle, crypt, release,
+            #: name)`, so no call site below indexes the backend tuple. The
+            #: tuple grew a name in slot 0 once already; three places spelling
+            #: `[1]`/`[2]`/`[3]` is three places that would silently call the
+            #: wrong function if it grows again.
+            name, make, crypt, release = backend
+            try:
+                self._native = (make(key), crypt, release, name)
+            except Exception as exc:
+                logger.warning('the OS AES backend %s refused this key (%s); '
+                               'this session uses the pure-Python keystream',
+                               name, exc)
+
+    def __del__(self):
+        try:
+            native = self._native
+        except AttributeError:
+            return                  # __init__ raised before the slot was set
+        if native is None:
+            return
+        try:
+            native[2](native[0])
+        except Exception:
+            # At interpreter shutdown the libraries may already be gone. One
+            # leaked cryptor at process exit is reclaimed by the OS; crashing
+            # on the way out is not.
+            pass
 
     def crypt(self, iv, data):
         """Return `data` XOR the keystream starting at the 16-byte counter `iv`."""
+        if self._native is not None:
+            handle, encrypt, release, name = self._native
+            try:
+                return encrypt(handle, iv, data)
+            except Exception as exc:
+                # A backend that starts failing mid-session must not stop the
+                # stream. Drop to the slow path and say so out loud: the
+                # picture survives, the bitrate ceiling comes back, and the
+                # log names the reason instead of leaving a mystery stall.
+                logger.error('the OS AES backend %s failed mid-stream (%s); '
+                             'this session falls back to the pure-Python '
+                             'keystream, which caps the low-latency channel',
+                             name, exc)
+                #: Released here rather than left to `__del__`: the session can
+                #: run for hours on the slow path, and a cryptor nobody will
+                #: ever touch again is not a reason to hold OS resources.
+                try:
+                    release(handle)
+                except Exception:
+                    pass
+                self._native = None
         w = self._w
         c0, c1, c2, c3 = struct.unpack('>4I', iv)
         out = bytearray(data)
@@ -5490,10 +6149,22 @@ TARGET_DELAY_MS = 200
 MAX_PACKET = 1400
 CAST_PACKET_HEADER = 19
 MAX_PAYLOAD = MAX_PACKET - CAST_PACKET_HEADER
-#: How many frames the receiver may sit on before we call it behind us. The
-#: reference also bounds the window by time; a frame count is what can be
-#: enforced without knowing the round trip.
-MAX_IN_FLIGHT_FRAMES = 12
+#: How far apart two un-acknowledged frame ids may be before an 8-bit id stops
+#: being unambiguous. openscreen calls this `kMaxUnackedFrames = 120`, and it is
+#: a *span* guard, not a burst window -- the burst is bounded by time, below.
+MAX_IN_FLIGHT_FRAMES = 120
+#: openscreen's floor and cap on the un-acknowledged window, in milliseconds:
+#: `clamp(2 x RTT, 66 ms, targetDelay / 3)`. At our 200 ms target the two clamp
+#: ends are 66 and 66.7 ms, so the window is effectively pinned at ~66 ms --
+#: about one and a half frames -- and the measured round trip only starts to
+#: matter if the target delay is ever raised. Worth saying out loud, because it
+#: means this constant, not the RTT probe, is what decides the queue here.
+MIN_WINDOW_MS = 66.0
+#: A round trip longer than this is a lost checkpoint, not a slow network, and
+#: feeding it back into the window would widen the queue for nothing.
+RTT_MAX_MS = 1000.0
+#: Exponential smoothing weight for a new round-trip sample.
+RTT_SMOOTHING = 0.25
 #: A receiver will not paint anything until it has the NTP<->RTP mapping, so
 #: the first sender report rides with the first picture rather than waiting for
 #: this timer.
@@ -5508,11 +6179,32 @@ CONTROL_PING_SECONDS = 5.0
 CONTROL_LOSS_SECONDS = 20.0
 #: Seconds between the NTP epoch (1900) and the UNIX epoch (1970).
 NTP_UNIX_OFFSET = 2208988800
-#: Pure-Python AES-128-CTR runs at about 1.3 MB/s, so this target buys its
-#: latency with a lower ceiling than the LOAD path has: 10 Mbps of 1080p would
-#: leave the encryptor permanently behind the encoder, and the mirror would
-#: slow-walk further and further into the past.
-CAST_STREAM_MAX_BITRATE = 4500000
+#: The ceiling this channel advertises, now that the keystream comes from the
+#: operating system (`_NATIVE_AES`): 8 Mbps is what the OS AES measures out at
+#: ~4,000x headroom, and it sits just under Google's own
+#: `kDefaultVideoMaxBitRate = 10 Mbps` rather than under a Python interpreter.
+#: 1080p desktop at 6 Mbps -- the menu's own '1080' preset -- now fits.
+CAST_STREAM_MAX_BITRATE = 8000000
+#: What the ceiling falls back to when no OS AES backend loaded and the
+#: pure-Python keystream is doing the work: that runs at 1.35 MB/s, so 10 Mbps
+#: of picture would leave the encryptor permanently behind the encoder and the
+#: mirror would slow-walk further into the past every second. This is a
+#: **degraded-mode** constant, not a design constant, and the two must not be
+#: collapsed back into one -- that single number is what pinned this channel
+#: below both Google's default and Chrome's for its whole life.
+CAST_STREAM_DEGRADED_BITRATE = 4500000
+
+
+def cast_stream_bitrate_cap():
+    """The bitrate this channel may actually ask for, given the cipher it got.
+
+    One function because the OFFER, the encoder argv and the console note all
+    have to agree: promising a receiver 8 Mbps and then encoding at 4.5 is a
+    lie the receiver can detect, and quoting the wrong number on the page is a
+    lie the user can.
+    """
+    return (CAST_STREAM_MAX_BITRATE if _NATIVE_AES is not None
+            else CAST_STREAM_DEGRADED_BITRATE)
 #: Requested height -> the frame this target actually pins. The OFFER has to
 #: claim a resolution before the encoder has produced a single picture, and
 #: "whatever the desktop happens to be" cannot be claimed then -- so 'source'
@@ -5748,7 +6440,13 @@ class _CastStreamSender(object):
         self._units = _AccessUnits()
         self._frame_id = 0
         self._sequence = secrets.randbelow(0x10000)
-        self._in_flight = deque()       # (frame id, last packet, timestamp)
+        # (frame id, last packet, rtp timestamp, monotonic send time). The send
+        # time is what makes the window a duration rather than a count; see
+        # `_window_full`.
+        self._in_flight = deque()
+        #: Smoothed round trip in milliseconds, from checkpoint acks. None
+        #: until the receiver has acknowledged something.
+        self._rtt_ms = None
         self._awaiting_key = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -5832,10 +6530,44 @@ class _CastStreamSender(object):
         for unit in self._units.flush():
             self._send_unit(unit)
 
+    def _window_ms(self):
+        """How long an un-acknowledged frame may stay in flight, in ms.
+
+        openscreen's `clamp(2 x RTT, 66 ms, targetDelay / 3)`, transcribed.
+        Callers hold `_lock`.
+        """
+        rtt = MIN_WINDOW_MS / 2.0 if self._rtt_ms is None else self._rtt_ms
+        return min(max(2.0 * rtt, MIN_WINDOW_MS), TARGET_DELAY_MS / 3.0)
+
+    def _window_full(self, now):
+        """Whether sending one more frame would overrun the window.
+
+        The unit is *time*, not frames, and that is the whole point: at a
+        200 ms target delay this protocol allows about 66 ms of
+        un-acknowledged data, which is one and a half of our frames. Counting
+        twelve of them instead handed the receiver six times the queue the
+        negotiation asked for, and every frame sitting in that queue is latency
+        we have already paid for and cannot get back.
+
+        Callers hold `_lock`.
+        """
+        if not self._in_flight:
+            return False
+        if self._frame_id - self._in_flight[0][0] >= MAX_IN_FLIGHT_FRAMES:
+            # The 8-bit frame id in the Cast header has stopped being
+            # unambiguous. Nothing to do with burst size -- just refuse to
+            # guess which frame an ack is talking about.
+            return True
+        return (now - self._in_flight[0][3]) * 1000.0 >= self._window_ms()
+
     def _send_unit(self, unit):
         is_key = _unit_is_key(unit)
+        # One clock read for the whole frame: the window check, the RTP
+        # timestamp and `_last_sent` all describe this same moment, and
+        # encrypting plus packetising in between is tens of microseconds.
+        now = time.monotonic()
         with self._lock:
-            behind = len(self._in_flight) >= MAX_IN_FLIGHT_FRAMES
+            behind = self._window_full(now)
         if behind or (self._awaiting_key and not is_key):
             # Shed *whole* frames: half a picture stays on the screen until the
             # next IDR, which is worse than the last complete one still there.
@@ -5846,7 +6578,6 @@ class _CastStreamSender(object):
             return
         frame_id = self._frame_id
         self._frame_id += 1
-        now = time.monotonic()
         timestamp = int((now - self._t0) * VIDEO_CLOCK) & 0xFFFFFFFF
         cipher = self._cipher.crypt(frame_iv(self._iv_mask, frame_id), unit)
         packets, self._sequence = cast_packets(
@@ -5862,7 +6593,7 @@ class _CastStreamSender(object):
             self._awaiting_key = True
             raise
         with self._lock:
-            self._in_flight.append((frame_id, packets[-1], timestamp))
+            self._in_flight.append((frame_id, packets[-1], timestamp, now))
             self._timestamp = timestamp
             self._octets = (self._octets + len(cipher)) & 0xFFFFFFFF
             self.packets += len(packets)
@@ -5905,10 +6636,25 @@ class _CastStreamSender(object):
             if event[0] == 'picture-loss':
                 self._awaiting_key = True
             elif event[0] == 'checkpoint':
+                acked_at = time.monotonic()
                 with self._lock:
                     acked = expand_frame_id(event[1], self._frame_id - 1)
+                    newest = None
                     while self._in_flight and self._in_flight[0][0] <= acked:
-                        self._in_flight.popleft()
+                        newest = self._in_flight.popleft()
+                    if newest is not None:
+                        # The newest frame this ack covers is the freshest round
+                        # trip; the older ones have been waiting behind it. The
+                        # window is a duration now, so this number is what
+                        # sizes it -- and a sample above RTT_MAX_MS is a lost
+                        # checkpoint rather than a slow network, so it is
+                        # dropped instead of widening the queue for nothing.
+                        sample = (acked_at - newest[3]) * 1000.0
+                        if 0.0 <= sample <= RTT_MAX_MS:
+                            self._rtt_ms = (
+                                sample if self._rtt_ms is None
+                                else self._rtt_ms + RTT_SMOOTHING
+                                * (sample - self._rtt_ms))
                     self.acked = max(self.acked, acked)
                     self.playout_delay = event[2]
             # 'nack': noted and dropped. See the class docstring.
@@ -6389,7 +7135,7 @@ class ScreenMirrorRenderer(Renderer):
             try:
                 stream = _CastStreamSender.open(
                     host, port, width, pinned, FPS,
-                    min(bitrate, CAST_STREAM_MAX_BITRATE),
+                    min(bitrate, cast_stream_bitrate_cap()),
                     on_lost=self._stream_lost)
             except Exception as e:
                 logger.warning('Cast Streaming refused (%s); using LOAD', e)
@@ -7081,17 +7827,60 @@ CONSOLE_VERSION = 4
 
 #: One line of trade-off language per target: the cards in the page have room to
 #: say what choosing this costs, which a menu label never did.
+#:
+#: Two of these lines carry a number, and both numbers are computed from the
+#: same function that decides them rather than typed in again -- 「上限 4.5
+#: Mbps」outlived its own cause by a whole release once, when the keystream
+#: moved to the operating system, and a hint that names a limit the code no
+#: longer has sends the user looking for a setting that does not exist.
+#: The `dlna` line is the *default-state* text: `output_hint` recomputes it with
+#: the stored prefill, because a dict literal is evaluated at import and reading
+#: a setting at import would persist it on a machine that never opened the page.
 OUTPUT_HINTS = {
     'cast': ('兼容性最好 · 有声音 · 发送端缓冲约 0.8 秒，电视端解码另计'
              '（这一路的端到端延迟没在真电视上量过）'),
-    'caststream': ('实验通道 · 纯 Python 加密，上限 4.5 Mbps · 本通道无声音 · '
+    'caststream': ('实验通道 · 加密走{crypto}，上限 {cap:.1f} Mbps · 本通道无声音 · '
                    '电视不认这一通道时会自动回落上面的兼容通道，那时是有声音的 · '
-                   '未在真电视上验证过'),
+                   '未在真电视上验证过').format(
+        crypto=('系统原生 AES（{}）'.format(native_aes_name())
+                if _NATIVE_AES is not None else '纯 Python（已降级）'),
+        cap=cast_stream_bitrate_cap() / 1000000.0),
     'dlna': ('给没有 Google 栈的老电视 · 「伪装成文件」会先攒约 {} 秒画面再交给它，'
              '所以一开始就有秒级延迟；默认的「直播流」不预填').format(
         DLNA_PREFILL_SECONDS),
     'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
 }
+
+#: The sentence the DLNA prefill control has to carry. Not in OUTPUT_HINTS
+#: because it is about a knob, not about a target: the user lowering this number
+#: is buying latency with a receiver that may stop playing, and that trade only
+#: makes sense if the page says which side of it they are on.
+DLNA_PREFILL_HINT = ('这个数字就是看得见的延迟：电视会先攒够这么多秒的画面才开始播，'
+                     '然后一直慢这么多，不会追上来。调小更快，但太小时老电视可能'
+                     '探测不出这是一个能播的流——本机没有那样的电视可量，'
+                     '所以默认停在实测过的那一档。')
+
+#: The pill row, so the page offers values the clamp accepts rather than a free
+#: text field it has to argue with. Every entry sits inside
+#: DLNA_PREFILL_MIN_SECONDS..DLNA_PREFILL_MAX_SECONDS by construction, and the
+#: default is the measured one rather than the floor -- see the reasoning on
+#: DLNA_PREFILL_MIN_SECONDS.
+DLNA_PREFILL_OPTIONS = (1, 2, DLNA_PREFILL_SECONDS, 6, 8)
+
+
+def output_hint(kind):
+    """The trade-off line for one target, with any user setting folded in.
+
+    Its own function because `OUTPUT_HINTS` is a module literal and one of its
+    lines quotes a number the user can change. A card that says「先攒约 4 秒」
+    while the session buffers 2 is the same lie as a stats overlay that
+    disagrees with the counter it is supposed to be showing.
+    """
+    if kind == 'dlna':
+        return ('给没有 Google 栈的老电视 · 「伪装成文件」会先攒约 {} 秒画面再交给它，'
+                '所以一开始就有秒级延迟；默认的「直播流」不预填').format(
+            dlna_prefill_seconds_setting())
+    return OUTPUT_HINTS.get(kind, '')
 
 # -- 投屏方式：先问用哪种协议，再问投给哪台设备 --------------------------------
 #
@@ -7260,7 +8049,7 @@ def channels_state(current=None):
             trace=dlna_trace() if probe == 'dlna' else None)
         out.append({'key': key,
                     'label': OUTPUTS[key][0],
-                    'hint': OUTPUT_HINTS.get(key, ''),
+                    'hint': output_hint(key),
                     'probe': probe,
                     'selected': key == current,
                     'devices': items,
@@ -7542,7 +8331,7 @@ class ScreenMirrorSetting(RendererSetting):
                 'kind': kind,
                 'options': [{'key': key,
                              'label': OUTPUTS[key][0],
-                             'hint': OUTPUT_HINTS.get(key, '')}
+                             'hint': output_hint(key)}
                             for key, _probe in CHANNELS],
             },
             'channels': channels_state(kind),
@@ -7583,6 +8372,19 @@ class ScreenMirrorSetting(RendererSetting):
                 'options': [{'key': key, 'label': DLNA_SHAPES[key][0],
                              'hint': DLNA_SHAPES[key][1]}
                             for key in (DLNA_SHAPE_LIVE, DLNA_SHAPE_FILE)],
+                #: The prefill lives on this card rather than getting one of its
+                #: own because it only exists for the endless-file shape above,
+                #: and a control two cards away from the thing that makes it
+                #: meaningful reads as a setting for the whole target.
+                'prefill': {
+                    'current': dlna_prefill_seconds_setting(),
+                    'options': [{'key': str(sec),
+                                 'label': '{} 秒{}'.format(
+                                     sec, '（默认）'
+                                     if sec == DLNA_PREFILL_SECONDS else '')}
+                                for sec in DLNA_PREFILL_OPTIONS],
+                    'note': DLNA_PREFILL_HINT,
+                },
             },
             'quality': {
                 'current': quality_key(),
@@ -7702,6 +8504,11 @@ class ScreenMirrorSetting(RendererSetting):
             'hardware_supported': hardware,
             'hardware_probed': hardware_available is not None,
             'hardware_available': bool(hardware_available),
+            #: Only non-empty where the switch itself is shown: on a machine with
+            #: no VideoToolbox there is nothing to turn off, and a note about a
+            #: choice the page is not offering reads as a bug.
+            'encoder_note': (ENCODER_TRADEOFF if hardware and hardware_available
+                             else ''),
         }
 
     @staticmethod
@@ -7728,8 +8535,23 @@ class ScreenMirrorSetting(RendererSetting):
         url = renderer.viewer_url() if renderer is not None else ''
         hint = '不要把这条地址转发出去：它带着本次会话的观看令牌' if url else (
             '开始镜像后这里会给出观看地址' if kind == 'browser' else '')
+        current = live_edge_seconds()
         return {'url': url, 'available': bool(url), 'hint': hint,
-                'kind': kind, 'mirroring': mirroring}
+                'kind': kind, 'mirroring': mirroring,
+                #: The player's park distance, which is this target's latency
+                #: floor. Reported whether or not a mirror is running: it is
+                #: read when the page is served, so setting it first is the
+                #: normal order and a control that only appears mid-session
+                #: would train the user to start, stop, and start again.
+                'live_edge': {
+                    'current': current,
+                    'options': [{'key': repr(sec),
+                                 'label': '{} 秒{}'.format(
+                                     ('%g' % sec), '（默认）'
+                                     if sec == LIVE_EDGE_SECONDS else '')}
+                                for sec in LIVE_EDGE_OPTIONS],
+                    'note': LIVE_EDGE_HINT,
+                }}
 
     # -- the console's actions --------------------------------------------------
 
@@ -7737,9 +8559,9 @@ class ScreenMirrorSetting(RendererSetting):
     #: name that is not here rather than dispatching on it.
     CONSOLE_ACTIONS = ('start', 'stop', 'toggle', 'set-output', 'set-target',
                        'set-dlna-target', 'set-dlna-shape', 'set-profile',
-                       'set-quality', 'set-screen', 'set-cursor',
-                       'set-encoder', 'refresh', 'probe', 'audio-setup',
-                       'audio-restore')
+                       'set-dlna-prefill', 'set-quality', 'set-screen',
+                       'set-cursor', 'set-encoder', 'set-live-edge',
+                       'refresh', 'probe', 'audio-setup', 'audio-restore')
 
     def console_action(self, action, args=None):
         """Single entry point for the console; {'code', 'message'} either way.
@@ -7867,6 +8689,52 @@ class ScreenMirrorSetting(RendererSetting):
         return self._ok('DLNA 形状：{}'.format(DLNA_SHAPES[key][0]),
                         restart=True)
 
+    def _do_set_dlna_prefill(self, args):
+        """How many seconds of picture the endless-file shape buffers first.
+
+        Restarts, because the budget is turned into a byte count when the
+        session is built and a running television is already reading from the
+        head of the buffer it was given -- changing the number underneath it
+        would move the offsets every absolute read is keyed on.
+
+        Validated against the same tuple the state reports its pills from, not
+        against the clamp: the clamp exists so a hand-edited settings file
+        cannot produce a television that will not play, and accepting arbitrary
+        numbers here would make the page the only thing enforcing the list.
+        """
+        raw = str(args.get('value') or '')
+        try:
+            seconds = int(raw)
+        except ValueError:
+            return self._no('预填秒数得是个整数：{}'.format(raw))
+        if seconds not in DLNA_PREFILL_OPTIONS:
+            return self._no('只能选这几档：{}'.format(
+                '、'.join(str(one) for one in DLNA_PREFILL_OPTIONS)))
+        Setting.set(SettingProperty.Mirror_Dlna_Prefill, seconds)
+        return self._ok('DLNA 预填：{} 秒（这就是看得见的延迟）'.format(seconds),
+                        restart=True)
+
+    def _do_set_live_edge(self, args):
+        """How far behind the live edge the browser player parks itself.
+
+        Deliberately the one knob here that does *not* restart: the value is
+        injected into the viewing page when that page is served, so the running
+        session is untouched and a reload of the viewing page picks it up.
+        Restarting a capture to change a number the player reads from its own
+        HTML would be the expensive way to do nothing.
+        """
+        raw = str(args.get('value') or '')
+        try:
+            seconds = float(raw)
+        except ValueError:
+            return self._no('延迟下限得是个数字：{}'.format(raw))
+        if seconds not in LIVE_EDGE_OPTIONS:
+            return self._no('只能选这几档：{}'.format(
+                '、'.join('%g' % one for one in LIVE_EDGE_OPTIONS)))
+        Setting.set(SettingProperty.Mirror_Live_Edge, seconds)
+        return self._ok('浏览器播放页停在直播边缘后 {} 秒'
+                        '（刷新观看页生效，不用重启镜像）'.format('%g' % seconds))
+
     def _do_set_quality(self, args):
         key = str(args.get('value') or '')
         if key not in QUALITIES:
@@ -7906,7 +8774,9 @@ class ScreenMirrorSetting(RendererSetting):
             return self._no('硬件编码（VideoToolbox）只有 macOS 有')
         Setting.set(SettingProperty.Mirror_Encoder, want)
         return self._ok('编码器：{}'.format(
-            'VideoToolbox 硬件编码' if want == 'hardware' else '软件编码（x264）'),
+            'VideoToolbox 硬件编码（约 0.2 核，延迟约 200 毫秒）'
+            if want == 'hardware'
+            else '软件编码（x264，延迟约 45 毫秒，代价约 4.5 核）'),
             restart=True)
 
     def _do_refresh(self, args):
@@ -8001,13 +8871,23 @@ class ScreenMirrorSetting(RendererSetting):
 
     @staticmethod
     def _quality_note():
-        """The low-latency channel cannot spend what the menu offers."""
+        """The low-latency channel's ceiling, and the reason it sits there.
+
+        The reason is not decoration: it used to say「软件加密跟不上」
+        unconditionally, which stopped being true the moment the keystream came
+        from the operating system. A note that names a cause the code no longer
+        has is worse than no note, because the user goes looking for the
+        encryption setting.
+        """
         if output_kind() != 'caststream':
             return None
         width, height, _filter = cast_stream_shape(quality_preset()[0])
-        return ('低延迟通道上限 {:.1f} Mbps（软件加密跟不上）· '
+        cap = cast_stream_bitrate_cap()
+        why = ('纯 Python 加密跟不上，已自动降级' if _NATIVE_AES is None
+               else '加密走系统原生 {}，上限是我们选的'.format(native_aes_name()))
+        return ('低延迟通道上限 {:.1f} Mbps（{}）· '
                 '帧尺寸固定 {}x{}（信箱化）'.format(
-                    CAST_STREAM_MAX_BITRATE / 1000000.0, width, height))
+                    cap / 1000000.0, why, width, height))
 
     @staticmethod
     def _audio_line(renderer=None, platform=None):
