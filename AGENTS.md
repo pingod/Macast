@@ -307,6 +307,26 @@ find /Applications/Macast.app -iname "*zeroconf*" | head
 Part 46 的三条变异体已逐个验过：改开一个门 / 删 `actions: write` / 把清扫放宽成 `always()`，
 各自都会当场变红。
 
+**查产物里有没有某个模块，要用点号名，而且 Linux 产物故意不含 pystray**（2026-10-02 验 v0.9.0
+时差点报出一个假缺陷，两条都记在这里）：
+
+- **Linux / Windows 产物是 PyInstaller `--onefile`**，`tar tzf` / `zipfile.namelist()` 只会给你
+  **3 个条目**（LICENSE、README、那一个可执行文件），列不出内容。可行的办法是把可执行文件
+  `strings -a` 出来再 grep —— PyInstaller 的 TOC 里模块名是明文。**但名字是点号形式**：
+  搜 `PIL/Image` 得 0，搜 `PIL.Image` 得 15（Linux 与 Windows 一样多）。
+  我第一遍用斜杠搜，据此差点断言"Linux 产物缺 Pillow ⇒ `gui.py` 模块级 `from PIL import Image`
+  会毒掉 `import macast.macast` ⇒ 整个 Linux CLI 起不来"。**那条推理链是对的，前提是假的** ——
+  所以报警之前先把 grep 模式验一遍（§10 那条"先拿证据再动手"同样适用于自己的探针）。macOS 产物不是 onefile，`Contents/Resources/lib/python3.12/` 下能直接 `ls`
+  （`zeroconf/`、`zeroconf/_services/`、`ifaddr/` 都是真目录 = §4.3 那条修复还在），
+  其余纯 Python 依赖在 `Contents/Resources/lib/python312.zip`（注意这一层，不在 `python3.12/` 里面）。
+- **Linux 产物搜不到 `pystray`（0 次），Windows 有（13 次）—— 这是设计，不是漏装。**
+  `build.yml` 那个 job 的标题就写着 *"Linux x86_64 — headless CLI, packaged as a standalone binary"*，
+  pip 列表里也从来没有 pystray。它能成立**全靠 §4.2 那条惰性 `_pystray()`**，而这条恰恰是
+  Part 50 在 CI 的 Linux runner 上用子进程真的验过的（meta_path 拦掉 pystray + `sys.platform='linux'`
+  → `import macast.macast` 且 `cli` 可调用）。所以"Linux 产物没有 pystray"这句话有两层证据，
+  别把它当成待修的缺失；反过来，**谁要是把 `import pystray` 提回 `gui.py` 模块顶层，
+  Linux 产物就真的起不来了**，而抓得住它的只有那个 CI job。
+
 ### 4.4 `macast/plugins/**` 的"动态导入"打包坑（与 §4.3 同族）
 
 内置插件（IINA / Web / Live / PotPlayer / PIFMRDS / NVA，来自
