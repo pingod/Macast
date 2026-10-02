@@ -35,3 +35,12 @@ pyobjc-framework-CoreMedia
 # Missing it is not a graceful degradation: the module import fails and the
 # app does not start at all.
 zeroconf
+# The screen-mirror plugin's WebRTC output shape (「浏览器 · WebRTC」). Both are
+# imported lazily inside screen_mirror.py -- a machine without them keeps every
+# other mirror target and this one refuses with the pip line -- but a *shipped*
+# .app has no pip, so a missing entry here means the target can never work in a
+# downloaded build. That is the same rule as the ScreenCaptureKit pair above,
+# with less graceful degradation behind it. requirements/common.txt names them
+# too; this file is the source of truth the macOS build and the CI job read.
+aiortc
+av

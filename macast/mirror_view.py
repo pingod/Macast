@@ -53,6 +53,7 @@ OUTPUT_FALLBACK = {
     'caststream': 'Chromecast 低延迟（实验 · 此通道无声音）',
     'dlna': 'DLNA 电视（老电视，无需在电视上装东西）',
     'browser': '浏览器（打开网址即可看）',
+    'webrtc': '浏览器 · WebRTC（低延迟 · 此通道无声音）',
 }
 
 #: What a protocol with no devices to find is asked for. The browser target has
@@ -103,7 +104,9 @@ def sections_for(state):
     sections.append('capture')
     if state.get('platform') == 'darwin' or (state.get('audio') or {}).get('line'):
         sections.append('audio')
-    if kind == 'browser':
+    if kind in ('browser', 'webrtc'):
+        # Both viewing targets answer with an address instead of a device
+        # list: the browser page, or the page that negotiates WebRTC.
         sections.append('viewer')
     sections.append('preview')
     # 「统计信息」has nothing to say until a session exists, and a row of empty

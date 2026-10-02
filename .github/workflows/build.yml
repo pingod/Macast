@@ -161,9 +161,12 @@ jobs:
           # entries are the screen-mirror plugin's fast capture path (lazy
           # imports, silently absent from the bundle if the build env lacks
           # them -- see the pyobjc comment in requirements/darwin.txt).
+          # `aiortc`/`av` are the WebRTC mirror target's engine, same story:
+          # imported lazily by screen_mirror.py, absent from the bundle unless
+          # the build environment carries them.
           pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
-                      'requests' 'pillow' 'zeroconf' \
+                      'requests' 'pillow' 'zeroconf' 'aiortc' 'av' \
                       'pyobjc-framework-Cocoa' \
                       'pyobjc-framework-ScreenCaptureKit' \
                       'pyobjc-framework-CoreMedia'
@@ -311,8 +314,15 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # `aiortc`+`av` are the WebRTC mirror target's engine, imported
+          # lazily by screen_mirror.py -- nothing here fails without them, the
+          # target just refuses at runtime in a binary whose user has no pip.
+          # The hidden imports below carry them plus `cffi`: pylibsrtp's
+          # `_binding.abi3.so` asks for `_cffi_backend` from a binary at load
+          # time, which the analyzer cannot see (hooks-contrib's hook-av.py
+          # handles av's own lib layout; the cffi chain needs naming).
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf
+                              appdirs pyperclip requests pillow zeroconf aiortc av
 
       - name: Compile .po -> .mo
         run: |
@@ -330,6 +340,9 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=aiortc \
+            --hidden-import=av \
+            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
@@ -410,8 +423,15 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
+          # `aiortc`+`av` are the WebRTC mirror target's engine, imported
+          # lazily by screen_mirror.py -- nothing here fails without them, the
+          # target just refuses at runtime in a binary whose user has no pip.
+          # The hidden imports below carry them plus `cffi`: pylibsrtp's
+          # `_binding.abi3.so` asks for `_cffi_backend` from a binary at load
+          # time, which the analyzer cannot see (hooks-contrib's hook-av.py
+          # handles av's own lib layout; the cffi chain needs naming).
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf
+                              appdirs pyperclip requests pillow zeroconf aiortc av
 
       - name: Compile .po -> .mo
         run: |
@@ -429,6 +449,9 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=aiortc \
+            --hidden-import=av \
+            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
@@ -508,8 +531,13 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
+          # `aiortc`+`av` are the WebRTC mirror target's engine; same story as
+          # the Linux jobs -- lazy imports in screen_mirror.py, and a frozen
+          # .exe has no pip for its user. `cffi` is named with them for the
+          # same reason: pylibsrtp's extension needs `_cffi_backend` at load
+          # time, invisible to the analyzer.
           pip install pyinstaller pystray 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf
+                              appdirs pyperclip requests pillow zeroconf aiortc av
 
       - name: Install static gettext (msgfmt)
         # Windows runners don't ship gettext; the GitHub release of the
@@ -554,6 +582,9 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
+            --hidden-import=aiortc \
+            --hidden-import=av \
+            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \

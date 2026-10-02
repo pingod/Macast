@@ -4517,8 +4517,11 @@ done
             mirror._capture_cache.clear()
             _st21 = mirror.ScreenMirrorSetting().console_state()
             _texts21 = _console_texts(_st21)
+            # The literal count is the tripwire: it reds the day a target is
+            # added so the author updates this Part (cast, caststream, dlna,
+            # browser, webrtc as of the WebRTC output shape).
             check("the console offers every output target with its trade-off",
-                  len(_st21['output']['options']) == 4
+                  len(_st21['output']['options']) == 5
                   and all(o['label'] and o['hint']
                           for o in _st21['output']['options']),
                   str(_st21['output']['options']))
@@ -4551,11 +4554,14 @@ done
             check("the device list is carried as id plus label, not markup",
                   all(d['id'] and d['label'] for d in _devs21), str(_devs21))
             check("each protocol answers only for itself",
-                  set(_rows21) == {'cast', 'caststream', 'dlna', 'browser'}
+                  set(_rows21) == {'cast', 'caststream', 'dlna', 'browser',
+                                   'webrtc'}
                   and _rows21['cast']['words'].startswith('发现 ')
                   and _rows21['dlna']['words'] != _rows21['cast']['words']
                   and _rows21['browser']['words'] == ''
-                  and _rows21['browser']['needs_device'] is False,
+                  and _rows21['browser']['needs_device'] is False
+                  and _rows21['webrtc']['words'] == ''
+                  and _rows21['webrtc']['needs_device'] is False,
                   str([(k, v['words']) for k, v in sorted(_rows21.items())]))
         finally:
             mirror.start_search, mirror.start_renderer_search = _kick21, _kick_dlna21
@@ -7252,9 +7258,9 @@ done
         mirror.start_search = lambda: _searches23.append('cast') or True
         _st23 = setting23.console_state()
         _labels23 = _console_texts(_st23)
-        check("the console offers four targets and names the running one",
+        check("the console offers five targets and names the running one",
               _st23['output']['kind'] == 'dlna'
-              and len(_st23['output']['options']) == 4
+              and len(_st23['output']['options']) == 5
               and any(o['key'] == 'dlna' and '老电视' in o['label'] for o in
                       _st23['output']['options']), str(_st23['output']))
         check("a target row names the device, never the container inside it",
@@ -12130,13 +12136,18 @@ try:
     check("no bundled plugin imports a third-party module Macast does not declare",
           not _bad30, str(_bad30))
     # The other way round: prove the rule above is not vacuous, and that it
-    # allows what it should allow. A plugin adding `import aiortc` is exactly
-    # the case AGENTS.md §4.6 sends to the bundled-plugin route, and `cherrypy`
-    # has to stay legal or every protocol plugin here would be reported.
+    # allows what it should allow. `numpy` is the undeclared-pip case (no
+    # requirements file names it), and `cherrypy` has to stay legal or every
+    # protocol plugin here would be reported. `aiortc`/`av` used to sit on the
+    # illegal side of this very check; the WebRTC mirror target moved them
+    # across when both requirements files declared them (§4.6's route for a
+    # pip dependency), so they now belong in the positive half -- which is
+    # what makes that half a claim about the plugin, not just about the check.
     check("an undeclared pip import is what this catches, and a declared one is not",
-          _illegal30("import aiortc\nimport pychromecast\n") == ['aiortc', 'pychromecast']
-          and _illegal30("import cherrypy\nimport Foundation\nimport os\n") == [],
-          str(_illegal30("import aiortc\nimport cherrypy\nimport Foundation\n")))
+          _illegal30("import numpy\nimport pychromecast\n") == ['numpy', 'pychromecast']
+          and _illegal30("import cherrypy\nimport aiortc\nimport av\n"
+                         "import Foundation\nimport os\n") == [],
+          str(_illegal30("import numpy\nimport cherrypy\nimport Foundation\n")))
 
     # pyobjc has to stay a declared dependency, not one inherited from rumps:
     # macast/utils.py imports AppKit at module level, and the two names above are
@@ -14625,11 +14636,14 @@ try:
           all(m37.live_gop(f) >= 2 for f in (1, 5, 12, 24, 25, 30, 60))
           and m37.live_gop(25) == 6 and m37.live_gop(24) == 6,
           str([(f, m37.live_gop(f)) for f in (1, 5, 24, 25, 30, 60)]))
-    check("the browser and Chromecast targets were not measured here, so "
-          "their cadence is still the one that was",
+    check("the browser and WebRTC targets keep the half-second cadence "
+          "(on WebRTC that figure is the recovery latency itself: nothing "
+          "on the far side can be asked to re-encode); the Chromecast "
+          "targets were not measured here and keep the one that was",
           m37.gop_size('browser') == m37.FPS // 2
+          and m37.gop_size('webrtc') == m37.FPS // 2
           and all(m37.gop_size(k) == m37.FPS for k in m37.OUTPUTS
-                  if k != 'browser'),
+                  if k not in ('browser', 'webrtc')),
           str([(k, m37.gop_size(k)) for k in m37.OUTPUTS]))
 
     # -- which encoder an untouched install picks ---------------------------
@@ -16670,23 +16684,28 @@ try:
     check("every output target the plugin offers is described in the help",
           _num44(r'([一二三四五六七八九十0-9]+)种目标') == len(m44.OUTPUTS)
           and all(k in _help44 for k in
-                  ('Google TV', '浏览器', '低延迟', '老电视')),
+                  ('Google TV', '浏览器', '低延迟', '老电视', 'WebRTC')),
           'help says %r 种目标, OUTPUTS has %d' % (
               _num44(r'([一二三四五六七八九十0-9]+)种目标'), len(m44.OUTPUTS)))
-    # The plugin's own label is the source of truth for which target is mute, so
-    # compare it against the one bullet of the help's target list that says so --
+    # The plugin's own label is the source of truth for which targets are mute,
+    # so compare it against the bullets of the help's target list that say so --
     # "no audio" written anywhere in the dialog would pass a whole-text check
     # while sitting in the wrong paragraph.
-    _silent44 = [k for k, v in m44.OUTPUTS.items() if '无声音' in v[0]]
-    _ladder44 = _re44.search(r'四种目标各自的脾气：</p>\s*<ul>(.*?)</ul>',
-                             _help_raw44, _re44.S)
+    _silent44 = sorted(k for k, v in m44.OUTPUTS.items() if '无声音' in v[0])
+    _ladder44 = _re44.search(
+        r'[一二三四五六七八九十0-9]+种目标各自的脾气：</p>\s*<ul>(.*?)</ul>',
+        _help_raw44, _re44.S)
     _bullets44 = _re44.findall(r'<li>(.*?)</li>',
                                _ladder44.group(1) if _ladder44 else '', _re44.S)
-    check("the one target with no audio is the one the help says has no audio",
-          _silent44 == ['caststream'] and len(_bullets44) == len(m44.OUTPUTS)
-          and sum(1 for b in _bullets44 if '没有声音' in b) == 1
-          and '低延迟' in [b for b in _bullets44 if '没有声音' in b][0],
-          'silent=%s bullets=%d' % (_silent44, len(_bullets44)))
+    _mute_bullets44 = [b for b in _bullets44 if '没有声音' in b]
+    check("the targets that ship without audio are the ones the help says have "
+          "none",
+          _silent44 == ['caststream', 'webrtc']
+          and len(_bullets44) == len(m44.OUTPUTS)
+          and len(_mute_bullets44) == len(_silent44)
+          and all('低延迟' in b for b in _mute_bullets44),
+          'silent=%s mute-bullets=%d bullets=%d' % (
+              _silent44, len(_mute_bullets44), len(_bullets44)))
     check("the ceiling the help quotes for that channel is the plugin's own",
           abs((_num44(r'([0-9.]+) Mbps') or 0) * 1e6
               - m44.CAST_STREAM_MAX_BITRATE) < 1e5,
@@ -19172,7 +19191,7 @@ try:
           and str(m52.DLNA_PROFILES['ts-h264'].fps) != str(m52.FPS),
           str(_dl52))
 
-    _live52 = [(k, e) for k in ('cast', 'browser', 'caststream')
+    _live52 = [(k, e) for k in ('cast', 'browser', 'webrtc', 'caststream')
                for e in ('software', 'hardware')]
     _cmd_live52 = {(k, e): m52.build_ffmpeg_command(
         'ffmpeg', _cap52b, 0, 6000000, kind=k, encoder=e)
@@ -21366,6 +21385,681 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved55[0], _saved55[1]
     utils.SETTING_DIR = _saved55[2]
     _shutil.rmtree(_tmp55, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+# Part 56: the WebRTC output shape -- the fifth mirror target.
+#
+# Four sections, each on the layer that decides the fact:
+#
+#   A. The argv this target hands ffmpeg. The promise that matters is "no
+#      audio, low-delay H.264": the label says 无声音, so a capture that
+#      *does* have a sound map must still be refused with -an, and the
+#      codec arguments have to be the shapes the access-unit splitter and
+#      the aiortc packet path expect. `gop_size('webrtc')` must be the same
+#      half-second the viewer queue is sized in.
+#
+#   B. The signalling door, over real HTTP on a real listening socket.
+#      The page and both POSTs answer to the per-session `page_token` and
+#      nothing else -- the management `Api_Token` included, and another
+#      session's token included. The session door has no GET shape by
+#      construction; the answer door refuses a body before reading it when
+#      the declared length is over the cap; the refusal for an unknown peer
+#      survives aiortc being unimportable (its check precedes the optional
+#      import); and the failure of `_webrtc_modules` is proven not cached,
+#      because the hint promises the pip-install-then-retry story. The
+#      `'VP8' not in sdp` assertion below is the bug-catcher this section
+#      exists for -- see the story at the assertion.
+#
+#   C. A real `aiortc` client, on the other side of the real door, fed the
+#      real fixture (`fixtures/webrtc-h264.bin`, which the production argv
+#      generated -- see scripts/fixtures/make-webrtc-h264.py). This is the
+#      only place in the suite where an offer is answered and frames
+#      actually cross SRTP. The pts assertions are deterministic: aiortc's
+#      `TimestampMapper` subtracts the first observed timestamp, and the
+#      packet timebase is 1/90000, so frame k carries pts k * 90000/FPS.
+#
+#   D. The packaging contract. `import aiortc; import av` lives inside
+#      `_webrtc_modules()` where no scanner sees it: the py2app
+#      packages/includes, the three PyInstaller jobs and both requirements
+#      files are the only reason a packed .app can offer this target. The
+#      AST checks prove the imports stay in the function body -- moving
+#      them to module scope takes the whole plugin down on every machine
+#      that never installs the pip line.
+# --------------------------------------------------------------------------
+print("\n=== Part 56: the WebRTC output shape ===")
+import ast as _ast56
+import asyncio as _asyncio56
+import http.client as _http_client56
+import json as _json56
+import re as _re56
+import traceback as _traceback56
+
+
+def _flag56(argv, flag):
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+def _get56(port, path, limit=1 << 18):
+    conn = _http_client56.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        conn.request('GET', path)
+        resp = conn.getresponse()
+        return resp.status, resp.read(limit)
+    finally:
+        conn.close()
+
+
+def _post56(port, path, body=None, headers=None):
+    conn = _http_client56.HTTPConnection('127.0.0.1', port, timeout=10)
+    try:
+        conn.request('POST', path, body=body, headers=headers or {})
+        resp = conn.getresponse()
+        return resp.status, resp.read(1 << 16)
+    finally:
+        conn.close()
+
+
+def _post56_json(port, path, payload):
+    return _post56(port, path, body=_json56.dumps(payload).encode('utf-8'),
+                   headers={'Content-Type': 'application/json'})
+
+
+class _Block56(object):
+    """Refuse `import aiortc` while this sits at the front of meta_path."""
+
+    def __init__(self):
+        self.hits = 0
+
+    def find_spec(self, name, path=None, target=None):
+        if name == 'aiortc' or name.startswith('aiortc.'):
+            self.hits += 1
+            raise ImportError('aiortc is blocked for this check (Part 56)')
+        return None
+
+
+async def _client56(offer, port, token, fixture, bridge, out):
+    """One real browser-side peer: offer in, answer out, frames watched.
+
+    The shape a browser runs, minus the browser: aiortc on the far side of
+    the same HTTP door, the fixture fed through the bridge exactly like the
+    pump feeds it, and the frames counted where they arrive (the decoded
+    `av.VideoFrame`s), not where we hoped they would.
+    """
+    import aiortc as _aiortc56
+    pc = _aiortc56.RTCPeerConnection()
+    frames = out['frames']
+
+    async def _drain(track):
+        try:
+            while True:
+                frame = await track.recv()
+                frames.append((frame.width, frame.height, frame.pts))
+                if len(frames) >= 8:
+                    return
+        except Exception as exc:            # MediaStreamError on teardown
+            out['errors'].append('track recv: %r' % (exc,))
+
+    @pc.on('track')
+    def _on_track(track):
+        _asyncio56.ensure_future(_drain(track))
+
+    await pc.setRemoteDescription(
+        _aiortc56.RTCSessionDescription(sdp=offer['sdp'],
+                                        type=offer['type']))
+    await pc.setLocalDescription(await pc.createAnswer())
+    deadline = time.time() + 3
+    while pc.iceGatheringState != 'complete' and time.time() < deadline:
+        await _asyncio56.sleep(0.05)
+    status, raw = _post56(
+        port, '/webrtc/answer?token={}&peer={}'.format(token, out['peer']),
+        body=_json56.dumps({'type': pc.localDescription.type,
+                            'sdp': pc.localDescription.sdp}).encode('utf-8'),
+        headers={'Content-Type': 'application/json'})
+    out['answer'] = (status, raw[:200])
+    deadline = time.time() + 10
+    while pc.connectionState != 'connected' and time.time() < deadline:
+        await _asyncio56.sleep(0.05)
+    out['connected'] = pc.connectionState
+    if pc.connectionState == 'connected':
+        for offset in range(0, len(fixture), m56.CHUNK):
+            bridge.feed(fixture[offset:offset + m56.CHUNK])
+            out['fed'] += 1
+            await _asyncio56.sleep(0.002)
+        bridge.flush()
+        deadline = time.time() + 20
+        while len(frames) < 8 and time.time() < deadline:
+            await _asyncio56.sleep(0.1)
+    out['clients'] = bridge.clients()
+    out['stats_status'], raw = _get56(
+        port, m56.BROWSER_STATS_PATH + '?token=' + token)
+    try:
+        out['stats'] = _json56.loads(raw)
+    except ValueError:
+        out['stats'] = None
+    try:
+        await pc.close()
+    except Exception:
+        pass
+
+
+_tmp56 = _tempfile.mkdtemp(prefix="macast-webrtc56-")
+_servers56 = []
+_bridges56 = []
+_saved56 = (utils.Setting.setting, utils.Setting.setting_path,
+            utils.SETTING_DIR)
+m56 = None
+_saved56_sys_platform = None
+_saved56_mods = None
+_saved56_err = None
+_saved56_aiortc = None
+try:
+    utils.SETTING_DIR = _tmp56
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp56, "macast_setting.json")
+    m56 = _load_plugin("screen_mirror_plugin_v56", "screen_mirror.py")
+    _saved56_sys_platform = m56.sys.platform
+    _saved56_mods = m56._WEBRTC_MODULES
+    _saved56_err = m56._WEBRTC_IMPORT_ERROR
+    _saved56_aiortc = sys.modules.get('aiortc')
+
+    # -- A. the argv this target hands ffmpeg ---------------------------------
+
+    _mods56 = m56._webrtc_modules()
+    check("Part 56/A: the optional packages this target is gated on are "
+          "importable here (aiortc + av) -- without them the negotiation "
+          "below would be pretend, so the absence says so instead",
+          _mods56 is not None and m56._WEBRTC_IMPORT_ERROR is None,
+          "modules=%s error=%r" % (_mods56 is not None,
+                                   m56._WEBRTC_IMPORT_ERROR))
+    check("Part 56/A: the refusal a machine without the pip line gets is "
+          "the install sentence, not a traceback",
+          'pip install aiortc av' in m56.WEBRTC_INSTALL_HINT,
+          m56.WEBRTC_INSTALL_HINT[:60])
+
+    #: A capture that *has* a sound map on purpose: the label promises
+    #: 无声音, so the refusal must come from the target, not from the
+    #: capture happening to be silent (Part 52's fixture has no audio_map).
+    _cap56 = m56._Capture('s', inputs=[
+        ['-f', 'lavfi', '-i',
+         'testsrc2=size=160x90:rate={}:duration=1'.format(m56.FPS)],
+        ['-f', 'lavfi', '-i',
+         'sine=frequency=440:sample_rate=48000']],
+        audio_map='1:a:0')
+    _sw56 = m56.build_ffmpeg_command('ffmpeg', _cap56, 90, 400000,
+                                     kind='webrtc', encoder='software')
+    check("Part 56/A: the label says 无声音 and the software argv delivers "
+          "it -- a capture with a sound map is still refused with -an and "
+          "no audio encoder, and the pipe is raw H.264 (Annex-B) either way",
+          '-an' in _sw56 and '-c:a' not in _sw56 and 'aac' not in _sw56
+          and _sw56[-3:] == ['-f', 'h264', 'pipe:1'],
+          ' '.join(_sw56[-14:]))
+    check("Part 56/A: software encoding for this target is the zero-latency "
+          "x264 shape the splitter and the packet path assume (aud, "
+          "scenecut off, keyint == the GOP, slice threads, baseline)",
+          _flag56(_sw56, '-aud') == '1'
+          and _flag56(_sw56, '-x264-params')
+          == 'keyint={0}:min_keyint={0}:scenecut=0'.format(
+              m56.gop_size('webrtc'))
+          and _flag56(_sw56, '-profile:v') == 'baseline'
+          and _flag56(_sw56, '-c:v') == 'libx264'
+          and _flag56(_sw56, '-tune') == 'zerolatency'
+          and _flag56(_sw56, '-thread_type') == 'slice'
+          and _flag56(_sw56, '-b:v') == '400000',
+          ' '.join(_sw56))
+
+    try:
+        m56.sys.platform = 'darwin'
+        _hw56 = m56.build_ffmpeg_command('ffmpeg', _cap56, 90, 400000,
+                                         kind='webrtc', encoder='hardware')
+        _bvwant56 = m56.rate_target(400000, 'hardware')
+    finally:
+        m56.sys.platform = _saved56_sys_platform
+    check("Part 56/A: the VideoToolbox shape carries no x264 private "
+          "options (an error on that encoder), keeps baseline + level 42 "
+          "for the 90-line picture, and asks for the 1.5x line rate the "
+          "codec will not give on its own (b:v == rate_target == {})"
+          .format(_bvwant56),
+          _flag56(_hw56, '-c:v') == 'h264_videotoolbox'
+          and _flag56(_hw56, '-profile:v') == 'baseline'
+          and _flag56(_hw56, '-level') == m56.vt_level(90)
+          and _flag56(_hw56, '-realtime') == '1'
+          and _flag56(_hw56, '-flags') == '+low_delay'
+          and _flag56(_hw56, '-b:v') == str(_bvwant56)
+          and _hw56[-3:] == ['-f', 'h264', 'pipe:1']
+          and '-aud' not in _hw56 and '-x264-params' not in _hw56
+          and '-thread_type' not in _hw56
+          and '-an' in _hw56 and 'aac' not in _hw56,
+          ' '.join(_hw56))
+    check("Part 56/A: the gop the encoder closes on is the same half-second "
+          "the viewer queue is sized in (FPS // 2 units)",
+          _flag56(_sw56, '-g') == str(m56.gop_size('webrtc'))
+          and m56.gop_size('webrtc') == m56.FPS // 2
+          and m56.gop_size('webrtc') == m56.WEBRTC_QUEUE_UNITS,
+          "g=%s gop=%s queue=%s" % (_flag56(_sw56, '-g'),
+                                    m56.gop_size('webrtc'),
+                                    m56.WEBRTC_QUEUE_UNITS))
+    _lbl56 = m56.OUTPUTS['webrtc'][0]
+    check("Part 56/A: the menu entry is the low-latency one and says "
+          "无声音 out loud -- the shortcut to 'listen first, read the "
+          "label later' is exactly the menu label lying",
+          _lbl56.startswith('浏览器') and '低延迟' in _lbl56
+          and '无声音' in _lbl56, _lbl56)
+
+    # -- B. the signalling door over real HTTP --------------------------------
+
+    _fx56 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         'fixtures', 'webrtc-h264.bin')
+    _data56 = open(_fx56, 'rb').read() if os.path.exists(_fx56) else b''
+    _sess56 = m56._Session('webrtc', bitrate=400000)
+    _bridge56 = m56._WebRTCBridge()
+    _bridges56.append(_bridge56)
+    _server56 = m56.start_stream_server(_sess56, broadcaster=_bridge56)
+    _servers56.append(_server56)
+    _port56 = _server56.server_address[1]
+    #: A second, browser-target session: the wrong-kind door answers 409,
+    #: which cannot be tested on the session that IS a WebRTC session.
+    _sess56b = m56._Session('browser', bitrate=400000)
+    _server56b = m56.start_stream_server(_sess56b)
+    _servers56.append(_server56b)
+    _port56b = _server56b.server_address[1]
+    _auth56 = '?token=' + _sess56.page_token
+
+    _st56, _body56 = _get56(_port56, m56.WEBRTC_PATH)
+    check("Part 56/B: the viewing page refuses a caller with no token",
+          _st56 == 403, str(_st56))
+    _st56, _body56 = _get56(_port56, m56.WEBRTC_PATH + '?token=deadbeef')
+    check("Part 56/B: and one with the wrong token", _st56 == 403,
+          str(_st56))
+    _st56, _body56 = _get56(
+        _port56, m56.WEBRTC_PATH + '?token=' + _sess56b.page_token)
+    check("Part 56/B: and one bearing another live session's token -- the "
+          "watched session's key is per session, not per server",
+          _st56 == 403, str(_st56))
+    _st56, _body56 = _get56(
+        _port56, m56.WEBRTC_PATH + '?token=' + protocol.api_token())
+    check("Part 56/B: the app's management token is not this session's key "
+          "-- a viewing URL gets forwarded, and Api_Token opens the whole "
+          "app's API", _st56 == 403, str(_st56))
+    _st56, _html56 = _get56(_port56, m56.WEBRTC_PATH + _auth56)
+    check("Part 56/B: with the session token it is the WebRTC page",
+          _st56 == 200 and b'<video' in _html56
+          and b'new RTCPeerConnection' in _html56
+          and b'var DIAG=' in _html56
+          and '此通道无声音'.encode('utf-8') in _html56,
+          str(_st56))
+    with open(m56.__file__, encoding='utf-8') as _mf56:
+        _src56 = _mf56.read()
+    check("Part 56/B: the page is ours end to end -- no template hole "
+          "left, and the session token is not copied into the body (the "
+          "script reads its own URL)",
+          _re56.search(r'@[A-Z_]+@', _html56.decode('utf-8')) is None
+          and _sess56.page_token.encode() not in _html56,
+          _html56[:80])
+    #: Same two nets as the browser page (Part 22): the literal must be
+    #: raw, and no JS string may span a real newline -- the failure mode is
+    #: a `SyntaxError` in the browser that every Python-side assertion
+    #: about this page would happily pass.
+    check("Part 56/B: the WebRTC page is a raw string, so Python cannot "
+          "eat a JS escape",
+          _re56.search(r'^WEBRTC_PAGE = r"""', _src56, _re56.M) is not None,
+          'WEBRTC_PAGE is not raw')
+    _js56 = _html56.decode('utf-8').split('<script>')[1] \
+        .split('</script>')[0]
+    _spanning56 = [ln for ln in _js56.split('\n')
+                   if (lambda c: (c.count("'") - c.count("\\'")) % 2
+                       or (c.count('"') - c.count('\\"')) % 2)
+                   (_re56.sub(r'//.*', '', ln))]
+    check("Part 56/B: no JS string literal in the served page spans a real "
+          "newline", not _spanning56, str(_spanning56[:2]))
+
+    _st56, _body56 = _get56(_port56, m56.WEBRTC_SESSION_PATH + _auth56)
+    check("Part 56/B: the session door has no GET shape -- an offer is "
+          "minted by POST alone, so a URL in a chat log cannot mint one",
+          _st56 == 404, str(_st56))
+    _st56, _body56 = _get56(
+        _port56, m56.STREAM_PREFIX + _sess56.stream_name())
+    # The counter is path-based (`end_headers` counts STREAM_PREFIX and
+    # BROWSER_PATH), so a *refused* stream-path fetch counts exactly like a
+    # served one -- it exists to log what a receiver fetched, or tried to.
+    # That is why this probe moves `exchanges` to 1, and the stats check
+    # below expects that 1 rather than a zero.
+    check("Part 56/B: this session serves no byte stream over HTTP -- a "
+          "player pointed at the stream URL gets an honest 404, not a "
+          "socket that waits forever; and that refusal is one exchange, "
+          "because the counter counts the path, not the outcome",
+          _st56 == 404 and _sess56.exchanges == 1,
+          "%s exchanges=%s" % (_st56, _sess56.exchanges))
+    _st56, _body56 = _post56(
+        _port56b, m56.WEBRTC_SESSION_PATH + '?token=' + _sess56b.page_token)
+    check("Part 56/B: a browser-target session says out loud that WebRTC "
+          "is not what it is mirroring to (409, not a broken offer)",
+          _st56 == 409 and _json56.loads(_body56).get('message')
+          == 'this session is not mirroring to WebRTC',
+          "%s %r" % (_st56, _body56[:90]))
+
+    check("Part 56/B: the session door is behind the same token",
+          _post56(_port56, m56.WEBRTC_SESSION_PATH)[0] == 403, 'no token')
+    check("Part 56/B: the answer door wants a token like every other door",
+          _post56(_port56, m56.WEBRTC_ANSWER_PATH)[0] == 403, 'no token')
+    _st56, _body56 = _post56(
+        _port56, m56.WEBRTC_ANSWER_PATH + '?token=deadbeef')
+    check("Part 56/B: and the wrong token is the same 403", _st56 == 403,
+          str(_st56))
+    _st56, _body56 = _post56(_port56, m56.WEBRTC_ANSWER_PATH + _auth56)
+    check("Part 56/B: an empty body is refused as 'a JSON body is "
+          "required'",
+          _st56 == 400 and _json56.loads(_body56).get('message')
+          == 'a JSON body is required',
+          "%s %r" % (_st56, _body56[:80]))
+    #: `body=None` with an explicit over-cap Content-Length: http.client
+    #: sends the declared header verbatim and nothing else, the server
+    #: refuses on the header alone, and nobody is left waiting on a body
+    #: either side -- verified against both stacks before this was written.
+    _st56, _body56 = _post56(
+        _port56, m56.WEBRTC_ANSWER_PATH + _auth56, body=None,
+        headers={'Content-Length': str(m56.WEBRTC_MAX_ANSWER_BYTES + 1)})
+    check("Part 56/B: an oversized answer is refused before a byte of it "
+          "is read -- the refusal comes from the declared length alone",
+          _st56 == 400 and _json56.loads(_body56).get('message')
+          == 'a JSON body is required',
+          "%s %r" % (_st56, _body56[:80]))
+    _st56, _body56 = _post56(_port56, m56.WEBRTC_ANSWER_PATH + _auth56,
+                             body=b'not json')
+    check("Part 56/B: a body that is not JSON says so",
+          _st56 == 400 and _json56.loads(_body56).get('message')
+          == 'the body is not JSON',
+          "%s %r" % (_st56, _body56[:80]))
+    _st56, _body56 = _post56(_port56, m56.WEBRTC_ANSWER_PATH + _auth56,
+                             body=b'[1, 2]')
+    check("Part 56/B: a JSON body that is not an answer says so",
+          _st56 == 400 and _json56.loads(_body56).get('message')
+          == 'the body is not an answer',
+          "%s %r" % (_st56, _body56[:80]))
+    _st56, _body56 = _post56(_port56, m56.WEBRTC_ANSWER_PATH + _auth56,
+                             body=b'{"type": "answer"}')
+    check("Part 56/B: an answer carrying no sdp says so",
+          _st56 == 400 and _json56.loads(_body56).get('message')
+          == 'the answer carries no sdp',
+          "%s %r" % (_st56, _body56[:80]))
+    _st56, _body56 = _post56(
+        _port56, m56.WEBRTC_ANSWER_PATH + _auth56 + '&peer=deadbeef',
+        body=b'{"type": "answer", "sdp": "v=0\\r\\n"}')
+    check("Part 56/B: a well-formed answer for a peer nobody offered to is "
+          "the bridge's own 409 ('no such WebRTC viewer'), not 'signaling "
+          "failed' -- the peer is checked before the optional import",
+          _st56 == 409 and _json56.loads(_body56).get('message')
+          == 'no such WebRTC viewer',
+          "%s %r" % (_st56, _body56[:90]))
+    _st56, _body56 = _post56(_port56, m56.WEBRTC_PATH + '/bogus' + _auth56)
+    check("Part 56/B: a path outside the two signalling fields is a 404 -- "
+          "the door does not grow endpoints", _st56 == 404, str(_st56))
+
+    _st56, _body56 = _get56(_port56, m56.BROWSER_STATS_PATH)
+    check("Part 56/B: the stats endpoint is the same token door",
+          _st56 == 403, str(_st56))
+    _st56, _body56 = _get56(_port56, m56.BROWSER_STATS_PATH + _auth56)
+    _stats56 = _json56.loads(_body56) if _st56 == 200 else {}
+    check("Part 56/B: on a fresh session the counters are present, shape "
+          "is 'live', and the only exchange so far is the refused "
+          "/stream/ probe above -- the /webrtc page, its session GET and "
+          "every POST since are not stream exchanges",
+          _st56 == 200
+          and set(_stats56) == {'written', 'exchanges', 'shape', 'chunks',
+                                'bytes', 'drops', 'sent', 'clients'}
+          and _stats56['shape'] == 'live'
+          and _stats56['exchanges'] == 1
+          and _stats56['clients'] == 0
+          and _bridge56.clients() == 0,
+          "%s %r %r" % (_st56, _stats56, _bridge56.clients()))
+    _ca56, _cb56 = _data56[:m56.CHUNK], _data56[m56.CHUNK:2 * m56.CHUNK]
+    _bridge56.feed(_ca56)
+    _bridge56.feed(_cb56)
+    _st56, _body56 = _get56(_port56, m56.BROWSER_STATS_PATH + _auth56)
+    _stats56 = _json56.loads(_body56) if _st56 == 200 else {}
+    check("Part 56/B: the counters move even with no viewer attached -- "
+          "the pump counts what it fed, so 'is anything being captured' "
+          "has an answer before the first viewer",
+          _stats56.get('chunks') == 2
+          and _stats56.get('bytes') == len(_ca56) + len(_cb56) == 8192,
+          "%r" % (_stats56,))
+
+    if _mods56 is None:
+        # No aiortc on this machine: the offer path cannot be exercised
+        # here, and a silent skip is the one thing the suite never does.
+        # The red names the reason the user would see: the install hint.
+        check("Part 56/B: the offer could be built and carries no VP8 (red "
+              "here means the optional packages aiortc/av are missing, and "
+              "the refusal a user gets is the pip-install hint)",
+              False, 'aiortc/av are not importable in this environment')
+    else:
+        _st56, _body56 = _post56(
+            _port56, m56.WEBRTC_SESSION_PATH + _auth56)
+        _msg56 = _json56.loads(_body56) if _st56 == 200 else {}
+        _offer56 = _msg56.get('offer') or {}
+        _sdp56 = _offer56.get('sdp') or ''
+        check("Part 56/B: the session door answers one offer for an "
+              "H.264-only video m-line, with a peer id this session minted",
+              _st56 == 200 and _msg56.get('code') == 0
+              and _offer56.get('type') == 'offer'
+              and 'm=video' in _sdp56 and 'H264/90000' in _sdp56
+              and 'packetization-mode=1' in _sdp56
+              and _re56.fullmatch(r'[0-9a-f]{16}',
+                                  _msg56.get('peer') or '') is not None,
+              "%s %r sdp=%d" % (_st56, _body56[:120], len(_sdp56)))
+        # The bug this assertion exists for, found 2026-10-02 by this very
+        # client: aiortc's capability table spells packetization-mode as
+        # the *string* "1". The first filter compared `== 1` (int),
+        # matched no codec, and `setCodecPreferences([])` means "no
+        # preference" to aiortc -- so the offer led with VP8, negotiation
+        # picked VP8 for an H.264 stream, `Vp8Encoder.pack` wrapped the
+        # Annex-B payloads without a word, and the viewer got zero frames
+        # with nothing in any log. 'VP8' reappearing in this SDP is that
+        # bug coming back.
+        check("Part 56/B: the offer cannot fall back to VP8 -- that "
+              "negotiation succeeds on paper and serves zero frames "
+              "forever (see the story above)",
+              'VP8' not in _sdp56 and 'H264' in _sdp56, _sdp56[:200])
+
+        _block56 = _Block56()
+        _saved56b_aiortc = sys.modules.get('aiortc')
+        _st56 = _body56 = None
+        _blocked56 = _blocked_err56 = None
+        try:
+            m56._WEBRTC_MODULES = None
+            sys.modules.pop('aiortc', None)
+            sys.meta_path.insert(0, _block56)
+            _blocked56 = m56._webrtc_modules()
+            _blocked_err56 = m56._WEBRTC_IMPORT_ERROR
+            # The refusal for an unknown peer must survive the missing
+            # import: `_apply_answer` looks the peer up before it reaches
+            # for aiortc, so this 409 is produced without ever importing.
+            _st56, _body56 = _post56(
+                _port56, m56.WEBRTC_ANSWER_PATH + _auth56 + '&peer=deadbeef',
+                body=b'{"type": "answer", "sdp": "v=0\\r\\n"}')
+        finally:
+            sys.meta_path.remove(_block56)
+            if _saved56b_aiortc is not None:
+                sys.modules['aiortc'] = _saved56b_aiortc
+        check("Part 56/B: with the import blocked, `_webrtc_modules` "
+              "answers None with the error object -- unavailability is a "
+              "state, not a crash",
+              _blocked56 is None and isinstance(_blocked_err56, Exception)
+              and _block56.hits >= 1,
+              "hits=%s err=%r" % (_block56.hits, _blocked_err56))
+        check("Part 56/B: the unknown-peer refusal does not depend on the "
+              "optional import -- still 409 'no such WebRTC viewer' while "
+              "aiortc cannot be imported",
+              _st56 == 409
+              and _json56.loads(_body56 or b'{}').get('message')
+              == 'no such WebRTC viewer',
+              "%s %r" % (_st56, (_body56 or b'')[:90]))
+        _retry56 = m56._webrtc_modules()
+        check("Part 56/B: the failure was not cached -- the hint's "
+              "'pip install, pick the target again, no restart' story "
+              "actually works",
+              _retry56 is not None and m56._WEBRTC_IMPORT_ERROR is None,
+              "retry=%s err=%r" % (_retry56 is not None,
+                                   m56._WEBRTC_IMPORT_ERROR))
+
+    # -- C. a real aiortc client, over the real door --------------------------
+
+    _sess56c = m56._Session('webrtc', bitrate=400000)
+    _bridge56c = m56._WebRTCBridge()
+    _bridges56.append(_bridge56c)
+    _server56c = m56.start_stream_server(_sess56c, broadcaster=_bridge56c)
+    _servers56.append(_server56c)
+    _port56c = _server56c.server_address[1]
+    check("Part 56/C: the fixture is a production stream, not a hand-made "
+          "one -- one second of the real webrtc argv, opening on an "
+          "access unit delimiter",
+          len(_data56) > 20000
+          and _data56.startswith(b'\x00\x00\x00\x01\x09'),
+          "{} bytes, head={!r}".format(len(_data56), _data56[:5]))
+    _out56 = {'frames': [], 'errors': [], 'connected': None, 'peer': None,
+              'answer': None, 'fed': 0, 'stats': None, 'stats_status': None,
+              'clients': None}
+    try:
+        _st56, _body56 = _post56(
+            _port56c, m56.WEBRTC_SESSION_PATH
+            + '?token=' + _sess56c.page_token)
+        _msg56 = _json56.loads(_body56) if _st56 == 200 else {}
+        _out56['peer'] = _msg56.get('peer')
+        _asyncio56.run(_asyncio56.wait_for(
+            _client56(_msg56.get('offer'), _port56c, _sess56c.page_token,
+                      _data56, _bridge56c, _out56),
+            timeout=60))
+    except Exception as _exc56c:
+        _out56['errors'].append('drive: %r' % (_exc56c,))
+    _ans56 = _out56['answer'] or (None, b'')
+    check("Part 56/C: a real aiortc client answered the offer through the "
+          "door and the two peers reached 'connected'",
+          _out56['connected'] == 'connected' and _ans56[0] == 200,
+          "connected=%s answer=%s errors=%r" % (
+              _out56['connected'], _ans56[0], _out56['errors'][:2]))
+    _fr56 = _out56['frames']
+    _pts56 = [p for _w, _h, p in _fr56]
+    _step56 = 90000 // m56.FPS
+    check("Part 56/C: the viewer decoded real frames at the fixture's own "
+          "size, and their pts are exactly the deterministic ladder "
+          "(0, 3750, ... -- the receiver normalises the first timestamp "
+          "and the packet timebase is 1/90000)",
+          len(_fr56) >= 2
+          and all((w, h) == (160, 90) for w, h, _ in _fr56)
+          and _pts56[0] == 0
+          and _pts56 == sorted(set(_pts56))
+          and all(p % _step56 == 0 for p in _pts56),
+          "frames=%r errors=%r" % (_fr56[:3], _out56['errors'][:2]))
+    _stats56 = _out56['stats'] or {}
+    check("Part 56/C: the stats the page polls agree with what actually "
+          "crossed -- every chunk fed is counted, clients is one, and the "
+          "bytes handed to viewers sit inside the fixture",
+          _out56['stats_status'] == 200
+          and set(_stats56) == {'written', 'exchanges', 'shape', 'chunks',
+                                'bytes', 'drops', 'sent', 'clients'}
+          and _stats56['shape'] == 'live'
+          and _stats56['chunks'] == _out56['fed']
+          and _out56['fed']
+          == (len(_data56) + m56.CHUNK - 1) // m56.CHUNK
+          and _stats56['bytes'] == len(_data56)
+          and _stats56['clients'] == 1
+          and _out56['clients'] == 1
+          and 0 < _stats56['sent'] <= len(_data56)
+          and _bridge56c.sent >= _stats56['sent'],
+          "stats=%r fed=%s clients=%r" % (_stats56, _out56['fed'],
+                                          _out56['clients']))
+
+    # -- D. the packaging contract --------------------------------------------
+
+    _p2app56 = open(os.path.join(REPO, 'scripts', 'setup_py2app.py'),
+                    encoding='utf-8').read()
+    _pkg56 = [m56x.group(1) for m56x in _re56.finditer(
+        r"'packages'\s*:\s*\[(.*?)\]", _p2app56, _re56.S)]
+    check("Part 56/D: py2app copies the `av` package whole -- its wheel "
+          "links FFmpeg as @loader_path dylibs under a hidden .dylibs "
+          "directory that has to travel with it",
+          any("'av'" in _body56x for _body56x in _pkg56),
+          str([b.replace('\n', ' ')[:60] for b in _pkg56]))
+    _inc56 = [m56x.group(1) for m56x in _re56.finditer(
+        r"'includes'\s*:\s*\[(.*?)\]", _p2app56, _re56.S)]
+    check("Part 56/D: and names `aiortc` and `cffi` in includes -- cffi is "
+          "the dependency nothing imports in Python (pylibsrtp asks for "
+          "_cffi_backend at dlopen time)",
+          any("'aiortc'" in _body56x and "'cffi'" in _body56x
+              for _body56x in _inc56),
+          str([b.replace('\n', ' ')[:60] for b in _inc56]))
+    _yml56 = open(os.path.join(REPO, '.github', 'workflows', 'build.yml'),
+                  encoding='utf-8').read()
+    _hid56 = {name: len(_re56.findall(r'--hidden-import={}\b'.format(name),
+                                      _yml56))
+              for name in ('aiortc', 'av', 'cffi')}
+    check("Part 56/D: every PyInstaller job (linux x86_64, linux arm64, "
+          "windows) carries the three hidden imports -- the plugin's "
+          "imports live in a function body, so modulegraph cannot see them",
+          _hid56 == {'aiortc': 3, 'av': 3, 'cffi': 3}, str(_hid56))
+    for _req56 in ('common.txt', 'darwin.txt'):
+        _req_text56 = open(os.path.join(REPO, 'requirements', _req56),
+                           encoding='utf-8').read()
+        check("Part 56/D: requirements/{} names both packages -- aiortc "
+              "and av are what this target is gated on".format(_req56),
+              _re56.search(r'^\s*aiortc\s*$', _req_text56,
+                           _re56.M) is not None
+              and _re56.search(r'^\s*av\s*$', _req_text56,
+                               _re56.M) is not None,
+              _req56)
+    _tree56 = _ast56.parse(_src56)
+    _top56 = set()
+    for _node56 in _tree56.body:
+        if isinstance(_node56, _ast56.Import):
+            for _alias56 in _node56.names:
+                _top56.add((_alias56.name or '').split('.')[0])
+        elif isinstance(_node56, _ast56.ImportFrom):
+            if _node56.module:
+                _top56.add(_node56.module.split('.')[0])
+    check("Part 56/D: the plugin imports neither package at module scope -- "
+          "a module-level `import aiortc` would take the whole plugin down "
+          "on every machine without the pip line (the scan itself has "
+          "teeth: more than ten top-level imports must be found)",
+          'aiortc' not in _top56 and 'av' not in _top56
+          and len(_top56) > 10,
+          "top=%d" % len(_top56))
+    _intry56 = set()
+    for _try56 in [n for n in _ast56.walk(_tree56)
+                   if isinstance(n, _ast56.Try)]:
+        for _imp56 in _ast56.walk(_try56):
+            if isinstance(_imp56, _ast56.Import):
+                for _alias56 in _imp56.names:
+                    _intry56.add((_alias56.name or '').split('.')[0])
+            elif isinstance(_imp56, _ast56.ImportFrom) and _imp56.module:
+                _intry56.add(_imp56.module.split('.')[0])
+    check("Part 56/D: they are imported inside a try -- the feature probe "
+          "is an actual import and its failure is caught, which is what "
+          "makes 'unavailable' a state instead of a crash",
+          'aiortc' in _intry56 and 'av' in _intry56,
+          str(sorted(_intry56))[:120])
+except Exception as _e56:
+    _traceback56.print_exc()
+    check("Part 56 runs", False, "{}: {}".format(type(_e56).__name__, _e56))
+finally:
+    if m56 is not None:
+        m56._WEBRTC_MODULES = _saved56_mods
+        m56._WEBRTC_IMPORT_ERROR = _saved56_err
+        if _saved56_sys_platform is not None:
+            m56.sys.platform = _saved56_sys_platform
+        if _saved56_aiortc is not None:
+            sys.modules['aiortc'] = _saved56_aiortc
+    for _bridge56q in _bridges56:
+        try:
+            _bridge56q.close()
+        except Exception:
+            pass
+    for _server56q in _servers56:
+        try:
+            _server56q.server_close()
+        except Exception:
+            pass
+    utils.Setting.setting, utils.Setting.setting_path = _saved56[0], _saved56[1]
+    utils.SETTING_DIR = _saved56[2]
+    _shutil.rmtree(_tmp56, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

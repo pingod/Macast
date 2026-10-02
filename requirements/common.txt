@@ -10,5 +10,16 @@ pillow
 requests
 netifaces
 zeroconf
+# The screen-mirror plugin's WebRTC output shape. screen_mirror imports both
+# lazily, inside a function, and the import is the feature probe: on a machine
+# without them every other mirror target still works and this one refuses with
+# the pip line. They are declared anyway (and shipped in every packaged build,
+# see build.yml) because a .app or a onefile binary has no pip for its user --
+# if the bundlers do not carry these, the target is a promise no download can
+# keep. `av` is also one of aiortc's own dependencies, but the plugin imports
+# it directly (it builds the pre-encoded packets aiortc sends), so it is named
+# here directly -- the cheroot rule above.
+aiortc
+av
 git+https://github.com/xfangfang/pystray.git
 git+https://github.com/xfangfang/pyperclip.git

@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.21</macast.version>
+# <macast.version>0.22</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -104,6 +104,7 @@
 #     loop the user reported ("装不完"), and CoreAudio-yes/ffmpeg-no is a
 #     microphone permission, which no download fixes either.
 
+import asyncio
 import ctypes
 import json
 import locale
@@ -123,6 +124,7 @@ import time
 import urllib.request
 from collections import deque
 from enum import Enum
+from fractions import Fraction
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue, Empty, Full
 
@@ -143,7 +145,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.21'
+PLUGIN_VERSION = '0.22'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -309,6 +311,28 @@ QUALITY_LABELS = {'360': '360p · 2 Mbps（省带宽）',
 QUALITY_ORDER = ('360', '720', '1080', 'source')
 #: frames per second, and with `-g` below the keyframe cadence in seconds.
 FPS = 24
+#: WebRTC's queue is counted in access units rather than bytes, because the
+#: unit a viewer either gets or does not is exactly one frame (`_AccessUnits`
+#: closes them). Half a second of them is the same budget the browser
+#: target's MSE queue gets; past that, a viewer is watching an old picture
+#: at live bitrates, which buys nothing. See `_WebRTCBridge`.
+WEBRTC_QUEUE_UNITS = FPS // 2
+#: A new viewer past this many is refused out loud instead of quietly
+#: starving the ones already connected: there is one encoder, one 4-8 Mbps
+#: stream, and the promise to each viewer is that it stays live.
+WEBRTC_MAX_VIEWERS = 4
+#: Seconds a half-negotiated peer may sit before the janitor retires it: the
+#: answer never arrived, or the connection never came up. A peer that is not
+#: in 'new'/'connecting' is never retired by this clock.
+WEBRTC_PEER_TIMEOUT = 30.0
+#: How long the offer waits for ICE gathering to finish before shipping
+#: whatever it has (host candidates only, on a LAN, are the whole story; the
+#: cap exists so a VPN interface cannot hold the page's first paint hostage).
+WEBRTC_GATHER_TIMEOUT = 2.0
+#: The most the answer POST may claim to be. A real SDP answer is a couple of
+#: kilobytes; this is the size past which the `Content-Length` header itself
+#: has become the attack, and the body is refused before a byte is read.
+WEBRTC_MAX_ANSWER_BYTES = 256 * 1024
 
 
 def gop_size(kind):
@@ -326,8 +350,18 @@ def gop_size(kind):
     keyframes at all, so their figure is only a seek granularity and a
     second of it is affordable; the DLNA target, which *is* joined
     mid-stream by a television, uses `live_gop` instead.
+
+    On `webrtc` the same half second means something slightly different and
+    slightly harder: there is no encoder on the receiving side of that wire
+    to ask for a keyframe -- aiortc forwards the packets we hand it, and a
+    PLI that arrives is not something this plugin can answer by re-encoding
+    -- so the keyframe spacing *is* the recovery latency after a loss, and
+    it doubles as how long a viewer that joins mid-picture waits for its
+    first complete image. Half a second is the cost of a fast recovery
+    there; a full second (the other targets' figure) would be a second of
+    smear on every loss.
     """
-    return FPS // 2 if kind == 'browser' else FPS
+    return FPS // 2 if kind in ('browser', 'webrtc') else FPS
 
 
 #: How long a live DLNA stream may go without an IDR, in seconds. At the 25 fps
@@ -379,6 +413,13 @@ OUTPUTS = {
     'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
                 ['-f', 'mp4', '-movflags',
                  'frag_every_frame+empty_moov+default_base_moof', 'pipe:1']),
+    #: Not a container either: these bytes are H.264 NAL units handed to a
+    #: WebRTC peer, which repacketises them into RTP without ever decoding
+    #: them (aiortc forwards what it is given). No suffix and no Content-Type
+    #: for the same reason as caststream -- nothing is served over HTTP; the
+    #: page negotiates a session and the media leaves the wire as SRTP.
+    'webrtc': ('浏览器 · WebRTC（低延迟 · 此通道无声音）', 'h264', None,
+               ['-f', 'h264', 'pipe:1']),
     #: Not a different device: the same Chromecast, driven by its mirroring app
     #: instead of by LOAD. No HTTP suffix and no Content-Type because nothing is
     #: served -- these bytes are pushed to a UDP port.
@@ -400,6 +441,16 @@ BROWSER_PATH = '/browser'
 #: renderer actually asked for, and a once-a-second poll would blow through that
 #: limit and bury the requests it exists to record.
 BROWSER_STATS_PATH = BROWSER_PATH + '/stats'
+#: The WebRTC target's signalling, served by the same tiny HTTP server and
+#: behind the same per-session `page_token` (never the standing `Api_Token`,
+#: for the same reason the viewing page never gets it). One POST to /session
+#: trades an offer for a peer id, one POST to /answer hands the answer back;
+#: GET /webrtc itself is the page a viewer opens. Like the stats endpoint
+#: these are deliberately *not* under `STREAM_PREFIX` -- they are not media
+#: and must not be counted as stream exchanges in the log.
+WEBRTC_PATH = '/webrtc'
+WEBRTC_SESSION_PATH = WEBRTC_PATH + '/session'
+WEBRTC_ANSWER_PATH = WEBRTC_PATH + '/answer'
 
 
 class _DlnaProfile(object):
@@ -2980,7 +3031,7 @@ def vt_level(height):
     return None
 
 
-def encoder_args(kind, platform=None, height=None):
+def encoder_args(kind, platform=None, height=None, output=None):
     """Video encoder flags. Hardware encoding is opt-in and macOS-only:
     ffmpeg's h264_videotoolbox is the one tap Apple actually ships, and unlike
     the Castify reference (which never probes for it and always lands on CPU
@@ -3000,15 +3051,25 @@ def encoder_args(kind, platform=None, height=None):
     It defaults to None -- "unknown" -- which for VT means "do not pin one",
     the safe direction: a missing level costs a slightly less explicit SPS,
     while a wrong one costs every frame.
+
+    `output` names the *target* (None for every caller that is not the live
+    pipeline), and one target overrides the profile: `webrtc` asks for
+    `baseline`, because constrained baseline is WebRTC's mandatory-to-
+    implement shape and a `high` SPS is what a strict receiver is entitled
+    to refuse. The research doc's "-level 3.1 is mandatory" line describes
+    that same constrained-baseline datapoint, and honouring it blindly is
+    exactly the 0.10 zero-frame bug: x264 computes its own level and is
+    right about it, and VT stays unpinned whenever `height` is unknown.
     """
+    profile = 'baseline' if output == 'webrtc' else 'high'
     if uses_videotoolbox(kind, platform):
-        args = ['-c:v', 'h264_videotoolbox', '-profile:v', 'high']
+        args = ['-c:v', 'h264_videotoolbox', '-profile:v', profile]
         level = vt_level(height)
         if level:
             args += ['-level', level]
         return args + ['-flags', '+low_delay', '-realtime', '1']
     return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
-            '-profile:v', 'high', '-flags', '+low_delay',
+            '-profile:v', profile, '-flags', '+low_delay',
             '-thread_type', 'slice']
 
 
@@ -3054,13 +3115,16 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     for one_input in capture.inputs:
         cmd += one_input
     cmd += ['-map', '0:v:0']
-    if capture.audio_map and kind != 'caststream':
+    if capture.audio_map and kind not in ('caststream', 'webrtc'):
         cmd += ['-map', capture.audio_map,
                 '-c:a', 'aac', '-b:a', '128k', '-ar', '48000', '-ac', '2']
         cmd += AUDIO_RESAMPLE
     else:
-        # The mirroring app takes video only until its audio stream is wired
-        # up, which is why the menu label for this target says 无声音 out loud.
+        # Both low-latency targets take video only, which is why their menu
+        # labels say 无声音 out loud: the mirroring app has no audio stream
+        # wired up at all, and the WebRTC page is a bare <video> -- this
+        # fork's audio plane for it is not built (v1 is video-only, stated
+        # in the same words as caststream).
         cmd += ['-an']
     extra = []
     if kind == 'caststream':
@@ -3069,25 +3133,30 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
         _width, height, video_filter = cast_stream_shape(height)
         bitrate = min(bitrate, cast_stream_bitrate_cap())
         cmd += ['-vf', video_filter]
-        if encoder == 'software':
-            # `-aud` makes every picture start with an access unit delimiter,
-            # which is what lets the splitter close a frame at its boundary
-            # instead of one frame late -- at 24 fps that is 42 ms of the
-            # latency this target exists to avoid. `scenecut=0` because x264
-            # deciding on its own when to redraw is not a promise the OFFER's
-            # one-second GOP can survive, and the PLI path assumes it.
-            # `-aud` is an AVOption, not an ffmpeg flag: it takes its value as
-            # a separate argument, so omitting the 1 eats the next option.
-            extra = ['-aud', '1', '-x264-params',
-                     'keyint={}:min_keyint={}:scenecut=0'.format(FPS, FPS)]
     elif height:
         # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
         cmd += ['-vf', 'scale=-2:{}'.format(height)]
+    if kind in ('caststream', 'webrtc') and encoder == 'software':
+        # `-aud` makes every picture start with an access unit delimiter,
+        # which is what lets the splitter close a frame at its boundary
+        # instead of one frame late -- at 24 fps that is 42 ms of the
+        # latency these targets exist to avoid. `scenecut=0` because x264
+        # deciding on its own when to redraw is not a promise the OFFER's
+        # one-second GOP can survive, and the PLI path assumes it; the
+        # WebRTC scan (`_AccessUnits`) reads the same boundaries and its
+        # own `-g` is the recovery promise there. `keyint` follows each
+        # target's own `gop_size`, so caststream's argv keeps its `FPS`
+        # spelling through the same formatter. `-aud` is an AVOption, not
+        # an ffmpeg flag: it takes its value as a separate argument, so
+        # omitting the 1 eats the next option.
+        extra = ['-aud', '1', '-x264-params',
+                 'keyint={}:min_keyint={}:scenecut=0'.format(
+                     gop_size(kind), gop_size(kind))]
     # `height` here is the height that will actually be encoded, not the one
     # the menu asked for: the caststream branch above has just replaced it with
     # the size the OFFER pinned, and 0 means "do not scale" (原画), which is
     # exactly the case `vt_level` must not pin a level for.
-    cmd += encoder_args(encoder, height=height)
+    cmd += encoder_args(encoder, height=height, output=kind)
     # Decided once, then used for both `-b:v` and the VBV that bounds it: a
     # ceiling computed from a different number than the target is not a
     # ceiling. Note the ordering against the caststream clamp above -- that one
@@ -5308,6 +5377,8 @@ class _StreamHandler(BaseHTTPRequestHandler):
         path = self.path.partition('?')[0]
         if path == BROWSER_PATH:
             return self._serve_page(head_only)
+        if path == WEBRTC_PATH:
+            return self._serve_webrtc_page(head_only)
         if path == BROWSER_STATS_PATH:
             return self._serve_stats()
         if path.startswith(STREAM_PREFIX):
@@ -5318,8 +5389,96 @@ class _StreamHandler(BaseHTTPRequestHandler):
             return self._serve_stream(head_only)
         return self._not_found()
 
+    def do_POST(self):
+        """The WebRTC signaling door: exactly two fields, both session-gated.
+
+        Not part of `macast.protocol`'s `Handler.POST_ROUTES` table -- that
+        table guards the *application's* management API on 58880, and this is
+        the mirror session's own server on a random port. The credential rule
+        is still the strictest one available here: only `page_token` (the
+        same per-session token as the viewing page), never `Api_Token` -- a
+        viewing URL gets copied and forwarded, and the management token opens
+        the whole app's API (AGENTS.md 4.7). An offer is kilobytes of SDP, so
+        the answer comes back in a request body -- there is no GET shape of
+        this door.
+        """
+        path = self.path.partition('?')[0]
+        if path not in (WEBRTC_SESSION_PATH, WEBRTC_ANSWER_PATH):
+            return self._not_found()
+        if not self._page_authorized():
+            return self._json(403, {'code': 1, 'message': 'a token is required'})
+        bridge = getattr(self.server, 'broadcaster', None)
+        if getattr(bridge, 'create_offer', None) is None:
+            return self._json(409, {
+                'code': 1,
+                'message': 'this session is not mirroring to WebRTC',
+            })
+        try:
+            if path == WEBRTC_SESSION_PATH:
+                peer, offer = bridge.create_offer()
+                return self._json(200, {'code': 0, 'peer': peer,
+                                        'offer': offer})
+            return self._post_answer(bridge)
+        except RuntimeError as e:
+            # The bridge's own refusals: too many viewers, an unknown peer,
+            # or a session that has meanwhile stopped. All of them are the
+            # client's answer, not a server fault.
+            return self._json(409, {'code': 1, 'message': str(e)})
+        except Exception as e:                                 # noqa: BLE001
+            logger.error('the WebRTC signaling request failed: %s', e)
+            return self._json(500, {'code': 1, 'message': 'signaling failed'})
+
+    def _post_answer(self, bridge):
+        """Read one JSON answer out of the request body and hand it over."""
+        import urllib.parse
+        query = urllib.parse.parse_qs(self.path.partition('?')[2] or '')
+        peer = (query.get('peer') or [''])[0]
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except ValueError:
+            length = 0
+        # An SDP answer is a couple of kilobytes; the cap is how a broken or
+        # hostile client cannot make this thread allocate its own claim.
+        if length <= 0 or length > WEBRTC_MAX_ANSWER_BYTES:
+            return self._json(400, {'code': 1,
+                                    'message': 'a JSON body is required'})
+        raw = self.rfile.read(length)
+        try:
+            message = json.loads(raw.decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            return self._json(400, {'code': 1,
+                                    'message': 'the body is not JSON'})
+        if not isinstance(message, dict):
+            return self._json(400, {'code': 1,
+                                    'message': 'the body is not an answer'})
+        sdp = message.get('sdp')
+        type_ = message.get('type') or 'answer'
+        if not isinstance(sdp, str) or not sdp:
+            return self._json(400, {'code': 1,
+                                    'message': 'the answer carries no sdp'})
+        bridge.set_answer(peer, sdp, type_)
+        return self._json(200, {'code': 0, 'peer': peer})
+
+    def _json(self, status, payload):
+        """One JSON answer for the signaling door, with the same two headers
+        every response of this server carries: `nosniff` and `no-store`."""
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_stream(self, head_only=False):
         broadcaster = self.server.broadcaster
+        if getattr(broadcaster, 'subscribe', None) is None:
+            # The WebRTC session shares this server but has no byte stream to
+            # serve (its frames travel over UDP/ICE, not HTTP). A client that
+            # falls back to the stream URL deserves an honest 404, not the
+            # AttributeError of an object with no `subscribe`.
+            return self._not_found()
         # A viewer cannot decode a container without the header that precedes
         # it, and it can never ask for that again -- so the header is written
         # here, once, on this connection, rather than being queued up among
@@ -5531,6 +5690,30 @@ class _StreamHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
+    def _serve_webrtc_page(self, head_only=False):
+        """The WebRTC viewing page: same credential as the other page.
+
+        `page_diag` is injected once, like the browser page's overlay gets it;
+        everything live is polled from `/browser/stats` -- which works here
+        unchanged because the bridge answers to the same counter names. The
+        page reads its own token back out of its URL; nothing in the body
+        repeats it (a copy would outlive the tab's address).
+        """
+        if not self._page_authorized():
+            self.send_error(403, 'a token is required')
+            return
+        body = WEBRTC_PAGE.replace('@DIAG@', json.dumps(page_diag(self.session))) \
+                          .replace('@TITLE@', self.session.page_title) \
+                          .encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
     def _serve_stats(self):
         """The overlay's per-second read of the sender's own counters."""
         if not self._page_authorized():
@@ -5718,6 +5901,13 @@ def page_url(server):
         server.session.page_token)
 
 
+def webrtc_page_url(server):
+    """The WebRTC target's viewing address, next to its browser cousin."""
+    return 'http://{}:{}{}?token={}'.format(
+        advertise_host(), server.server_address[1], WEBRTC_PATH,
+        server.session.page_token)
+
+
 def _int_flag(command, flag):
     """The integer that follows `flag` in an argv list, or None.
 
@@ -5786,6 +5976,15 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
         #: follow the live edge or are byte-addressed by the TV itself.
         'replay_bytes': REPLAY_BYTES if kind == 'browser' else 0,
     }
+    if kind == 'webrtc':
+        # The bridge's queue is counted in access units, not byte chunks: the
+        # sender's share of this target's delay is these units at 1/FPS each
+        # (the unit itself was already encoded; this is only the part that
+        # queues here before SRTP leaves).
+        info.update({
+            'queue_chunks': WEBRTC_QUEUE_UNITS,
+            'queue_seconds': round(WEBRTC_QUEUE_UNITS / float(FPS), 2),
+        })
     if kind == 'dlna':
         profile = session.profile
         info.update({
@@ -5831,7 +6030,11 @@ def page_stats(session, source):
         'exchanges': getattr(session, 'exchanges', 0),
         'shape': 'file' if getattr(session, 'bytelog', False) else 'live',
     }
-    for name in ('chunks', 'bytes', 'drops'):
+    #: `sent` is the WebRTC bridge's delivered-byte counter -- the same fact
+    #: `written` is on a byte stream, under the name the bridge has room for.
+    #: A byte-stream broadcaster does not have it, and answers 0, which the
+    #: browser overlay never shows (only the WebRTC page reads it).
+    for name in ('chunks', 'bytes', 'drops', 'sent'):
         live[name] = getattr(source, name, 0) if source is not None else 0
     clients = getattr(source, 'clients', None) if source is not None else None
     live['clients'] = clients() if callable(clients) else 0
@@ -6047,6 +6250,198 @@ function mse(){
   }
 }
 mse();
+</script></body></html>
+"""
+
+
+# -- the WebRTC player page -------------------------------------------------
+#
+# The fifth target's viewing page. Same credential, same overlay counters,
+# same textContent-only rules as PLAYER_PAGE above -- what changes is the
+# media path: one RTCPeerConnection instead of an MSE fetch loop. The page
+# fetches the sender's offer from `/webrtc/session`, answers it, and the
+# track it receives *is* the encoder's H.264 re-packetized for RTP -- no
+# re-encode anywhere on this path (that is the whole point of the target).
+#
+# Raw string on purpose, same as PLAYER_PAGE: the JS has its own `'\n'`. The
+# token is read back out of the URL rather than repeated in the body -- a
+# copy down here would outlive the address bar it was opened from.
+WEBRTC_PAGE = r"""<!doctype html>
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>@TITLE@ 屏幕镜像 · WebRTC</title>
+<style>
+ html,body{margin:0;height:100%;background:#000;color:#ccc;
+   font:14px/1.5 -apple-system,system-ui,sans-serif}
+ video{width:100%;height:100%;object-fit:contain;background:#000}
+ #bar{position:fixed;left:0;right:0;top:0;display:flex;gap:8px;
+   align-items:center;padding:6px 10px;background:#0008;color:#ddd;
+   font-size:12px;opacity:.25;transition:opacity .3s}
+ body:hover #bar{opacity:1}
+ button{background:#222;color:#ddd;border:1px solid #444;border-radius:6px;
+   padding:4px 10px;font:inherit}
+ button.on{background:#28465f;border-color:#4d7ea8;color:#fff}
+ #err{color:#f88;display:none}
+ #mute{color:#f8b46c}
+ #stats{position:fixed;left:10px;top:38px;max-width:min(72ch,92%);
+   background:#000c;color:#cfe3ff;font:11px/1.5 ui-monospace,Menlo,Consolas,
+   monospace;padding:8px 10px;border-radius:6px;white-space:pre-wrap;
+   overflow-wrap:break-word;pointer-events:none;display:none}
+ #stats.on{display:block}
+</style></head><body>
+<div id="bar"><span id="st">连接中…</span><span id="err"></span>
+ <span id="mute">此通道无声音</span>
+ <span style="flex:1"></span>
+ <button id="stat">统计</button><button id="full">全屏</button></div>
+<div id="stats"></div>
+<video id="v" autoplay playsinline muted></video>
+<script>
+var DIAG=@DIAG@||{};
+var v=document.getElementById('v'),st=document.getElementById('st'),
+    err=document.getElementById('err'),panel=document.getElementById('stats'),
+    toggle=document.getElementById('stat');
+// The page's own credential, read back out of its URL. The body must not
+// repeat it, and it is never the app's stable management token.
+var TOKEN=(location.search.match(/[?&]token=([^&]+)/)||[,''])[1];
+var STATS='/browser/stats?token='+encodeURIComponent(TOKEN);
+function say(t){st.textContent=t}
+function fail(t){err.style.display='inline';err.textContent=' · '+t}
+function unlock(){if(navigator.wakeLock)navigator.wakeLock.request('screen')
+  .catch(function(){})}
+document.getElementById('full').onclick=function(){
+  (v.requestFullscreen||v.webkitRequestFullscreen||function(){}).call(v)};
+
+// -- the negotiation: one offer in, one answer out -------------------------
+// No ICE server: this is a LAN, host candidates are the whole story, and a
+// STUN round trip to the internet would only delay first paint on exactly
+// the networks where it would fail. Host candidates arrive as mDNS names
+// (the browser hides local IPs from pages); aiortc resolves those itself.
+if(!window.RTCPeerConnection){fail('这个浏览器不支持 WebRTC')}
+var pc=window.RTCPeerConnection?new RTCPeerConnection({iceServers:[]}):null;
+function post(url,body){return fetch(url,{method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(body||{})}).then(function(r){
+    return r.json().catch(function(){throw new Error('http '+r.status)})
+    .then(function(j){if(!r.ok||j.code!==0)
+      throw new Error(j.message||('http '+r.status));return j})})}
+function gathered(){return new Promise(function(res){
+  if(pc.iceGatheringState==='complete')return res();
+  var t=setTimeout(res,2000);
+  pc.addEventListener('icegatheringstatechange',function(){
+    if(pc.iceGatheringState==='complete'){clearTimeout(t);res()}})})}
+function negotiate(){
+  if(!pc)return;
+  say('正在协商…');
+  var peer='';
+  post('/webrtc/session?token='+encodeURIComponent(TOKEN))
+  .then(function(j){peer=j.peer;return pc.setRemoteDescription(j.offer)})
+  .then(function(){return pc.createAnswer()})
+  .then(function(a){return pc.setLocalDescription(a).then(gathered)})
+  .then(function(){return post('/webrtc/answer?token='
+    +encodeURIComponent(TOKEN)+'&peer='+encodeURIComponent(peer),
+    {type:'answer',sdp:pc.localDescription.sdp})})
+  .then(function(){say('等待画面…')})
+  .catch(function(e){fail('协商失败：'+e.message)});
+}
+if(pc){
+  pc.ontrack=function(ev){
+    v.srcObject=ev.streams[0]||new MediaStream([ev.track]);
+    v.play().catch(function(){});
+    say('已连接');unlock()};
+  pc.onconnectionstatechange=function(){
+    if(pc.connectionState==='connected')say('已连接');
+    if(pc.connectionState==='failed'){fail('连接中断，正在重连');
+      setTimeout(function(){location.reload()},2000)}};
+  negotiate();
+}
+
+// -- the overlay: the sender's counters, and what this page did with them --
+var MB=1048576;
+function s(x){return (x===undefined||x===null||x==='')?'—':String(x)}
+function mb(b){return b?((b/MB).toFixed(1)+' MB'):'0 MB'}
+function rate(b){return b?(b*8/1e6).toFixed(2)+' Mbps':'0 Mbps'}
+function bps(b){return b?(b/1e6).toFixed(2)+' Mbps':'0 Mbps'}
+function secs(x){return (x===null||x===undefined)?'—':Number(x).toFixed(2)+' s'}
+function line(a,b){return a+'：'+b}
+var live={};          // the sender's counters, from the same /browser/stats poll
+var N={state:'new',w:0,h:0,fps:0,bytes:0,instant:0,lost:0,recv:0,
+       rtt:'—',jitter:0};
+var Q={fps:'—'};
+function rows(){
+  var out=[],d=DIAG;
+  out.push('— 发送端 —');
+  out.push(line('目标',s(d.kind))+' · '+line('形状',s(live.shape)));
+  if(d.capture!==undefined)out.push(line('采集',d.capture));
+  if(d.encoder!==undefined)out.push(line('编码器',d.encoder)+' · '
+    +s(d.height)+'p@'+s(d.fps)+' · GOP '+s(d.gop));
+  if(d.bitrate)out.push(line('档位码率',bps(d.bitrate)));
+  if(d.queue_seconds!==undefined&&d.queue_seconds!==null)
+    out.push(line('发送端队列',secs(d.queue_seconds)
+                  +(d.queue_chunks?' ('+d.queue_chunks+' 块)':'')));
+  out.push('— 推流（发送端实时）—');
+  out.push(line('编码器产出',s(live.chunks)+' 块 · '+mb(live.bytes)));
+  out.push(line('发送端丢块',s(live.drops)
+                +(live.drops?'（慢消费者被丢整块）':'')));
+  out.push(line('已交付',mb(live.sent))+' · '+line('观看端',s(live.clients)));
+  out.push('— 连接（本机）—');
+  out.push(line('连接',s(N.state))+' · '+line('解码',
+              N.w?N.w+'×'+N.h:'—')+' @ '+s(N.fps)+' fps');
+  out.push(line('接收码率',rate(N.instant))+' · '+line('已接收',mb(N.bytes)));
+  out.push(line('丢包',s(N.lost)+'/'+s(N.recv))+' · '+line('往返时延',
+              N.rtt==='—'?'—':N.rtt+' ms')+' · '+line('抖动',
+              N.jitter?Math.round(N.jitter*1000)+' ms':'0 ms'));
+  out.push(line('帧率',(N.fps===0?'—':N.fps+' fps 解码')+' / '
+    +(Q.fps==='—'?'—':Q.fps+' fps 上屏')
+    +(N.fps>=6&&Q.fps!=='—'&&Q.fps*2<N.fps
+      ?'（窗口不在前台，上屏数不算链路）':'')));
+  out.push(new Date().toLocaleTimeString());
+  return out.join('\n')}
+function paint(){panel.textContent=rows()}
+// What actually reached the screen, next to what getStats says was decoded.
+// A backgrounded or occluded window presents at a couple of fps while the
+// decoder keeps the encoder's cadence -- one number alone blames the mirror.
+if(v.requestVideoFrameCallback){
+  var fcount=0,fmark=Date.now();
+  var tick=function(){fcount++;v.requestVideoFrameCallback(tick)};
+  v.requestVideoFrameCallback(tick);
+  setInterval(function(){var n=Date.now();
+    if(n-fmark>0){Q.fps=Math.round(fcount*1000/(n-fmark))}
+    fcount=0;fmark=n},1000)}
+// The connection's own numbers, straight out of getStats once a second.
+var prev={bytes:0,at:Date.now()};
+function net(){
+  if(!pc)return;
+  pc.getStats().then(function(rep){
+    rep.forEach(function(x){
+      if(x.type==='inbound-rtp'&&x.kind==='video'){
+        N.w=x.frameWidth||N.w;N.h=x.frameHeight||N.h;
+        N.fps=x.framesPerSecond||N.fps;
+        N.lost=x.packetsLost||0;N.recv=x.packetsReceived||0;
+        N.jitter=x.jitter||0;N.bytes=x.bytesReceived||0}
+      if(x.type==='candidate-pair'&&x.state==='succeeded'
+         &&x.currentRoundTripTime!==undefined){
+        N.rtt=Math.round(x.currentRoundTripTime*1000)}});
+    var n=Date.now(),dt=n-prev.at;
+    if(dt>0){N.instant=Math.round((N.bytes-prev.bytes)*1000/dt)}
+    prev={bytes:N.bytes,at:n};
+    N.state=pc.connectionState;
+    if(panel.classList.contains('on'))paint()}).catch(function(){})}
+setInterval(net,1000);
+function poll(){fetch(STATS).then(function(r){
+    if(!r.ok)throw new Error(''+r.status);return r.json()}).then(function(j){
+      live=j;if(panel.classList.contains('on'))paint()})
+    .catch(function(){})}
+var poller=null;
+function setOpen(on){
+  panel.classList.toggle('on',on);toggle.classList.toggle('on',on);
+  try{localStorage.setItem('macast.mirror.stats',on?'1':'0')}catch(x){}
+  if(poller){clearInterval(poller);poller=null}
+  if(on){poll();net();paint();poller=setInterval(poll,1000)}}
+toggle.onclick=function(){setOpen(!panel.classList.contains('on'))};
+var stored=null;try{stored=localStorage.getItem('macast.mirror.stats')}catch(x){}
+setOpen(stored==='1');
+setInterval(function(){ // keep the panel honest while it is open
+  if(panel.classList.contains('on'))paint()},1000);
 </script></body></html>
 """
 
@@ -8548,6 +8943,420 @@ def unicode_text(value):
     return value if isinstance(value, str) else str(value)
 
 
+# -- the WebRTC target --------------------------------------------------------
+#
+# The fifth output target, and the third one that takes the media plane off
+# HTTP: the page opens a real RTCPeerConnection, the server answers with an
+# offer, and the encoder's H.264 access units ride out as SRTP through
+# aiortc -- which never sees a decoded frame, because the track hands it
+# whole Annex-B pictures and it repacketises what it is given. That opacity
+# is the point: a transcoder here would add a decode + encode to the one
+# pipeline on this list that exists to remove latency.
+#
+# Why aiortc and not ffmpeg's own `-whip`: `-whip` is a *client* muxer -- it
+# pushes to a WHIP endpoint, and here Macast is the endpoint. A WHIP server
+# (ICE, DTLS, SRTP, RTP packetisation, congestion feedback) would still have
+# to exist, and ffmpeg does not provide one; aiortc does, is importable
+# from a single-file plugin, and forwards our access units without decoding
+# them. The price is this file's only optional dependency, and everything
+# below is shaped around paying it without letting it spread: nothing at
+# module scope imports aiortc, and the failure stays recoverable.
+
+#: A successful `import aiortc; import av` -- cached forever. The matching
+#: failure is deliberately *not* cached: the printed fix is a `pip install`,
+#: and a user who runs it should not have to restart Macast to be believed.
+_WEBRTC_MODULES = None
+_WEBRTC_IMPORT_ERROR = None
+#: The viewer track class, built once from the real aiortc base class.
+_WEBRTC_VIEWER_CLASS = None
+
+WEBRTC_INSTALL_HINT = (
+    '这条通道需要两个可选依赖：aiortc 与 av。请在运行 Macast 的那个 Python 里执行 '
+    '「pip install aiortc av」，然后回到这里重新选择本目标即可（失败不会被缓存，'
+    '不需要重启 Macast）。')
+
+
+def _webrtc_modules():
+    """(aiortc, av), or None while the optional packages are unavailable.
+
+    Lazy on purpose, twice over. At module scope a `pip` library would take
+    the whole plugin down on any machine and any packed artefact that never
+    installs it -- packaged builds now carry both (see the py2app `packages`
+    and PyInstaller hidden-import entries), but a run from source on a
+    machine without the pip line must keep every other mirror target
+    working. And inside this function the import is the *feature probe*:
+    "is this target usable" is answered by actually loading the packages,
+    the same way `has_hardware_encoder` answers by asking ffmpeg rather
+    than by trusting a table.
+    """
+    global _WEBRTC_MODULES, _WEBRTC_IMPORT_ERROR
+    if _WEBRTC_MODULES is not None:
+        return _WEBRTC_MODULES
+    try:
+        import aiortc
+        import av
+    except Exception as exc:            # ImportError, or a broken wheel
+        _WEBRTC_IMPORT_ERROR = exc
+        logger.info('the WebRTC packages are not importable: %s', exc)
+        return None
+    _WEBRTC_MODULES = (aiortc, av)
+    _WEBRTC_IMPORT_ERROR = None
+    return _WEBRTC_MODULES
+
+
+def _make_viewer_class():
+    """The `aiortc.MediaStreamTrack` subclass, built once aiortc loads.
+
+    A module-level `class _WebRTCViewer(aiortc.MediaStreamTrack)` would make
+    aiortc a module-scope import again, one indirection up; resolving the
+    base class here is what keeps the plugin loadable without it. Cached
+    after the first success because the class is stateless -- the queue it
+    drains lives on the *instance*, one per viewer.
+    """
+    global _WEBRTC_VIEWER_CLASS
+    if _WEBRTC_VIEWER_CLASS is not None:
+        return _WEBRTC_VIEWER_CLASS
+    aiortc, av = _webrtc_modules()
+    media_stream_error = aiortc.mediastreams.MediaStreamError
+
+    class _WebRTCViewer(aiortc.MediaStreamTrack):
+        """One viewer, as seen by aiortc: a queue of access units to drain.
+
+        There is no encoder below `recv()`, so the pacing rules are simple
+        and slightly unusual: a call must be answered *immediately* when a
+        unit is waiting (the frame is already encoded; sleeping here would
+        put an artificial 1/FPS clock on top of the encoder's own), and a
+        viewer that falls behind is dropped for rather than caught up --
+        sending it twenty stale frames to keep it "in sync" would be
+        sending twenty frames of the past at live bitrates, which is the
+        one thing a live view cannot want.
+        """
+
+        kind = 'video'
+
+        def __init__(self, owner):
+            super(_WebRTCViewer, self).__init__()
+            self._owner = owner
+            self._queue = deque()
+            self._waiter = None
+            self._closed = False
+            self._frames = 0
+            #: The first unit a new viewer may be sent is an IDR: anything
+            #: earlier references pictures it has never seen. Everything
+            #: from here until then is skipped *by the sender*, because
+            #: nothing on the far side can ask for a keyframe -- see
+            #: `gop_size`'s note on this target.
+            self._awaiting_idr = True
+            self.pc = None
+
+        # -- called on the bridge's own loop thread ---------------------------
+
+        def offer(self, unit):
+            """One access unit for this viewer; never blocks."""
+            if self._closed:
+                return
+            waiter = self._waiter
+            if waiter is not None and not waiter.done():
+                waiter.set_result(unit)
+                self._waiter = None
+                return
+            if len(self._queue) >= WEBRTC_QUEUE_UNITS:
+                self._queue.popleft()
+                self._owner.note_drop()
+            self._queue.append(unit)
+
+        def sentinel(self):
+            """No more units will ever come: wake `recv()` so it can end."""
+            self._closed = True
+            self._queue.clear()
+            waiter, self._waiter = self._waiter, None
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
+
+        # -- called by aiortc, on the bridge's loop thread --------------------
+
+        async def recv(self):
+            while True:
+                unit = await self._take()
+                if unit is None:
+                    raise media_stream_error('the mirroring session ended')
+                if self._awaiting_idr and not _unit_is_key(unit):
+                    continue
+                self._awaiting_idr = False
+                packet = av.Packet(unit)
+                # pts counts *this viewer's* frames from zero, and the
+                # timebase is the pipeline's own `-r`: aiortc extrapolates
+                # RTP timestamps from these two, and the receiver's jitter
+                # math is only honest if they describe the encoder we
+                # actually run. A viewer joining mid-session therefore gets
+                # a timestamp timeline that starts at whatever wall-clock
+                # moment its first IDR was produced.
+                packet.pts = self._frames
+                packet.time_base = Fraction(1, FPS)
+                self._frames += 1
+                self._owner.note_sent(len(unit))
+                return packet
+
+        async def _take(self):
+            while True:
+                if self._queue:
+                    return self._queue.popleft()
+                if self._closed:
+                    return None
+                waiter = self._owner._loop.create_future()
+                self._waiter = waiter
+                try:
+                    return await waiter
+                finally:
+                    self._waiter = None
+
+    _WEBRTC_VIEWER_CLASS = _WebRTCViewer
+    return _WEBRTC_VIEWER_CLASS
+
+
+class _WebRTCBridge(object):
+    """The WebRTC media plane: one ffmpeg byte stream -> N SRTP viewers.
+
+    Sits in the slot `_Broadcaster` fills for every other target, and
+    deliberately shares only the surface the rest of the plugin calls:
+    `feed`/`flush` from the pump, `clients()`, `close()` from teardown. It
+    is *not* a `_Broadcaster`: that class protects an HTTP socket per
+    viewer by dropping whole container pieces, and there is no container
+    and no socket here -- a viewer is an aiortc track, and the piece it
+    either gets or misses is exactly one access unit (see `offer`).
+
+    One dedicated asyncio loop, on its own thread, runs every piece of
+    queue state: `feed` only ever crosses onto it with
+    `call_soon_threadsafe`, so the asyncio objects (futures, the peers
+    dict) have exactly one owner and no lock is needed for a pipeline
+    that runs at frame rates. The counters are the exception -- written
+    from both threads, read from the UI thread -- and each one is a single
+    `+=` on an int: a stale-by-one read of a number printed once a second
+    is not worth serialising four frame pipelines for.
+    """
+
+    def __init__(self):
+        self._units = _AccessUnits()
+        self._peers = {}
+        self._closed = False
+        self.chunks = 0
+        self.bytes = 0
+        self.drops = 0
+        self.sent = 0
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run_loop,
+                                        name='SCREEN_MIRROR_WEBRTC')
+        self._thread.daemon = True
+        self._thread.start()
+
+    def _run_loop(self):
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_forever()
+        except Exception:
+            logger.exception('the WebRTC loop died')
+
+    # -- the pump's side ------------------------------------------------------
+
+    def feed(self, chunk):
+        """One ffmpeg chunk, from the pump thread.
+
+        Access units are split even while no viewer is connected: the
+        splitter is what caches SPS/PPS in front of every IDR, and a viewer
+        that joins later must inherit that cache warm. A stream whose
+        parser only ran while someone watched would hand its first viewer
+        an IDR without parameter sets -- a black picture, not a saving.
+        """
+        if self._closed:
+            return
+        self.chunks += 1
+        self.bytes += len(chunk)
+        for unit in self._units.feed(chunk):
+            self._dispatch(unit)
+
+    def flush(self):
+        """Drain the splitter at end of stream (see `_AccessUnits.flush`)."""
+        if self._closed:
+            return
+        for unit in self._units.flush():
+            self._dispatch(unit)
+
+    def _dispatch(self, unit):
+        if self._peers:
+            self._loop.call_soon_threadsafe(self._offer, unit)
+
+    def _offer(self, unit):
+        for viewer in tuple(self._peers.values()):
+            viewer.offer(unit)
+
+    def note_drop(self):
+        self.drops += 1
+
+    def note_sent(self, count):
+        self.sent += count
+
+    # -- the HTTP handler's side ----------------------------------------------
+
+    def clients(self):
+        return len(self._peers)
+
+    def create_offer(self, timeout=10.0):
+        """A fresh (peer_id, {type, sdp}) pair, or raise with the reason.
+
+        Synchronous wrapper for the signalling POST: the coroutine runs on
+        the loop thread and this thread waits for it, because the answer
+        has to go back to the HTTP client in the same request.
+        """
+        if self._closed:
+            raise RuntimeError('the mirror has stopped')
+        future = asyncio.run_coroutine_threadsafe(self._create_offer(),
+                                                  self._loop)
+        return future.result(timeout)
+
+    def set_answer(self, peer_id, sdp, type_, timeout=10.0):
+        if self._closed:
+            raise RuntimeError('the mirror has stopped')
+        future = asyncio.run_coroutine_threadsafe(
+            self._apply_answer(peer_id, sdp, type_), self._loop)
+        return future.result(timeout)
+
+    # -- on the loop thread ---------------------------------------------------
+
+    async def _create_offer(self):
+        aiortc, _av = _webrtc_modules()
+        if self._closed:
+            raise RuntimeError('the mirror has stopped')
+        if len(self._peers) >= WEBRTC_MAX_VIEWERS:
+            raise RuntimeError('too many WebRTC viewers (the limit is {})'
+                               .format(WEBRTC_MAX_VIEWERS))
+        viewer = _make_viewer_class()(self)
+        pc = aiortc.RTCPeerConnection()
+        viewer.pc = pc
+        pc.addTrack(viewer)
+        # aiortc's own codec list puts VP8 first, and a VP8 negotiation
+        # would leave this track serving an encoder nobody has (the spike
+        # for this target *did* negotiate VP8 once and the viewer got
+        # zero frames). H.264 packetization-mode=1 is what this pipeline
+        # produces, so that is what the offer may contain.
+        #
+        # The value in aiortc's capability table is the *string* `"1"`
+        # (codecs/__init__.py, the two H264 profiles), and it must be
+        # compared as such: the first spelling of this filter was `== 1`
+        # (int), which matched nothing, and `setCodecPreferences([])` means
+        # "no preference" to aiortc -- VP8 first. Negotiation then picked
+        # VP8 for an H264 stream, `Vp8Encoder.pack` wrapped our Annex-B
+        # payloads in VP8 descriptors without complaining, and the viewer
+        # got zero frames with no error anywhere (found 2026-10-02 by this
+        # suite's own aiortc client, which is exactly why that case exists).
+        capabilities = aiortc.RTCRtpSender.getCapabilities('video')
+        h264 = [codec for codec in capabilities.codecs
+                if codec.mimeType == 'video/H264'
+                and str(codec.parameters.get('packetization-mode')) == '1']
+        if not h264:
+            # A loud refusal on this side of the wire; silently proceeding
+            # is the black-picture bug above, and the page will show this
+            # message.
+            raise RuntimeError('this build of aiortc offers no H264 '
+                               'packetization-mode=1 codec')
+        for transceiver in pc.getTransceivers():
+            transceiver.setCodecPreferences(h264)
+        peer_id = secrets.token_hex(8)
+        # Registered *before* the SDP exists, so end-to-end wiring has no
+        # lost-viewer window: units produced while the offer gathers ICE
+        # are already queued for this viewer, and a teardown that happens
+        # mid-handshake still finds it in `_peers` and closes it.
+        self._peers[peer_id] = viewer
+        logger.info('WebRTC viewer %s: offering (%d connected)',
+                    peer_id, len(self._peers))
+
+        @pc.on('connectionstatechange')
+        def _state_changed():
+            if pc.connectionState in ('failed', 'closed'):
+                self._loop.create_task(self._retire(peer_id))
+
+        # The page posts its answer within a second when the browser is
+        # healthy; a peer still in 'new'/'connecting' after this long is a
+        # tab that was closed mid-handshake or a browser that refused the
+        # offer, and it holds a slot at `WEBRTC_MAX_VIEWERS` until reaped.
+        self._loop.call_later(WEBRTC_PEER_TIMEOUT, self._check_peer, peer_id)
+        await pc.setLocalDescription(await pc.createOffer())
+        deadline = self._loop.time() + WEBRTC_GATHER_TIMEOUT
+        while (pc.iceGatheringState != 'complete'
+               and self._loop.time() < deadline):
+            await asyncio.sleep(0.05)
+        description = pc.localDescription
+        if description is None:
+            await self._retire(peer_id)
+            raise RuntimeError('the offer could not be built')
+        return peer_id, {'type': description.type, 'sdp': description.sdp}
+
+    async def _apply_answer(self, peer_id, sdp, type_):
+        # The unknown-peer refusal comes first, so it does not depend on the
+        # optional import: with aiortc missing, `_webrtc_modules()` returns
+        # None and unpacking it here would surface as a 500 "signaling
+        # failed" instead of the honest 409.
+        viewer = self._peers.get(peer_id)
+        if viewer is None or viewer.pc is None:
+            raise RuntimeError('no such WebRTC viewer')
+        aiortc, _av = _webrtc_modules()
+        await viewer.pc.setRemoteDescription(
+            aiortc.RTCSessionDescription(sdp=sdp, type=type_))
+
+    async def _retire(self, peer_id):
+        viewer = self._peers.pop(peer_id, None)
+        if viewer is None:
+            return
+        logger.info('WebRTC viewer %s: retired', peer_id)
+        viewer.sentinel()
+        try:
+            await viewer.pc.close()
+        except Exception:
+            pass
+
+    def _check_peer(self, peer_id):
+        viewer = self._peers.get(peer_id)
+        if viewer is None or viewer.pc is None:
+            return
+        if viewer.pc.connectionState in ('new', 'connecting'):
+            logger.info('WebRTC viewer %s: the answer never came, retiring',
+                        peer_id)
+            self._loop.create_task(self._retire(peer_id))
+
+    # -- teardown -------------------------------------------------------------
+
+    def close(self):
+        """Idempotent; returns without waiting for the loop to stop.
+
+        The pump thread is already gone when this is called (teardown
+        happens after the encoder died), and `feed`'s own `_closed` guard
+        keeps any late chunk out. A second close only schedules a callback
+        onto a loop that has stopped, which is a no-op -- closing the loop
+        itself is deliberately never done, because aiortc objects touched
+        after a closed loop are a worse failure than a stopped one.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._loop.call_soon_threadsafe(self._begin_shutdown)
+        except RuntimeError:
+            pass                       # the loop is already closed
+
+    def _begin_shutdown(self):
+        self._loop.create_task(self._finish_shutdown())
+
+    async def _finish_shutdown(self):
+        viewers = list(self._peers.values())
+        self._peers.clear()
+        for viewer in viewers:
+            viewer.sentinel()
+            try:
+                await viewer.pc.close()
+            except Exception:
+                pass
+        self._loop.stop()
+
+
 # -- the renderer ------------------------------------------------------------
 
 class _Aborted(Exception):
@@ -8670,11 +9479,18 @@ class ScreenMirrorRenderer(Renderer):
         return self._url
 
     def viewer_url(self):
-        """The /browser address for the running session, or ''."""
+        """The viewing address for the running session, or ''.
+
+        Two targets answer: `browser` (the MSE page) and `webrtc` (the peer
+        connection page). Both are "open this on the device you want to watch
+        from"; the other three targets are devices, not pages.
+        """
         with self._lock:
             server = self._server
-        if server is None or server.session.kind != 'browser':
+        if server is None or server.session.kind not in ('browser', 'webrtc'):
             return ''
+        if server.session.kind == 'webrtc':
+            return webrtc_page_url(server)
         return page_url(server)
 
     def stats(self):
@@ -8726,7 +9542,13 @@ class ScreenMirrorRenderer(Renderer):
         #: way as "the repair traffic" is wrong twice over -- the number that
         #: says the wireless is losing datagrams is `retransmits`, below, which
         #: counts repairs directly and is not a difference of two moving totals.
-        if server is not None:
+        if kind == 'webrtc':
+            #: The bridge's `sent` is this target's delivered count -- bytes
+            #: the viewer track handed to aiortc. There is no HTTP body on
+            #: this path, so the session's `written` stays 0 and pointing at
+            #: it would report a working channel as one that delivered nothing.
+            info['delivered'] = getattr(source, 'sent', 0)
+        elif server is not None:
             info['delivered'] = server.session.written
         if kind == 'caststream':
             info['delivered'] = sink.socket_bytes
@@ -8798,7 +9620,8 @@ class ScreenMirrorRenderer(Renderer):
             # of the two it is, because a browser target has no device to pick
             # and telling someone to go pick one is a dead end.
             why = ('浏览器目标没有可中继的设备，它只播这台电脑推出去的流；'
-                   if kind == 'browser' else '还没有选择投屏目标；')
+                   if kind in ('browser', 'webrtc')
+                   else '还没有选择投屏目标；')
             notify('Screen Mirror 无法播放推送的网址：{}在「电脑投屏」页里把「投屏方式」'
                    '切到 Chromecast 或 DLNA 电视做中继，或换回默认渲染器播放'
                    .format(why))
@@ -8981,6 +9804,13 @@ class ScreenMirrorRenderer(Renderer):
             self._fail('找不到 ffmpeg：{}后重试'.format(FFMPEG_WAY.get(
                 sys.platform, '用包管理器安装 ffmpeg')), generation)
             return False
+        if kind == 'webrtc' and _webrtc_modules() is None:
+            # This target's one optional dependency, refused before a capture
+            # probe or an encoder exists to unwind. The sentence is the pip
+            # line and where to run it -- the failure is a missing install on
+            # one machine, not a broken mirror.
+            self._fail(WEBRTC_INSTALL_HINT, generation)
+            return False
         capture = probe_capture(ffmpeg)
         if capture is None:
             self._fail(capture_unavailable_hint(), generation)
@@ -9024,23 +9854,28 @@ class ScreenMirrorRenderer(Renderer):
         # Locals the unwind paths below hand to `_cleanup` when an attempt
         # never reaches its `handed` moment: nothing else has ever seen them,
         # so `_teardown` -- which reads the published fields -- cannot reap
-        # them. All of them are None on every non-SCK capture.
+        # them. All of them are None on every non-SCK capture. `server` joins
+        # them for the same reason the encoder does: the unwind paths read it
+        # before `start_stream_server` has had a chance to run (a bridge that
+        # refuses to build, a command that will not assemble), and an
+        # `UnboundLocalError` here would replace the real reason.
         proc = None
         feeder = None
         feed_audio = False
+        server = None
         audio_r = audio_w = None
         try:
             # The ScreenCaptureKit pair: ffmpeg reads NV12 frames from stdin
             # and f32le PCM from a second pipe whose read fd is argv material
             # (`_AUDIO_FD_TOKEN`), so the pipe exists before the command is
-            # built. The low-latency target unmaps audio entirely (`-an`), so
+            # built. The low-latency targets unmap audio entirely (`-an`), so
             # feeding it would be wasted work -- but its write end must still
             # be closed: an audio input that is open and silent freezes the
             # whole command at open time (measured 2026-10-02).
             try:
                 if capture.method == 'sck' and capture.audio_map:
                     audio_r, audio_w = os.pipe()
-                    feed_audio = kind != 'caststream'
+                    feed_audio = kind not in ('caststream', 'webrtc')
                 # Built once and reused for the spawn and for the log line: the
                 # same argv is what the「统计信息」card shows, and building it
                 # twice was two chances for the logged command to differ from
@@ -9058,8 +9893,23 @@ class ScreenMirrorRenderer(Renderer):
                 #: that opens the URL inside the first second would otherwise
                 #: get an empty panel and conclude the overlay is broken.
                 session.diag = diagnostics
-                server = None if stream is not None \
-                    else start_stream_server(session)
+                # The WebRTC bridge takes the slot a byte broadcaster fills
+                # for every other HTTP target: built first, handed to the
+                # server as its `broadcaster`, and reaped by `_cleanup`
+                # through the same `close` hook. It has to exist before the
+                # server answers, or the viewing page's first POST has
+                # nothing to signal.
+                bridge = _WebRTCBridge() if kind == 'webrtc' else None
+                try:
+                    server = None if stream is not None \
+                        else start_stream_server(session, broadcaster=bridge)
+                except Exception:
+                    # The bridge never reached the server, so nothing else
+                    # can reap it: its loop thread must not outlive the
+                    # attempt.
+                    if bridge is not None:
+                        bridge.close()
+                    raise
                 proc = subprocess.Popen(
                     command,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -9115,9 +9965,16 @@ class ScreenMirrorRenderer(Renderer):
             drain = threading.Thread(target=_drain_stderr, args=(proc, tail),
                                      daemon=True, name="SCREEN_MIRROR_LOG")
             drain.start()
-            url = ('' if stream is not None else
-                   dlna_stream_url(server, _url_host(control))
-                   if kind == 'dlna' else stream_url(server))
+            url = ''
+            if stream is None:
+                if kind == 'dlna':
+                    url = dlna_stream_url(server, _url_host(control))
+                elif kind == 'webrtc':
+                    # Not media bytes: the address of the page that will
+                    # negotiate the session and receive SRTP.
+                    url = webrtc_page_url(server)
+                else:
+                    url = stream_url(server)
             if stream is not None:
                 stream.start()
             if feeder is not None:
@@ -9214,7 +10071,8 @@ class ScreenMirrorRenderer(Renderer):
                         _sck_refused.add(ffmpeg)
                         invalidate_capture_cache()
                     raise _RetryCapture()
-                if with_audio and capture.audio_map and kind != 'caststream':
+                if with_audio and capture.audio_map \
+                        and kind not in ('caststream', 'webrtc'):
                     # An audio tap this process may not read -- no microphone
                     # grant, or a BlackHole nothing is clocking -- does not
                     # complain: the session opens and delivers nothing, video
@@ -9322,6 +10180,9 @@ class ScreenMirrorRenderer(Renderer):
                 name, session.profile.label, dlna_shape_words(session))
         elif kind == 'browser':
             message = '镜像已开始，浏览器打开：{}'.format(page_url(server))
+        elif kind == 'webrtc':
+            message = '已开始低延迟镜像（此通道没有声音），浏览器打开：{}'.format(
+                webrtc_page_url(server))
         elif kind == 'caststream':
             message = '已开始低延迟镜像到 {}（本通道没有声音）'.format(name)
         else:
@@ -9927,6 +10788,8 @@ OUTPUT_HINTS = {
              '所以一开始就有秒级延迟；默认的「直播流」不预填').format(
         DLNA_PREFILL_SECONDS),
     'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
+    'webrtc': ('浏览器直连（WebRTC / SRTP）：没有播放器这一层缓冲，为最低延迟设计 · '
+               '此通道无声音 · 需要可选依赖 aiortc 与 av（未安装时开始会给出安装命令）'),
 }
 
 #: The sentence the DLNA prefill control has to carry. Not in OUTPUT_HINTS
@@ -9971,7 +10834,8 @@ def output_hint(kind):
 CHANNELS = (('cast', 'cast'),
             ('caststream', 'cast'),
             ('dlna', 'dlna'),
-            ('browser', ''))
+            ('browser', ''),
+            ('webrtc', ''))
 #: what an empty answer is called, per probe.「没有发现」is a verdict about the
 #: LAN, and the two protocols have different things to have not found.
 PROBE_LABELS = {'cast': ('Chromecast', '没有发现 Chromecast'),
@@ -10612,24 +11476,27 @@ class ScreenMirrorSetting(RendererSetting):
     def _viewer_state(renderer, mirroring, kind):
         url = renderer.viewer_url() if renderer is not None else ''
         hint = '不要把这条地址转发出去：它带着本次会话的观看令牌' if url else (
-            '开始镜像后这里会给出观看地址' if kind == 'browser' else '')
+            '开始镜像后这里会给出观看地址'
+            if kind in ('browser', 'webrtc') else '')
+        state = {'url': url, 'available': bool(url), 'hint': hint,
+                 'kind': kind, 'mirroring': mirroring}
+        if kind == 'webrtc':
+            # No park knob on this target: SRTP plays as it arrives, there is
+            # no player buffer to hold back and no backlog to seek within.
+            # The page hides the row when the key is absent -- a control that
+            # adjusts nothing is the same lie here as a stale hint would be.
+            return state
         current = live_edge_seconds()
-        return {'url': url, 'available': bool(url), 'hint': hint,
-                'kind': kind, 'mirroring': mirroring,
-                #: The player's park distance, which is this target's latency
-                #: floor. Reported whether or not a mirror is running: it is
-                #: read when the page is served, so setting it first is the
-                #: normal order and a control that only appears mid-session
-                #: would train the user to start, stop, and start again.
-                'live_edge': {
-                    'current': current,
-                    'options': [{'key': repr(sec),
-                                 'label': '{} 秒{}'.format(
-                                     ('%g' % sec), '（默认）'
-                                     if sec == LIVE_EDGE_SECONDS else '')}
-                                for sec in LIVE_EDGE_OPTIONS],
-                    'note': LIVE_EDGE_HINT,
-                }}
+        state['live_edge'] = {
+            'current': current,
+            'options': [{'key': repr(sec),
+                         'label': '{} 秒{}'.format(
+                             ('%g' % sec), '（默认）'
+                             if sec == LIVE_EDGE_SECONDS else '')}
+                        for sec in LIVE_EDGE_OPTIONS],
+            'note': LIVE_EDGE_HINT,
+        }
+        return state
 
     # -- the console's actions --------------------------------------------------
 

@@ -471,7 +471,19 @@ OPTIONS = {
     # `macast/plugins/**` with os.listdir and imports what it finds, so the
     # directory has to exist on disk as a package rather than as scattered
     # entries inside the zip.
-    'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr'],
+    #
+    # `av` joins them for a third variation on the same theme: its PyPI wheel
+    # is a delocated bundle -- `av/_core.abi3.so` links FFmpeg as
+    # `@loader_path/.dylibs/*.dylib`, a *hidden* subdirectory whose contents
+    # have to travel with the extension exactly where they are. A verbatim
+    # copy keeps every `@loader_path` resolution intact; letting modulegraph
+    # scatter the modules and macholib relocate the dylibs is the bet that
+    # produces an .app that builds and then cannot import (the zeroconf
+    # failure mode, hosted by a 44 MB wheel). The screen-mirror plugin reaches
+    # for it lazily (`import av` inside `_webrtc_modules`), which is why it has
+    # to be named here at all.
+    'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr',
+                 'av'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
     'arch': TARGET_ARCH,
     'strip': True,
@@ -499,6 +511,22 @@ OPTIONS = {
                  # rather than left to modulegraph. Both must also be in the
                  # build environment -- see requirements/darwin.txt.
                  'ScreenCaptureKit', 'CoreMedia',
+                 # The WebRTC output shape's server, same story one level down:
+                 # a function-body import in screen_mirror.py, named here so
+                 # the bundle keeps it. Its H.264 companion `av` is not here --
+                 # it is a whole-directory package (see `packages`), and
+                 # spelling it in both places would ship two copies.
+                 'aiortc',
+                 # `cffi` is the one dependency that nothing imports *in
+                 # Python*: pylibsrtp's `_binding.abi3.so` is a cffi API-mode
+                 # extension and asks for `_cffi_backend` at dlopen time --
+                 # invisible to modulegraph, which is how the first build of
+                 # this bundle produced an .app whose WebRTC negotiation died
+                 # with "ModuleNotFoundError: No module named '_cffi_backend'".
+                 # Naming `cffi` is enough: `cffi.api` does the actual
+                 # `import _cffi_backend`, so the extension rides in with the
+                 # package.
+                 'cffi',
                  # All first-party plugins are shipped in the application. The
                  # loader discovers them from os.listdir, so py2app cannot
                  # infer these imports on its own.
