@@ -18384,7 +18384,7 @@ try:
           "the gate is dead code while no workflow asks for it")
 
     # --- (c) the same premise, applied to this file -------------------------
-    # Parts 21/22/23/29/38 feed the parser avfoundation-shaped fakes and were
+    # Parts 21/22/23/29/38/52 feed the parser avfoundation-shaped fakes and were
     # written on a Mac, so they pin `screen_mirror.sys.platform` to be macOS
     # Parts with or without a Mac under them; Part 31 passes the seam per call,
     # and Part 37 states both branches of `sys.platform ==` where the answer
@@ -19065,6 +19065,16 @@ try:
           and '-level' not in m52.encoder_args('hardware', 'win32', height=0)
           and 'videotoolbox' not in ''.join(
               m52.encoder_args('hardware', 'linux', height=0)), '')
+    # The argv claims below read the command a Mac would produce, so they pin
+    # the platform rather than inherit the runner's -- the same idiom Parts
+    # 21/22/23/29/38 use for this module, and the reason Part 50's comment (c)
+    # refuses to state it as a static rule. Without the pin `hardware` on the
+    # Linux runner correctly means x264 (there is no VideoToolbox to select),
+    # and these three cases went red on the v0.10.0 tag build while staying
+    # green on a Mac: exactly the "assumption a Mac alone satisfies" that the
+    # `verify` job exists to falsify.
+    _saved_platform52 = m52.sys.platform
+    m52.sys.platform = 'darwin'
     _nat52 = m52.build_ffmpeg_command('ffmpeg', _cap52b, 0, 6000000,
                                       kind='cast', encoder='hardware')
     check("and that reaches the real argv -- 原画 + hardware is what `auto` "
@@ -19116,6 +19126,7 @@ try:
           all(not ('-r' in c and '-fps_mode' in c)
               for c in _cmd_live52.values())
           and '-fps_mode' not in _nat52 and '-fps_mode' not in _dl52, '')
+    m52.sys.platform = globals().pop('_saved_platform52', m52.sys.platform)
 
     # -- E. the two knobs ----------------------------------------------------
     def _set52(prop, value):
