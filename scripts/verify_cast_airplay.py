@@ -4876,10 +4876,15 @@ done
         _no22 = _write_fake(os.path.join(_tmp22, "binenc"), "ffmpeg-no",
                             '#!/bin/sh\necho x >> "%s"\nprintf "libx264\\n"\n'
                             % _count22)
-        check("VideoToolbox is offered on macOS and refused elsewhere",
-              'h264_videotoolbox' in mirror.encoder_args('hardware', 'darwin')
-              and 'libx264' in mirror.encoder_args('hardware', 'linux')
-              and 'libx264' in mirror.encoder_args('hardware', 'win32'))
+        check("each platform's「硬件编码」names the encoder that platform has, "
+              "and Linux names none",
+              mirror.encoder_args('hardware', 'darwin')[1] == 'h264_videotoolbox'
+              and mirror.encoder_args('hardware', 'win32')[1] == 'h264_nvenc'
+              and mirror.encoder_args('hardware', 'linux')
+              == mirror.encoder_args('software', 'linux'),
+              '%s / %s / %s' % (mirror.encoder_args('hardware', 'darwin'),
+                                mirror.encoder_args('hardware', 'win32'),
+                                mirror.encoder_args('hardware', 'linux')))
         check("the probe reads what this ffmpeg actually lists",
               mirror.has_hardware_encoder(_vt22, 'darwin') is True
               and mirror.has_hardware_encoder(_no22, 'darwin') is False,
@@ -4892,6 +4897,97 @@ done
         check("a machine without the tap never gets asked to encode on it",
               mirror.has_hardware_encoder(_vt22, 'linux') is False
               and open(_count22).read() == _before22)
+
+        # -- the same question, Windows-shaped -------------------------------
+        # `hardware_encoder()` started answering `h264_nvenc` for win32 on
+        # 2026-10-02, after .68 was measured with the shipped argv (0.21 of a
+        # core against x264's 0.44, both 24 fps at speed 1.00x). That box also
+        # measured why a listing cannot be the question there:
+        # `ffmpeg -encoders` names h264_nvenc, h264_qsv *and* h264_amf, and
+        # h264_qsv then refuses to open a session at all --
+        #
+        #     [h264_qsv] Error creating a MFX session: -9
+        #     [out#0/mp4] Nothing was written into output file
+        #     exit=-1313558101  bytes=0
+        #
+        # The refusing fake below is *that* failure shape (non-zero exit, no
+        # bytes) applied to the name this code asks about. nvenc itself opened
+        # cleanly on the machine, so the refusal is the measured shape rather
+        # than a measured nvenc incident -- say so, because the difference is
+        # what the probe is for.
+        _wargv22 = os.path.join(_tmp22, "win_probe_argv")
+        _nvok22 = _write_fake(
+            os.path.join(_tmp22, "binenc"), "ffmpeg-nvenc",
+            '#!/bin/sh\nprintf \'%%s\\n\' "$*" >> "%s"\n'
+            'case "$*" in\n'
+            '  *-encoders*) '
+            'printf "h264_nvenc\\nh264_qsv\\nh264_amf\\nlibx264\\n"; exit 0;;\n'
+            '  *"h264_nvenc"*) printf "these-are-the-encoded-bytes\\n"; exit 0;;\n'
+            'esac\nexit 1\n' % _wargv22)
+        _nvbad22 = _write_fake(
+            os.path.join(_tmp22, "binenc"), "ffmpeg-nvenc-dead",
+            '#!/bin/sh\nprintf \'%%s\\n\' "$*" >> "%s"\n'
+            'case "$*" in\n'
+            '  *-encoders*) '
+            'printf "h264_nvenc\\nh264_qsv\\nh264_amf\\nlibx264\\n"; exit 0;;\n'
+            'esac\n'
+            'printf "[h264_nvenc] cannot prepare encoder\\n" >&2\nexit 1\n'
+            % _wargv22)
+        check("Windows asks for a half-second encode instead of a listing",
+              mirror.has_hardware_encoder(_nvok22, 'win32') is True
+              and '-encoders' not in open(_wargv22).read()
+              and '-c:v h264_nvenc -pix_fmt nv12 -f mp4' in open(_wargv22).read(),
+              open(_wargv22).read())
+        check("…asked on a real source with a real deadline, because 'listed' "
+              "is what a Mac can trust and a driver is not",
+              '-f lavfi' in open(_wargv22).read()
+              and 'testsrc' in open(_wargv22).read()
+              and '-t %s' % mirror._PROBE_SECONDS in open(_wargv22).read(),
+              open(_wargv22).read())
+        _asked22 = open(_wargv22).read().count('\n')
+        mirror.has_hardware_encoder(_nvok22, 'win32')
+        check("and it is the same once-per-answer bill as on macOS",
+              open(_wargv22).read().count('\n') == _asked22)
+        check("a build that lists the encoder and cannot open it is refused",
+              mirror.has_hardware_encoder(_nvbad22, 'win32') is False,
+              _nvbad22)
+
+        # The spelling was chosen by what the machine answered, not by what the
+        # option names suggest, so each rejected shape is named here too:
+        # `-tuned ll` is not an option at all (unrecognised, 0 bytes out),
+        # `-preset ll` works but warns it is deprecated in favour of p1..p7 +
+        # -tune, and `-realtime` is a VideoToolbox AVOption.
+        _nv22 = mirror.encoder_args('hardware', 'win32')
+        check("the nvenc argv is the spelling that was measured",
+              _nv22[:2] == ['-c:v', 'h264_nvenc']
+              and ['-preset', 'p1'] == _nv22[2:4]
+              and _nv22[_nv22.index('-tune') + 1] == 'll'
+              and _nv22[_nv22.index('-rc') + 1] == 'vbr', str(_nv22))
+        check("and carries no flag this build was measured to reject",
+              not any('tuned' in one for one in _nv22)
+              and '-realtime' not in _nv22
+              and '+low_delay' not in _nv22
+              and '-level' not in _nv22, str(_nv22))
+        check("VideoToolbox's 1.5x bitrate ask does not travel to nvenc -- "
+              "nvenc lands on the number it is given (6052/6081/6087/6029 "
+              "kbit/s for 6000)",
+              mirror.rate_target(6000000, 'hardware', 'win32') == 6000000
+              and mirror.rate_target(6000000, 'hardware', 'darwin') == 9000000,
+              '%s / %s' % (mirror.rate_target(6000000, 'hardware', 'win32'),
+                           mirror.rate_target(6000000, 'hardware', 'darwin')))
+        check("each hardware encoder is asked for the pixel format it was "
+              "probed with",
+              mirror.encoder_pix_fmt('hardware', 'win32') == 'nv12'
+              and mirror.encoder_pix_fmt('hardware', 'darwin') != 'nv12',
+              '%s / %s' % (mirror.encoder_pix_fmt('hardware', 'win32'),
+                           mirror.encoder_pix_fmt('hardware', 'darwin')))
+        check("and the switch on the page is labelled for the machine it is on",
+              mirror.encoder_switch_label('darwin') == 'VideoToolbox 硬件编码'
+              and mirror.encoder_switch_label('win32') == 'NVENC 硬件编码'
+              and mirror.encoder_switch_label('linux') == '硬件编码',
+              '%s / %s / %s' % (mirror.encoder_switch_label('darwin'),
+                                mirror.encoder_switch_label('win32'),
+                                mirror.encoder_switch_label('linux')))
 
         # -- the pointer, and the display to grab ---------------------------
         _win22 = os.path.join(_tmp22, "binwin")
@@ -5079,13 +5175,73 @@ done
               _bc22.init_segment == b'this is plainly not an mp4 at allftypisomxx'
               and _bc22.tail() == [b'moofZZZZ'],
               "{} / {}".format(_bc22.init_segment, _bc22.tail()))
-        check("a framed queue is bounded in fragments, not in 4 KiB reads",
-              mirror._Broadcaster(init_marker=b'moof')._maxsize
-              == mirror._Broadcaster.FRAMED_QUEUE
-              and mirror._Broadcaster()._maxsize == 256)
+        check("an unframed broadcaster still defaults to the byte budget's "
+              "ceiling -- the framed shapes are the ones that changed units",
+              mirror._Broadcaster()._maxsize == mirror.LIVE_QUEUE_MAX_CHUNKS,
+              str(mirror._Broadcaster()._maxsize))
+        # The old contract was a hard-coded eight, and eight is not a quantity --
+        # it is a number that happens to be right for one container's chunk size
+        # and 0.11 s for another's. So the ceiling is now derived from the
+        # stream's own cadence, which means it moves when the container's does.
+        import math as _math22  # noqa: E402
+
+        def _qsess22(marker, bitrate=6000000, has_audio=True):
+            """The three fields the sizing actually reads."""
+            return types.SimpleNamespace(init_marker=marker, bitrate=bitrate,
+                                         has_audio=has_audio)
+
+        _fmp4 = _qsess22(b'moof')
+        check("the fMP4 ceiling is the budget spent at the fragment rate, "
+              "not eight of anything",
+              mirror.live_queue_units(_fmp4)
+              == int(_math22.ceil(mirror.fragment_rate(mirror.FPS, True)
+                                  * mirror.LIVE_QUEUE_SECONDS))
+              and mirror.live_queue_units(_fmp4) > 8,
+              str(mirror.live_queue_units(_fmp4)))
+        check("and an audio track doubles the cadence the same budget buys",
+              mirror.live_queue_units(_fmp4)
+              > mirror.live_queue_units(_qsess22(b'moof', has_audio=False)))
+        check("Matroska clusters are sized by bitrate, because they are a size "
+              "budget the muxer closes -- not a per-frame cadence",
+              mirror.live_queue_units(_qsess22(mirror.MKV_FIRST_CLUSTER))
+              == int(_math22.ceil(6000000 * mirror.LIVE_QUEUE_SECONDS / 8.0
+                                  / mirror.MKV_CLUSTER_BYTES)))
+        check("the shape with no container framing keeps the byte-budget answer",
+              mirror.live_queue_units(_qsess22(None))
+              == mirror.live_queue_chunks(6000000))
+        check("every shape floors at the eight units the framed path used to "
+              "hard-code, so no stream can get less slack than it had before",
+              all(mirror.live_queue_units(s) >= mirror.LIVE_QUEUE_MIN_UNITS
+                  for s in (_qsess22(None, bitrate=1),
+                            _qsess22(b'moof', bitrate=1, has_audio=False),
+                            _qsess22(mirror.MKV_FIRST_CLUSTER, bitrate=1))))
+        check("and the card that quotes a queue length quotes the same function "
+              "that set it: capacity in seconds, computed per shape",
+              abs(mirror.queue_hold_seconds(_fmp4,
+                                            mirror.live_queue_units(_fmp4))
+                  - mirror.LIVE_QUEUE_SECONDS) < 0.05
+              and mirror.LIVE_QUEUE_SECONDS * 0.99
+              <= mirror.queue_hold_seconds(
+                  _qsess22(mirror.MKV_FIRST_CLUSTER),
+                  mirror.live_queue_units(_qsess22(
+                      mirror.MKV_FIRST_CLUSTER)))
+              <= mirror.LIVE_QUEUE_SECONDS * 1.5,
+              str(mirror.queue_hold_seconds(_fmp4,
+                                            mirror.live_queue_units(_fmp4))))
+        check("with nothing to divide by the card stays silent instead of "
+              "inventing a duration",
+              mirror.queue_hold_seconds(_qsess22(None, bitrate=0), 8) is None
+              and mirror.queue_hold_seconds(_fmp4, None) is None)
 
         # -- the browser endpoint over a real socket -------------------------
         _server22 = mirror.start_stream_server(_sess_b22)
+        check("and the server a browser session gets is the one that sizes "
+              "the queue in fragments: eight of them is 0.11 s of a 71-per-"
+              "second stream, which is the number this whole block exists to "
+              "make impossible",
+              _server22.broadcaster._maxsize == mirror.live_queue_units(_sess_b22)
+              and _server22.broadcaster._maxsize > mirror.LIVE_QUEUE_MIN_UNITS,
+              str(_server22.broadcaster._maxsize))
         _port22 = _server22.server_address[1]
         _server22.broadcaster.feed(b'ftypisomxxmoofAAAA')
         _path22 = _sess_b22.stream_path()
@@ -5182,6 +5338,163 @@ done
         check("and a fallback that reaches the reader says why",
               _html22.count(b'progressive(') >= 4
               and b"progressive('" in _html22, str(_html22.count(b'progressive(')))
+
+        # -- the H.264 fourcc the page is handed --------------------------------
+        # The shipped string asserted "avc1.640028 (H.264 High @ Level 4.0)".
+        # Measured with production argv (`scripts/codec_string_probe.py`), that is
+        # true of two of the eight shapes measured so far -- and of none the
+        # software encoder makes: x264 was *told* `high` and wrote 42c0
+        # (Constrained Baseline) into the SPS it actually emitted.
+        #   x264   1080p          avc1.42c028    VT  -level 42   avc1.64002a
+        #   x264   720p           avc1.42c01f    VT  2160p       avc1.640033
+        #   x264   2160p          avc1.42c033    VT  1080p open  avc1.640028
+        #   nvenc  1080p          avc1.640028    nvenc 2160p     avc1.640033
+        # The x264 rows were read on macOS (2026-10-02) and repeated identically
+        # on the Windows box; the nvenc pair came off that box on 2026-10-03.
+        # That pair is the sharpest form of the argument: one encoder, one argv
+        # shape, no level pinned, and the string changes with the picture -- so
+        # the fallback cannot even become a per-platform constant.
+        # So the string is read off the encoder's own avcC box, and the pinned
+        # default is only what a page fetched before that header exists is left
+        # with. A card claiming High over a picture the browser cannot decode is
+        # the disagreement this block removes -- and it is why the row is drawn
+        # from the same read as the page, not from a constant.
+        def _avcC22(profile, compat, level, cfg=1, size=None):
+            """An ftyp+moov init segment declaring these three bytes in its avcC."""
+            body = bytes([cfg, profile, compat, level, 0xff, 0xe1, 0x00, 0x00])
+            return _box22(b'ftyp', b'isom') + _box22(
+                b'moov',
+                struct.pack('>I', (8 + len(body)) if size is None else size)
+                + b'avcC' + body)
+
+        _rows22 = [
+            ('x264 1080p', (0x42, 0xc0, 0x28), 'avc1.42c028'),
+            ('x264 720p', (0x42, 0xc0, 0x1f), 'avc1.42c01f'),
+            ('x264 2160p', (0x42, 0xc0, 0x33), 'avc1.42c033'),
+            ('VT level 42', (0x64, 0x00, 0x2a), 'avc1.64002a'),
+            ('VT 2160p', (0x64, 0x00, 0x33), 'avc1.640033'),
+            ('VT 1080p open', (0x64, 0x00, 0x28), 'avc1.640028'),
+            ('nvenc 1080p', (0x64, 0x00, 0x28), 'avc1.640028'),
+            ('nvenc 2160p', (0x64, 0x00, 0x33), 'avc1.640033'),
+        ]
+        check("the fourcc is read off the encoder's own avcC box, for every "
+              "shape that was measured",
+              all(mirror.avc_codec_string(_avcC22(*r[1])) == r[2] for r in _rows22),
+              str([(r[0], mirror.avc_codec_string(_avcC22(*r[1])))
+                   for r in _rows22]))
+        check("which is why the shipped default is only a fallback: it fits two "
+              "of those eight shapes, and nvenc 1080p is one of them purely by "
+              "coincidence",
+              [r[2] for r in _rows22].count(mirror.MSE_VIDEO_CODEC_DEFAULT) == 2
+              and mirror.MSE_VIDEO_CODEC_DEFAULT == 'avc1.640028'
+              and mirror.avc_codec_string(_avcC22(0x42, 0xc0, 0x28))
+              != mirror.MSE_VIDEO_CODEC_DEFAULT
+              and mirror.avc_codec_string(_avcC22(0x64, 0x00, 0x33))
+              != mirror.MSE_VIDEO_CODEC_DEFAULT,
+              mirror.MSE_VIDEO_CODEC_DEFAULT)
+        check("and a box that does not check out is not a codec string",
+              mirror.avc_codec_string(_avcC22(0x42, 0xc0, 0x28, cfg=0)) is None
+              and mirror.avc_codec_string(_avcC22(0x42, 0xc0, 0x28, size=11)) is None
+              and mirror.avc_codec_string(_avcC22(0x42, 0xc0, 0x28, size=0)) is None
+              and mirror.avc_codec_string(b'') is None
+              and mirror.avc_codec_string(None) is None,
+              'a declared size that misses the body, or a configurationVersion '
+              'that is not 1, must not answer')
+        check("so the two checks that decide do their job on a false spelling",
+              mirror.avc_codec_string(_box22(b'text', b'avcC' + b'x' * 20)) is None
+              and mirror.avc_codec_string(
+                  _box22(b'text', b'avcC' + b'x' * 20) + _avcC22(0x42, 0xc0, 0x28))
+              == 'avc1.42c028',
+              'the first four bytes spelled avcC must not end the scan')
+
+        _cdq22 = mirror._Broadcaster(init_marker=b'moof', maxsize=8)
+        _sess_d22 = mirror._Session('browser', has_audio=True, title='Test')
+        check("before the encoder has written its header the page gets the "
+              "pinned default, and nothing pretends to be a measurement",
+              mirror.avc_codec_of(_cdq22) == ''
+              and mirror.live_codecs(_sess_d22, _cdq22) == _sess_d22.codecs,
+              '%r / %r' % (mirror.avc_codec_of(_cdq22), _sess_d22.codecs))
+        _cdq22.feed(_avcC22(0x42, 0xc0, 0x28) + b'moof' + b'x' * 400)
+        check("once it has, the string the browser is handed is the one the "
+              "encoder wrote",
+              mirror.avc_codec_of(_cdq22) == 'avc1.42c028'
+              and mirror.live_codecs(_sess_d22, _cdq22)
+              == 'video/mp4; codecs="avc1.42c028,mp4a.40.2"',
+              mirror.live_codecs(_sess_d22, _cdq22))
+        check("and the audio half is not carried along by a video-only mirror",
+              mirror.codecs_for('avc1.42c028', False)
+              == 'video/mp4; codecs="avc1.42c028"'
+              and mirror.codecs_for('avc1.42c028', True).endswith(
+                  ',%s"' % mirror.MSE_AUDIO_CODEC),
+              mirror.codecs_for('avc1.42c028', False))
+        # Shapes with no init segment answer '' rather than a guess: the byte log
+        # is addressed by offset (the DLNA file shape names its codecs in the DIDL,
+        # not in a box a browser would read) and WebRTC carries no ftyp at all.
+        check("a broadcast with no init segment answers '' instead of the default",
+              mirror.avc_codec_of(None) == ''
+              and mirror.avc_codec_of(object()) == '',
+              "%r / %r" % (mirror.avc_codec_of(None),
+                           mirror.avc_codec_of(object())))
+
+        # One answer, three readers (AGENTS.md §4.8 red line ③): the page's
+        # `addSourceBuffer` call, the viewing overlay, and the settings card.
+        # Pinning the function once would let a reader keep its own copy again.
+        _sess_e22 = mirror._Session('browser', has_audio=True, title='Test')
+        _cdsrv22 = mirror.start_stream_server(_sess_e22)
+        _cdsrv22.broadcaster.feed(_avcC22(0x42, 0xc0, 0x28) + b'moof' + b'x' * 400)
+        _cdport22 = _cdsrv22.server_address[1]
+
+        def _cdget22(path):
+            _c22 = http.client.HTTPConnection('127.0.0.1', _cdport22, timeout=5)
+            _c22.request('GET', path)
+            _r22 = _c22.getresponse()
+            _b22 = _r22.read()
+            _c22.close()
+            return _r22, _b22
+
+        _cdpage22, _cdhtml22 = _cdget22(
+            mirror.BROWSER_PATH + '?token=' + _sess_e22.page_token)
+        check("the served page really carries the read fourcc in its CODECS",
+              _cdpage22.status == 200
+              and b'video/mp4; codecs="avc1.42c028' in _cdhtml22
+              and mirror.MSE_VIDEO_CODEC_DEFAULT.encode() not in _cdhtml22,
+              str(_cdhtml22[_cdhtml22.find(b'CODECS'):][:80]))
+        _cdstat22, _cdbody22 = _cdget22(
+            mirror.BROWSER_STATS_PATH + '?token=' + _sess_e22.page_token)
+        _cdlive22 = json.loads(_cdbody22.decode('utf-8'))
+        check("the overlay's counter endpoint says the same thing",
+              _cdstat22.status == 200
+              and _cdlive22['codec'] == mirror.avc_codec_of(_cdsrv22.broadcaster)
+              == 'avc1.42c028', str(_cdlive22.get('codec')))
+        # The card's own facts come from the session, its numbers from the same
+        # live dict the overlay polled -- so a row here is the endpoint's answer,
+        # not a second read of the header.
+        # `_session_diagnostics` takes the capture the picker produced, not a
+        # summary of it: the card reports which tap and which audio map the
+        # session was actually built on, so a dict invented here would be a
+        # second source of truth for the same facts.
+        _cdiag22 = mirror._session_diagnostics(
+            kind='browser', capture=_screen22,
+            command=['ffmpeg', '-f', 'x', '-c:v', 'libx264'],
+            encoder='software', height=1080, bitrate=4000000,
+            session=_sess_e22)
+        _cdstate22 = {'output': {'kind': 'browser'}, 'stats': dict(
+            _cdlive22, diag=_cdiag22)}
+        _cdrows22 = _mc.diagnostics_rows(_cdstate22)
+        check("and the settings card draws its row from that same read",
+              ['H.264 Profile', 'avc1.42c028'] in _cdrows22, str(_cdrows22))
+        check("with nothing drawn when there is nothing to say",
+              not [r for r in _mc.diagnostics_rows(
+                  {'output': {'kind': 'browser'},
+                   'stats': {'diag': _cdiag22}})
+                  if r[0] == 'H.264 Profile'],
+              'an empty codec must not print a guess')
+        check("the overlay row is drawn from the endpoint too, and only when "
+              "the answer is not empty",
+              "if(live.codec)out.push(line('H.264 Profile',live.codec));"
+              in _js22, 'the panel and the card must not diverge')
+        _cdsrv22.shutdown()
+        _cdsrv22.server_close()
 
         # -- the overlay: what the page is told, and what it can ask for ------
         # The panel exists because the settings card is on the *sender's*
@@ -12478,13 +12791,30 @@ try:
             _plug32 += _fh32.read()
 
     # -- 1. every codec the plugins hand to ffmpeg gets asked about ----------
-    _used32 = set(_re32.findall(r"'-c:[va]',\s*'([^']+)'", _plug32))
+    # Encoder names became module constants the day the「硬件编码」switch stopped
+    # meaning "VideoToolbox, on a Mac" (`HARDWARE_ENCODERS` now answers nvenc on
+    # Windows), so this extraction has to follow an identifier to its definition
+    # instead of only reading quoted literals. Quoted-only would silently drop
+    # h264_videotoolbox and h264_nvenc from `_used32`, and the second check below
+    # would then report the preflight's two hardware probes as "stale" -- the same
+    # direction of failure this Part exists to catch, wearing different clothes.
+    _consts32 = dict(_re32.findall(r"^([A-Za-z_][A-Za-z0-9_]*) = '([^']*)'$",
+                                   _plug32, _re32.M))
+    _used32 = set()
+    for _tok32 in _re32.findall(r"'-c:[va]',\s*('[^']+'|[A-Za-z_][A-Za-z0-9_]*)",
+                                _plug32):
+        # A bare identifier this file does not define at module level is a
+        # function parameter (the encoder probe passes the name in), not a codec.
+        _name32 = (_tok32[1:-1] if _tok32.startswith("'")
+                   else _consts32.get(_tok32))
+        if _name32:
+            _used32.add(_name32)
     # `aac` ships in every ffmpeg build, so probing for it would only produce
     # noise; anything else has to be named in the preflight. `ppm` joins it for
     # the same reason: the preview frame is raw pixels, an encoder no build of
     # ffmpeg is without, and a missing one would take the picture with it -- the
-    # mirror's real encoders (x264 / VideoToolbox / mpeg2 / ac3) each still cost
-    # a link, so they stay on the list.
+    # mirror's real encoders (x264 / VideoToolbox / NVENC / mpeg2 / ac3) each
+    # still cost a link, so they stay on the list.
     _always32 = {'aac', 'ppm'}
     _probe_src32 = (_pre32.split('for flag, why in (')[1]
                     .split('if flag in out:')[0])
@@ -14568,6 +14898,43 @@ try:
               "would fight the framer",
               _f37.broadcaster._align is None
               and _f37.broadcaster._framer is not None, '')
+        # 2026-10-02, measured on the Windows box: this queue was eight units
+        # wide for a container that produces ~71 fragments a second, so the
+        # sender shed 28 % of its own output to a *loopback* curl while the
+        # budget three lines up still said 0.75 s. The unit changed; the budget
+        # never did -- so the depth has to be checked in seconds, in the
+        # container's own cadence, or the two drift apart exactly like that.
+        check("the framed queue actually holds the budget it was given",
+              m37.queue_hold_seconds(_f37.session, _f37.broadcaster._maxsize)
+              >= m37.LIVE_QUEUE_SECONDS * 0.99
+              and _f37.broadcaster._maxsize > m37.LIVE_QUEUE_MIN_UNITS,
+              '%s units = %s s' % (_f37.broadcaster._maxsize,
+                                   m37.queue_hold_seconds(
+                                       _f37.session,
+                                       _f37.broadcaster._maxsize)))
+        check("...and that number is the same one the settings card prints, "
+              "because both read one function",
+              m37._session_diagnostics(
+                  'browser', types.SimpleNamespace(label='test', audio_map=''),
+                  [], 'software', 1080, 6000000,
+                  _f37.session).get('queue_chunks')
+              == _f37.broadcaster._maxsize,
+              str(m37._session_diagnostics(
+                  'browser', types.SimpleNamespace(label='test', audio_map=''),
+                  [], 'software', 1080, 6000000, _f37.session)
+                  .get('queue_chunks')))
+        check("an AAC track at 1024 samples per frame is what doubles the "
+              "cadence -- so the argv's sample rate and this number are one "
+              "fact, not two",
+              abs(m37.AAC_FRAMES_PER_SECOND - 48000 / 1024.0) < 1e-9
+              and m37.fragment_rate(m37.FPS, True) > m37.fragment_rate(m37.FPS,
+                                                                      False)
+              and '48000' in m37.build_ffmpeg_command(
+                  'ffmpeg',
+                  m37._Capture('test', [['-f', 'test', '-i', 'x']],
+                               audio_map='1:a:0'),
+                  720, 6000000, kind='browser', encoder='software'),
+              str(m37.AAC_FRAMES_PER_SECOND))
     finally:
         for _s37 in (_b37, _f37):
             _s37.shutdown()
@@ -19657,6 +20024,15 @@ try:
     # seam the module reads (the same trick the Windows parts above use).
     _saved_platform54 = m54.sys.platform
     m54.sys.platform = 'win32'
+    # …and stand in for the one thing that seam does *not* fake correctly:
+    # `find_ffmpeg()` starts at `shutil.which`, and `shutil.which` branches on
+    # `sys.platform` before it looks at anything. Since Windows got a hardware
+    # encoder, `_capture_state()` reads the encoder probe answer -- keyed by the
+    # binary it was taken for -- on every poll, so the lie would reach the
+    # standard library and die there (`NoneType` has no
+    # `NeedCurrentDirectoryForExePath`). The machine this part describes really
+    # does have an ffmpeg on PATH; hand it one.
+    _saved_find54 = m54.find_ffmpeg
 
     class _Grab54(_logging54.Handler):
         def __init__(self):
@@ -19783,6 +20159,8 @@ while true; do
 done
 """.replace("@RECEIPT@", _recB54))
 
+    m54.find_ffmpeg = lambda: _fakeA54
+
     # -- the attach walk -----------------------------------------------------
     _outs54 = m54._ddagrab_outputs(_fakeA54)
     check("two DXGI outputs attach, each at its own measured even size",
@@ -19847,6 +20225,21 @@ done
               {'index': '0', 'label': '0 · 2560x1440', 'selected': False},
               {'index': '1', 'label': '1 · 2560x1440', 'selected': True}],
           '%s / %s' % (cap54b.inputs[0][3], _state54['screens']))
+    # The page's switch used to wear macOS's name wherever it was drawn, so a
+    # Windows install read「VideoToolbox 硬件编码」-- a control naming an encoder
+    # that machine was never offered, and a user who clicked it had no way to
+    # tell that from a broken VideoToolbox. `hardware_probed` stays False here
+    # because nothing has spawned the probe in this part; the state builder
+    # reads the cache rather than paying for it on a poll.
+    check("and the same page names the encoder this platform actually has",
+          _state54['hardware_supported'] is True
+          and _state54['hardware_encoder'] == 'h264_nvenc'
+          and _state54['hardware_label'] == 'NVENC 硬件编码'
+          and _state54['hardware_probed'] is False
+          and _state54['encoder_note'] == '',
+          str({k: v for k, v in _state54.items()
+               if k.startswith('hardware') or k in ('encoder',
+                                                    'encoder_note')}))
 
     utils.Setting.set(m54.SettingProperty.Mirror_Screen, '3')
     m54._capture_cache.clear()
@@ -19943,9 +20336,10 @@ done
         _notify54.append(' '.join(str(one) for one in args))
 
     cherrypy.engine.subscribe('app_notify', _notify54_rec)
-    _saved54_find = m54.find_ffmpeg
     _saved54_awake = m54._keep_awake
-    m54.find_ffmpeg = lambda: _fakeA54
+    # `find_ffmpeg` is already the fake (stubbed once, above, for the whole
+    # part) -- the mirror start path resolves ffmpeg the same way the state
+    # builder does.
     m54._keep_awake = lambda *a, **k: None      # no caffeinate in a test
     m54._capture_cache.clear()
     m54._ddagrab_cache.clear()
@@ -19991,7 +20385,7 @@ done
             _wait_until(lambda: not mir54.is_mirroring()
                         and mir54._proc is None, timeout=10)
         cherrypy.engine.unsubscribe('app_notify', _notify54_rec)
-        m54.find_ffmpeg = _saved54_find
+        m54.find_ffmpeg = _saved_find54
         m54._keep_awake = _saved54_awake
         utils.Setting.unset(m54.SettingProperty.Mirror_Output)
         m54._capture_cache.clear()
@@ -21805,7 +22199,8 @@ try:
           "every POST since are not stream exchanges",
           _st56 == 200
           and set(_stats56) == {'written', 'exchanges', 'shape', 'chunks',
-                                'bytes', 'drops', 'sent', 'clients'}
+                                'bytes', 'drops', 'sent', 'clients',
+                                'misses', 'queued', 'codec'}
           and _stats56['shape'] == 'live'
           and _stats56['exchanges'] == 1
           and _stats56['clients'] == 0
@@ -21954,8 +22349,15 @@ try:
           "crossed -- every chunk fed is counted, clients is one, and the "
           "bytes handed to viewers sit inside the fixture",
           _out56['stats_status'] == 200
+          # `codec` is the fourthcc the encoder really wrote, which on this
+          # target is an empty answer: WebRTC carries no init segment for a
+          # browser to read a fourcc out of, and the H.264 Profile row is a
+          # browser-page row. It is still in the set because the endpoint is
+          # shared -- one shape, so a viewer added here shows up there too.
           and set(_stats56) == {'written', 'exchanges', 'shape', 'chunks',
-                                'bytes', 'drops', 'sent', 'clients'}
+                                'bytes', 'drops', 'sent', 'clients',
+                                'misses', 'queued', 'codec'}
+          and _stats56['codec'] == ''
           and _stats56['shape'] == 'live'
           and _stats56['chunks'] == _out56['fed']
           and _out56['fed']

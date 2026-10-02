@@ -322,8 +322,8 @@ else:
          "television can decode it, and without ffprobe it cannot")
 
 if os.path.exists(ffmpeg):
-    # One `-encoders` run answers four questions, because the four targets want
-    # four different codecs and each has its own "why is the menu empty".
+    # One `-encoders` run answers the codec questions, because the targets want
+    # different codecs and each has its own "why is the menu empty".
     try:
         out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
                              capture_output=True, text=True,
@@ -331,17 +331,41 @@ if os.path.exists(ffmpeg):
     except Exception as e:
         out = ""
         warn("could not ask ffmpeg about its encoders ({})".format(e))
+    #: Which platform's「硬件编码」switch each hardware encoder belongs to. The
+    #: preflight runs on the user's machine, so asking a Mac about NVENC (or a
+    #: Windows box about VideoToolbox) is noise the user has to read past --
+    #: but both names have to stay literals in this file, because Part 32
+    #: compares the codecs the plugins hand ffmpeg against the codecs asked
+    #: about here.
+    HARDWARE_FLAG_PLATFORM = {"h264_videotoolbox": "darwin",
+                              "h264_nvenc": "win32"}
     for flag, why in (("libx264", "every mirror target except the hardware one"),
                       ("h264_videotoolbox",
                        "the macOS '硬件编码（VideoToolbox）' switch"),
+                      ("h264_nvenc", "the Windows '硬件编码（NVENC）' switch"),
                       ("mpeg2video", "the DLNA profiles for an old television"),
                       ("ac3", "audio on those same MPEG-PS profiles")):
+        owner = HARDWARE_FLAG_PLATFORM.get(flag)
+        if owner is not None and owner != sys.platform:
+            continue
         if flag in out:
-            ok("ffmpeg can encode {} -- needed for {}".format(flag, why))
-        elif flag == "h264_videotoolbox":
-            warn("this ffmpeg has no h264_videotoolbox, so the hardware "
-                 "encoding switch stays unavailable",
-                 "mirror in software instead; a Homebrew ffmpeg does have it")
+            # On Windows a listing is not the whole answer: .68 was measured
+            # listing h264_nvenc, h264_qsv *and* h264_amf, then refusing to open
+            # an MFX session for qsv at all -- a driver question, not a build
+            # one. The mirror re-asks with a real half-second encode
+            # (`screen_mirror._encoder_opens`) before it offers the switch, so
+            # this line claims what a listing can claim and no more.
+            ok("ffmpeg can encode {} -- needed for {}".format(flag, why)
+               + ("; the mirror still encodes a test frame before it trusts the "
+                  "driver behind it" if flag == "h264_nvenc" else ""))
+        elif owner is not None:
+            warn("this ffmpeg has no {}, so the hardware encoding switch "
+                 "stays unavailable".format(flag),
+                 "mirror in software instead"
+                 + ("; a Homebrew ffmpeg does have h264_videotoolbox"
+                    if owner == "darwin" else
+                    "; install an ffmpeg built with nvenc (NVIDIA's own builds "
+                    "and the gyan.dev full builds both have it)"))
         else:
             warn("this ffmpeg cannot encode {}, so {} will fail".format(
                 flag, why),

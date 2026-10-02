@@ -1051,7 +1051,7 @@
                                  v-if="mirror_state.capture.hardware_supported && mirror_state.capture.hardware_probed && mirror_state.capture.hardware_available">
                                 <el-switch :value="mirror_state.capture.encoder === 'hardware'"
                                            @change="mirror_run('set-encoder', {value: $event ? 'hardware' : 'software'})"
-                                           active-text="VideoToolbox 硬件编码"></el-switch>
+                                           :active-text="mirror_state.capture.hardware_label"></el-switch>
                             </div>
                             <div class="hint"
                                  v-if="mirror_state.capture.encoder_note"

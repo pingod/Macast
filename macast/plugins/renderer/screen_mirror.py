@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.22</macast.version>
+# <macast.version>0.23</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -109,6 +109,7 @@ import ctypes
 import json
 import locale
 import logging
+import math
 import os
 import platform
 import re
@@ -145,7 +146,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.22'
+PLUGIN_VERSION = '0.23'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -156,11 +157,26 @@ CHUNK = 4096
 #: One MPEG-TS packet. Where a slow consumer is being dropped for, the queue
 #: unit is a whole number of these -- see `_Broadcaster(packet_align=...)`.
 TS_PACKET = 188
-#: Seconds of slack a live consumer gets in front of it, and the clamp on how
-#: many 4 KiB reads that is -- see `live_queue_chunks`.
+#: Seconds of slack a live consumer gets in front of it. This is the budget;
+#: `live_queue_units` is what spends it, and the unit it spends in is the
+#: container's, not a fixed size.
 LIVE_QUEUE_SECONDS = 0.75
 LIVE_QUEUE_MIN_CHUNKS = 64
 LIVE_QUEUE_MAX_CHUNKS = 256
+#: Never fewer queue units than the framed shapes used to hard-code. Eight was
+#: about half a second of Matroska clusters (50-60 KB each at these bitrates)
+#: and about a sixth of what the fMP4 shape needed -- see `live_queue_units`.
+LIVE_QUEUE_MIN_UNITS = 8
+#: AAC emits one frame per 1024 samples and the browser target muxes at 48 kHz
+#: (`-ar 48000`, in `_AAC` and in `build_ffmpeg_command`), so one second of its
+#: audio track is this many samples-worth of fragments. Coupled to that argv by
+#: a case in Part 37: change the sample rate there and this number has to move.
+AAC_FRAMES_PER_SECOND = 48000 / 1024.0
+#: The live Matroska shape queues whole clusters, and the muxer closes one by
+#: *size*, measured at 50-60 KB on the shipping shape (see `_Clusters`). The
+#: top of that range is used so the seconds buy a conservative count rather
+#: than an optimistic one.
+MKV_CLUSTER_BYTES = 60 << 10
 #: How long ffmpeg may survive before its death is blamed on the
 #: Screen Recording permission instead of a genuine mid-stream failure.
 EARLY_DEATH_SECONDS = 5.0
@@ -1170,6 +1186,13 @@ def output_kind():
 #: low-delay rate-control path, it does not buy latency here). It is the
 #: hardware pipeline's own depth.
 #:
+#: Windows joined this default on 2026-10-02, when `hardware_encoder()` started
+#: answering `h264_nvenc` there: the same argument, measured on that machine's
+#: own argv (0.44 of a core for x264 against 0.21 for NVENC, both at 24 fps and
+#: ~19 MB at `-b:v 6000000`). What was **not** measured there is the first-frame
+#: difference, which is why `ENCODER_TRADEOFF_WIN32` refuses to quote macOS's
+#: 200 ms on the other machine's behalf.
+#:
 #: So `auto` still lands on hardware -- but that is now a **default whose reason
 #: got weaker**, not a verdict: 0.2 of a core is cheap and 200 ms is not, and
 #: flipping the default is a user decision rather than a measurement, so it has
@@ -1198,25 +1221,57 @@ ENCODER_TRADEOFF = ('关掉硬件编码大约省下 200 毫秒的首帧延迟（
                     '这不是「软件编码跟不上」——两者都跑满 24 fps——'
                     '只是多耗约 0.2 个核心：笔记本上会发热、耗电。')
 
+#: The same sentence for the machine where「硬件编码」is NVENC, not VideoToolbox.
+#: Written as its own string because the two halves of the tradeoff are not
+#: equally known here: the CPU cost was measured on .68 with the shipped argv,
+#: while the first-frame difference was measured only on macOS. A Windows user
+#: who reads macOS's 200 ms would be reading somebody else's machine, so this
+#: one gives the number it has and says out loud which one it does not.
+#:
+#:     0.44 of a core  libx264  (the shipped argv, 1080p, 24 fps, 1.00x)
+#:     0.21 of a core  h264_nvenc (same argv shape, ~19 MB at -b:v 6000000)
+#:
+#: The byte totals matching is the point of quoting them: it says both rows did
+#: the same work, so 0.44 vs 0.21 is a price difference rather than a quality
+#: difference nobody agreed to pay.
+ENCODER_TRADEOFF_WIN32 = ('关掉硬件编码的代价是 CPU：这台机器上实测同一份采集、'
+                          '同样跑满 24 fps、同样的码率（约 19 MB / 25 秒 @6 Mbps），'
+                          'x264 吃 0.44 个核心，NVENC 吃 0.21 个。'
+                          '首帧延迟的差值我没有在 Windows 上量过——Mac 上量到的是'
+                          '硬件晚约 200 毫秒，这里不替那台机器转述这个数字。')
+
+
+def encoder_tradeoff(platform=None):
+    """The tradeoff sentence for the encoder this platform's switch means."""
+    if hardware_encoder(platform) == _NVENC:
+        return ENCODER_TRADEOFF_WIN32
+    return ENCODER_TRADEOFF
+
 
 def encoder_kind():
-    """'software' | 'hardware'; hardware only means anything on macOS.
+    """'software' | 'hardware' -- which of `encoder_args`' two shapes to ship.
+
+    "Hardware" is only a name this file can honour where `hardware_encoder()`
+    has an entry for the platform (macOS: VideoToolbox, Windows: NVENC), so the
+    old `sys.platform == 'darwin'` in two places here was not a platform fact --
+    it was the same single-name table the previous paragraph describes, spelled
+    inline. Linux falls through to software and means it.
 
     Never spawns ffmpeg: this is consulted while the menu and the console are
     being built, so `auto` may only read a probe answer that a mirror start (or
     `selfcheck.py`) already produced. A user who picks 硬件编码 explicitly gets
-    that wish stored, and `_mirror` falls back to x264 with a warning when the
-    binary turns out not to offer it.
+    that wish stored, and `_mirror` falls back to x264 with a warning naming the
+    encoder the machine turned out not to offer.
     """
     kind = str(Setting.get(SettingProperty.Mirror_Encoder, ENCODER_AUTO)
                or ENCODER_AUTO).strip().lower()
     if kind == 'hardware':
-        return 'hardware' if sys.platform == 'darwin' else 'software'
+        return 'hardware' if hardware_encoder() else 'software'
     if kind != ENCODER_AUTO:
         return 'software'
-    if sys.platform != 'darwin':
+    if not hardware_encoder():
         return 'software'
-    return ('hardware' if _hw_encoder_cache.get((find_ffmpeg(), 'darwin'))
+    return ('hardware' if _hw_encoder_cache.get((find_ffmpeg(), sys.platform))
             else 'software')
 
 
@@ -2951,10 +3006,113 @@ def uses_videotoolbox(kind, platform=None):
 
     Its own predicate because two other things have to agree with
     `encoder_args` about which encoder is live -- the bitrate it asks for
-    (`rate_target`) and the flags it may carry -- and a second copy of this
-    condition is exactly how they stop agreeing.
+    (`rate_target`) and the pixel format it asks for (`encoder_pix_fmt`) -- and
+    a second copy of this condition is exactly how they stop agreeing.
     """
-    return kind == 'hardware' and (platform or sys.platform) == 'darwin'
+    return kind == 'hardware' and hardware_encoder(platform) == _VT_ENCODER
+
+
+#: The encoder each platform's「硬件编码」means, and why the list is as short as
+#: it is. Windows used to have no entry at all -- `auto` landed on x264 on every
+#: platform but macOS because `h264_videotoolbox` was the only name this file
+#: knew -- which is how the Windows→Mac case ended up paying for a CPU encoder
+#: on a machine with an RTX 5060 Ti in it.
+#:
+#:     0.44 of a core  libx264, the shipped argv, 1080p/24 fps
+#:     0.21 of a core  h264_nvenc, same argv shape, same fps, same 1.00x
+#:
+#: (2026-10-02, the interactive-session matrix on .68: one animated desktop,
+#: four rows, 25 s each, CPU sampled between two `Get-Process` reads. Both
+#: produced ~19 MB at `-b:v 6000000` and ran the muxer at speed=1.00x, so this
+#: is the same work priced twice, not two different amounts of video.)
+_VT_ENCODER = 'h264_videotoolbox'
+_NVENC = 'h264_nvenc'
+HARDWARE_ENCODERS = {'darwin': _VT_ENCODER, 'win32': _NVENC}
+
+
+def hardware_encoder(platform=None):
+    """The encoder name the hardware switch selects here, or None for "this
+    platform has no hardware encoder this code is willing to name".
+
+    Linux is deliberately absent rather than unfinished: `h264_vaapi` needs a
+    DRM render node and a working `FFMPEG_VAAPI` path that has never been
+    exercised here, and the pipeline already runs at 24 fps on CPU. Naming an
+    encoder we cannot measure on any machine we have is how the `-level 42`
+    class of bug gets shipped (see `vt_level`), and §4.8's other lesson -- the
+    avfoundation parser written against an output format that never existed --
+    says the same thing about test fixtures.
+    """
+    return HARDWARE_ENCODERS.get(platform or sys.platform)
+
+
+def uses_nvenc(kind, platform=None):
+    """Whether `encoder_args` will really select h264_nvenc. Same reason
+    `uses_videotoolbox` exists: three call sites have to agree about which
+    encoder is live, and they must not each keep their own copy of the test.
+    """
+    return kind == 'hardware' and hardware_encoder(platform) == _NVENC
+
+
+def encoder_pix_fmt(kind, platform=None):
+    """The `-pix_fmt` this encoder wants, measured rather than assumed.
+
+    nvenc was probed with nv12 (both the 0.5 s capability probe and the 25 s
+    matrix row), and asking it for yuv420p instead inserts a conversion the
+    encoder does not need -- ffmpeg would still work, but every number in the
+    comment above was measured on the shape being shipped here.
+    """
+    return 'nv12' if uses_nvenc(kind, platform) else 'yuv420p'
+
+
+#: What the switch answers after it has been turned, per platform's encoder.
+#:
+#: The macOS software row used to read「延迟约 45 毫秒，代价约 4.5 核」. Both
+#: numbers were the offline file-source measurement (see ENCODER_AUTO), which is
+#: exactly the mistake that comment goes on about: 4.5 cores is what x264 burns
+#: when it is *allowed* to run 486 fps, and a live 24 fps mirror pays 0.59. The
+#: rows below quote the live capture numbers, and the Windows software row says
+#: which number was never measured on that machine rather than borrowing
+#: macOS's.
+ENCODER_NOTES = {
+    _VT_ENCODER: {
+        'hardware': 'VideoToolbox 硬件编码（实测 0.41 核；'
+                    '首帧比 x264 晚约 200 毫秒）',
+        'software': '软件编码（x264，实测 0.59 核、跑满 24 fps；'
+                    '首帧比硬件早约 200 毫秒）',
+    },
+    _NVENC: {
+        'hardware': 'NVENC 硬件编码（实测 0.21 核，帧率、码率与 x264 那一路一致）',
+        'software': '软件编码（x264，实测 0.44 核、跑满 24 fps；'
+                    '这台机器上的首帧差值没有量过）',
+    },
+}
+
+#: A machine with no hardware encoder this file can name still has to say
+#: something true when the user picks 软件编码 -- so this row makes no
+#: comparison, because there is nothing on this platform to compare against.
+ENCODER_NOTE_SOFTWARE_DEFAULT = '软件编码（x264，跑满 24 fps）'
+
+#: The switch's own words. The settings page used to carry「VideoToolbox
+#: 硬件编码」as a literal, so on a Windows machine the control named an encoder
+#: that machine was never offered -- the same one-switch-two-dialects mistake
+#: the「统计信息」card made until it started reading `-c:v` off the argv.
+ENCODER_SWITCH_LABELS = {_VT_ENCODER: 'VideoToolbox 硬件编码',
+                         _NVENC: 'NVENC 硬件编码'}
+ENCODER_SWITCH_LABEL_DEFAULT = '硬件编码'
+
+
+def encoder_switch_label(platform=None):
+    """The label for the hardware switch on this platform."""
+    return ENCODER_SWITCH_LABELS.get(hardware_encoder(platform) or '',
+                                     ENCODER_SWITCH_LABEL_DEFAULT)
+
+
+def encoder_note(kind, platform=None):
+    """The confirmation sentence for the encoder the switch just stored."""
+    table = ENCODER_NOTES.get(hardware_encoder(platform) or '')
+    if not table:
+        return ENCODER_NOTE_SOFTWARE_DEFAULT
+    return table[kind]
 
 
 #: VideoToolbox's rate control undershoots whatever `-b:v` it is handed by
@@ -2963,6 +3121,11 @@ def uses_videotoolbox(kind, platform=None):
 #: ultrafast+zerolatency's 90.78 at 4216 kbit, a better picture at two thirds
 #: the bitrate. So when VT is the encoder we ask for 1.5x, and the number that
 #: reaches the wire is the number the quality menu promised.
+#:
+#: nvenc gets no multiplier because it does not need one, which is the first
+#: thing measured about it (2026-10-02, .68, four argv shapes around a 6000 kbit
+#: ask): 6052, 6081, 6087 and 6029 kbit/s on the wire. Applying VT's 1.5x here
+#: would put 9 Mbps on a link the menu described as 6.
 VT_BITRATE_MULT = 1.5
 
 
@@ -3032,19 +3195,27 @@ def vt_level(height):
 
 
 def encoder_args(kind, platform=None, height=None, output=None):
-    """Video encoder flags. Hardware encoding is opt-in and macOS-only:
-    ffmpeg's h264_videotoolbox is the one tap Apple actually ships, and unlike
-    the Castify reference (which never probes for it and always lands on CPU
-    x264 on a Mac) we ask first -- see has_hardware_encoder().
+    """Video encoder flags.
 
-    Both branches carry `-flags +low_delay`: it is the first flag Google's own
-    reference sender sets, and upstream `videotoolboxenc.c` keeps adding
-    support for it ("ensure bitrate is set in low_delay mode"), so it is not an
-    x264-only idea. `-thread_type slice` rides on the x264 branch alone,
+    Hardware encoding is opt-in and goes through `hardware_encoder()`, so the
+    encoder a machine gets named there is the only encoder this function will
+    write. macOS answers `h264_videotoolbox` (Apple's one real tap, and unlike
+    the Castify reference -- which never probes for it and always lands on CPU
+    x264 on a Mac -- we ask first, see `has_hardware_encoder`); Windows answers
+    `h264_nvenc`; Linux answers nothing, so `hardware` falls through to x264
+    there exactly as it did before this function knew about NVIDIA.
+
+    Both low-latency branches carry `-flags +low_delay`: it is the first flag
+    Google's own reference sender sets, and upstream `videotoolboxenc.c` keeps
+    adding support for it ("ensure bitrate is set in low_delay mode"), so it is
+    not an x264-only idea. `-thread_type slice` rides on the x264 branch alone,
     because videotoolbox reports *no* threading capability at all and asking
     it for a thread type is asking for an option it does not have. x264 already
     gets sliced threads implicitly from `-tune zerolatency`; naming it is cheap
     insurance against a preset change quietly costing a frame of latency.
+    nvenc gets neither, because the two numbers it was chosen for (0.21 of a
+    core, speed=1.00x) were measured on an argv that carries neither -- a flag
+    that costs nothing to add is still a change to a measured shape.
 
     `height` is the encoded picture height, and only the VideoToolbox branch
     reads it (`vt_level`); x264 computes its own level and is right about it.
@@ -3063,36 +3234,114 @@ def encoder_args(kind, platform=None, height=None, output=None):
     """
     profile = 'baseline' if output == 'webrtc' else 'high'
     if uses_videotoolbox(kind, platform):
-        args = ['-c:v', 'h264_videotoolbox', '-profile:v', profile]
+        args = ['-c:v', _VT_ENCODER, '-profile:v', profile]
         level = vt_level(height)
         if level:
             args += ['-level', level]
         return args + ['-flags', '+low_delay', '-realtime', '1']
+    if uses_nvenc(kind, platform):
+        # The spelling was measured on the machine this branch exists for,
+        # because the obvious one is wrong in this build and fails silently:
+        #
+        #   `-tuned ll`   -> unrecognized option, **0 bytes out**
+        #   `-preset ll`  -> works, but warns that it is deprecated in favour
+        #                    of p1..p7 plus -tune
+        #   `-preset p1 -tune ll`  -> works, no warning, lands on the asked
+        #                    bitrate (6052/6081/6087/6029 kbit/s for 6000)
+        #
+        # `-rc vbr` is the mode that measurement was taken in; `-profile:v`
+        # follows `output` like the other branches (baseline and high both open
+        # clean). No `-level`: nvenc derives its own from the picture, and the
+        # table `vt_level` consults is a VideoToolbox answer to a VideoToolbox
+        # failure. No `-realtime`, which is a VT AVOption and not an nvenc one
+        # -- passing it there is the same class of mistake as `-tuned` was, only
+        # noisier.
+        return ['-c:v', _NVENC, '-preset', 'p1', '-tune', 'll', '-rc', 'vbr',
+                '-profile:v', profile]
     return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
             '-profile:v', profile, '-flags', '+low_delay',
             '-thread_type', 'slice']
 
 
+#: The tiny encode that asks nvenc whether it is *live*, not whether it is
+#: listed. Sized to be cheap (268 ms on the machine it was written for, ffmpeg
+#: startup included) and to exercise the same open path a mirror session will:
+#: a real video stream, the real pixel format, the real container.
+_PROBE_SOURCE = 'testsrc=size=640x360:rate=24'
+_PROBE_SECONDS = '0.5'
+
+
+def _encoder_opens(ffmpeg, name, pix_fmt):
+    """Ask one encoder to encode half a second of test pattern.
+
+    Returns the name on success, None on any other answer. This is the only
+    honest question to ask a Windows ffmpeg: `ffmpeg -encoders` on .68 lists
+    h264_nvenc, h264_qsv *and* h264_amf, and h264_qsv then refuses to open a
+    session at all on the same machine --
+
+        [h264_qsv] Error creating a MFX session: -9
+        [out#0/mp4] Nothing was written into output file
+        exit=-1313558101  bytes=0
+
+    -- which is §4.8's `-level 42` lesson wearing the opposite clothes: a
+    listing says the symbol is in the binary, and says nothing about the driver
+    behind it. The failure is loud here (non-zero exit, zero bytes) rather than
+    silent, but "loud at probe time" is only better than "loud at mirror time"
+    if somebody actually runs the probe before offering the switch.
+    """
+    try:
+        proc = subprocess.run(
+            [ffmpeg, '-hide_banner', '-loglevel', 'error', '-nostdin',
+             '-f', 'lavfi', '-i', _PROBE_SOURCE, '-t', _PROBE_SECONDS,
+             '-c:v', name, '-pix_fmt', pix_fmt,
+             '-f', 'mp4', '-movflags',
+             'frag_every_frame+empty_moov+default_base_moof', '-'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    except Exception as e:
+        logger.info('cannot probe %s: %s', name, e)
+        return None
+    if proc.returncode or not proc.stdout:
+        logger.info('%s is not usable here (exit %s): %s', name,
+                    proc.returncode,
+                    proc.stderr.decode('utf-8', 'replace').strip()[:300])
+        return None
+    return name
+
+
 def has_hardware_encoder(ffmpeg, platform=None):
-    """Whether this ffmpeg really offers h264_videotoolbox.
+    """Whether `hardware` means anything on this machine.
 
     Cached because it spawns ffmpeg, and the answer is only ever consulted
     from a background thread or the menu's status line. The platform is part
     of the key: the same binary answers differently under a different OS, and
     the caller may name one explicitly (tests, and any future cross-check).
+
+    Two platforms, two probe shapes, because their failure modes differ:
+
+      * **macOS** asks the listing. VideoToolbox is an OS framework rather
+        than a driver -- if the build names `h264_videotoolbox`, the operating
+        system has it -- and this is the shape the encoder-latency measurements
+        were taken under.
+      * **Windows** asks for a real encode, for the reason in
+        `_encoder_opens`: three hardware encoders are listed and the machine
+        only has one of them.
     """
     key = (ffmpeg, platform or sys.platform)
     if key in _hw_encoder_cache:
         return _hw_encoder_cache[key]
     verdict = False
-    if key[1] == 'darwin':
+    name = hardware_encoder(key[1])
+    if name and key[1] == 'darwin':
         try:
             proc = subprocess.run([ffmpeg, '-hide_banner', '-encoders'],
                                   stdout=subprocess.PIPE,
                                   stderr=subprocess.DEVNULL, timeout=10)
-            verdict = b'h264_videotoolbox' in proc.stdout
+            verdict = name.encode() in proc.stdout
         except Exception as e:
             logger.info("cannot probe the encoders: %s", e)
+    elif name:
+        verdict = _encoder_opens(ffmpeg, name,
+                                 encoder_pix_fmt('hardware', key[1])) is not None
     _hw_encoder_cache[key] = verdict
     return verdict
 
@@ -3198,8 +3447,8 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     # `-fps_mode vfr`: CFR puts straight back every frame mpdecimate dropped,
     # so if that filter is ever added here it must replace this `-r`, not
     # ride alongside it.
-    cmd += ['-pix_fmt', 'yuv420p', '-r', str(FPS), '-g', str(gop_size(kind)),
-            '-b:v', str(target)]
+    cmd += ['-pix_fmt', encoder_pix_fmt(encoder), '-r', str(FPS),
+            '-g', str(gop_size(kind)), '-b:v', str(target)]
     cmd += rate_caps(target)
     # Encoder private options only resolve after -c:v, so they ride at the end.
     cmd += extra
@@ -3237,7 +3486,8 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
         # before this they differed by 30% in the other direction, which made
         # every advertised number on this target a mild fiction.
         target = rate_target(profile.bitrate, encoder)
-        cmd += ['-pix_fmt', 'yuv420p', '-g', str(live_gop(profile.fps)),
+        cmd += ['-pix_fmt', encoder_pix_fmt(encoder),
+                '-g', str(live_gop(profile.fps)),
                 '-r', str(profile.fps), '-b:v', str(target)]
         cmd += rate_caps(target)
     cmd += profile.muxer + ['pipe:1']
@@ -4837,12 +5087,6 @@ class _Clusters(object):
 class _Broadcaster(object):
     """Fan out encoder output to every connected client; drop for the slow."""
 
-    #: A framed queue entry is a whole fragment -- half a second of picture --
-    #: where an unframed one is one 4 KiB read from the pipe. Eight of them is
-    #: about the same seconds of slack as the old 256 reads, and a third of the
-    #: memory they could cost at a high bitrate.
-    FRAMED_QUEUE = 8
-
     def __init__(self, maxsize=256, ring_bytes=REPLAY_BYTES, init_marker=None,
                  packet_align=None):
         self._ring_limit = ring_bytes
@@ -4867,8 +5111,13 @@ class _Broadcaster(object):
         #: audio frame just lost its middle, which is a click, not a stutter.
         self._align = packet_align if self._framer is None else None
         self._carry = b''
-        if self._framer is not None:
-            maxsize = min(maxsize, self.FRAMED_QUEUE)
+        #: `maxsize` is already counted in this container's own unit -- whole
+        #: fragments where a framer is running, 4 KiB reads where one is not --
+        #: because `live_queue_units` decided which unit that is from the same
+        #: `init_marker` this object picks its framer from. There used to be a
+        #: second, hard-coded clamp to eight in here, and eight fragments is
+        #: 0.11 s of a 70.8-fragments-per-second stream: the sender shed 28 % of
+        #: its own output to a loopback curl while the budget said 0.75 s.
         self._maxsize = maxsize
         self._init = b''
         #: An Event rather than a flag because the handler *waits* for the
@@ -5088,6 +5337,18 @@ class _Broadcaster(object):
     def clients(self):
         with self._lock:
             return len(self._subs)
+
+    def queued(self):
+        """Units sitting unsent in front of every live viewer, right now.
+
+        A gauge for the statistics row, not a decision the stream makes:
+        `Queue.qsize()` is documented as unreliable in a multithreaded context,
+        and read next to `drops` it is the difference between "the queue is
+        full and shedding" and "there is room and nothing is being lost".
+        """
+        with self._lock:
+            subs = list(self._subs)
+        return sum(q.qsize() for q in subs)
 
 
 class _ByteLog(object):
@@ -5677,7 +5938,9 @@ class _StreamHandler(BaseHTTPRequestHandler):
             self.send_error(403, 'a token is required')
             return
         body = PLAYER_PAGE.replace('@STREAM@', self.session.stream_path()) \
-                          .replace('@CODECS@', self.session.codecs) \
+                          .replace('@CODECS@', live_codecs(
+                              self.session,
+                              getattr(self.server, 'broadcaster', None))) \
                           .replace('@LIVE_EDGE@', repr(live_edge_seconds())) \
                           .replace('@DIAG@', json.dumps(page_diag(self.session))) \
                           .replace('@TITLE@', self.session.page_title).encode('utf-8')
@@ -5731,6 +5994,117 @@ class _StreamHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+#: The video part of the MediaSource codec string this file used to *assert*.
+#: It was wrong on every shape except one, and a wrong string here is not a
+#: cosmetic lie: `MediaSource.isTypeSupported()` answers no, the page falls to
+#: its progressive path, and a live fragmented MP4 has no playable duration
+#: there -- a black player with no error.
+#:
+#: Measured with `scripts/codec_string_probe.py`, which reads the avcC box out
+#: of the init segment each shipped encoder really produced -- the x264 rows on
+#: this machine (2026-10-02) and the NVENC rows on the Windows box (2026-10-03,
+#: ffmpeg 8.1.2; the x264 rows repeated there identically):
+#:
+#:     x264  1080p  avc1.42c028   (Constrained Baseline, level 4.0)
+#:     x264  2160p  avc1.42c033
+#:     x264   720p  avc1.42c01f
+#:     VT    1080p w/ -level 42   avc1.64002a
+#:     VT    2160p w/ -level 51   avc1.640033
+#:     VT    1080p, no level      avc1.640028   <- the only row the claim fit
+#:     NVENC 1080p  avc1.640028   (fits by coincidence, not by design)
+#:     NVENC 2160p  avc1.640033   (same encoder, and this branch pins no level)
+#:
+#: The NVENC pair is the reason the pinned default stays a fallback rather than
+#: becoming a per-platform constant: the level is a property of the picture, so
+#: no string can be right for both rows.
+#:
+#: So the four bytes are not a constant of this plugin -- they are a property of
+#: the encoder, its profile pin, and the size being encoded. `avc_codec_string`
+#: reads them off the wire; this stays the fallback for the window before the
+#: encoder has written its header, where nothing else can be said yet.
+MSE_VIDEO_CODEC_DEFAULT = 'avc1.640028'
+
+#: The audio part. AAC-LC in ISO BMF, which is what `-c:a aac` emits here and
+#: what every browser with an MSE implementation accepts; unlike the video
+#: fourcc it is not something the encoder decides.
+MSE_AUDIO_CODEC = 'mp4a.40.2'
+
+
+def codecs_for(fourcc, has_audio):
+    """A MediaSource codec string, in the only shape `addSourceBuffer` takes:
+    a MIME type with a quoted codec list."""
+    if has_audio:
+        return 'video/mp4; codecs="%s,%s"' % (fourcc, MSE_AUDIO_CODEC)
+    return 'video/mp4; codecs="%s"' % fourcc
+
+
+def avc_codec_string(header):
+    """The `avc1.PPCCLL` fourcc inside an init segment's avcC box, or None.
+
+    Scans for the four-character box type rather than walking the tree: an
+    init segment is ftyp + moov and nothing else, there is no codec payload in
+    it to produce a false hit, and a walker would have to know the sample-entry
+    layout (avc1's 36 reserved bytes before avcC) to get the same answer. The
+    declared box size bounds the slice it reads, but the two checks that decide
+    are `len(body) >= 4` (a box truncated below the four bytes is not an avcC)
+    and configurationVersion being 1 -- together they turn "these four bytes
+    spelled avcC inside somebody's comment string" into a rejection. A separate
+    minimum-size test was measured to be redundant with the first of them: a
+    declared size below 12 leaves a slice shorter than four bytes, so the two
+    questions have the same answer for every size from 0 to 2^31.
+
+    avcC is `(configurationVersion, AVCProfileIndication,
+    profile_compatibility, AVCLevelIndication, ...)`; the codec string is the
+    last three as hex, which is why a profile byte read from a listing or from
+    `-profile:v` would not do: x264 was *told* `high` and wrote
+    `42c0` (Constrained Baseline) into the SPS it actually emitted.
+    """
+    if not header:
+        return None
+    start = 0
+    while True:
+        i = header.find(b'avcC', start)
+        if i < 8:
+            if i == -1:
+                return None
+            start = i + 4
+            continue
+        size = int.from_bytes(header[i - 4:i], 'big')
+        # size counts the 8-byte header, so the body ends where the next box
+        # starts.
+        body = header[i + 4:i - 4 + size]
+        if len(body) >= 4 and body[0] == 1:
+            return 'avc1.%02x%02x%02x' % (body[1], body[2], body[3])
+        start = i + 4
+
+
+def avc_codec_of(source):
+    """The fourcc this broadcast is really carrying, or '' while unknown.
+
+    One function because three readers ask the same question -- the page's
+    `addSourceBuffer` call, the viewing overlay, and the settings card -- and
+    AGENTS.md §4.8's red line is that two readers must not each keep their own
+    copy of an answer. A byte log (the DLNA file shape) and the WebRTC bridge
+    have no init segment, so they answer '' and the rows built from this stay
+    quiet instead of showing a guess.
+    """
+    header = getattr(source, 'init_segment', b'') if source is not None else b''
+    return avc_codec_string(header or b'') or ''
+
+
+def live_codecs(session, broadcaster):
+    """What to hand the page's `MediaSource`/`addSourceBuffer` call.
+
+    The real fourcc once the encoder has produced its init segment, the pinned
+    default until then. This is called while serving the page, which is after
+    `_serve_stream`'s `await_init()` on any viewer that actually plays -- so in
+    practice a browser that opens the URL gets the truth, and the fallback is
+    what a page fetched in the first few hundred milliseconds is left with.
+    """
+    return codecs_for(avc_codec_of(broadcaster) or MSE_VIDEO_CODEC_DEFAULT,
+                      getattr(session, 'has_audio', False))
+
+
 class _Session(object):
     """What this mirror session looks like to the HTTP server."""
 
@@ -5738,6 +6112,10 @@ class _Session(object):
                  bitrate=None):
         self.kind = kind if kind in OUTPUTS else DEFAULT_OUTPUT
         self.label, self.suffix, self.content_type, _args = OUTPUTS[self.kind]
+        #: Whether this session's container carries an audio track at all. The
+        #: browser target's queue is sized against its fragment cadence, and an
+        #: audio track doubles that cadence -- see `fragment_rate`.
+        self.has_audio = bool(has_audio)
         #: The encoder's target video rate, in bits/s. The queue in front of a
         #: live consumer is sized from it -- see `live_queue_chunks`.
         self.bitrate = bitrate
@@ -5824,8 +6202,13 @@ class _Session(object):
         #: silently drop every viewer onto the progressive fallback -- and a
         #: live fragmented MP4 has no playable duration there, so Safari showed
         #: a black page.
-        self.codecs = ('video/mp4; codecs="avc1.640028,mp4a.40.2"' if has_audio
-                       else 'video/mp4; codecs="avc1.640028"')
+        #:
+        #: This is the *fallback* the page gets when it arrives before the
+        #: encoder has written its header; `_serve_page` asks `live_codecs` for
+        #: the fourcc off the real avcC box, because this default turned out to
+        #: describe one shape out of the seven the plugin can ship (see
+        #: `MSE_VIDEO_CODEC_DEFAULT`).
+        self.codecs = codecs_for(MSE_VIDEO_CODEC_DEFAULT, has_audio)
         self.page_title = title
         #: What this session *is* -- encoder, capture, budgets -- as
         #: `_session_diagnostics` computed it. The settings card reaches it
@@ -5864,6 +6247,9 @@ def live_queue_chunks(bitrate):
     complains about, and it should be budgeted in seconds, not bytes. Clamped
     at both ends: below ~64 reads a 2 Mbps preset cannot survive one TCP
     stall, and nothing needs a second and a half of backlog to look smooth.
+
+    This is the answer only for the containers that queue reads. The two framed
+    shapes queue whole units and go through `live_queue_units` instead.
     """
     if not bitrate:
         return LIVE_QUEUE_MAX_CHUNKS
@@ -5872,13 +6258,93 @@ def live_queue_chunks(bitrate):
                min(LIVE_QUEUE_MAX_CHUNKS, budget // CHUNK))
 
 
+def fragment_rate(fps=FPS, has_audio=True):
+    """How many fragments one second of live fragmented MP4 puts on the wire.
+
+    `frag_every_frame` is a per-**sample** cadence, not a per-picture one: the
+    audio track is muxed in the same flush, so a browser session carrying system
+    sound at 24 fps writes 24 + 46.875 `moof` boxes a second. Budgeting the
+    queue against `fps` alone therefore buys a third of the slack that was asked
+    for, and budgeting it against a hard-coded eight buys a sixth.
+
+    Measured on a real session served by the shipping code (2026-10-02, Windows
+    source, 24 fps with sound): 1063 fragments in 15.02 s of stream -- 70.8 a
+    second, 8 835 bytes each, which is the same answer the arithmetic gives.
+    """
+    rate = float(fps or FPS)
+    return rate + (AAC_FRAMES_PER_SECOND if has_audio else 0.0)
+
+
+def live_queue_units(session, bitrate=None):
+    """The live queue's capacity, counted in the unit this container queues.
+
+    One budget in seconds (`LIVE_QUEUE_SECONDS`), three different units:
+
+    - unframed (MPEG-TS / MPEG-PS): 4 KiB reads, so `live_queue_chunks`.
+    - fragmented MP4 (the browser target): whole fragments, and the fragment
+      cadence is `fragment_rate` -- at 24 fps with sound that is 54 of them,
+      where the queue used to hold eight.
+    - live Matroska (a DLNA profile that must be read from its header): whole
+      clusters, and the muxer closes those by size, measured at 50-60 KB, so
+      the seconds are spent against `MKV_CLUSTER_BYTES`.
+
+    The `init_marker` the broadcaster frames by is the same value this reads, so
+    the unit the queue is counted in and the unit the framer emits are decided
+    together or not at all.
+
+    `bitrate` is the caller's override for the case where the rate is known from
+    somewhere other than the session -- the diagnostics card reads it out of the
+    argv that is actually running. Both answers must come from *here*, so the
+    override is a parameter rather than a second copy of the arithmetic.
+    """
+    if bitrate is None:
+        bitrate = session.bitrate
+    if session.init_marker == b'moof':
+        units = int(math.ceil(fragment_rate(FPS, session.has_audio)
+                               * LIVE_QUEUE_SECONDS))
+        return max(LIVE_QUEUE_MIN_UNITS, units)
+    if session.init_marker == MKV_FIRST_CLUSTER:
+        if not bitrate:
+            return LIVE_QUEUE_MIN_UNITS
+        units = int(math.ceil(bitrate * LIVE_QUEUE_SECONDS / 8.0
+                              / MKV_CLUSTER_BYTES))
+        return max(LIVE_QUEUE_MIN_UNITS, units)
+    return live_queue_chunks(bitrate)
+
+
+def queue_hold_seconds(session, units, bitrate=None):
+    """What `live_queue_units` capacity is actually worth, in seconds.
+
+    The inverse of the same arithmetic, for the two places that show it:
+    the「统计信息」card and the viewing page's overlay. Framed units are divided
+    by their cadence, queued reads by the bitrate, so a card that says 0.75 s
+    means 0.75 s of picture rather than 0.75 s of whatever the read size was.
+
+    The fMP4 branch needs no bitrate -- a fragment is a frame, and frames come at
+    a fixed rate. The other two are byte-shaped, so without a rate to divide by
+    they answer None: a duration invented from an unknown bitrate is the number
+    this card exists to stop people guessing at.
+    """
+    if units is None:
+        return None
+    if bitrate is None:
+        bitrate = session.bitrate
+    if session.init_marker == b'moof':
+        return round(units / fragment_rate(FPS, session.has_audio), 2)
+    if not bitrate:
+        return None
+    if session.init_marker == MKV_FIRST_CLUSTER:
+        return round(units * MKV_CLUSTER_BYTES * 8.0 / bitrate, 2)
+    return round(units * CHUNK * 8.0 / bitrate, 2)
+
+
 def start_stream_server(session, broadcaster=None):
     server = ThreadingHTTPServer(('0.0.0.0', 0), _StreamHandler)
     server.session = session
     if broadcaster is None:
         broadcaster = _ByteLog() if session.bytelog else _Broadcaster(
             init_marker=session.init_marker,
-            maxsize=live_queue_chunks(session.bitrate),
+            maxsize=live_queue_units(session),
             packet_align=TS_PACKET if session.kind == 'cast' else None)
     server.broadcaster = broadcaster
     server.daemon_threads = True
@@ -5906,6 +6372,21 @@ def webrtc_page_url(server):
     return 'http://{}:{}{}?token={}'.format(
         advertise_host(), server.server_address[1], WEBRTC_PATH,
         server.session.page_token)
+
+
+def _flag_value(command, flag):
+    """The token that follows `flag` in an argv list, or None.
+
+    Same refusal as `_int_flag`: a command where the flag is the last token
+    answers None rather than guessing. This one returns the string because
+    `-c:v` is not a number.
+    """
+    if flag in command:
+        try:
+            return str(command[command.index(flag) + 1])
+        except IndexError:
+            return None
+    return None
 
 
 def _int_flag(command, flag):
@@ -5939,7 +6420,6 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
     both, and they answer different questions ("it is dropping" vs "it was
     always going to be 4 s behind on this target").
     """
-    queue_chunks = live_queue_chunks(bitrate) if bitrate else None
     #: Which of the two DLNA shapes this session answers with decides what the
     #: sender's own delay *is*: the live shape serves out of the queue in front
     #: of the encoder, the file shape holds a prefill back before the TV is
@@ -5947,6 +6427,13 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
     #: where it is actually paid keeps the「统计信息」card from naming a budget
     #: this session never spent.
     live_queue = not session.bytelog
+    #: The queue's capacity and what it is worth, both from the two functions
+    #: `start_stream_server` builds the broadcaster with. Until 2026-10 this
+    #: pair was computed from `live_queue_chunks(bitrate)` alone, which is the
+    #: budget of the *unframed* shapes: on a browser session the card said
+    #: 0.75 s while the queue actually held eight fragments, i.e. 0.11 s.
+    queue_units = (live_queue_units(session, bitrate)
+                   if (live_queue and bitrate) else None)
     info = {
         'kind': kind,
         'capture': capture.label,
@@ -5954,6 +6441,14 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
         'audio_map': capture.audio_map or '',
         'audio_expected': bool(audio_expected),
         'encoder': encoder,
+        #: The name that actually went into `-c:v`, read off the argv that is
+        #: running rather than derived from the switch. `encoder` above is the
+        #: user's *wish* ('hardware'), which means VideoToolbox on a Mac, NVENC
+        #: on a Windows box, and -- when the probe refused it -- libx264 with a
+        #: warning in the log. A card that only ever said「硬件编码
+        #: （VideoToolbox）」was stating macOS's dialect about a machine in
+        #: another one, and hiding the fallback.
+        'encoder_name': _flag_value(command, '-c:v') or '',
         'height': height,
         'bitrate': bitrate,
         #: Both of these are read out of the argv that is actually running
@@ -5966,12 +6461,13 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
         'gop': _int_flag(command, '-g'),
         'command': ' '.join(command),
         'cast_refused': str(refused or ''),
-        'queue_chunks': queue_chunks if live_queue else None,
+        'queue_chunks': queue_units,
         #: How much picture the sender's own queue may hold before the
-        #: slowest viewer starts losing fragments -- the sender's share of
-        #: the delay, in seconds so it can be read next to the rest.
-        'queue_seconds': (round(queue_chunks * CHUNK * 8.0 / bitrate, 2)
-                          if live_queue and queue_chunks and bitrate else None),
+        #: slowest viewer starts losing units -- the sender's share of the
+        #: delay, in seconds so it can be read next to the rest. `queue_chunks`
+        #: is that same capacity in the unit the container queues (4 KiB reads,
+        #: fragments, or clusters), which is why the two are derived together.
+        'queue_seconds': queue_hold_seconds(session, queue_units, bitrate),
         #: Only the browser target replays a backlog; the other live targets
         #: follow the live edge or are byte-addressed by the TV itself.
         'replay_bytes': REPLAY_BYTES if kind == 'browser' else 0,
@@ -6004,7 +6500,8 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
 #: a subset: `command` is the whole ffmpeg argv -- a paragraph the settings
 #: card can copy out, and nothing the corner of a video has room for. A key
 #: that is absent (a DLNA-only row on a browser session) simply draws no row.
-PAGE_DIAG_KEYS = ('kind', 'capture', 'encoder', 'height', 'fps', 'gop',
+PAGE_DIAG_KEYS = ('kind', 'capture', 'encoder', 'encoder_name', 'height',
+                  'fps', 'gop',
                   'bitrate', 'queue_chunks', 'queue_seconds', 'replay_bytes',
                   'audio', 'audio_expected', 'audio_map', 'profile',
                   'profile_bitrate', 'prefill_seconds', 'cast_refused')
@@ -6036,8 +6533,22 @@ def page_stats(session, source):
     #: browser overlay never shows (only the WebRTC page reads it).
     for name in ('chunks', 'bytes', 'drops', 'sent'):
         live[name] = getattr(source, name, 0) if source is not None else 0
+    #: A replay that found no keyframe to start on is invisible in `drops` --
+    #: nothing was dropped, the viewer simply got no pre-roll and waits for the
+    #: next IDR. It used to exist only in the log, which is the one place the
+    #: person watching a late-joining viewer stutter does not look.
+    live['misses'] = getattr(source, 'keyframe_misses', 0) if source is not None else 0
+    #: Units queued unsent in front of the viewers right now. Only the queue
+    #: broadcaster has an answer; the byte log is addressed by offset and sheds
+    #: nothing, so it reports no depth rather than a zero that reads as "empty".
+    depth = getattr(source, 'queued', None) if source is not None else None
+    live['queued'] = depth() if callable(depth) else None
     clients = getattr(source, 'clients', None) if source is not None else None
     live['clients'] = clients() if callable(clients) else 0
+    #: The H.264 fourcc off the encoder's own avcC box, '' while the header has
+    #: not been written. Both statistics readers ask it of the same object
+    #: through `avc_codec_of` (red line: one answer, not two).
+    live['codec'] = avc_codec_of(source)
     return live
 
 
@@ -6125,8 +6636,12 @@ function rows(){
   if(d.capture!==undefined)out.push(line('采集',d.capture));
   out.push(line('声音',d.audio?(d.audio_map||'有')
                  :(d.audio_expected?'已弃（保画面）':'无')));
-  if(d.encoder!==undefined)out.push(line('编码器',d.encoder)+' · '
+  if(d.encoder!==undefined)out.push(line('编码器',d.encoder_name||d.encoder)+' · '
     +s(d.height)+'p@'+s(d.fps)+' · GOP '+s(d.gop));
+  // The fourcc the encoder really wrote into its avcC box, not the one this
+  // page was compiled with: addSourceBuffer() was handed that string a moment
+  // ago, so a mismatch reads as a black player rather than as a wrong label.
+  if(live.codec)out.push(line('H.264 Profile',live.codec));
   if(d.bitrate)out.push(line('档位码率',bps(d.bitrate)));
   if(d.queue_seconds!==undefined&&d.queue_seconds!==null)
     out.push(line('发送端队列',secs(d.queue_seconds)
@@ -6138,6 +6653,14 @@ function rows(){
   out.push(line('编码器产出',s(live.chunks)+' 块 · '+mb(live.bytes)));
   out.push(line('发送端丢块',s(live.drops)
                 +(live.drops?'（慢消费者被丢整块）':'')));
+  // Two facts `drops` cannot carry: how much is queued unsent right now (a
+  // full queue means the next drop is already decided), and how many viewers
+  // joined a ring that held no keyframe and are waiting for one instead of
+  // being handed a smear. Both were log-only until 2026-10.
+  if(live.queued!==null&&live.queued!==undefined)
+    out.push(line('队列占用',s(live.queued)
+                  +(d.queue_chunks?' / '+d.queue_chunks+' 块':'')));
+  if(live.misses)out.push(line('重播等关键帧',s(live.misses)+' 次'));
   out.push(line('已交付',mb(live.written))+' · '+line('观看端',s(live.clients)));
   out.push('— 播放器（本机）—');
   out.push(line('接收码率',rate(M.instant)));
@@ -6372,7 +6895,7 @@ function rows(){
   out.push('— 发送端 —');
   out.push(line('目标',s(d.kind))+' · '+line('形状',s(live.shape)));
   if(d.capture!==undefined)out.push(line('采集',d.capture));
-  if(d.encoder!==undefined)out.push(line('编码器',d.encoder)+' · '
+  if(d.encoder!==undefined)out.push(line('编码器',d.encoder_name||d.encoder)+' · '
     +s(d.height)+'p@'+s(d.fps)+' · GOP '+s(d.gop));
   if(d.bitrate)out.push(line('档位码率',bps(d.bitrate)));
   if(d.queue_seconds!==undefined&&d.queue_seconds!==null)
@@ -6382,6 +6905,14 @@ function rows(){
   out.push(line('编码器产出',s(live.chunks)+' 块 · '+mb(live.bytes)));
   out.push(line('发送端丢块',s(live.drops)
                 +(live.drops?'（慢消费者被丢整块）':'')));
+  // Two facts `drops` cannot carry: how much is queued unsent right now (a
+  // full queue means the next drop is already decided), and how many viewers
+  // joined a ring that held no keyframe and are waiting for one instead of
+  // being handed a smear. Both were log-only until 2026-10.
+  if(live.queued!==null&&live.queued!==undefined)
+    out.push(line('队列占用',s(live.queued)
+                  +(d.queue_chunks?' / '+d.queue_chunks+' 块':'')));
+  if(live.misses)out.push(line('重播等关键帧',s(live.misses)+' 次'));
   out.push(line('已交付',mb(live.sent))+' · '+line('观看端',s(live.clients)));
   out.push('— 连接（本机）—');
   out.push(line('连接',s(N.state))+' · '+line('解码',
@@ -9514,6 +10045,14 @@ class ScreenMirrorRenderer(Renderer):
                 'chunks': source.chunks,
                 'bytes': source.bytes,
                 'drops': source.drops,
+                #: The two facts `drops` cannot express: replays that found no
+                #: keyframe, and units sitting unsent in front of the viewers
+                #: right now. Same counter set as `/browser/stats` reads -- one
+                #: source, two readers (AGENTS.md 4.8 red line ③).
+                'misses': getattr(source, 'keyframe_misses', 0),
+                'queued': (source.queued() if hasattr(source, 'queued')
+                           else None),
+                'codec': avc_codec_of(source),
                 'mbps': round(source.bytes * 8 / 1000000.0 / seconds, 2),
                 'seconds': int(time.time() - self._started_at)
                 if self._started_at else 0}
@@ -9820,7 +10359,14 @@ class ScreenMirrorRenderer(Renderer):
         height, bitrate = self.quality()
         encoder = encoder_kind()
         if encoder == 'hardware' and not has_hardware_encoder(ffmpeg):
-            logger.warning('h264_videotoolbox is unavailable; using libx264')
+            # Name the encoder this platform's switch *means*. The sentence used
+            # to say "h264_videotoolbox" unconditionally, which on a Windows
+            # machine fell back from NVENC and then described an encoder the
+            # user had never been offered -- and VideoToolbox is exactly the
+            # candidate whose refusal is worth reading precisely, because
+            # §4.8's `-level 42` class of bug hides in "which encoder said no".
+            logger.warning('%s is unavailable here; using libx264',
+                           hardware_encoder() or 'the hardware encoder')
             encoder = 'software'
         first_bytes = threading.Event()
         tail = deque(maxlen=20)
@@ -11415,7 +11961,8 @@ class ScreenMirrorSetting(RendererSetting):
         The guard is the caches themselves, because the page polls once a second;
         `request_capture_probe()` adds the single-flight one.
         """
-        if _capture_cache and (sys.platform != 'darwin' or _hw_encoder_cache):
+        if _capture_cache and (hardware_encoder() is None
+                               or _hw_encoder_cache):
             return
         request_capture_probe()
 
@@ -11431,7 +11978,7 @@ class ScreenMirrorSetting(RendererSetting):
             screens.append({'index': str(index),
                             'label': '{} · {}'.format(index, name),
                             'selected': wanted == str(index)})
-        hardware = sys.platform == 'darwin'
+        hardware = hardware_encoder() is not None
         #: None means the encoder probe has not answered yet; the console hides
         #: the switch rather than offering a choice it cannot keep.
         hardware_available = _hw_encoder_cache.get(
@@ -11444,13 +11991,19 @@ class ScreenMirrorSetting(RendererSetting):
             'cursor': cursor_enabled(),
             'encoder': encoder_kind(),
             'hardware_supported': hardware,
+            #: The name this platform's「硬件编码」actually buys (VideoToolbox on a
+            #: Mac, NVENC on Windows) and the words the switch wears -- the page
+            #: used to hard-code macOS's name for a control that means something
+            #: else on every other platform.
+            'hardware_encoder': hardware_encoder() or '',
+            'hardware_label': encoder_switch_label(),
             'hardware_probed': hardware_available is not None,
             'hardware_available': bool(hardware_available),
             #: Only non-empty where the switch itself is shown: on a machine with
-            #: no VideoToolbox there is nothing to turn off, and a note about a
-            #: choice the page is not offering reads as a bug.
-            'encoder_note': (ENCODER_TRADEOFF if hardware and hardware_available
-                             else ''),
+            #: no hardware encoder at all there is nothing to turn off, and a
+            #: note about a choice the page is not offering reads as a bug.
+            'encoder_note': (encoder_tradeoff()
+                             if hardware and hardware_available else ''),
         }
 
     @staticmethod
@@ -11709,20 +12262,18 @@ class ScreenMirrorSetting(RendererSetting):
                         restart=True)
 
     def _do_set_encoder(self, args):
-        """Only stores the wish; a mirror that cannot use VideoToolbox falls back
-        to libx264 with a warning, which is better than refusing here (the
-        probe may not have run yet)."""
+        """Only stores the wish; a mirror whose probe says the encoder is not
+        there falls back to libx264 with a warning naming it, which is better
+        than refusing here (the probe may not have run yet)."""
         want = str(args.get('value') or '')
         if want not in ('software', 'hardware'):
             return self._no('没有这种编码器：{}'.format(want))
-        if want == 'hardware' and sys.platform != 'darwin':
-            return self._no('硬件编码（VideoToolbox）只有 macOS 有')
+        name = hardware_encoder()
+        if want == 'hardware' and not name:
+            return self._no('这台机器没有可命名的硬件编码器（macOS 用 VideoToolbox、'
+                            'Windows 用 NVENC），只能用软件编码')
         Setting.set(SettingProperty.Mirror_Encoder, want)
-        return self._ok('编码器：{}'.format(
-            'VideoToolbox 硬件编码（约 0.2 核，延迟约 200 毫秒）'
-            if want == 'hardware'
-            else '软件编码（x264，延迟约 45 毫秒，代价约 4.5 核）'),
-            restart=True)
+        return self._ok('编码器：{}'.format(encoder_note(want)), restart=True)
 
     def _do_refresh(self, args):
         """Re-run every protocol's search, not just the chosen target's.

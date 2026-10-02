@@ -455,6 +455,11 @@ Decoder probing uses `avcodec_receive_frame_flags(ctx, frame, AV_CODEC_RECEIVE_F
 
 ## 7. Could NOT be verified
 
+> **2026-10-03 update:** some of what follows has since been measured on a real
+> Windows → Mac link — see **§9**, which also records one claim of *mine* that the
+> re-measurement falsified. Items closed there say so; the cross-machine lag number
+> for `webrtc`, Safari/phone, true wireless and real TV firmware are still open.
+
 **Cast Streaming (Q1)**
 - **No real-Chromecast test report from any hand-rolled sender** (omacast, 1PhoneMirror, go-cast, gcast) — so the probability that Macast's `caststream` is accepted by real firmware is unknown.
 - The **device-auth contradiction is unresolved**: VLC-style `DeviceAuthMessage{AuthResponse{signature, client_auth_certificate}}` (Macast's notes) vs omacast's no-op TLS verifier + "we don't need it for mirroring".
@@ -519,3 +524,79 @@ If `aiortc` is adopted for a `webrtc` shape, Macast's constraints (from `AGENTS.
 **Cheapest first experiment:** keep the existing ffmpeg pipeline, add `-profile:v baseline -level 3.1`, and pipe Annex-B access units into an `aiortc` `MediaStreamTrack` whose `recv()` returns `av.Packet`s, served from the HTTP server Macast already runs, with the aiortc `examples/server/client.js` page as the receiver. No STUN, no TURN, no new ports.
 
 **As shipped (2026-10-02):** see §3.5 for the corrections — the 7–8 names were *not* all hand-listed (`aiortc`'s own dependency graph is followed by both packagers), `av` must go in py2app `packages` (delocated wheel), `cffi` was the one undiscoverable name, and no `-profile:v baseline` was needed on the pass-through path.
+
+---
+
+## 9. Follow-up (2026-10-03) — the first real Windows → Mac measurement
+
+Everything above this line was measured **one machine talking to itself** (`avfoundation`
+capture, headless Chromium viewer, both on the Mac). The user's actual complaint was about
+a different link — *Windows PC mirroring into macOS* — so this section is that link, measured
+on 2026-10-02/03 with the shipping code: source = Windows 11 (192.168.1.68, RTX 5060 Ti,
+`ddagrab` capture), viewer = a real browser on the Mac, wired LAN.
+
+**What was true afterwards**
+
+| Claim this doc made | Verdict | Evidence |
+|---|---|---|
+| The `browser` shape's dominant term is upstream of the player | **Confirmed across machines**, and one upstream term was *ours* | the send queue was sized in 4 KiB reads; with `frag_every_frame` the queued unit is a whole fragment, so the 0.75 s budget landed as **8 fragments = 0.11 s** and the sender self-dropped **28 %** of frames before any consumer was slow |
+| Fragment cadence = `fps` | **Falsified** | `frag_every_frame` is per-**sample**, not per-picture: audio is muxed in the same flush. Real session: **1063 fragments in 15.02 s = 70.8/s** at 24 fps with sound (avg 8,835 B) → `24 + 46.875` is the arithmetic, and `fragment_rate()` now says so |
+| The link ran at 0.80× media time | **Falsified — and the falsifier was my own probe** | re-measured with in-stream timestamps against wall clock: **0.983–0.985**, player `playbackRate` 1.00. The 0.80 came from timing *HTTP chunk arrival intervals* as if they were media durations — an artifact of the measuring instrument, not of Windows |
+| `avc1.640028` describes the mirror stream | **Falsified for three of four shapes** | the fourcc is now read off the encoder's own `avcC` (see the table below); `avc1.640028` is true only for VideoToolbox + 1080p + unpinned level |
+| Hardware encoding is "VideoToolbox" | **Replaced by a platform table** | `HARDWARE_ENCODERS = {darwin: videotoolbox, win32: nvenc}`; Linux deliberately absent |
+
+**Encoders, on the same real Windows desktop capture**
+
+- **CPU**: x264 `ultrafast`+`zerolatency` **0.44 cores** vs `h264_nvenc` **0.21 cores**.
+- **Rate control**: nvenc lands on the requested number — a 6000 kbit/s tier measured
+  **6052 / 6081 / 6087 / 6029** across runs. So `VT_BITRATE_MULT = 1.5` is **VideoToolbox
+  only**; applying it to nvenc would over-deliver by half. (VT under-delivers: 4 Mbps asked,
+  2802 kbit/s on the wire.)
+- **argv spelling** (measured, each rejection is a measured rejection):
+  `-c:v h264_nvenc -preset p1 -tune ll -rc vbr -profile:v <p>`. `-tuned ll` produces
+  **zero bytes**; `-preset ll` is deprecated; `-realtime` is a VideoToolbox AVOption and
+  is *not* an nvenc one; no `-level` is pinned.
+- **Listing ≠ usable**: that machine's `ffmpeg -encoders` lists `h264_nvenc`, `h264_qsv`
+  **and** `h264_amf`, while `h264_qsv` refuses to open a session at all
+  (`Error creating a MFX session: -9`, non-zero exit, zero bytes). Windows therefore
+  probes with a real half-second encode before the switch is offered; macOS keeps the
+  listing question because VideoToolbox is an OS framework rather than a driver.
+
+**The fourcc rows** (read off the init segment with `scripts/codec_string_probe.py`;
+this is what `addSourceBuffer` is now handed). The x264 rows were taken twice — macOS
+ffmpeg 8.x on 2026-10-02 and the Windows box's ffmpeg 8.1.2 on 2026-10-03 — and came out
+byte-identical, which is why one table serves both machines:
+
+| Encoder / shape | Declared fourcc |
+|---|---|
+| x264 1080p (3 M and 6 M) | `avc1.42c028` |
+| x264 720p | `avc1.42c01f` |
+| x264 2160p (6 M / 8 M) | `avc1.42c033` |
+| VideoToolbox, `-level 42` | `avc1.64002a` |
+| VideoToolbox 2160p | `avc1.640033` |
+| VideoToolbox 1080p, unpinned | `avc1.640028` |
+| NVENC 1080p (6 M) | `avc1.640028` |
+| NVENC 2160p (9 M) | `avc1.640033` |
+
+Telling x264 `-profile:v baseline` still yields `avc1.42c028`, while NVENC told the same
+`high` writes `0x64` and takes its level from the picture (`0x28` at 1080p, `0x33` at
+2160p). The constraint bits and level are the encoder's own answer, which is exactly why
+the number has to come off the wire rather than out of a comment — and NVENC 1080p is the
+sharpest example: it lands on `avc1.640028`, the same string the pinned fallback used to
+claim unconditionally, purely by coincidence. The same encoder at 2160p says
+`avc1.640033`, and no `-level` is ever pinned on that branch, so a hardcoded default
+would be right for one picture size and silently wrong for the rest.
+
+**What this still does not answer**
+
+- **No end-to-end lag number for the `webrtc` shape across machines.** The cross-machine
+  session proved the picture moves (decoded frames, canvas non-uniformity, viewer counts
+  agreeing with the sender); it did not reproduce the `mse_latency_probe.py` measurement
+  shape on that link, so §1's "<50 ms" row is still third-party, not ours.
+- **Safari, phone browsers, and true wireless remain unverified** for every shape — the
+  viewer in all of this was Chromium on the Mac over cable.
+- **No real Chromecast / no real old-TV firmware** was ever in these runs (this LAN has
+  neither), so `caststream` and the five DLNA tiers are still self-consistency proofs only.
+- The `browser` shape's **838 ms p50** (§1) was measured on the Mac talking to itself.
+  The Windows source is materially faster per frame (0.21 cores) but that is CPU headroom,
+  not a lag measurement on that link.

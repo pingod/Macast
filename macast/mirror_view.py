@@ -268,9 +268,12 @@ def _mib(value):
     return '{:.1f} MiB'.format(number / 1048576.0)
 
 
-#: The encoder choice, said the way the switch on the page says it. A raw
-#: 'hardware' next to 'VideoToolbox 硬件编码' is the same fact in two languages.
-ENCODER_LABELS = {'hardware': '硬件编码（VideoToolbox）', 'software': '软件编码（x264）'}
+#: The encoder *setting*, said the way the switch on the page says it. Only a
+#: fallback: the card would rather name the encoder the argv actually carries
+#: ('h264_nvenc' here, 'h264_videotoolbox' there), because '硬件编码' next to a
+#: Windows session answers nothing -- and the setting's word for it is not a
+#: platform claim we get to make on the machine's behalf.
+ENCODER_LABELS = {'hardware': '硬件编码', 'software': '软件编码（x264）'}
 
 
 def diagnostics_rows(state):
@@ -300,8 +303,14 @@ def diagnostics_rows(state):
     kind = diag.get('kind') or (state.get('output') or {}).get('kind', '')
     add('投屏方式', current_channel(state).get('label') or kind)
     add('采集', diag.get('capture'))
-    add('编码器', ENCODER_LABELS.get(str(diag.get('encoder') or ''),
-                                    diag.get('encoder')))
+    add('编码器', diag.get('encoder_name')
+        or ENCODER_LABELS.get(str(diag.get('encoder') or ''), diag.get('encoder')))
+    #: The fourcc the encoder wrote into its own avcC box, which is the string
+    #: the browser was handed for addSourceBuffer(). It is here because the
+    #: shipped default ('avc1.640028', High@4.0) is only true of one of the
+    #: shapes: x264 emits Baseline, and a page that plays a black rectangle
+    #: while the card claims High is exactly the disagreement this row removes.
+    add('H.264 Profile', stats.get('codec'))
     if diag.get('bitrate'):
         height = diag.get('height')
         add('目标画质', '{}p · {:.1f} Mbps'.format(height, diag['bitrate'] / 1000000.0)
@@ -352,6 +361,21 @@ def diagnostics_rows(state):
         add('实际送达', _mib(stats.get('delivered')))
     add('分块', stats.get('chunks'))
     add('丢块', stats.get('drops'))
+    # The queue row above is a *capacity*; this one is the occupancy right now.
+    # Both the viewer and the sender need to be readable at once: a full queue
+    # with drops climbing is a congested link, a near-empty one with drops
+    # climbing is a sender that sized its own buffer wrong -- and the second is
+    # the shape the framed queue actually had (8 fragments of a 71-per-second
+    # stream). Same counters as the overlay on the viewing page, by the same
+    # red line that keeps the two from ever disagreeing.
+    if stats.get('queued') is not None:
+        add('队列占用', '{} / {} 块'.format(stats['queued'], diag.get('queue_chunks'))
+            if diag.get('queue_chunks') else '{} 块'.format(stats['queued']))
+    if stats.get('misses'):
+        # A replay a late viewer asked for that the ring could not answer: every
+        # one of these is someone waiting for the next keyframe before their
+        # picture unblurs, which 「丢块」 alone does not say.
+        add('重播等关键帧', '{} 次'.format(stats['misses']))
     if stats.get('seconds') is not None:
         add('已运行', '{} 秒'.format(stats['seconds']))
     if kind == 'caststream':
