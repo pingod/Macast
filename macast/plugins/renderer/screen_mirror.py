@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.19</macast.version>
+# <macast.version>0.20</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -27,8 +27,10 @@
 #     built from a random id, and /browser requires the matching token --
 #     a live mirror is not something to hand to "any host that can reach
 #     this port" (see the note on _StreamHandler and AGENTS.md 4.7);
-#   * capture is platform dispatched: avfoundation (macOS), gdigrab
-#     (Windows), x11grab (Linux/X11). System audio rides along where a tap
+#   * capture is platform dispatched: avfoundation (macOS), ddagrab preferred
+#     with gdigrab behind it (Windows; see the DDAGRAB_* notes for what the
+#     gdigrab path costs on a multi-monitor desk), x11grab (Linux/X11).
+#     System audio rides along where a tap
 #     exists: macOS needs a BlackHole device (no released FFmpeg can see
 #     system audio natively -- the screencapturekit demuxer never shipped),
 #     Windows needs a dshow *loopback* recording device (Stereo Mix where the
@@ -135,7 +137,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.19'
+PLUGIN_VERSION = '0.20'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -1019,13 +1021,21 @@ class _Capture(object):
     """What one probe decided: how to grab this machine's screen, and system
     audio too if a sink for it exists."""
 
-    def __init__(self, label, inputs, audio_map=None, screens=None):
+    def __init__(self, label, inputs, audio_map=None, screens=None,
+                 method=''):
         self.label = label        # for the menu / logs
         self.inputs = inputs      # one list of input args per ffmpeg -i
         self.audio_map = audio_map  # '0:a:0' / '1:a:0' / None
-        #: [(avfoundation index, device name)] for the display picker, empty
-        #: where the platform has no list to offer (Windows/Linux).
+        #: [(index, device name)] for the display picker: avfoundation's screen
+        #: devices on macOS, ddagrab's DXGI outputs on Windows (0.20+), empty
+        #: where the platform has no list to offer (Linux).
         self.screens = screens or []
+        #: How this grab was built: 'ddagrab' / 'gdi' on Windows, '' elsewhere.
+        #: The mirror's runtime fallback keys on it -- ddagrab can refuse a
+        #: display at attach time ("Generic error in an external library" on a
+        #: desktop the DWM will not duplicate), and only this field tells the
+        #: starter thread that the refusal it just watched is that one.
+        self.method = method
 
 
 #: probe results are cached per (ffmpeg, platform): probing spawns ffmpeg, and
@@ -1037,6 +1047,13 @@ _capture_cache = {}
 
 def invalidate_capture_cache():
     _capture_cache.clear()
+    # The ddagrab attach test is cached separately (it spawns one ffmpeg per
+    # output), so it has to be cleared here too or a cursor/screen change would
+    # keep serving the old answer. `_ddagrab_refused` is deliberately NOT
+    # cleared: a display that refused to be duplicated will refuse again in
+    # this process, and forgetting that would send the next session back into
+    # the same multi-second refusal.
+    _ddagrab_cache.clear()
 
 
 def cursor_enabled():
@@ -1598,7 +1615,8 @@ def video_only_capture(capture):
     else:
         # One input per device (PulseAudio's monitor sink): drop that input.
         del inputs[audio_input:audio_input + 1]
-    return _Capture('屏幕 (无系统声音)', inputs, screens=capture.screens)
+    return _Capture('屏幕 (无系统声音)', inputs, screens=capture.screens,
+                    method=capture.method)
 
 
 #: What `ffmpeg -f dshow -list_devices true -i dummy` prints on Windows
@@ -1620,8 +1638,8 @@ def video_only_capture(capture):
 #: listed as either video or audio -- deliberately, because the alternative
 #: (guessing "video") is one bad guess away from being handed to `audio=<name>`
 #: and taking the whole capture down. Nothing in this plugin needs a `(none)`
-#: device: the picture comes from gdigrab, and only an audio tap is looked for
-#: here.
+#: device: the picture comes from ddagrab (or its gdigrab fallback), and only an
+#: audio tap is looked for here.
 _DSHOW_DEVICE = re.compile(r'"([^"]+)"\s*\((video|audio)\)')
 
 #: ffmpeg also prints an `Alternative name` for each device -- an ASCII
@@ -1713,31 +1731,206 @@ def windows_loopback_device(audios):
     return None
 
 
+#: Desktop Duplication (ddagrab) became the preferred Windows picture source in
+#: 0.20, and the reason is measured, not architectural. On a real box (Windows
+#: 11, ffmpeg 8.1.2, two monitors 2560x1440 + 1440x2560 rotated):
+#:
+#:   * gdigrab captures the *virtual desktop* -- 4000x2571 across that pair --
+#:     and an odd height is not something the encoders accept:
+#:     `[libx264] height not divisible by 2 (4000x2571)`, zero bytes, exit
+#:     -542398533. The 原画 profile sends no `-vf`, so on a setup like this the
+#:     Windows 原画 path produced nothing at all, on any quality rung.
+#:   * ddagrab captures one DXGI output at a time, at that output's own even
+#:     size, which is also exactly what the screen picker asks for. Attach is
+#:     cheap: a `-frames:v 1` run into the null muxer, under a second per
+#:     output on the box measured.
+#:   * the audio tap is unchanged -- dshow below still carries Stereo Mix, and
+#:     a ddagrab + dshow pair was measured to mux (AAC, ~0.30 cores at 1440p24,
+#:     first byte 2.0 s).
+#:
+#: The filter is consumed inside the lavfi input string
+#: (`ddagrab=...,hwdownload,format=bgra`), so the `-vf` composition in
+#: `build_ffmpeg_command` / `build_dlna_command` never has to know about it,
+#: and 原画 (no `-vf`) works for the same reason.
+
+#: How many DXGI outputs to try. Four covers everything a desktop machine
+#: plausibly drives, and the probe stops at the first refusal -- outputs
+#: enumerate from 0, and on every machine measured, the first hole is where
+#: the list ends.
+DDAGRAB_MAX_OUTPUTS = 4
+
+#: Attach test results, keyed by ffmpeg path only: the test pins draw_mouse=0
+#: and the frame rate, so the cursor setting does not enter the answer. One
+#: test spawns one ffmpeg per output, and the console must not pay that on
+#: every read; `invalidate_capture_cache()` clears this along with the probe
+#: cache.
+_ddagrab_cache = {}
+
+#: ffmpeg builds whose ddagrab refused the display *at runtime* in this
+#: process. Like `_audio_refused`, this is a latch for the whole run: a display
+#: the DWM will not duplicate will not start duplicating on the next session,
+#: and the only thing re-asking buys is the same stall. Deliberately NOT
+#: cleared by `invalidate_capture_cache()` -- see there.
+_ddagrab_refused = set()
+
+#: Attach either answers quickly or it is not going to answer; measured runs
+#: were all under a second. A wedged desktop-duplication call must not hold the
+#: probe hostage -- the settings page reads through `probe_capture`.
+DDAGRAB_ATTACH_TIMEOUT = 10.0
+
+#: The dimensions out of the one line a successful attach prints:
+#:   Stream #0:0: Video: wrapped_avframe, bgra, 2560x1440 [SAR 1:1 DAR 16:9]...
+#: `wrapped_avframe` appears twice in that log (input and null output) and both
+#: carry the same WxH, so the first match is the answer.
+_DDAGRAB_SIZE = re.compile(r'wrapped_avframe[^\n]*?(\d{3,5})x(\d{3,5})')
+
+#: What a refused output prints (verbatim, ffmpeg 8.1.2, output 2 of 2):
+#:
+#:   [Parsed_ddagrab_0 @ ...] Failed to enumerate DXGI output 2
+#:   [Parsed_ddagrab_0 @ ...] Failed to configure output pad on Parsed_ddagrab_0
+#:   [in#0 @ ...] Error opening input: Generic error in an external library
+#:   Error opening input file ddagrab=output_idx=2:...
+#:
+#: The `Error opening input file ddagrab=` line is the anchor -- ffmpeg's own
+#: verdict, and it names the filter -- while the Parsed_ddagrab tag lines catch
+#: a refusal that words itself differently.
+_DDAGRAB_FAILURE = re.compile(
+    r'Error opening input file ddagrab='
+    r'|\[Parsed_ddagrab_\d+ @ \w+\] (?:Failed|Error)')
+
+
+def _ddagrab_attach_test(ffmpeg, index):
+    """One output's attach answer: 'WxH', '' (size unknown), or None (refused).
+
+    Runs the real filter against the real output for exactly one frame: a
+    successful attach prints the stream line with the dimensions, a refusal
+    exits non-zero with the DXGI complaint. The timeout is here because this
+    is reached from the settings page through `probe_capture` -- a wedged
+    duplication call would otherwise hold the whole console.
+    """
+    command = [ffmpeg, '-hide_banner', '-loglevel', 'info', '-nostdin',
+               '-f', 'lavfi', '-i',
+               'ddagrab=output_idx={}:framerate={}:draw_mouse=0'
+               ',hwdownload,format=bgra'.format(index, FPS),
+               '-frames:v', '1', '-f', 'null', '-']
+    try:
+        proc = subprocess.run(command, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                              timeout=DDAGRAB_ATTACH_TIMEOUT)
+    except Exception as e:
+        logger.info('ddagrab attach test for output %s did not run: %s',
+                    index, e)
+        return None
+    text = _dshow_text(proc.stderr)
+    if proc.returncode != 0:
+        for line in text.splitlines():
+            if _DDAGRAB_FAILURE.search(line):
+                logger.info('ddagrab output %s: %s', index, line.strip())
+                break
+        else:
+            logger.info('ddagrab attach test for output %s exited %s',
+                        index, proc.returncode)
+        return None
+    match = _DDAGRAB_SIZE.search(text)
+    size = '{}x{}'.format(match.group(1), match.group(2)) if match else ''
+    logger.info('ddagrab output %s attaches at %s', index, size or 'unknown')
+    return size
+
+
+def _ddagrab_outputs(ffmpeg):
+    """[(output index, 'WxH')] for every DXGI output ddagrab can attach to.
+
+    Empty when the build has no ddagrab filter or output 0 refuses. Cached per
+    ffmpeg path because each entry costs one spawned ffmpeg.
+    """
+    if ffmpeg in _ddagrab_cache:
+        return _ddagrab_cache[ffmpeg]
+    outputs = []
+    for index in range(DDAGRAB_MAX_OUTPUTS):
+        size = _ddagrab_attach_test(ffmpeg, index)
+        if size is None:
+            break
+        outputs.append((index, size))
+    _ddagrab_cache[ffmpeg] = outputs
+    return outputs
+
+
+def _ddagrab_refusal(proc, tail, drain):
+    """Whether a dead ddagrab session died of the display refusing to attach.
+
+    Only meaningful once the encoder process is gone: a running process has
+    not refused anything (a slow start is the audio rung's territory). The
+    stderr reader is a separate thread, so its tail can lag the process exit
+    by a moment -- joining it is what makes the verdict about the dead
+    process rather than about how fast the reader was.
+    """
+    if proc.poll() is None:
+        return False
+    if drain is not None:
+        drain.join(timeout=1.0)
+    return bool(_DDAGRAB_FAILURE.search('\n'.join(tail)))
+
+
 def _probe_windows(ffmpeg, cursor=True):
-    """gdigrab for the picture, plus a loopback tap for the sound if one exists.
+    """Desktop Duplication for the picture, plus a loopback tap for the sound.
 
     Unlike macOS there is no driver to install for us to trigger: either the
     machine already has a device that carries the output (Stereo Mix, or a
     virtual cable someone installed), or the mirror is video only and the
     console says which device to switch on. That is why this probe asks dshow
     once and never tries to make a device appear.
+
+    gdigrab is the fallback, and it is not the safer choice: whole-virtual-
+    desktop capture can have an odd height, and an odd height is a zero-byte
+    encode (see the DDAGRAB_* notes above). `_ddagrab_refused` skips the
+    enquiry entirely after a runtime refusal: the display has already answered.
     """
+    draw = '1' if cursor else '0'
+    outputs = [] if ffmpeg in _ddagrab_refused else _ddagrab_outputs(ffmpeg)
+    if outputs:
+        wanted = str(Setting.get(SettingProperty.Mirror_Screen, '') or '')
+        index = outputs[0][0]
+        if wanted.isdigit():
+            for output, _size in outputs:
+                if str(output) == wanted:
+                    index = output
+                    break
+            else:
+                logger.warning("screen %s is gone, falling back to %s",
+                               wanted, index)
+        source = ['-f', 'lavfi', '-i',
+                  'ddagrab=output_idx={}:framerate={}:draw_mouse={}'
+                  ',hwdownload,format=bgra'.format(index, FPS, draw)]
+        screens = [(output, size or '输出 {}'.format(output + 1))
+                   for output, size in outputs]
+        _videos, audios = _dshow_lists(ffmpeg)
+        device = windows_loopback_device(audios)
+        if device is None:
+            return _Capture('屏幕 (Desktop Duplication)', [source],
+                            screens=screens, method='ddagrab')
+        return _Capture(
+            '屏幕 (Desktop Duplication) + 系统声音 ({})'.format(device),
+            [source,
+             # The name, not the ASCII identifier ffmpeg prints under it: handing
+             # ffmpeg `audio=@device_cm_{...}\wave_{...}` was measured on the real
+             # box -- ffmpeg 8.1.2 answers `Error opening input file` and the tap
+             # delivers nothing, while the name (once decoded correctly, see
+             # `_dshow_text`) gives a first frame in 1.4 s.
+             ['-f', 'dshow', '-i', 'audio={}'.format(device)]],
+            audio_map='1:a:0', screens=screens, method='ddagrab')
     base = ['-f', 'gdigrab', '-framerate', str(FPS),
-            '-draw_mouse', '1' if cursor else '0']
+            '-draw_mouse', draw]
     _videos, audios = _dshow_lists(ffmpeg)
     device = windows_loopback_device(audios)
     if device is None:
-        return _Capture('Desktop (GDI)', [base + ['-i', 'desktop']])
+        return _Capture('Desktop (GDI)', [base + ['-i', 'desktop']],
+                        method='gdi')
     return _Capture(
         '屏幕 (GDI) + 系统声音 ({})'.format(device),
         [base + ['-i', 'desktop'],
-         # The name, not the ASCII identifier ffmpeg prints under it: handing
-         # ffmpeg `audio=@device_cm_{...}\wave_{...}` was measured on the real
-         # box -- ffmpeg 8.1.2 answers `Error opening input file` and the tap
-         # delivers nothing, while the name (once decoded correctly, see
-         # `_dshow_text`) gives a first frame in 1.4 s.
+         # (Same name-not-identifier rule as above.)
          ['-f', 'dshow', '-i', 'audio={}'.format(device)]],
-        audio_map='1:a:0')
+        audio_map='1:a:0', method='gdi')
 
 
 def _default_pulse_monitor():
@@ -2059,7 +2252,7 @@ def capture_unavailable_hint():
     if sys.platform == 'darwin':
         return 'ffmpeg 没有列出任何屏幕采集设备（avfoundation）'
     if sys.platform == 'win32':
-        return '这个 ffmpeg 构建不支持 gdigrab'
+        return '这个 ffmpeg 构建既没有 ddagrab 也没有 gdigrab，无法采集桌面'
     #: Derived, not written out: this sentence used to say「三种目标」and stayed
     #: saying it for two releases after the fourth target shipped, which is the
     #: failure mode a count in prose always has -- nobody re-reads it when they
@@ -7409,6 +7602,16 @@ class _RetryVideoOnly(Exception):
     attempt and start a video-only one, without calling it a failure."""
 
 
+class _RetryCapture(Exception):
+    """ddagrab refused the display before producing a frame: latch it and
+    start again on the gdigrab fallback, without calling it a failure.
+
+    Distinct from `_RetryVideoOnly` because the *capture source* changes, not
+    the audio: the retry keeps whatever audio the probe found, and the latch
+    (`_ddagrab_refused`) keeps every later session of this run off ddagrab.
+    """
+
+
 class ScreenMirrorRenderer(Renderer):
 
     #: Told to `MacastPluginManager` that this plugin owns the desktop console:
@@ -7452,6 +7655,12 @@ class ScreenMirrorRenderer(Renderer):
         #: this run. The answer does not change between sessions, and asking
         #: again costs the viewer seconds of black before the picture starts.
         self._audio_refused = False
+        #: The capture source the running attempt was built on ('ddagrab' /
+        #: 'gdi' on Windows, '' elsewhere). Read by `_encoder_died`: a ddagrab
+        #: session that died before its first byte is a refusal the starter
+        #: thread is about to answer (gdigrab fallback, or a considered
+        #: failure), and the pump must not race it with a「启动失败」of its own.
+        self._capture_method = ''
         #: Which compatibility shape *this run* is on, when the watchdog moved
         #: it, and how many moves it has spent. Both belong to the run rather
         #: than to the setting: `Mirror_Dlna_Profile` is the user's choice, and
@@ -7757,13 +7966,18 @@ class ScreenMirrorRenderer(Renderer):
                 no_frame_budget())
         try:
             while self._run_mirror(generation, with_audio):
-                # The video-only attempt is a new session, not a second half of
-                # this one: `_run_mirror` has already retired the generation
-                # that failed, so pick the new number up before it is taken.
+                # The retry is a new session, not a second half of this one:
+                # `_run_mirror` has already retired the generation that failed,
+                # so pick the new number up before it is taken. What the retry
+                # gives up lives on the renderer's latches -- `_audio_refused`
+                # here, `_ddagrab_refused` inside the probe -- which is why the
+                # audio answer is read back instead of nailed to False: a
+                # ddagrab refusal must not silently cost the sound on its way
+                # to the gdigrab fallback.
                 with self._lock:
                     generation = self._generation
                     self._starting = True
-                with_audio = False
+                with_audio = not self._audio_refused
         finally:
             with self._lock:
                 # A newer generation owns the flag now; it clears its own.
@@ -7865,14 +8079,21 @@ class ScreenMirrorRenderer(Renderer):
                 self._sink = stream
                 self._kind = kind
                 self._diag = diagnostics
+                # Which grab this attempt runs on. `_encoder_died` reads it
+                # to know whose death it is looking at; see the field comment.
+                self._capture_method = capture.method
                 handed = True
             threading.Thread(
                 target=_pump,
                 args=(proc, server.broadcaster if stream is None else stream,
                       self, generation, first_bytes),
                 daemon=True, name="SCREEN_MIRROR_PUMP").start()
-            threading.Thread(target=_drain_stderr, args=(proc, tail),
-                             daemon=True, name="SCREEN_MIRROR_LOG").start()
+            # The handle is kept: `_ddagrab_refusal` joins this reader before
+            # reading `tail`, so the verdict about a dead process is not a
+            # verdict about how fast the reader was.
+            drain = threading.Thread(target=_drain_stderr, args=(proc, tail),
+                                     daemon=True, name="SCREEN_MIRROR_LOG")
+            drain.start()
             url = ('' if stream is not None else
                    dlna_stream_url(server, _url_host(control))
                    if kind == 'dlna' else stream_url(server))
@@ -7880,19 +8101,65 @@ class ScreenMirrorRenderer(Renderer):
                 stream.start()
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
-            # reporting that while we wait.
+            # reporting that while we wait. A process that dies calls the wait
+            # off early -- the refusal that matters on Windows (ddagrab) is an
+            # exit, not a timeout, and waiting out the full budget beside a
+            # corpse would add that whole budget to every fallback.
             budget = no_frame_budget()
-            first_bytes.wait(timeout=budget)
+            started_wait = time.time()
+            deadline = started_wait + budget
+            while not first_bytes.is_set():
+                if proc.poll() is not None or generation != self._generation:
+                    break
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                first_bytes.wait(timeout=min(0.25, remaining))
             if not first_bytes.is_set():
                 detail = '；'.join(list(tail)[-3:])
+                if generation != self._generation:
+                    # The wait was cancelled by a stop or a newer start:
+                    # whoever moved the generation owns the cleanup, and a
+                    # retry from here would race it. This used to raise a
+                    # spurious `_RetryVideoOnly` in exactly this window.
+                    if proc.poll() is None:
+                        proc.terminate()
+                    raise _Aborted()
+                if capture.method == 'ddagrab' \
+                        and _ddagrab_refusal(proc, tail, drain):
+                    # The DWM refused to duplicate this display: attach tests
+                    # pass (a fresh session opens the duplication fine), the
+                    # long-running one dies on it. Latch the build, re-probe
+                    # (which now answers gdigrab) and take the attempt again --
+                    # with the same audio: this failure has nothing to do with
+                    # it. The latch is set here, before `_RetryCapture` unwinds
+                    # to the starter: the re-probe the retry performs is what
+                    # must not ask ddagrab again, and it reads the latch --
+                    # without it the probe re-asks, ddagrab refuses again, and
+                    # the loop never ends.
+                    logger.warning(
+                        'ddagrab refused the display at runtime (%s);'
+                        ' retrying with gdigrab',
+                        detail or 'no stderr from ffmpeg')
+                    with self._lock:
+                        # Retire the generation before the process dies, or
+                        # the pump reports our own kill as an interruption.
+                        self._generation += 1
+                        _ddagrab_refused.add(ffmpeg)
+                        invalidate_capture_cache()
+                    raise _RetryCapture()
                 if with_audio and capture.audio_map and kind != 'caststream':
                     # An audio tap this process may not read -- no microphone
                     # grant, or a BlackHole nothing is clocking -- does not
                     # complain: the session opens and delivers nothing, video
                     # included. Give up the sound rather than the mirror.
+                    # The seconds reported are the ones actually waited: since
+                    # the wait ends early on a dead process, quoting the whole
+                    # budget here would be a deadline restated as an event.
                     logger.warning(
-                        'capture with system audio returned no frame in %g s'
-                        ' (%s); retrying video only', budget,
+                        'capture with system audio returned no frame in %.1f s'
+                        ' (%s); retrying video only',
+                        time.time() - started_wait,
                         detail or 'no stderr from ffmpeg')
                     # Retire the generation before the process dies, or the
                     # pump reports our own kill as an interruption.
@@ -7938,9 +8205,10 @@ class ScreenMirrorRenderer(Renderer):
                 _cleanup(None, None, None, stream)
             self._teardown()
             return
-        except _RetryVideoOnly:
-            # Not a failure, so nothing goes on the status line: the video-only
-            # attempt is already under way and will report its own outcome.
+        except (_RetryVideoOnly, _RetryCapture):
+            # Not a failure, so nothing goes on the status line: the next
+            # attempt -- video only, or gdigrab after a ddagrab refusal -- is
+            # already under way and will report its own outcome.
             self._teardown()
             return True
         except Exception as e:
@@ -8310,11 +8578,27 @@ class ScreenMirrorRenderer(Renderer):
             self._sender = sender
         logger.info('cast %s to %s (%s:%s)', url, name, host, port)
 
-    def _encoder_died(self, generation, proc, started_at):
-        """ffmpeg exited while we still wanted it running."""
+    def _encoder_died(self, generation, proc, started_at, produced=True):
+        """ffmpeg exited while we still wanted it running.
+
+        `produced` is whether any encoder output had arrived. A ddagrab
+        session that died before its first byte is answered by the starter
+        thread -- gdigrab fallback, or a failure sentence that carries
+        ffmpeg's own last words -- so reporting it here as well would race
+        that. And a「启动失败」that is about to turn into a working fallback is
+        a lie the user reads just before the picture that was already coming.
+        Every other death, on every other capture, is reported here exactly as
+        before.
+        """
         with self._lock:
             if generation != self._generation:
                 return
+            method = self._capture_method
+        if method == 'ddagrab' and not produced:
+            logger.info('ffmpeg (ddagrab) exited before its first frame'
+                        ' (code %s); the capture starter owns this verdict',
+                        proc.poll())
+            return
         code = proc.poll()
         if time.time() - started_at < EARLY_DEATH_SECONDS:
             hint = ('：若是首次使用，{}，勾选后重启 Macast'.format(PERMISSION_DOOR)
@@ -8405,7 +8689,7 @@ def _pump(proc, broadcaster, owner, generation, first_bytes):
         except OSError:
             pass
     proc.wait()
-    owner._encoder_died(generation, proc, started)
+    owner._encoder_died(generation, proc, started, first_bytes.is_set())
 
 
 def _clean_env():

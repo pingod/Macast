@@ -99,13 +99,17 @@ env -u PYTHONPATH python3 scripts/check_index_reachability.py   # 退出码 0/2/
 - **Screen Mirror**：「电脑投屏」页签的「投屏方式」先选一类，再点「开始镜像」。链路是 ffmpeg 屏幕采集 →
   H.264/MPEG-2 → 插件内的 HTTP 服务持续输出实时流。三类目标只是**封装不同**：
   **Chromecast / Google TV** 走 `video/mp2t`（MPEG-TS）+ Cast `LOAD streamType=LIVE`；
-  **浏览器**走分片 MP4（`frag_keyframe+empty_moov+default_base_moof`），镜像开始时页签的
-  「观看地址」会给出 `http://<本机>:<端口>/browser?token=…`，局域网里任何浏览器打开即看（MSE 播，
-  不支持 MSE 的会退回渐进式下载）。关键帧节奏就是分片节奏（每秒一个），所以后加入的观看端
-  能立刻接上。采集按平台分派：macOS `avfoundation`、Windows `gdigrab`、Linux `x11grab`
-  （**只认 X11 会话**，纯 Wayland 会明确报出来）。
-  **v0.4 的采集选项**（都在「采集」卡片里，改完对下一次镜像生效）：多显示器选择（探针缓存里那台机器
-  列出的 `Capture screen N`，插拔后自动回落到默认屏而不是报错）、画质四档 `360p / 720p（默认）/
+  **浏览器**走分片 MP4（`frag_every_frame+empty_moov+default_base_moof`，v0.19 起每帧一片），
+  镜像开始时页签的「观看地址」会给出 `http://<本机>:<端口>/browser?token=…`，局域网里任何
+  浏览器打开即看（MSE 播，不支持 MSE 的会退回渐进式下载）。分片是每帧一片（约 41.7 毫秒），
+  迟到的观看端从环形缓冲里最近的可重播关键帧处开始重播。采集按平台分派：macOS `avfoundation`、
+  Windows `ddagrab`（Desktop Duplication，v0.20 起；每块 DXGI 输出按自己的尺寸采 —— gdigrab
+  抓的是整块虚拟桌面，多显示器时可能是个奇数高度、编码器直接零字节退出；运行时被桌面拒绝就
+  回落 `gdigrab` 并在本次运行内闩住）、Linux `x11grab`（**只认 X11 会话**，纯 Wayland 会明确报出来）。
+  **v0.4 的采集选项**（都在「采集」卡片里；v0.10 起改任何一项都会重启正在跑的镜像，菜单时代的
+  「下次镜像生效」已作废）：多显示器选择（探针缓存里那台机器列出的屏幕 —— macOS 是
+  `Capture screen N`，Windows v0.20 起是 DXGI 输出索引并附实测尺寸；插拔后自动回落到
+  默认屏并说明，而不是报错）、画质四档 `360p / 720p（默认）/
   1080p / 原始分辨率`、是否画鼠标指针、以及 macOS 上的**硬件编码（VideoToolbox）**开关
   —— 开关会先真的去问这个 ffmpeg 认不认识 `h264_videotoolbox`（问一次缓存一次，页面每秒读状态
   也不 spawn ffmpeg），机器上没这个编码口时就直接拒绝。镜像期间用 `caffeinate` 阻止 Mac 休眠，

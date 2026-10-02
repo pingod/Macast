@@ -404,7 +404,7 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
 
 ### 3.1 为什么镜像只做一个插件（而不是「Cast 插件 / DLNA 插件 / 浏览器插件」三个）
 
-因为**采集与系统音频那 600 行只有一份**：avfoundation/gdigrab/x11grab 探测、BlackHole 探测与
+因为**采集与系统音频那 600 行只有一份**：avfoundation、Windows 的 ddagrab+gdigrab、x11grab 探测、BlackHole 探测与
 CoreAudio 聚合设备、`_Broadcaster` 扇出、ffmpeg 进程监工与 generation 判定。
 拆成三个单文件插件（内置插件必须单文件，见 AGENTS.md §4.8）= 复制三份同样的坑，且**渲染器互斥**
 （§0 硬约束 2）意味着用户装三个也只能用一个。

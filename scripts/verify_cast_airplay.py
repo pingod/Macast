@@ -4284,6 +4284,16 @@ case "$*" in
       '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
+  *ddagrab*)
+    # This fake is an avfoundation/dshow one; it has never seen a DXGI output,
+    # so it answers the attach test the way the real box refuses output 2
+    # (the first line is verbatim from that run). Fast and non-zero, because
+    # the probe must fall through to gdigrab without paying the attach timeout
+    # -- and the ddagrab-first path itself is Part 54's to prove.
+    printf '%s\n' \
+      '[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output 0'
+    exit 2
+    ;;
 esac
 while true; do
   head -c 8192 /dev/zero | tr '\0' 'T'
@@ -4346,11 +4356,14 @@ done
         #    argument is the seam, nothing about this process changes) ------
         cap_win21 = mirror.probe_capture(fake_ffmpeg21, 'win32')
         _cmd_win21 = mirror.build_ffmpeg_command(fake_ffmpeg21, cap_win21, 720, 5000000)
-        # This fake answers the avfoundation shape, so the dshow device table
-        # comes back empty and Windows is the video-only case -- the audio half
-        # needs a device that carries the output, and Part 39 feeds the parser
-        # a real dshow listing to prove it turns on when one is there.
-        check("windows dispatches to gdigrab, video only with no loopback device",
+        # This fake answers the avfoundation shape and refuses ddagrab (a
+        # headless/RDP session looks exactly like that), so the dshow device
+        # table comes back empty and Windows is the video-only case -- the
+        # audio half needs a device that carries the output, and Part 39 feeds
+        # the parser a real dshow listing to prove it turns on when one is
+        # there. The ddagrab-first path itself is Part 54's.
+        check("windows falls back to gdigrab when ddagrab refuses, video only"
+              " with no loopback device",
               'gdigrab' in _cmd_win21 and '-an' in _cmd_win21, str(_cmd_win21))
 
         _saved_disp21 = os.environ.pop('DISPLAY', None)
@@ -12369,20 +12382,33 @@ exit 1
         # -- and the fixtures that hid it -----------------------------------
         # A parser bug that its own tests agree with is a fixture bug. The
         # fictional form had one unmistakable mark: a device name in quotes with
-        # no avfoundation index in front of it. Real ffmpeg does quote some
-        # names, always alongside `[N]`, so the index is what decides.
+        # no avfoundation index in front of it. Real avfoundation output quotes
+        # some names, always alongside `[N]`, so *there* the index decides.
+        # The rule is scoped to blocks that claim to be an avfoundation listing
+        # (`AVFoundation` or the fictional form's own `Video devices:` marker):
+        # dshow -- Windows -- quotes every name with no index at all, which is
+        # exactly what the box's real ffmpeg printed (the Part 54 fakes carry
+        # that table verbatim), so flagging those would red a fixture whose
+        # only fault is being true. `scanned` keeps the skipping honest:
+        # zero avfoundation blocks would make this check pass by vacuum.
         with open(os.path.abspath(__file__), encoding="utf-8") as _fh31:
             _self31 = _fh31.read()
         _fictional31 = []
+        _scanned31 = 0
         for _block31 in _self31.split('*list_devices*)')[1:]:
-            for _line in _block31.split('exit 0')[0].splitlines():
-                if '"' not in _line:
+            _head31 = _block31.split('exit 0')[0]
+            if 'AVFoundation' not in _head31 and 'Video devices:' not in _head31:
+                continue
+            _scanned31 += 1
+            for _line31 in _head31.splitlines():
+                if '"' not in _line31:
                     continue
-                if _re31.search(r'\[\s*\d+\s*\]|\d+\s*\)', _line):
+                if _re31.search(r'\[\s*\d+\s*\]|\d+\s*\)', _line31):
                     continue
-                _fictional31.append(_line.strip())
+                _fictional31.append(_line31.strip())
         check("no fake ffmpeg in this suite answers -list_devices in the invented shape",
-              not _fictional31, str(_fictional31))
+              not _fictional31 and _scanned31 >= 4,
+              '%s / scanned %d' % (_fictional31, _scanned31))
     finally:
         utils.SETTING_DIR = _saved_dir31
         utils.Setting.setting, utils.Setting.setting_path = _saved_setting31
@@ -15227,6 +15253,10 @@ case "$*" in
       '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
     ;;
+  *ddagrab*)
+    printf '%s\n' '[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output 0'
+    exit 2
+    ;;
 esac
 while true; do
   head -c 8192 /dev/zero | tr '\0' 'T'
@@ -15241,6 +15271,10 @@ case "$*" in
       '[dshow @ 0x1] "麦克风阵列 (Realtek(R) Audio)" (audio)' \
       '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
+    ;;
+  *ddagrab*)
+    printf '%s\n' '[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output 0'
+    exit 2
     ;;
 esac
 while true; do
@@ -15257,7 +15291,8 @@ done
           and 'Stereo Mix (Realtek(R) Audio)' in _cap39.label
           and '-c:a' in _cmd39 and 'aac' in _cmd39 and '-an' not in _cmd39,
           '%s / %s' % (_cap39.label, _cmd39))
-    check("the sound is a second input, and the picture stays gdigrab",
+    check("the sound is a second input, and the refused ddagrab falls back"
+          " to a gdigrab picture",
           len(_cap39.inputs) == 2
           and _cap39.inputs[0][:2] == ['-f', 'gdigrab']
           and _cap39.inputs[1][:3] == ['-f', 'dshow', '-i']
@@ -15322,6 +15357,10 @@ case "$*" in
       '[in#0 @ 0x1]   Alternative name "@device_cm_{33D9A762}\wave_{BD7FE901}"' \
       '[in#0 @ 0x1] Error opening input: Input/output error'
     exit 0
+    ;;
+  *ddagrab*)
+    printf '%s\n' '[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output 0'
+    exit 2
     ;;
 esac
 while true; do
@@ -19491,6 +19530,433 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved53[0], _saved53[1]
     utils.SETTING_DIR = _saved53[2]
     _shutil.rmtree(_tmp53, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# Part 54: the Windows picture moves off gdigrab (v0.20)
+#
+# gdigrab captures the *virtual desktop*, and on the real two-monitor box this
+# was measured on (2560x1440 + 1440x2560) that is 4000x2571 -- an odd height,
+# which no encoder accepts: `[libx264] height not divisible by 2 (4000x2571)`,
+# zero bytes, exit -542398533, on every quality rung (原画 sends no `-vf`, so
+# there was nothing there to save it). ddagrab captures one DXGI output at its
+# own even size, which is also exactly what the screen picker asks for, and
+# the attach question -- "can this build open output N?" -- is answered by
+# running the real filter for one frame into the null muxer: under a second
+# per output on the box measured, and a refusal is an exit, not a hang.
+#
+# What the cases below pin, in the order the product decides:
+#
+#   * the attach walk answers per output and STOPS at the first refusal --
+#     walking past a hole would invent outputs the machine does not have;
+#   * the attach answer is cached per ffmpeg (the console reads through
+#     `probe_capture` every second; one spawned ffmpeg per output per poll is
+#     not a budget this page has) and `invalidate_capture_cache()` clears it
+#     with a cursor/screen change -- but the runtime-refusal latch is
+#     deliberately NOT cleared: a display the DWM refused stays refused for
+#     the whole process, and re-asking buys only the same stall;
+#   * the filter rides inside the lavfi `-i` argument
+#     (`ddagrab=...,hwdownload,format=bgra`), which is why none of the `-vf`
+#     composition points in build_ffmpeg_command had to learn about it;
+#   * a refusal at runtime (attach passed, the long session dies) costs one
+#     warning and one re-probe, NOT the no-frame budget: the starter notices
+#     the dead process immediately and the retry comes up on gdigrab with the
+#     sound still on. The pump's own death report is deferred to the starter
+#     -- `_encoder_died` knows `_capture_method` -- and without that deferral
+#     the race turns a working fallback into a spurious「启动失败」the user
+#     reads just before the picture that was already coming.
+#
+# The fakes print what the real box printed: the attach success body is
+# ffmpeg 8.1.2's one-frame transcript (both of the box's outputs measured at
+# 2560x1440 -- the attach report does not mirror DISPLAY2's rotated
+# geometry), a refusal is the verbatim five-line exit for output 2 of 2, and
+# the dshow device table is the box's own `-list_devices` answer with the
+# devices this part does not need elided (every remaining line verbatim,
+# including the `[in#0 @ ...]` prefix and the Alternative-name rows -- a
+# Windows listing quotes its names with no index, which is why Part 31's
+# avfoundation-shaped scan is scoped away from these blocks).
+# Only the index and draw_mouse fields are filled with what was actually
+# asked, the way a real ffmpeg echoes its own argv; nothing here parses those
+# two echo lines, only ffmpeg's own `Error opening input file ddagrab=` line
+# and the stream line's `WxH`.
+#
+# Eight single-line mutants were run against the full suite on 2026-10-02,
+# each restored byte-for-byte afterwards (md5-checked): walking past the first
+# refusal, blinding the refusal regex, dropping the runtime latch, forgetting
+# the attach cache on invalidate, ignoring the stored screen number, losing
+# the method in the no-sound rewrite, removing the starter's dead-process
+# exit, silencing the pump's deferral. Each reddens only the cases that read
+# through the line it broke -- 3 / 3 / 3 / 1 / 2 / 1 / 1 / 1 non-Part-34
+# reds, fifteen in total, none outside this Part.
+# --------------------------------------------------------------------------
+print("\n=== Part 54: the Windows picture moves off gdigrab ===")
+import traceback as _traceback54
+import logging as _logging54
+import re as _re54
+
+_tmp54 = _tempfile.mkdtemp(prefix="macast-dda54-")
+_saved54 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+try:
+    utils.SETTING_DIR = _tmp54
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp54, "macast_setting.json")
+    m54 = _load_plugin("screen_mirror_plugin_v54", "screen_mirror.py")
+    _bin54 = os.path.join(_tmp54, "bin")
+
+    # Every case below is a Windows case, wherever this suite runs: pin the
+    # seam the module reads (the same trick the Windows parts above use).
+    _saved_platform54 = m54.sys.platform
+    m54.sys.platform = 'win32'
+
+    class _Grab54(_logging54.Handler):
+        def __init__(self):
+            _logging54.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append((record.levelno, record.getMessage()))
+
+    _grab54 = _Grab54()
+    _lg54 = _logging54.getLogger(m54.logger.name)
+    _lg54.addHandler(_grab54)
+    _lvl54 = _lg54.level
+    _lg54.setLevel(_logging54.DEBUG)
+
+    _recA54 = os.path.join(_tmp54, "receiptA")
+    _recB54 = os.path.join(_tmp54, "receiptB")
+
+    def _lines54(path):
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            return [ln for ln in handle.read().splitlines() if ln.strip()]
+
+    def _attach54(path):
+        return [ln for ln in _lines54(path) if '-frames:v 1 -f null' in ln]
+
+    def _idx54(line):
+        found = _re54.search(r'output_idx=(\d+)', line)
+        return int(found.group(1)) if found else -1
+
+    # Fake A: both of the measured outputs attach; anything from 2 on refuses
+    # the way the box refused output 2. A one-frame run succeeds, while a
+    # long-running duplication session dies immediately -- that asymmetry is
+    # the measured phenomenon this whole part is about (a fresh attach test
+    # and a dead session, minutes apart, same machine).
+    _fakeA54 = _write_fake(_bin54, "ffmpeg54a", r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[in#0 @ 00000000007b2680] "Smart Connect Camera" (video)' \
+      '[in#0 @ 00000000007b2680]   Alternative name "@device_pnp_\\?\root#camera#0000#{65e8773d-8f56-11d0-a3b9-00a0c9223196}\global"' \
+      '[in#0 @ 00000000007b2680] "OBS Virtual Camera" (none)' \
+      '[in#0 @ 00000000007b2680] "麦克风 (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 00000000007b2680] "立体声混音 (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 00000000007b2680]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{BD7FE901-89C0-4961-8324-D8A9C1CC634D}"' \
+      'Error opening input file dummy.' >&2
+    exit 0
+    ;;
+  *"-frames:v 1 -f null"*)
+    idx=$(printf '%s\n' "$*" | sed -n 's/.*output_idx=\([0-9][0-9]*\).*/\1/p')
+    draw=$(printf '%s\n' "$*" | sed -n 's/.*draw_mouse=\([0-9][0-9]*\).*/\1/p')
+    case "$idx" in
+      0|1)
+        printf '%s\n' \
+          "Input #0, lavfi, from 'ddagrab=output_idx=$idx:framerate=24:draw_mouse=$draw,hwdownload,format=bgra':" \
+          '  Duration: N/A, start: 0.000000, bitrate: N/A' \
+          '  Stream #0:0: Video: wrapped_avframe, bgra, 2560x1440 [SAR 1:1 DAR 16:9], 24 fps, 24 tbr, 1000k tbn' \
+          'Stream mapping:' \
+          '  Stream #0:0 -> #0:0 (wrapped_avframe (native) -> wrapped_avframe (native))' \
+          'Press [q] to stop, [?] for help' \
+          "Output #0, null, to 'pipe:'" \
+          '  Metadata:' \
+          '    encoder         : Lavf62.12.102' \
+          '  Stream #0:0: Video: wrapped_avframe, bgra(pc, gbr/bt709/iec61966-2-1, progressive), 2560x1440 [SAR 1:1 DAR 16:9], q=2-31, 200 kb/s, 24 fps, 24 tbn' \
+          '    Metadata:' \
+          '      encoder         : Lavc62.28.102 wrapped_avframe' \
+          '[out#0/null @ 0000000049d3d180] video:0KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown' \
+          'frame=    1 fps=0.0 q=-0.0 Lsize=N/A time=00:00:00.04 bitrate=N/A speed=1.05x elapsed=0:00:00.03    ' >&2
+        exit 0
+        ;;
+      *)
+        printf '%s\n' \
+          "[Parsed_ddagrab_0 @ 00000000007a8d40] Failed to enumerate DXGI output $idx" \
+          '[Parsed_ddagrab_0 @ 00000000007a8d40] Failed to configure output pad on Parsed_ddagrab_0' \
+          '[in#0 @ 0000000000789140] Error opening input: Generic error in an external library' \
+          "Error opening input file ddagrab=output_idx=$idx:framerate=24:draw_mouse=$draw,hwdownload,format=bgra." \
+          'Error opening input files: Generic error in an external library' >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *ddagrab*)
+    idx=$(printf '%s\n' "$*" | sed -n 's/.*output_idx=\([0-9][0-9]*\).*/\1/p')
+    draw=$(printf '%s\n' "$*" | sed -n 's/.*draw_mouse=\([0-9][0-9]*\).*/\1/p')
+    printf '%s\n' \
+      "[Parsed_ddagrab_0 @ 00000000007a8d40] Failed to enumerate DXGI output $idx" \
+      '[Parsed_ddagrab_0 @ 00000000007a8d40] Failed to configure output pad on Parsed_ddagrab_0' \
+      '[in#0 @ 0000000000789140] Error opening input: Generic error in an external library' \
+      "Error opening input file ddagrab=output_idx=$idx:framerate=24:draw_mouse=$draw,hwdownload,format=bgra." \
+      'Error opening input files: Generic error in an external library' >&2
+    exit 2
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""".replace("@RECEIPT@", _recA54))
+
+    # Fake B: refuses at output 0 -- the machine whose ddagrab cannot attach
+    # anywhere, which must degrade to gdigrab after exactly one enquiry.
+    _fakeB54 = _write_fake(_bin54, "ffmpeg54b", r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+  *list_devices*)
+    printf '%s\n' \
+      '[in#0 @ 00000000007b2680] "OBS Virtual Camera" (none)' \
+      '[in#0 @ 00000000007b2680] "麦克风 (Realtek(R) Audio)" (audio)' \
+      '[in#0 @ 00000000007b2680]   Alternative name "@device_cm_{33D9A762-90C8-11D0-BD43-00A0C911CE86}\wave_{965FC79E-DC31-4CFD-86F0-7C2E01B067EB}"' \
+      'Error opening input file dummy.' >&2
+    exit 0
+    ;;
+  *ddagrab*)
+    idx=$(printf '%s\n' "$*" | sed -n 's/.*output_idx=\([0-9][0-9]*\).*/\1/p')
+    printf '%s\n' "[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output $idx" >&2
+    exit 2
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""".replace("@RECEIPT@", _recB54))
+
+    # -- the attach walk -----------------------------------------------------
+    _outs54 = m54._ddagrab_outputs(_fakeA54)
+    check("two DXGI outputs attach, each at its own measured even size",
+          _outs54 == [(0, '2560x1440'), (1, '2560x1440')], str(_outs54))
+    _asked54 = [_idx54(one) for one in _attach54(_recA54)]
+    check("the walk stops at the first refusal: outputs 0, 1, 2 were asked, "
+          "3 never was",
+          _asked54 == [0, 1, 2], str(_asked54))
+    _seen54 = len(_lines54(_recA54))
+    _outs54b = m54._ddagrab_outputs(_fakeA54)
+    check("the answer is cached per ffmpeg: the second ask spawns nothing",
+          _outs54b == _outs54 and len(_lines54(_recA54)) == _seen54,
+          'spawns went from %d to %d' % (_seen54, len(_lines54(_recA54))))
+    _outs54c = m54._ddagrab_outputs("/nonexistent/ffmpeg54")
+    check("an ffmpeg that cannot even run degrades to the empty output list, "
+          "without raising and without latching a refusal",
+          _outs54c == [] and m54._ddagrab_refused == set(), str(_outs54c))
+    check("the attach question is always asked with the cursor pinned off "
+          "(draw_mouse=0): whether an output exists does not depend on it",
+          all('draw_mouse=0' in one for one in _attach54(_recA54)),
+          'attach receipts: %s' % _attach54(_recA54))
+
+    cap54 = m54.probe_capture(_fakeA54, 'win32')
+    check("the Windows probe now prefers Desktop Duplication, keeps the "
+          "measured sizes as its screen list, and still finds the loopback "
+          "tap for the sound",
+          cap54 is not None and cap54.method == 'ddagrab'
+          and cap54.screens == [(0, '2560x1440'), (1, '2560x1440')]
+          and cap54.audio_map == '1:a:0'
+          and 'Desktop Duplication' in cap54.label
+          and '立体声混音' in cap54.label,
+          '%s / %s' % (cap54.label if cap54 else None,
+                       cap54.screens if cap54 else None))
+    cap54off = m54.probe_capture(_fakeA54, 'win32', cursor=False)
+    _cmd54 = m54.build_ffmpeg_command(_fakeA54, cap54, 720, 5000000)
+    _in54 = _cmd54[_cmd54.index('-i') + 1]
+    check("the cursor setting moves the production filter, and only the "
+          "production filter",
+          'draw_mouse=1' in cap54.inputs[0][3]
+          and 'draw_mouse=0' in cap54off.inputs[0][3],
+          '%s / %s' % (cap54.inputs[0][3], cap54off.inputs[0][3]))
+    check("the filter rides inside the lavfi input argument -- hwdownload "
+          "and all -- so none of the -vf composition had to learn about it, "
+          "and the -r pin rides along",
+          cap54.inputs[0] == ['-f', 'lavfi', '-i',
+                              'ddagrab=output_idx=0:framerate=24:draw_mouse=1'
+                              ',hwdownload,format=bgra']
+          and _in54 == cap54.inputs[0][3]
+          and sum(1 for one in _cmd54 if 'hwdownload' in one) == 1
+          and '-r' in _cmd54 and _cmd54[_cmd54.index('-r') + 1] == '24',
+          str(_cmd54))
+
+    utils.Setting.set(m54.SettingProperty.Mirror_Screen, '1')
+    m54._capture_cache.clear()
+    cap54b = m54.probe_capture(_fakeA54, 'win32')
+    _state54 = m54.ScreenMirrorSetting._capture_state()
+    check("the stored screen number picks the output, and the picker marks "
+          "it selected with the measured size as its label",
+          cap54b.inputs[0][3].startswith('ddagrab=output_idx=1:')
+          and _state54['screens'] == [
+              {'index': '', 'label': '第一块屏幕（默认）', 'selected': False},
+              {'index': '0', 'label': '0 · 2560x1440', 'selected': False},
+              {'index': '1', 'label': '1 · 2560x1440', 'selected': True}],
+          '%s / %s' % (cap54b.inputs[0][3], _state54['screens']))
+
+    utils.Setting.set(m54.SettingProperty.Mirror_Screen, '3')
+    m54._capture_cache.clear()
+    cap54c = m54.probe_capture(_fakeA54, 'win32')
+    _gone54 = [msg for _lvl, msg in _grab54.lines if 'screen 3 is gone' in msg]
+    check("a stored screen this machine does not have falls back to the "
+          "first output and says so, rather than asking ddagrab for a hole",
+          cap54c.inputs[0][3].startswith('ddagrab=output_idx=0:')
+          and len(_gone54) == 1,
+          '%s / %s' % (cap54c.inputs[0][3], _gone54))
+    utils.Setting.unset(m54.SettingProperty.Mirror_Screen)
+
+    _vo54 = m54.video_only_capture(cap54)
+    check("giving up the sound keeps the ddagrab method and the screen list, "
+          "and drops the dshow input whole",
+          _vo54 is not None and _vo54.method == cap54.method == 'ddagrab'
+          and _vo54.screens == cap54.screens and _vo54.audio_map is None
+          and len(_vo54.inputs) == 1 and 'ddagrab' in _vo54.inputs[0][3],
+          '%s / %s' % (_vo54.method if _vo54 else None,
+                       _vo54.inputs if _vo54 else None))
+
+    # -- the latch is a latch ------------------------------------------------
+    m54._capture_cache[('seed54', 'win32', True)] = cap54
+    m54._ddagrab_refused.add(_fakeA54)
+    m54.invalidate_capture_cache()
+    check("invalidate clears the probe cache and the attach cache, and keeps "
+          "the runtime latch -- a display that said no is not asked twice",
+          m54._capture_cache == {} and m54._ddagrab_cache == {}
+          and _fakeA54 in m54._ddagrab_refused,
+          'caches=%d/%d latch=%s' % (len(m54._capture_cache),
+                                     len(m54._ddagrab_cache),
+                                     sorted(m54._ddagrab_refused)))
+    _attach_before54 = len(_attach54(_recA54))
+    cap54d = m54.probe_capture(_fakeA54, 'win32')
+    check("with the latch set the next probe answers gdigrab -- sound kept, "
+          "no screen list -- without asking ddagrab once",
+          cap54d.method == 'gdi' and cap54d.screens == []
+          and 'GDI' in cap54d.label and cap54d.audio_map == '1:a:0'
+          and len(_attach54(_recA54)) == _attach_before54,
+          '%s / %s / attach receipts %d -> %d' % (
+              cap54d.method, cap54d.label, _attach_before54,
+              len(_attach54(_recA54))))
+    m54._ddagrab_refused.discard(_fakeA54)
+    m54._capture_cache.clear()
+
+    capB54 = m54.probe_capture(_fakeB54, 'win32')
+    _askedB54 = [_idx54(one) for one in _attach54(_recB54)]
+    check("an ffmpeg whose very first output refuses falls to gdigrab after "
+          "exactly one attach enquiry, and merges that with no sound device",
+          capB54.method == 'gdi' and capB54.screens == []
+          and capB54.audio_map is None and capB54.label == 'Desktop (GDI)'
+          and _askedB54 == [0],
+          '%s / %s / asked=%s' % (capB54.method, capB54.label, _askedB54))
+
+    # `_ddagrab_refusal` asks a Popen whether it is gone and reads the tail it
+    # is handed, so the dead case is a reaped Popen -- a `subprocess.run`
+    # result has no `poll()` and would only be testing the suite's own model.
+    _pri54 = subprocess.Popen(['/bin/sh', '-c', 'exit 2'],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    _pri54.wait()
+    _live54 = subprocess.Popen(['sleep', '30'],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    try:
+        _line54 = '[Parsed_ddagrab_0 @ 0x1] Failed to enumerate DXGI output 0'
+        check("a running ddagrab session has refused nothing -- the verdict "
+              "is only for a dead process -- and a dead one is read by its "
+              "own words",
+              m54._ddagrab_refusal(_live54, [_line54], None) is False
+              and m54._ddagrab_refusal(_pri54, [_line54], None) is True
+              and m54._ddagrab_refusal(_pri54, ['some other last words'],
+                                       None) is False,
+              'live=%s' % (m54._ddagrab_refusal(_live54, [], None),))
+    finally:
+        _live54.terminate()
+        _live54.wait()
+
+    # -- the runtime refusal, end to end -------------------------------------
+    # Attach passes (three one-frame runs all answer), the long session dies
+    # on the display: the product must latch, re-probe and come up on
+    # gdigrab, keeping the sound -- and it must do that immediately, not
+    # after sitting out the 8-second no-frame budget beside a corpse.
+    _rec54 = _StateRec()
+
+    class _Mirror54(m54.ScreenMirrorRenderer):
+        @property
+        def protocol(self):
+            return _rec54
+
+    _notify54 = []
+
+    def _notify54_rec(*args, **kwargs):
+        _notify54.append(' '.join(str(one) for one in args))
+
+    cherrypy.engine.subscribe('app_notify', _notify54_rec)
+    _saved54_find = m54.find_ffmpeg
+    _saved54_awake = m54._keep_awake
+    m54.find_ffmpeg = lambda: _fakeA54
+    m54._keep_awake = lambda *a, **k: None      # no caffeinate in a test
+    m54._capture_cache.clear()
+    m54._ddagrab_cache.clear()
+    m54._ddagrab_refused.discard(_fakeA54)
+    open(_recA54, 'w').close()
+    utils.Setting.set(m54.SettingProperty.Mirror_Output, 'browser')
+    mir54 = None
+    try:
+        mir54 = _Mirror54()
+        _started54 = time.time()
+        mir54.start_mirror()
+        _up54 = _wait_until(lambda: mir54.is_mirroring(), timeout=25)
+        _elapsed54 = time.time() - _started54
+        _said54 = [msg for _lvl, msg in _grab54.lines]
+        check("a display that accepts the attach and refuses the session "
+              "costs one retry, not the whole no-frame budget: the mirror "
+              "comes up, on gdigrab, with the sound still on",
+              _up54 and mir54._capture_method == 'gdi'
+              and 'dshow' in mir54._diag.get('command', '')
+              and 'ddagrab' not in mir54._diag.get('command', '')
+              and mir54._audio_refused is False
+              and _elapsed54 < m54.no_frame_budget('win32') - 2.0,
+              'up=%s method=%s elapsed=%.1f s' % (
+                  _up54, mir54._capture_method, _elapsed54))
+        check("and nothing was announced as a failure: the refusal is warned "
+              "about once, and the pump's early death was deferred to the "
+              "starter rather than raced into a spurious 启动失败",
+              ('error', True) not in _rec54.rows
+              and not any('启动失败' in one or '中断' in one
+                          for one in _notify54)
+              and len([m for m in _said54
+                       if 'ddagrab refused the display at runtime' in m]) == 1
+              and any('exited before its first frame' in m for m in _said54),
+              'rows=%s said=%s' % (_rec54.rows, _notify54))
+        _askedE54 = [_idx54(one) for one in _attach54(_recA54)]
+        check("the whole fallback asked the attach question three times -- "
+              "outputs 0, 1, 2, once -- because the latch stopped the retry's "
+              "re-probe from asking ddagrab again",
+              _askedE54 == [0, 1, 2], str(_askedE54))
+    finally:
+        if mir54 is not None:
+            mir54.stop_mirror()
+            _wait_until(lambda: not mir54.is_mirroring()
+                        and mir54._proc is None, timeout=10)
+        cherrypy.engine.unsubscribe('app_notify', _notify54_rec)
+        m54.find_ffmpeg = _saved54_find
+        m54._keep_awake = _saved54_awake
+        utils.Setting.unset(m54.SettingProperty.Mirror_Output)
+        m54._capture_cache.clear()
+        m54._ddagrab_cache.clear()
+        m54._ddagrab_refused.discard(_fakeA54)
+except Exception as _e54:
+    _traceback54.print_exc()
+    check("Part 54 runs", False, "{}: {}".format(type(_e54).__name__, _e54))
+finally:
+    _lg54.setLevel(_lvl54)
+    _lg54.removeHandler(_grab54)
+    m54.sys.platform = _saved_platform54
+    utils.Setting.setting, utils.Setting.setting_path = _saved54[0], _saved54[1]
+    utils.SETTING_DIR = _saved54[2]
+    _shutil.rmtree(_tmp54, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

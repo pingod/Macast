@@ -103,7 +103,7 @@ interpreter** (`SIGABRT`, exit 134) because CPython already has Homebrew's `libc
 flat-namespace load collides (`"... is loading libcrypto in an unsafe way"`). On macOS use
 CommonCrypto only; never probe LibreSSL by bare soname.
 
-### 1.2 Windows: `bcrypt.dll` — signatures confirmed, throughput **[unverified, no Windows host]**
+### 1.2 Windows: `bcrypt.dll` — signatures confirmed, throughput **[unverified — no benchmark run yet]**
 
 Confirmed from Microsoft's own docs (reachable from this host):
 
@@ -699,11 +699,22 @@ permission flow.
   `gh api compare n6.0...f61125548` → the commit is an **ancestor** of `n6.0`, while
   `n5.1...` → **diverged**. ⇒ **first shipped in FFmpeg 6.0.** This is DXGI Desktop Duplication,
   i.e. the same API Windows.Graphics.Capture sits on top of for game capture, and it is the
-  single biggest Windows-side win available to Macast.
+  single biggest Windows-side win available to Macast — **landed in v0.20 of the
+  `screen_mirror` plugin** (ddagrab first, gdigrab as the runtime fallback).
 - **Windows.Graphics.Capture (WGC):** no ffmpeg input exists. OBS uses it
   (`plugins/win-capture/game-capture.c`). Reaching it from Python would mean WinRT bindings — a
   much heavier dependency than `ddagrab` is. **Use `ddagrab`.**
-- **Measured Windows latency/fps numbers: [unverified] — no Windows host.**
+- **Measured on a real Windows host (2026-10-02, Windows 11 build 26300, ffmpeg 8.1.2):**
+  `ddagrab=output_idx=N` attaches per DXGI output — outputs 0 and 1 both report 2560×1440
+  (`wrapped_avframe, bgra`), output 2 is refused verbatim (`Failed to enumerate DXGI output 2`
+  + `Error opening input file ddagrab=output_idx=2:…`) and the walk stops at the first refusal.
+  A full production-shape run (shipped browser argv + loopback dshow audio, 4 s) yielded a
+  4,176,319-byte MP4: h264 Constrained Baseline 2560×1440 yuv420p, r_frame_rate 24/1,
+  93 frames / 4.021 s, AAC audio, clean local decode. The gdigrab path on the same box
+  captures the composite virtual desktop at **4000×2571** — an odd height — and x264 refuses
+  it (`height not divisible by 2`), i.e. the source-resolution preset used to produce
+  **zero bytes** on that box. **Not measured:** any WGC-vs-gdigrab-vs-ddagrab **latency/fps**
+  comparison, CPU cost on Windows, or behavior inside an RDP session.
 
 ### 4.7 Linux
 
@@ -1003,8 +1014,10 @@ open):
   `pypi.org/pypi/<pkg>/json`; `WebSearch` for snippets only.
 
 **Specific gaps:**
-1. **No Windows or Linux host** → bcrypt.dll and libcrypto ctypes paths are signature-verified
-   against primary docs but **never executed or benchmarked**. All throughput numbers are macOS only.
+1. **bcrypt.dll and libcrypto ctypes paths are signature-verified against primary docs but
+   never executed or benchmarked** — a Windows host became reachable on 2026-10-02 (it carried
+   the capture measurements in §4.6) but no cipher benchmark has been run there, and there is
+   still no Linux host. All throughput numbers are macOS only.
 2. **The minimum Windows version for `BCRYPT_CHAIN_MODE_CTR`** — the authoritative Microsoft CNG
    property-identifiers page 404s from here. Widely reported as Windows 8 / Server 2012. Must be
    probed at runtime (`BCryptSetProperty` → `STATUS_NOT_SUPPORTED`).
@@ -1018,10 +1031,12 @@ open):
    negotiation approach in §3.3 makes this moot, which is the point.
 7. **DLNA HEVC-in-MPEG-TS reality** — no reachable primary source.
 8. **WGC-vs-gdigrab latency/fps numbers**, **PipeWire portal latency numbers**,
-   **measured SCK-vs-avfoundation latency** — all require hosts/hardware not available. The SCK
-   *capability* claims are from Apple docs and from OBS/WebKit source, but I have **no measured
-   latency delta** between `avfoundation` and ScreenCaptureKit. That number is the one I would most
-   want before committing to the SCK rewrite.
+   **measured SCK-vs-avfoundation latency** — none measured. A real Windows host is now
+   available (§4.6 carries its attach/output measurements) but no *latency* comparison was run
+   there; PipeWire and SCK still need hardware not available. The SCK *capability* claims are
+   from Apple docs and from OBS/WebKit source, but I have **no measured latency delta** between
+   `avfoundation` and ScreenCaptureKit. That number is the one I would most want before
+   committing to the SCK rewrite.
 9. **Browser MSE and WebRTC jitter-buffer latencies** — no primary source reached.
 10. **Sunshine/Parsec static-content frame-skipping policy** — searched, not found; Sunshine appears
     to encode every frame, Parsec is closed source.

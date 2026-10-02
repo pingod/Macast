@@ -527,6 +527,26 @@ GOP **就是**发布节奏；而探测窗口越过开头 IDR 的解封装器要�
 真正的 3 秒差在容器本身，见 §1.3 那张表（`ts-h264` 1.9 秒 vs `ps-pal` 5.1 秒）。
 这些数字改一处就要改文档与用例，Part 37 就是照着代码里的常量核对它们的。
 
+### 1.6b Windows 的画面采集：Desktop Duplication（ddagrab，v0.20）
+
+Windows 上原先用 gdigrab，它抓的是**整块虚拟桌面** —— 多显示器时那是一整张画布：本机实测
+gdigrab 在这台机器上报 **4000×2571**，奇数高度让 x264 直接拒绝
+（`height not divisible by 2 (4000x2571)`），于是**「原始分辨率」档在这类机器上产出零字节**。
+现在优先走 ffmpeg 的 `ddagrab`（DXGI Desktop Duplication，与游戏采集用的
+Windows.Graphics.Capture 是同一套底层）：**每块屏幕按自己的尺寸采**，「采集」卡片里的
+显示器列表就是这台机器真实的 DXGI 输出列表（v0.20 起 Windows 才有这个选择器）。
+
+被桌面拒绝时（驱动不提供 Desktop Duplication、RDP 会话等），本次运行自动回落到 gdigrab，
+原因写进插件日志（设置页「日志」→ 选 `ScreenMirror`），**同一次运行内不会反复重试
+ddagrab** —— 每次重试都要白等一轮首帧预算，而拒绝通常不会自己变好。
+
+**这条路验证到什么程度**（2026-10-02，Windows 11 build 26300 / ffmpeg 8.1.2，与 §1.5
+声音验收同一台机器）：输出 0 与 1 各报 2560×1440 附着成功；第三块输出被逐字拒绝
+（`Failed to enumerate DXGI output 2`）且探询就此停下。按出货 argv 跑 4 秒的浏览器形状
+产出一个 4,176,319 字节的 MP4 —— ffprobe 报 h264 Constrained Baseline、2560×1440、
+r_frame_rate 24/1、93 帧 / 4.021 秒，加 AAC 音轨，本地完整解码零报错。**没有验证的**：
+Windows 镜像投到真电视 / 真 Chromecast、以及多显示器时选副屏的实际投出。
+
 ---
 
 ## 2. Local File Caster —— 把这台电脑磁盘上的文件投到电视
