@@ -320,6 +320,14 @@ def diagnostics_rows(state):
     if diag.get('gop') and diag.get('fps'):
         add('关键帧间隔', '{} 帧 · {:.1f} 秒'.format(
             diag['gop'], diag['gop'] / float(diag['fps'])))
+    #: The ceiling this session's encoder was told to stop at, read off its own
+    #: argv rather than from the setting. Only the two television shapes carry a
+    #: `-t`, so the row is simply absent for the other three -- a browser session
+    #: that will run until somebody closes the tab must not be shown a limit it
+    #: inherited from a setting it never reads. It answers "why did the mirror
+    #: stop by itself at 12 hours" before the user has to ask it.
+    if diag.get('max_seconds'):
+        add('最大时长', '{} 小时'.format(int(diag['max_seconds']) // 3600))
     if diag.get('audio'):
         add('系统声音', '已启用 · {}'.format(diag.get('audio_map') or ''))
     elif diag.get('audio_expected'):

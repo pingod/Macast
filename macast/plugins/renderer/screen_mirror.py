@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.23</macast.version>
+# <macast.version>0.24</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -146,7 +146,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.23'
+PLUGIN_VERSION = '0.24'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -1038,6 +1038,10 @@ class SettingProperty(Enum):
     #: shape of fact as the one above, on the other end of the pipe: it is a
     #: standing delay the viewer never catches up from -- see LIVE_EDGE_SECONDS.
     Mirror_Live_Edge = 14
+    #: Hours a television target may run before it stops itself -- see
+    #: MAX_DURATION_HOURS. Only the two TV shapes obey it, so the key is worth
+    #: a page row only there; a browser viewer can simply reload.
+    Mirror_Max_Duration = 15
 
 
 # -- ffmpeg ----------------------------------------------------------------
@@ -1496,7 +1500,97 @@ def profile_order(profile=None):
     return keys[keys.index(current) + 1:] + keys[:keys.index(current)]
 
 
-def advertised_file(bitrate):
+#: Hours a television session may run before it stops itself. The user asked
+#: for a ceiling, not a countdown: an unattended mirror that nobody remembered
+#: to stop keeps encoding, keeps the machine awake (`_keep_awake` holds a
+#: `caffeinate` assertion for the whole session) and keeps serving a stream
+#: forever. Three options and a default, with **no "unlimited" row on purpose**
+#: -- a knob whose safest setting is "off" is a knob nobody will ever turn on.
+MAX_DURATION_HOURS = (12, 24, 48)
+DEFAULT_MAX_DURATION_HOURS = 12
+#: Which output shapes obey it. Only the two television targets: `cast` LOADs a
+#: live stream into a device that will sit on it indefinitely, and `dlna` hands
+#: a renderer a file with a fabricated length it will read to the end. A browser
+#: viewer that has run too long reloads its page, and the two low-latency
+#: channels (`caststream`, `webrtc`) are live-edge consumers whose receivers
+#: hold no backlog worth protecting a television from -- putting `-t` on them
+#: would truncate a presentation to save nothing.
+MAX_DURATION_TARGETS = ('cast', 'dlna')
+
+
+def max_duration_hours():
+    """The stored ceiling in hours, validated the way `quality_key` is.
+
+    An unknown value is the default rather than a refusal: the alternative is a
+    settings JSON edit that ends a presentation mid-sentence, and the person
+    watching the television gets no explanation of why.
+    """
+    try:
+        hours = int(Setting.get(SettingProperty.Mirror_Max_Duration,
+                                DEFAULT_MAX_DURATION_HOURS))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_DURATION_HOURS
+    return hours if hours in MAX_DURATION_HOURS else DEFAULT_MAX_DURATION_HOURS
+
+
+def bound_video_seconds():
+    """The single truth about how long one television session may encode.
+
+    Both halves of the promise read this: ffmpeg's `-t` (which decides when the
+    bytes stop) and `advertised_file` (which decides what length the television
+    is told). Those two were allowed to be computed separately exactly once, and
+    what that produced is the failure this function exists to prevent -- a file
+    shape whose advertised length is further than the encoder ever writes is the
+    Android-11-TV story in `protocol_info`'s docstring: read to the end, go
+    looking for an index that is not there, never PLAYING.
+    """
+    return max_duration_hours() * 3600
+
+
+def duration_bound(kind):
+    """`bound_video_seconds()` for a shape that obeys it, else None.
+
+    None means "no `-t` on this argv", which is the honest answer for the four
+    live shapes and what the「统计信息」card then leaves off rather than printing
+    a blank row.
+    """
+    return bound_video_seconds() if kind in MAX_DURATION_TARGETS else None
+
+
+def duration_args(max_seconds):
+    """The argv that bounds one encode: `-t <seconds>`, or nothing.
+
+    Both television builders call this rather than writing `-t` themselves, so
+    "which shapes get a ceiling" has one answer in the file. It is an *output*
+    option, so it rides after the inputs and codec args and before the muxer
+    flags -- as an input option it would bound the file ffmpeg opens, and a
+    live capture has no duration to bound there.
+    """
+    return ['-t', str(int(max_seconds))] if max_seconds else []
+
+
+#: Sits on the「画质」card rather than getting one of its own, for the same
+#: reason the prefill seconds sit under「投屏形状」: it only exists for some
+#: targets, and a control two cards away from the thing that makes it meaningful
+#: reads as a setting for the whole mirror. 「画质」is the one card *both*
+#: television shapes always have.
+MAX_DURATION_HINT = ('到点主动停止并弹通知，不是悄悄把画面截掉：无人看管的镜像会一直'
+                     '编码、一直阻止这台机器休眠。只对 Chromecast 兼容通道与 DLNA 电视'
+                     '生效（浏览器页刷新一下就好，两条低延迟通道不该被截断）。'
+                     '换这里会立刻重启镜像。')
+
+
+def max_duration_phrase(seconds):
+    """The ceiling in words, for the notice and the option pills.
+
+    Whole hours are the only thing `max_duration_hours` can answer with, so this
+    never has to say "and 37 minutes" -- it is a formatter for three numbers, not
+    a duration library.
+    """
+    return '{} 小时'.format(int(seconds) // 3600)
+
+
+def advertised_file(bitrate, max_seconds=None):
     """(size, 'H:MM:SS') claimed for the endless stream.
 
     The two numbers have to agree with each other and with the bitrate, or a
@@ -1507,8 +1601,16 @@ def advertised_file(bitrate):
     `bitrate` is the *total* rate (video + audio): the video-only figure made
     the advertised duration about 4% short of the bytes actually produced, and
     a TV that seeks from the end notices.
+
+    `max_seconds` is the ceiling the encoder was told to stop at (`-t`). It may
+    only ever **shorten** this pair: the size cap already bounds the file at
+    roughly an hour on the shipping profiles, so a 12-hour ceiling changes
+    nothing here, while a ceiling below the cap has to shrink the advertised
+    length or the television is promised bytes that will never arrive.
     """
     size = min(bitrate * 3600 // 8, DLNA_MAX_ADVERTISED_SIZE)
+    if max_seconds:
+        size = min(size, int(bitrate) * int(max_seconds) // 8)
     seconds = max(1, size * 8 // bitrate)
     return size, '{}:{:02d}:{:02d}'.format(seconds // 3600,
                                            seconds % 3600 // 60, seconds % 60)
@@ -3347,7 +3449,8 @@ def has_hardware_encoder(ffmpeg, platform=None):
 
 
 def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
-                         encoder='software', profile=None, audio_fd=None):
+                         encoder='software', profile=None, audio_fd=None,
+                         max_seconds=None):
     # `audio_fd` resolves the ScreenCaptureKit audio pipe token (see
     # `_AUDIO_FD_TOKEN`): the command carries a placeholder because the fd does
     # not exist until the spawn, and resolution is deliberately loud -- a
@@ -3359,7 +3462,8 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
         # height, the codec, the rate control and the container all have to be
         # ones that TV's demuxer knows.
         return _resolve_audio_fd(build_dlna_command(ffmpeg, capture,
-                                  profile or dlna_profile(), encoder), audio_fd)
+                                  profile or dlna_profile(), encoder,
+                                  max_seconds=max_seconds), audio_fd)
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
     for one_input in capture.inputs:
         cmd += one_input
@@ -3452,11 +3556,21 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     cmd += rate_caps(target)
     # Encoder private options only resolve after -c:v, so they ride at the end.
     cmd += extra
+    # The ceiling the television targets were promised. Re-checked against
+    # `MAX_DURATION_TARGETS` here rather than trusted from the caller: a live
+    # shape whose viewer follows the live edge must never be cut short just
+    # because some call site passed a number for it. It is an output option, so
+    # it rides after the encoder args and before the muxer flags.
+    # `_session_diagnostics` reads this same argv back with `_int_flag`, so the
+    #「统计信息」card cannot promise a bound a run does not carry.
+    cmd += duration_args(max_seconds
+                         if kind in MAX_DURATION_TARGETS else None)
     cmd += OUTPUTS[kind][3]
     return _resolve_audio_fd(cmd, audio_fd)
 
 
-def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
+def build_dlna_command(ffmpeg, capture, profile, encoder='software',
+                       max_seconds=None):
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
     for one_input in capture.inputs:
         cmd += one_input
@@ -3490,7 +3604,7 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
                 '-g', str(live_gop(profile.fps)),
                 '-r', str(profile.fps), '-b:v', str(target)]
         cmd += rate_caps(target)
-    cmd += profile.muxer + ['pipe:1']
+    cmd += profile.muxer + duration_args(max_seconds) + ['pipe:1']
     return cmd
 
 
@@ -6109,7 +6223,7 @@ class _Session(object):
     """What this mirror session looks like to the HTTP server."""
 
     def __init__(self, kind, has_audio=False, title='Macast', profile=None,
-                 bitrate=None):
+                 bitrate=None, max_seconds=None):
         self.kind = kind if kind in OUTPUTS else DEFAULT_OUTPUT
         self.label, self.suffix, self.content_type, _args = OUTPUTS[self.kind]
         #: Whether this session's container carries an audio track at all. The
@@ -6119,6 +6233,12 @@ class _Session(object):
         #: The encoder's target video rate, in bits/s. The queue in front of a
         #: live consumer is sized from it -- see `live_queue_chunks`.
         self.bitrate = bitrate
+        #: The ceiling this session was started under, in seconds (None = this
+        #: shape has none). Asked once, by the run, and handed down: the argv's
+        #: `-t` and the file shape's advertised length are both computed from
+        #: this value, so a settings edit made mid-session cannot leave the
+        #: television promised a length the encoder no longer writes.
+        self.max_seconds = max_seconds
         #: The DLNA target answers as a finite file, so it needs a profile
         #: (which container, which codec, which advertised size) and a byte log
         #: instead of the queue broadcaster. The other targets leave both None
@@ -6172,7 +6292,7 @@ class _Session(object):
             self.file_size = self.file_duration = None
             if self.bytelog:
                 self.file_size, self.file_duration = advertised_file(
-                    self.profile.total_bitrate)
+                    self.profile.total_bitrate, self.max_seconds)
         #: A browser can only attach to a live fragmented stream at a
         #: keyframe, so replaying the header plus a short tail is what makes
         #: "open the URL a second time" work. A TV is never replayed: it would
@@ -6459,6 +6579,12 @@ def _session_diagnostics(kind, capture, command, encoder, height, bitrate,
         #: keep, which is the one thing this dict exists to be honest about.
         'fps': _int_flag(command, '-r') or FPS,
         'gop': _int_flag(command, '-g'),
+        #: The ceiling the encoder was told to stop at, read off the same argv.
+        #: This is the answer to "why did the mirror stop after N hours" -- and
+        #: it is `None` (no row) for the three shapes that have no ceiling,
+        #: which is why it is worth printing rather than deriving: the setting
+        #: exists on every machine, the `-t` does not.
+        'max_seconds': _int_flag(command, '-t'),
         'command': ' '.join(command),
         'cast_refused': str(refused or ''),
         'queue_chunks': queue_units,
@@ -7794,14 +7920,18 @@ class _DlnaSender(object):
                     values[_local_name(child.tag)] = (child.text or '').strip()
         return values
 
-    def set_uri(self, url, title, profile, shape=None):
+    def set_uri(self, url, title, profile, shape=None, max_seconds=None):
         """Tell the renderer what to play.
 
         Only the file shape states a size and a duration -- see `build_didl`.
+        `max_seconds` is the ceiling *this session* was started under: the DIDL
+        must not promise a length the encoder was told not to write, so the two
+        callers that push a mirror's own URL hand their session's value down
+        rather than letting this method ask the setting again mid-flight.
         """
         shape = shape or dlna_shape()
         if shape == DLNA_SHAPE_FILE:
-            size, duration = advertised_file(profile.total_bitrate)
+            size, duration = advertised_file(profile.total_bitrate, max_seconds)
         else:
             size = duration = None
         return self._request('SetAVTransportURI', {
@@ -9930,6 +10060,13 @@ class ScreenMirrorRenderer(Renderer):
         self._sink = None
         self._kind = ''
         self._awake = None
+        #: The session's own ceiling, armed when the session is published and
+        #: cancelled by `_teardown`. None for the shapes that have none. It is a
+        #: timer rather than only ffmpeg's `-t` because the notice is ours to
+        #: write: a mirror that ends because the encoder ran out of its budget
+        #: leaves the television on a frozen frame and the user with no sentence
+        #: explaining why.
+        self._duration_timer = None
         self._generation = 0
         self._mirroring = False
         self._started_at = 0.0
@@ -10393,9 +10530,15 @@ class ScreenMirrorRenderer(Renderer):
         # the ladder, a session on rung 3 and an encoder still on rung 2 is a
         # black screen with two confident logs about it.
         profile = self.active_dlna_profile() if kind == 'dlna' else None
+        #: Asked once, on the possibly-lowered `kind` above: a caststream the
+        #: device refused is now a LOAD session, and it obeys the ceiling the
+        #: same as every other television shape. Both the argv and the session
+        #: read this one value -- see `bound_video_seconds`.
+        max_seconds = duration_bound(kind)
         session = _Session(kind, has_audio=bool(capture.audio_map),
                            title=socket.gethostname() or 'Macast',
-                           profile=profile, bitrate=bitrate)
+                           profile=profile, bitrate=bitrate,
+                           max_seconds=max_seconds)
         handed = False
         # Locals the unwind paths below hand to `_cleanup` when an attempt
         # never reaches its `handed` moment: nothing else has ever seen them,
@@ -10428,7 +10571,8 @@ class ScreenMirrorRenderer(Renderer):
                 # the run one.
                 command = build_ffmpeg_command(
                     ffmpeg, capture, height, bitrate, kind=kind,
-                    encoder=encoder, profile=profile, audio_fd=audio_r)
+                    encoder=encoder, profile=profile, audio_fd=audio_r,
+                    max_seconds=max_seconds)
                 diagnostics = _session_diagnostics(
                     kind=kind, capture=capture, command=command,
                     encoder=encoder, height=height, bitrate=bitrate,
@@ -10665,7 +10809,8 @@ class ScreenMirrorRenderer(Renderer):
             elif kind == 'dlna':
                 sender = _DlnaSender(control)
                 sender.set_uri(url, '屏幕镜像 · {}'.format(session.page_title),
-                               session.profile)
+                               session.profile,
+                               max_seconds=session.max_seconds)
                 sender.play()
         except _Aborted:
             if not handed:
@@ -10715,6 +10860,8 @@ class ScreenMirrorRenderer(Renderer):
             _stop_awake(awake)
             return
         self.set_state_transport('PLAYING')
+        if max_seconds:
+            self._arm_duration_timer(generation, max_seconds)
         if kind == 'dlna':
             # The renderer needs a push of its own to recover from the pauses
             # and seek-stalls old firmware does on a stream it thinks is a
@@ -10780,6 +10927,10 @@ class ScreenMirrorRenderer(Renderer):
         profile = dlna_profile()
         try:
             sender = _DlnaSender(control)
+            # No `max_seconds` here on purpose: this path plays a URL somebody
+            # else pushed, so no encoder of ours holds a `-t` that the advertised
+            # length would have to agree with. Capping it would shorten a file we
+            # are not writing.
             sender.set_uri(url, 'Macast · {}'.format(name), profile)
             sender.play()
         except Exception as e:
@@ -10909,7 +11060,8 @@ class ScreenMirrorRenderer(Renderer):
                         state, misses, DLNA_MAX_REPUSHES)
             try:
                 sender.set_uri(url, '屏幕镜像 · {}'.format(session.page_title),
-                               session.profile)
+                               session.profile,
+                               max_seconds=session.max_seconds)
                 sender.play()
             except Exception as e:
                 logger.debug('re-push failed: %s', e)
@@ -11099,6 +11251,11 @@ class ScreenMirrorRenderer(Renderer):
                 return
             method = self._capture_method
             feeder = self._feeder
+            #: The ceiling this session's argv carries, read off that argv when
+            #: it was published (`_session_diagnostics`), not from the setting:
+            #: three of the five shapes have none, and the setting is a number on
+            #: every machine.
+            bound = (self._diag or {}).get('max_seconds')
         if method in ('ddagrab', 'sck') and not produced:
             logger.info('ffmpeg (%s) exited before its first frame'
                         ' (code %s); the capture starter owns this verdict',
@@ -11106,6 +11263,19 @@ class ScreenMirrorRenderer(Renderer):
             return
         code = proc.poll()
         why = feeder.failed() if feeder is not None else None
+        if bound and time.time() - started_at >= bound:
+            # The encoder wrote exactly as much picture as it was told to and
+            # then stopped on its own `-t`. This branch only gets reached when
+            # `_duration_expired` did not: that timer is armed on the same
+            # ceiling and bumps the generation first, so a session it ended
+            # reports nothing here. Reaching this line means that thread never
+            # got to run -- and an OS that starved a daemon timer for a whole
+            # session still has no business reporting「采集中断」about a mirror
+            # that finished its job.
+            logger.info('ffmpeg reached its own duration limit (%s s, exit %s),'
+                        ' ending the session as planned', bound, code)
+            self._duration_expired(generation, bound)
+            return
         if time.time() - started_at < EARLY_DEATH_SECONDS:
             hint = ('：若是首次使用，{}，勾选后重启 Macast'.format(PERMISSION_DOOR)
                     if sys.platform == 'darwin' else '')
@@ -11115,6 +11285,59 @@ class ScreenMirrorRenderer(Renderer):
             self._fail('屏幕采集中断（{}）'.format(
                 why or 'ffmpeg 退出码 {}'.format(code)), generation)
         self._teardown()
+
+    def _arm_duration_timer(self, generation, max_seconds):
+        """Stop *here*, at the ceiling, rather than letting the encoder's own
+        `-t` be the event that ends the session.
+
+        The notification, the transport state and the `caffeinate` release all
+        live on this side of the pipe, and a pump reporting ffmpeg's planned exit
+        would call it「屏幕采集中断」over a mirror that did exactly what it was
+        told. The `-t` stays in the argv as the backstop for the case where this
+        thread never gets to run -- but a timer nobody started is not a backstop
+        for anything, so this method's whole job is to hand a *running* timer to
+        `_teardown`.
+        """
+        timer = threading.Timer(max_seconds, self._duration_expired,
+                                args=(generation, max_seconds))
+        timer.daemon = True
+        timer.name = 'SCREEN_MIRROR_MAX_DURATION'
+        with self._lock:
+            self._duration_timer = timer
+        timer.start()
+
+    def _duration_expired(self, generation, max_seconds):
+        """The session ran into its ceiling: stop, and say which knob did it.
+
+        Not `_fail`. Nothing went wrong -- the encoder wrote exactly the amount
+        of picture it was told to -- so there is no transport error to publish
+        and no ERROR line to leave in the log. What the user needs is the
+        sentence naming the limit, because a mirror that stops on its own with
+        no explanation reads like the crash they set a limit to contain.
+
+        Reached from two places on purpose: the timer armed when the session was
+        published, and `_encoder_died` when ffmpeg's own `-t` got there first.
+        The generation guard makes the pair idempotent, so whichever arrives
+        second is silent rather than sending a second notification.
+        """
+        with self._lock:
+            if generation != self._generation:
+                return
+            # Bumped before anything is reaped, exactly like `stop_mirror`: the
+            # pump thread is about to watch the encoder die, and that report must
+            # not reach the user as「屏幕采集中断」.
+            self._generation += 1
+        phrase = max_duration_phrase(max_seconds)
+        logger.info('mirroring stopped at its maximum duration (%s)', phrase)
+        notify('已达投屏最大时长（{}），镜像已停止。要更长的时间就在'
+               '「电脑投屏 → 画质」里换一档：最大时长'.format(phrase), sound=True)
+        self._teardown()
+        # The session really is over: the television is holding a frozen frame
+        # and the encoder is gone, so leaving the published transport state at
+        # PLAYING is the same stale claim the state page has been bitten by
+        # before. `set_media_stop` uses this same word for this same physical
+        # situation.
+        self.set_state_transport('STOPPED')
 
     def _fail(self, message, generation):
         with self._lock:
@@ -11145,9 +11368,17 @@ class ScreenMirrorRenderer(Renderer):
             # Claim the assert here so a second teardown (the encoder dying
             # right after a manual stop) cannot release someone else's.
             awake, self._awake = self._awake, None
+            # Same reason the generation is bumped first at every other stop: a
+            # teardown for a *new* session must not leave the previous session's
+            # ceiling timer armed to end it. `cancel()` on a thread that is
+            # running its own callback is a no-op, so `_duration_expired` can
+            # come through here safely.
+            timer, self._duration_timer = self._duration_timer, None
         _cleanup(sender, proc, server, sink, feeder)
         if awake is not None:
             _stop_awake(awake)
+        if timer is not None:
+            timer.cancel()
 
 
 def _cleanup(sender, proc, server, sink=None, feeder=None):
@@ -11874,12 +12105,7 @@ class ScreenMirrorSetting(RendererSetting):
                     'note': DLNA_PREFILL_HINT,
                 },
             },
-            'quality': {
-                'current': quality_key(),
-                'options': [{'key': key, 'label': QUALITY_LABELS[key]}
-                            for key in QUALITY_ORDER],
-                'note': self._quality_note() or '',
-            },
+            'quality': self._quality_state(kind),
             'capture': self._capture_state(),
             'audio': self._audio_state(renderer),
             'viewer': self._viewer_state(renderer, mirroring, kind),
@@ -12025,6 +12251,38 @@ class ScreenMirrorSetting(RendererSetting):
             'progress_url': _audio_progress_url,
         }
 
+    def _quality_state(self, kind):
+        """The「画质」card: the bitrate rungs, plus the ceiling where one exists.
+
+        The ceiling is nested here instead of being its own card because it only
+        exists for the two television shapes, and because it belongs next to the
+        number that decides how many bytes an hour of mirror costs -- 12 hours at
+        6 Mbps is a different promise than 12 hours at 1.5 Mbps, and the two are
+        read together or not at all.
+
+        Absent (no key at all) for the three shapes that ignore it, which the
+        page hides. A pill that changes a setting nothing obeys is the same lie
+        here as a stale hint would be.
+        """
+        state = {
+            'current': quality_key(),
+            'options': [{'key': key, 'label': QUALITY_LABELS[key]}
+                        for key in QUALITY_ORDER],
+            'note': self._quality_note() or '',
+        }
+        if kind not in MAX_DURATION_TARGETS:
+            return state
+        state['max_duration'] = {
+            'current': max_duration_hours(),
+            'options': [{'key': str(one),
+                         'label': '{} 小时{}'.format(
+                             one, '（默认）'
+                             if one == DEFAULT_MAX_DURATION_HOURS else '')}
+                        for one in MAX_DURATION_HOURS],
+            'note': MAX_DURATION_HINT,
+        }
+        return state
+
     @staticmethod
     def _viewer_state(renderer, mirroring, kind):
         url = renderer.viewer_url() if renderer is not None else ''
@@ -12057,9 +12315,10 @@ class ScreenMirrorSetting(RendererSetting):
     #: name that is not here rather than dispatching on it.
     CONSOLE_ACTIONS = ('start', 'stop', 'toggle', 'set-output', 'set-target',
                        'set-dlna-target', 'set-dlna-shape', 'set-profile',
-                       'set-dlna-prefill', 'set-quality', 'set-screen',
-                       'set-cursor', 'set-encoder', 'set-live-edge',
-                       'refresh', 'probe', 'audio-setup', 'audio-restore')
+                       'set-dlna-prefill', 'set-quality', 'set-max-duration',
+                       'set-screen', 'set-cursor', 'set-encoder',
+                       'set-live-edge', 'refresh', 'probe', 'audio-setup',
+                       'audio-restore')
 
     def console_action(self, action, args=None):
         """Single entry point for the console; {'code', 'message'} either way.
@@ -12239,6 +12498,33 @@ class ScreenMirrorSetting(RendererSetting):
             return self._no('没有这个画质档位：{}'.format(key))
         Setting.set(SettingProperty.Mirror_Quality, key)
         return self._ok('画质：{}'.format(QUALITY_LABELS[key]), restart=True)
+
+    def _do_set_max_duration(self, args):
+        """How many hours one television session may run before it stops itself.
+
+        Restarts, because the ceiling is baked into two things a running session
+        cannot change underneath itself: the encoder's `-t`, and the length the
+        file shape already advertised (a television that believes in 12 hours has
+        already been promised that many bytes -- shortening the session would leave
+        it reading toward an end that is no longer there).
+
+        Validated against the options tuple rather than the clamp, exactly like
+        the prefill knob above: the clamp exists so a hand-edited settings file
+        cannot produce a session that stops for a reason nobody can name, and
+        accepting arbitrary numbers here would make the page the only thing
+        enforcing the list.
+        """
+        raw = str(args.get('value') or '')
+        try:
+            hours = int(raw)
+        except ValueError:
+            return self._no('最大时长得是几小时这样的整数：{}'.format(raw))
+        if hours not in MAX_DURATION_HOURS:
+            return self._no('只能选这几档：{}'.format(
+                '、'.join('{} 小时'.format(one)
+                         for one in MAX_DURATION_HOURS)))
+        Setting.set(SettingProperty.Mirror_Max_Duration, hours)
+        return self._ok('投屏最大时长：{} 小时'.format(hours), restart=True)
 
     def _do_set_screen(self, args):
         index = str(args.get('value') or '')

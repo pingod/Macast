@@ -22464,6 +22464,601 @@ finally:
     _shutil.rmtree(_tmp56, ignore_errors=True)
 
 # --------------------------------------------------------------------------
+# Part 57: how long one television session is allowed to run (`#108`).
+#
+# The feature is a ceiling, and a ceiling is only worth what its weakest link
+# is worth, so this Part walks the whole distance the number travels:
+#
+#   the stored hours -> bound_video_seconds() -> duration_bound(kind)
+#     -> the encoder's `-t`  AND  the file shape's advertised size/duration
+#     -> the session's own record -> the「统计信息」card (read back off the argv)
+#     -> the timer that ends the session, and the one place that cancels it
+#
+# Three failures it exists to prevent, all of them shapes this repo has been
+# bitten by before:
+#  * a number that is computed and never handed down -- the builder takes
+#    `max_seconds`, so every unit test can pass while the real call site drops
+#    it and no `-t` ever reaches ffmpeg. That is not hypothetical: it is exactly
+#    what this code did on the day the parameter was added, and the case that
+#    catches it is group B's last one, a text assertion on the call site.
+#  * two halves of one promise computed separately: `-t` decides when the bytes
+#    stop, the DIDL decides how many bytes the television believes it is being
+#    handed. If the length is the further of the two, the renderer reads to an
+#    end that never arrives and goes looking for a container index -- the
+#    Android-11-TV story in `protocol_info`'s docstring, re-opened by a knob.
+#  * a silent truncation. An expiry that only manifests as "the picture froze"
+#    reads as the crash the ceiling was installed to contain, so the deadline
+#    must arrive as a stop *plus a sentence naming the knob*, and must arrive
+#    exactly once whether the timer or ffmpeg's own `-t` got there first.
+# --------------------------------------------------------------------------
+print("\n=== Part 57: the ceiling on one television session ===")
+import traceback as _traceback57
+
+_tmp57 = _tempfile.mkdtemp(prefix="macast-duration57-")
+_saved57 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+m57 = None
+_saved_notify57 = None
+_notify57 = []
+try:
+    import inspect as _inspect57
+
+    utils.SETTING_DIR = _tmp57
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp57, "macast_setting.json")
+    m57 = _load_plugin("screen_mirror_plugin_v57", "screen_mirror.py")
+    _saved_notify57 = m57.notify
+    m57.notify = lambda *args, **kwargs: _notify57.append(
+        ' '.join(str(one) for one in args))
+
+    def _set57(prop, value):
+        if value is None:
+            utils.Setting.unset(prop)
+        else:
+            utils.Setting.set(prop, value)
+
+    def _secs_from_clock(text):
+        hh, mm, ss = text.split(':')
+        return int(hh) * 3600 + int(mm) * 60 + int(ss)
+
+    def _flag_once57(argv, flag):
+        """(count, value) -- a ceiling written twice is a different bug than 0."""
+        hits = [i for i, token in enumerate(argv) if token == flag]
+        return len(hits), (argv[hits[0] + 1] if hits else None)
+
+    def _call_texts57(src, name):
+        """Every `name(...)` call in `src`, read across its line breaks.
+
+        The call site that hands the ceiling down is written on four lines, so a
+        line scan reads `command = build_ffmpeg_command(` and concludes the
+        argument was dropped. A check whose verdict changes when someone reflows
+        a call is not checking the contract -- it is checking the formatter.
+        """
+        out = []
+        needle = name + '('
+        for at in (i for i in range(len(src)) if src.startswith(needle, i)):
+            # 1, not 0: the scan starts *after* this call's own `(`, so the
+            # paren that ends the answer we are looking for is the one that
+            # brings the depth back to 0. Started at 0, the first *nested* call
+            # (`has_audio=bool(capture.audio_map)`) closed the span early and the
+            # verdict depended on whether an argument happened to contain a call.
+            depth = 1
+            for j in range(at + len(needle), len(src)):
+                if src[j] == '(':
+                    depth += 1
+                elif src[j] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        out.append(' '.join(src[at:j + 1].split()))
+                        break
+        return out
+
+    # -- A. the number, and who is allowed to answer it ----------------------
+    check("three rungs, and the safest-looking one is deliberately missing: an "
+          "「不限」row would be the row everybody leaves chosen, which is the "
+          "state this knob exists to end",
+          m57.MAX_DURATION_HOURS == (12, 24, 48)
+          and m57.DEFAULT_MAX_DURATION_HOURS == min(m57.MAX_DURATION_HOURS)
+          and 0 not in m57.MAX_DURATION_HOURS
+          and None not in m57.MAX_DURATION_HOURS,
+          str(m57.MAX_DURATION_HOURS))
+    _hours57 = [(None, 12), (12, 12), (24, 24), (48, 48), (6, 12), (0, 12),
+                (49, 12), ('nonsense', 12), (24.0, 24)]
+    _got57 = []
+    for _stored57, _want57 in _hours57:
+        _set57(m57.SettingProperty.Mirror_Max_Duration, _stored57)
+        _got57.append((_stored57, m57.max_duration_hours(), _want57))
+    check("an out-of-rung or unparseable value is the default rather than a "
+          "refusal -- the alternative is a settings JSON edit that ends a "
+          "presentation mid-sentence with nobody able to say why",
+          all(got == want for _s, got, want in _got57), str(_got57))
+    _set57(m57.SettingProperty.Mirror_Max_Duration, 24)
+    check("bound_video_seconds() is the single truth the rest of the file reads, "
+          "in seconds, and it follows the knob",
+          m57.bound_video_seconds() == 24 * 3600 == m57.max_duration_hours() * 3600,
+          str(m57.bound_video_seconds()))
+    check("and exactly the two television shapes are bounded -- a live-edge "
+          "consumer (browser, WebRTC, caststream) must never be cut short, "
+          "because truncating one of those saves nothing and costs a "
+          "presentation",
+          {k for k in m57.OUTPUTS if m57.duration_bound(k)}
+          == set(m57.MAX_DURATION_TARGETS)
+          and set(m57.MAX_DURATION_TARGETS) <= set(m57.OUTPUTS)
+          and m57.duration_bound('browser') is None
+          and m57.duration_bound('webrtc') is None
+          and m57.duration_bound('caststream') is None
+          and m57.duration_bound('cast') == 24 * 3600
+          and m57.duration_bound('dlna') == 24 * 3600,
+          str(sorted(m57.OUTPUTS)))
+    check("`duration_args` is the only place `-t` is spelled, and it spells "
+          "nothing at all for a missing bound (an output option with no value "
+          "would eat the muxer flag that follows it)",
+          m57.duration_args(None) == [] and m57.duration_args(0) == []
+          and m57.duration_args(43200) == ['-t', '43200'],
+          str(m57.duration_args(43200)))
+
+    # -- B. the number reaching the encoder ----------------------------------
+    _set57(m57.SettingProperty.Mirror_Max_Duration, None)
+    _cap57 = types.SimpleNamespace(
+        inputs=[['-f', 'avfoundation', '-i', '1:none']], audio_map='1:a:0',
+        label='测试采集', method='avfoundation')
+    _bound57 = m57.duration_bound('cast')
+    _argv_cast57 = m57.build_ffmpeg_command('ffmpeg', _cap57, 1080, 6000000,
+                                            kind='cast', encoder='software',
+                                            max_seconds=_bound57)
+    _n57, _v57 = _flag_once57(_argv_cast57, '-t')
+    _last_i57 = max(i for i, token in enumerate(_argv_cast57) if token == '-i')
+    check("a cast session's argv carries the ceiling once, as an *output* "
+          "option -- after the last input and before the muxer tail",
+          _n57 == 1 and _v57 == str(_bound57)
+          and _last_i57 < _argv_cast57.index('-t')
+          and _argv_cast57.index('-t') < _argv_cast57.index('-f', _last_i57),
+          str(_argv_cast57[-14:]))
+    _tail57 = list(m57.OUTPUTS['cast'][3])
+    check("and the tail is still the last thing on the command, so `-t` did not "
+          "displace the muxer flags by being appended after them",
+          _argv_cast57[-len(_tail57):] == _tail57, str(_argv_cast57[-6:]))
+    _passing57 = {}
+    for _k57 in sorted(m57.OUTPUTS):
+        _argv57 = m57.build_ffmpeg_command(
+            'ffmpeg', _cap57, 1080, 6000000, kind=_k57, encoder='software',
+            profile=m57.DLNA_PROFILES['ts-h264'] if _k57 == 'dlna' else None,
+            max_seconds=_bound57)
+        _passing57[_k57] = '-t' in _argv57
+    check("a ceiling mis-passed for every shape still only reaches the two "
+          "television ones: the builders re-check `MAX_DURATION_TARGETS` rather "
+          "than trusting the caller, so the wrong kind cannot be truncated from "
+          "a distance",
+          {k for k, seen in _passing57.items() if seen}
+          == set(m57.MAX_DURATION_TARGETS), str(_passing57))
+    _dl57 = m57.build_dlna_command('ffmpeg', _cap57,
+                                   m57.DLNA_PROFILES['ts-h264'],
+                                   max_seconds=_bound57)
+    _dln57, _dlv57 = _flag_once57(_dl57, '-t')
+    _dl_last_i57 = max(i for i, token in enumerate(_dl57) if token == '-i')
+    check("the DLNA builder puts it after its inputs and before `pipe:1`, "
+          "immediately after the profile's own muxer flags",
+          _dln57 == 1 and _dlv57 == str(_bound57)
+          and _dl_last_i57 < _dl57.index('-t') and _dl57[-1] == 'pipe:1'
+          and _dl57.index('-t') < _dl57.index('pipe:1'), str(_dl57[-12:]))
+    check("and the same builder with no ceiling writes no `-t` at all, rather "
+          "than `-t 0` -- which is a command that exits immediately",
+          '-t' not in m57.build_dlna_command('ffmpeg', _cap57,
+                                             m57.DLNA_PROFILES['ts-h264']), '')
+    check("`_int_flag` reads that argv back, which is what makes the「统计信息」"
+          "card a report rather than an echo of the setting",
+          m57._int_flag(_argv_cast57, '-t') == _bound57
+          and m57._int_flag(
+              m57.build_ffmpeg_command('ffmpeg', _cap57, 1080, 6000000,
+                                       kind='browser', encoder='software'),
+              '-t') is None, str(m57._int_flag(_argv_cast57, '-t')))
+    _diag_cast57 = m57._session_diagnostics(
+        kind='cast', capture=_cap57, command=_argv_cast57, encoder='software',
+        height=1080, bitrate=6000000,
+        session=m57._Session('cast', has_audio=True, title='x',
+                             bitrate=6000000, max_seconds=_bound57))
+    _argv_browser57 = m57.build_ffmpeg_command('ffmpeg', _cap57, 1080, 6000000,
+                                               kind='browser',
+                                               encoder='software')
+    _diag_browser57 = m57._session_diagnostics(
+        kind='browser', capture=_cap57, command=_argv_browser57,
+        encoder='software', height=1080, bitrate=6000000,
+        session=m57._Session('browser', has_audio=True, title='x',
+                             bitrate=6000000))
+    check("the published diagnostics carry the same number the argv carries, "
+          "and answer None (no row) for a shape with no ceiling",
+          _diag_cast57['max_seconds'] == _bound57
+          and _diag_browser57['max_seconds'] is None,
+          '{} / {}'.format(_diag_cast57.get('max_seconds'),
+                           _diag_browser57.get('max_seconds')))
+    _src_run57 = _inspect57.getsource(m57.ScreenMirrorRenderer._run_mirror)
+    _calls57 = _call_texts57(_src_run57, 'build_ffmpeg_command')
+    check("the run hands the ceiling to the builder: the parameter existing on "
+          "`build_ffmpeg_command` proves nothing, and this call site is the one "
+          "place it can be dropped -- dropping it leaves a mirror with a timer, "
+          "no `-t`, and a stats card that honestly says nothing",
+          len(_calls57) == 1 and 'max_seconds=max_seconds' in _calls57[0],
+          str(_calls57))
+    check("and it asks for it exactly once, on the kind that may already have "
+          "been lowered by a refused low-latency handshake -- a caststream the "
+          "device rejected is a LOAD session, and obeys the ceiling like every "
+          "other television shape",
+          _src_run57.count('duration_bound(') == 1
+          and _src_run57.index('duration_bound(') > _src_run57.index(
+              "kind = 'cast'"),
+          str(_src_run57.count('duration_bound(')))
+    _session_calls57 = _call_texts57(_src_run57, '_Session')
+    check("and the same value is handed to the session, which is the only place "
+          "both the file shape's own length and every push the run makes can "
+          "read it from -- a session that forgets its ceiling is a session that "
+          "promises a television a length its encoder was told not to write, and "
+          "at today's tier bitrates nothing else notices",
+          len(_session_calls57) == 1
+          and 'max_seconds=max_seconds' in _session_calls57[0],
+          str(_session_calls57))
+
+    # -- C. the promise made to the television -------------------------------
+    _pal57 = m57.DLNA_PROFILES['ps-pal']
+    _rate57 = _pal57.total_bitrate
+    _unbounded57 = m57.advertised_file(_rate57)
+    _short57 = m57.advertised_file(_rate57, 60)
+    check("a ceiling below the size cap shortens the advertised length: at 60 "
+          "s the file is promised exactly a minute of picture",
+          _short57[0] == _rate57 * 60 // 8
+          and _short57 == (_rate57 * 60 // 8, '0:01:00'), str(_short57))
+    _never_longer57 = []
+    for _b57 in (60, 3600) + tuple(h * 3600 for h in m57.MAX_DURATION_HOURS):
+        _cand57 = m57.advertised_file(_rate57, _b57)
+        _never_longer57.append(
+            (_b57, _cand57[0] <= _unbounded57[0],
+             _secs_from_clock(_cand57[1]) <= _secs_from_clock(_unbounded57[1])))
+    check("the ceiling may only ever shorten this pair, never lengthen it -- "
+          "growing a promise past what the size cap allows is the truncation "
+          "bug pointed the other way",
+          all(ok_size and ok_secs for _b, ok_size, ok_secs in _never_longer57),
+          str(_never_longer57))
+    check("and on the shipping rungs it changes nothing, because the 2 GiB cap "
+          "already bounds a fake file near an hour well below 12 -- the "
+          "advertised length and `-t` must agree whichever one is the binding "
+          "constraint, so equality here is the honest answer rather than an "
+          "unused parameter",
+          all(m57.advertised_file(_rate57, h * 3600) == _unbounded57
+              for h in m57.MAX_DURATION_HOURS), str(_unbounded57))
+    _over2g57 = []
+    for _pid57, _prof57 in m57.DLNA_PROFILES.items():
+        for _b57 in (60,) + tuple(h * 3600 for h in m57.MAX_DURATION_HOURS):
+            _size57, _dur57 = m57.advertised_file(_prof57.total_bitrate, _b57)
+            _over2g57.append((_pid57, _b57, _size57 < 2 ** 31,
+                              abs(_size57 * 8 // _prof57.total_bitrate
+                                  - _secs_from_clock(_dur57)) <= 1))
+    check("every profile under every rung stays inside signed 32 bits and keeps "
+          "size, bitrate and duration mutually consistent -- a TV that "
+          "cross-checks the three sees a broken file otherwise",
+          all(size_ok and clock_ok for _p, _b, size_ok, clock_ok in _over2g57),
+          str(_over2g57[:4]))
+    _set57(m57.SettingProperty.Mirror_Dlna_Shape, m57.DLNA_SHAPE_FILE)
+    _file_sess57 = m57._Session('dlna', profile=_pal57, has_audio=True,
+                                max_seconds=60)
+    check("the session that answers as a file records the shortened pair itself "
+          "-- the byte log's `size=`/`duration=` come from here, not from a "
+          "second reading of the setting. The ceiling here is 60 s, deliberately "
+          "below the size cap: at a shipping rung the two answers are the same "
+          "number, and a case that cannot tell them apart is not a case",
+          _file_sess57.bytelog is True and _file_sess57.shape_forced is False
+          and (_file_sess57.file_size, _file_sess57.file_duration)
+          == m57.advertised_file(_rate57, 60)
+          and _file_sess57.file_size != _unbounded57[0],
+          str([_file_sess57.file_size, _file_sess57.file_duration]))
+    _unbound_sess57 = m57._Session('dlna', profile=_pal57, has_audio=True)
+    check("and the same construction with no ceiling keeps the full length -- so "
+          "the case above is measuring the ceiling, not a `min` that always "
+          "shrinks",
+          _unbound_sess57.file_size == _unbounded57[0]
+          and _unbound_sess57.file_duration == _unbounded57[1],
+          str([_unbound_sess57.file_size, _unbound_sess57.file_duration]))
+    _set57(m57.SettingProperty.Mirror_Dlna_Shape, m57.DLNA_SHAPE_LIVE)
+    _live_sess57 = m57._Session('dlna', profile=_pal57, has_audio=True,
+                                max_seconds=_bound57)
+    check("the live shape states neither: it holds a ceiling for its encoder and "
+          "no length for a renderer that was never promised one",
+          _live_sess57.bytelog is False
+          and _live_sess57.file_size is None
+          and _live_sess57.file_duration is None, str(_live_sess57.bytelog))
+    _pushed57 = {}
+    _sender57 = m57._DlnaSender('http://127.0.0.1:1/control')
+    _sender57._request = lambda action, args: _pushed57.setdefault(
+        action, args)
+    _set57(m57.SettingProperty.Mirror_Dlna_Shape, m57.DLNA_SHAPE_FILE)
+    _sender57.set_uri('http://127.0.0.1:9/stream.mpg', '屏幕镜像', _pal57,
+                      max_seconds=60)
+    _didl60_57 = _pushed57['SetAVTransportURI']['CurrentURIMetaData']
+    _pushed57.clear()
+    _sender57.set_uri('http://127.0.0.1:9/stream.mpg', '屏幕镜像', _pal57)
+    _didl_none57 = _pushed57['SetAVTransportURI']['CurrentURIMetaData']
+    _pushed57.clear()
+    _set57(m57.SettingProperty.Mirror_Dlna_Shape, m57.DLNA_SHAPE_LIVE)
+    _sender57.set_uri('http://127.0.0.1:9/stream.mpg', '屏幕镜像', _pal57,
+                      max_seconds=60)
+    _didl_live57 = _pushed57['SetAVTransportURI']['CurrentURIMetaData']
+    check("the envelope a television actually receives carries the shortened "
+          "pair -- `set_uri` takes the session's ceiling as an argument instead "
+          "of asking the setting again mid-flight, so a knob turned while a "
+          "mirror runs cannot desync the two",
+          'size="{}" duration="{}"'.format(*m57.advertised_file(_rate57, 60))
+          in _didl60_57, _didl60_57[:200])
+    check("and no `size=` at all for the live shape, even when a ceiling exists "
+          "for its encoder",
+          'size=' not in _didl_live57 and 'duration=' not in _didl_live57,
+          _didl_live57[:200])
+    check("`set_uri` called with no ceiling (the bridge path, which plays "
+          "somebody else's URL and writes no encoder of ours) still advertises "
+          "the file shape's full length rather than a knob that does not apply",
+          'size="{}"'.format(_unbounded57[0]) in _didl_none57,
+          _didl_none57[:160])
+    _src_bridge57 = _inspect57.getsource(m57.ScreenMirrorRenderer._dlna_url)
+    _bridge57 = _call_texts57(_src_bridge57, 'set_uri')
+    check("and that bridge path really is the one that passes no ceiling -- "
+          "capping a file we are not writing would shorten somebody else's "
+          "video on our say-so",
+          len(_bridge57) == 1 and 'max_seconds' not in _bridge57[0],
+          str(_bridge57)[:200])
+    _set57(m57.SettingProperty.Mirror_Dlna_Shape, None)
+
+    # -- D. the deadline arriving -------------------------------------------
+    _R57 = m57.ScreenMirrorRenderer
+
+    def _make57(diag=None, generation=0):
+        inst = _R57.__new__(_R57)
+        inst._lock = threading.RLock()
+        inst._generation = generation
+        inst._diag = diag or {}
+        inst._capture_method = 'avfoundation'
+        inst._feeder = None
+        inst._sender = inst._proc = inst._server = None
+        inst._sink = None
+        inst._kind = 'cast'
+        inst._mirroring = True
+        inst._starting = False
+        inst._awake = None
+        inst._duration_timer = None
+        inst._events = []
+        inst.set_state_transport = lambda state: inst._events.append(
+            ('transport', state))
+        inst.set_state = lambda *a, **k: inst._events.append(('state', a))
+        inst.set_state_transport_error = lambda *a, **k: inst._events.append(
+            ('transport-error', a))
+        inst._fail = lambda message, gen: inst._events.append(('fail', message))
+        return inst
+
+    _notify57[:] = []
+    _inst57 = _make57()
+    _inst57._duration_expired(0, 12 * 3600)
+    _said57 = list(_notify57)
+    check("the ceiling ends the session out loud: one notification naming the "
+          "limit, the number of hours and the knob to change it",
+          len(_said57) == 1 and '已达投屏最大时长' in _said57[0]
+          and '12 小时' in _said57[0] and '最大时长' in _said57[0],
+          str(_said57))
+    check("it is a stop, not a failure: no transport error and no `_fail`, so a "
+          "session that did what it was told never reads as the crash it was "
+          "bounded to contain",
+          ('transport', 'STOPPED') in _inst57._events
+          and not [e for e in _inst57._events if e[0] == 'fail']
+          and not [e for e in _inst57._events if e[0] == 'transport-error'],
+          str(_inst57._events))
+    check("and it bumps the generation before reaping anything, exactly like "
+          "every other stop path: the pump is about to watch the encoder die, "
+          "and that report must not reach the user as「屏幕采集中断」",
+          _inst57._generation == 1 and _inst57._mirroring is False, '')
+    _notify57[:] = []
+    _stale57 = _make57(generation=3)
+    _stale57._duration_expired(2, 12 * 3600)
+    check("the second entrance is idempotent: a timer for a session that is "
+          "already gone says nothing at all (two notifications for one "
+          "midnight is how a reliable stop becomes a mystery)",
+          _notify57 == [] and _stale57._events == []
+          and _stale57._generation == 3, str(_notify57))
+    _notify57[:] = []
+    _capped57 = _make57(diag={'max_seconds': 12 * 3600})
+    _capped57._encoder_died(0, types.SimpleNamespace(poll=lambda: 0),
+                            time.time() - 12 * 3600 - 5)
+    check("when ffmpeg's own `-t` gets there first, the death is reported as "
+          "the planned end it is, through the same single sentence",
+          len(_notify57) == 1 and '已达投屏最大时长' in _notify57[0]
+          and not [e for e in _capped57._events if e[0] == 'fail'],
+          str(_notify57) + ' ' + str(_capped57._events))
+    _notify57[:] = []
+    _plain57 = _make57()
+    _plain57._encoder_died(0, types.SimpleNamespace(poll=lambda: 1),
+                           time.time() - 12 * 3600 - 5)
+    check("while a death at the same age on a session that carries no ceiling "
+          "is still an interruption, honestly named: the cap branch keys off "
+          "the argv's own number, not off how long the machine has been up",
+          _notify57 == [] and [e for e in _plain57._events if e[0] == 'fail']
+          and '屏幕采集中断' in _plain57._events[-1][1],
+          str(_plain57._events))
+    _early57 = _make57(diag={'max_seconds': 12 * 3600})
+    _early57._encoder_died(0, types.SimpleNamespace(poll=lambda: 1),
+                           time.time() - 2)
+    check("and a bounded session that dies two seconds in is still a start "
+          "failure -- holding a ceiling is not an excuse that turns any crash "
+          "into「按计划结束」",
+          _notify57 == []
+          and [e for e in _early57._events if e[0] == 'fail']
+          and '启动失败' in _early57._events[-1][1], str(_early57._events))
+    _fired57 = threading.Event()
+    _armed57 = threading.Timer(0.05, _fired57.set)
+    _armed57.daemon = True
+    _untorn57 = _make57()
+    _untorn57._duration_timer = _armed57
+    _armed57.start()
+    _untorn57._teardown()
+    time.sleep(0.3)
+    check("the one reaper cancels the session's ceiling timer: a teardown for a "
+          "new session must not leave the previous session's deadline armed to "
+          "end it",
+          _fired57.is_set() is False and _untorn57._duration_timer is None, '')
+    _fired2_57 = threading.Event()
+    _control57 = threading.Timer(0.05, _fired2_57.set)
+    _control57.daemon = True
+    _control57.start()
+    time.sleep(0.3)
+    check("and that assertion has a positive control -- an armed timer nobody "
+          "cancels does fire, so the case above is not measuring a thread that "
+          "never ran",
+          _fired2_57.is_set() is True, '')
+    _src_timer57 = _inspect57.getsource(m57.ScreenMirrorRenderer._run_mirror)
+    _timer_lines57 = _src_timer57.splitlines()
+    _arm_line57 = [i for i, ln in enumerate(_timer_lines57)
+                   if 'self._arm_duration_timer(' in ln]
+    _play_line57 = [i for i, ln in enumerate(_timer_lines57)
+                    if "set_state_transport('PLAYING')" in ln]
+    _guard_line57 = [i for i, ln in enumerate(_timer_lines57)
+                     if ln.strip() == 'if max_seconds:']
+    check("the timer is armed only when a ceiling exists, and only after the "
+          "session has been published as PLAYING -- arming it before the encoder "
+          "is handed over would let a refused start stop a mirror that never "
+          "began",
+          len(_arm_line57) == 1 and len(_play_line57) == 1
+          and len(_guard_line57) == 1
+          and _play_line57[0] < _guard_line57[0] < _arm_line57[0],
+          str([_play_line57, _guard_line57, _arm_line57]))
+    _notify57[:] = []
+    _live57 = _make57()
+    _live57._arm_duration_timer(0, 1)
+    _deadline57 = time.time() + 4.0
+    while time.time() < _deadline57 and not _notify57:
+        time.sleep(0.05)
+    check("and arming it is not constructing it: with nothing killing ffmpeg, a "
+          "one-second ceiling ends the session by itself -- one notification, the "
+          "generation bumped, the mirror flag cleared. Without this the only "
+          "thing that would ever stop a television mirror is the encoder's own "
+          "`-t`, which is the backstop this design says it is not alone",
+          len(_notify57) == 1 and '已达投屏最大时长' in _notify57[0]
+          and _live57._generation == 1 and _live57._mirroring is False
+          and ('transport', 'STOPPED') in _live57._events,
+          '{} in {:.2f}s {} {}'.format(
+              _notify57, time.time() - (_deadline57 - 4.0),
+              _live57._events[-1:], _live57._mirroring))
+    _src_watch57 = _inspect57.getsource(m57.ScreenMirrorRenderer._watch_dlna)
+    check("the watchdog's re-push carries the same session ceiling, so a "
+          "renderer that stalls and gets its URL again is not re-promised the "
+          "unbounded length",
+          _src_watch57.count('max_seconds=session.max_seconds') == 1
+          and _src_run57.count('max_seconds=session.max_seconds') == 1, '')
+
+    # -- E. what the user is offered, and what the card says ----------------
+    _mirror35_57 = m57.ScreenMirrorSetting
+    _saved_kick57 = m57.start_search, m57.start_renderer_search
+    m57.start_search = m57.start_renderer_search = lambda: None
+    try:
+        _quality57 = {}
+        for _k57 in ('cast', 'caststream', 'dlna', 'browser', 'webrtc'):
+            _set57(m57.SettingProperty.Mirror_Output, _k57)
+            _q57 = _mirror35_57().console_state()['quality']
+            _quality57[_k57] = ('max_duration' in _q57,
+                                [o['key'] for o in
+                                 _q57.get('max_duration', {}).get('options', [])],
+                                _q57.get('max_duration', {}).get('current'))
+        check("the「画质」card offers the ceiling for exactly the two television "
+              "targets and for no other -- a pill that changes a setting "
+              "nothing obeys is the same lie as a stale hint",
+              {k for k, (present, _o, _c) in _quality57.items() if present}
+              == set(m57.MAX_DURATION_TARGETS), str(_quality57))
+        _set57(m57.SettingProperty.Mirror_Output, 'cast')
+        _q57 = _mirror35_57().console_state()['quality']
+        _md57 = _q57['max_duration']
+        check("the pills are spelled from the rungs themselves, with the "
+              "default marked, and the bitrate rungs next to them are untouched",
+              [o['key'] for o in _md57['options']] == ['12', '24', '48']
+              and _md57['current'] == m57.DEFAULT_MAX_DURATION_HOURS
+              and '（默认）' in _md57['options'][0]['label']
+              and '12 小时' in _md57['options'][0]['label']
+              and '（默认）' not in _md57['options'][1]['label']
+              and [o['key'] for o in _q57['options']] == list(m57.QUALITY_ORDER),
+              str(_md57['options']))
+        check("and the card's own sentence names both television targets, both "
+              "exclusions and that the stop is active rather than a silent cut "
+              "-- the help text and this hint have to agree, and neither may "
+              "leave the reader hunting for which knob did it",
+              _md57['note'] == m57.MAX_DURATION_HINT
+              and 'Chromecast' in _md57['note'] and 'DLNA' in _md57['note']
+              and '浏览器' in _md57['note'] and '低延迟' in _md57['note']
+              and '主动停止' in _md57['note'], _md57['note'][:120])
+    finally:
+        m57.start_search, m57.start_renderer_search = _saved_kick57
+    _set57(m57.SettingProperty.Mirror_Output, None)
+    check("the console can be asked to change it, and only by name",
+          'set-max-duration' in m57.ScreenMirrorSetting.CONSOLE_ACTIONS, '')
+    _setting57 = m57.ScreenMirrorSetting()
+    _restarts57 = []
+    _setting57._restart = lambda: _restarts57.append(1)
+    _notify57[:] = []
+    _refused57 = []
+    for _args57 in ({'value': '40'}, {'value': 'abc'}, {}, {'value': ''}):
+        _refused57.append((str(_args57),
+                           _setting57.console_action('set-max-duration',
+                                                     _args57)['code']))
+    check("an out-of-rung or unparseable value is refused with a message rather "
+          "than clamped, because the page is not the only thing that should "
+          "enforce the list and a silent 40 -> 48 would be a surprise at 3 am",
+          all(code == 1 for _a, code in _refused57)
+          and m57.max_duration_hours() == m57.DEFAULT_MAX_DURATION_HOURS
+          and _restarts57 == [], str(_refused57))
+    _ok57 = _setting57.console_action('set-max-duration', {'value': '24'})
+    check("a real rung is accepted, written, and restarts: the ceiling is baked "
+          "into both the encoder's `-t` and a length the television already "
+          "believes, so a running session cannot change it underneath itself",
+          _ok57['code'] == 0 and m57.max_duration_hours() == 24
+          and _restarts57 == [1] and len(_notify57) == 1
+          and '24 小时' in _notify57[0], str([_ok57, _restarts57, _notify57]))
+    _set57(m57.SettingProperty.Mirror_Max_Duration, None)
+    _mv57 = _load("mirror_view57", "mirror_view.py")
+    _rowed57 = _mv57.diagnostics_rows({'stats': {'diag': _diag_cast57},
+                                       'output': {'kind': 'cast'},
+                                       'channels': []})
+    _flat57 = dict(_rowed57)
+    _rowed_none57 = dict(_mv57.diagnostics_rows(
+        {'stats': {'diag': _diag_browser57}, 'output': {'kind': 'browser'},
+         'channels': []}))
+    check("the「统计信息」card prints the ceiling in hours for a bounded run and "
+          "leaves the row off entirely for a shape that has none -- the setting "
+          "exists on every machine, the `-t` does not, and a card that derived "
+          "this row from the setting would lie about three of the five targets",
+          _flat57.get('最大时长') == m57.max_duration_phrase(_bound57)
+          and '最大时长' not in _rowed_none57
+          and _flat57['最大时长'] == '12 小时',
+          str([_flat57.get('最大时长'), _rowed_none57.get('最大时长')]))
+    _page57 = open(os.path.join(MACAST, 'xml', 'setting.html'),
+                   encoding='utf-8').read()
+    check("the page reads the nested key rather than deciding for itself which "
+          "targets have a ceiling, calls the action by its name, and spells no "
+          "rung number in markup -- the rungs live in one tuple",
+          'mirror_state.quality.max_duration' in _page57
+          and "mirror_run('set-max-duration'" in _page57
+          and '小时' not in _page57,
+          str(_page57.count('max_duration')))
+    _lab57 = __import__('macast.module_settings', fromlist=['PLUGIN_LABELS'])
+    _own57 = _lab57.PLUGIN_LABELS.get('screen_mirror', {})
+    _cjk57 = lambda s: any(u'一' <= ch <= u'鿿' for ch in s)
+    check("the key has a Chinese label and hint in the ownership table, so "
+          "「模块设置」never shows a raw `Mirror_Max_Duration` or an English "
+          "sentence about it (AGENTS.md 4.11's drift guard is this shape)",
+          'Mirror_Max_Duration' in _own57
+          and _cjk57(_own57['Mirror_Max_Duration'][0])
+          and _cjk57(_own57['Mirror_Max_Duration'][1])
+          and 'DLNA' in _own57['Mirror_Max_Duration'][1],
+          str(_own57.get('Mirror_Max_Duration')))
+except Exception as _e57:
+    _traceback57.print_exc()
+    check("Part 57 runs", False, "{}: {}".format(type(_e57).__name__, _e57))
+finally:
+    if m57 is not None and _saved_notify57 is not None:
+        m57.notify = _saved_notify57
+    utils.Setting.setting, utils.Setting.setting_path = _saved57[0], _saved57[1]
+    utils.SETTING_DIR = _saved57[2]
+    _shutil.rmtree(_tmp57, ignore_errors=True)
+
+# --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
 # The CI gate, applied (see `ci_gate` above for why the rule is this narrow).

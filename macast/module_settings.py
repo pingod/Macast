@@ -68,11 +68,13 @@ PLUGIN_LABELS = {
         'Mirror_Quality': ('画质档位', '「电脑投屏」页「画质」写入的档位索引。'),
         'Mirror_Audio_Aggregate': ('聚合设备 ID', '一键设置创建的 CoreAudio 多输出设备，复用而非叠建。'),
         'Mirror_Audio_Original': ('原声音输出 ID', '「恢复原声音输出」要回到的默认设备。'),
-        'Mirror_Output': ('投屏方式', "'cast' | 'caststream' | 'browser' | 'dlna'。"
-                                       '「电脑投屏」页「投屏方式」选中的那一种。'),
+        'Mirror_Output': ('投屏方式', "'cast' | 'caststream' | 'browser' | "
+                                      "'webrtc' | 'dlna'。"
+                                      '「电脑投屏」页「投屏方式」选中的那一种。'),
         'Mirror_Screen': ('采集屏幕', 'avfoundation 视频设备序号；空串 = 第一块屏幕。'),
         'Mirror_Cursor': ('显示鼠标指针', 'bool。'),
-        'Mirror_Encoder': ('编码器', "'software'（x264）| 'hardware'（VideoToolbox，仅 macOS）。"),
+        'Mirror_Encoder': ('编码器', "'software'（x264）| 'hardware'"
+                                     '（macOS 是 VideoToolbox，Windows 是 NVENC）。'),
         'Mirror_Dlna_Profile': ('DLNA 档位', 'DLNA_PROFILES 的键；老电视吃得下什么封装由它决定。'),
         'Mirror_Dlna_Control': ('DLNA 控制 URL', '所选 DLNA 渲染器的 AVTransport 控制地址。'),
         'Mirror_Dlna_Shape': ('DLNA 投屏形状',
@@ -85,6 +87,10 @@ PLUGIN_LABELS = {
                              '浏览器播放页落后直播边缘超过多少秒就被拉回，0.5–5；'
                              '管的不是延迟下限（实测 1 秒与 0.5 秒只差 9 毫秒），'
                              '刷新观看页生效。'),
+        'Mirror_Max_Duration': ('投屏最大时长',
+                                '一次电视镜像最多连续跑多少小时，到点主动停止并通知，'
+                                '12 | 24 | 48。只管 Chromecast 兼容通道与 DLNA 电视；'
+                                '浏览器页与两条低延迟通道不受它约束。'),
     },
     'cast_local_file': {
         'Target_Kind': ('目标类型', "'cast'（Chromecast）或 'dlna'（电视）。"),

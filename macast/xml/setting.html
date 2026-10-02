@@ -1032,6 +1032,16 @@
                                 </span>
                             </div>
                             <div class="hint" style="margin-top:8px;">{{ mirror_view.quality.note }}</div>
+                            <template v-if="mirror_state.quality.max_duration">
+                                <h3 style="margin-top:16px;">投屏最大时长</h3>
+                                <div class="mirror-pills">
+                                    <span class="mirror-pill"
+                                          :class="{sel: hd.key === String(mirror_state.quality.max_duration.current)}"
+                                          v-for="hd in mirror_state.quality.max_duration.options" :key="hd.key"
+                                          @click="mirror_run('set-max-duration', {value: hd.key})">{{ hd.label }}</span>
+                                </div>
+                                <div class="hint" style="margin-top:8px;">{{ mirror_state.quality.max_duration.note }}</div>
+                            </template>
                         </div>
 
                         <div class="status-card" v-if="sec === 'capture'" key="capture">
@@ -1479,8 +1489,10 @@
                     <li><strong>Wayland 不支持</strong>（Linux）：屏幕采集走 X11，Wayland 会话下没有可靠抓手，
                         页面上会直说，不会假装修好了。</li>
                 </ol>
-                <p>另外两件不算 bug 的事：镜像期间应用会阻止这台电脑休眠；
-                    有 DLNA/Chromecast 投屏进来时，镜像会<strong>主动让位</strong>并把画面转投给那台设备。</p>
+                <p>另外三件不算 bug 的事：镜像期间应用会阻止这台电脑休眠；
+                    有 DLNA/Chromecast 投屏进来时，镜像会<strong>主动让位</strong>并把画面转投给那台设备；
+                    投给电视的那几路到「投屏最大时长」（「电脑投屏」→「画质」卡）就<strong>主动停止并通知</strong>，
+                    而不是悄悄把画面截掉 —— 哪几路受它约束、怎么换档，都写在那张卡的说明里。</p>
 
                 <h2 id="h-file">投本地文件 / 字幕</h2>
                 <ul>
