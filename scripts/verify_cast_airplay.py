@@ -4792,9 +4792,10 @@ done
                                             kind='cast')
         _mp22 = mirror.build_ffmpeg_command('ffmpeg', _cap22, 720, 5000000,
                                            kind='browser')
-        check("the browser target muxes fragmented MP4 into the pipe",
+        check("the browser target muxes fragmented MP4 into the pipe, cut at "
+              "every frame",
               'mp4' in _mp22
-              and 'frag_keyframe+empty_moov+default_base_moof' in ''.join(_mp22)
+              and 'frag_every_frame+empty_moov+default_base_moof' in ''.join(_mp22)
               and 'pipe:1' in _mp22 and 'mpegts' not in _mp22, str(_mp22))
         check("the Chromecast target still muxes MPEG-TS",
               'mpegts' in _ts22 and 'mp4' not in _ts22, str(_ts22))
@@ -4975,9 +4976,15 @@ done
         def _box22(kind, body=b''):
             return struct.pack('>I', 8 + len(body)) + kind + body
 
-        def _fragment22(n):
+        def _fragment22(n, sync=True):
+            # `starts_with_keyframe` reads a real AVCC sample now: the first
+            # NAL byte decides whether a replay may start here (0x65 = IDR 5,
+            # 0x41 = non-IDR slice 1). A payload of dots answers neither --
+            # leave this fixture as it was and every tag goes silently False,
+            # which `tail()` would read as "no replay for anyone".
+            nal = bytes([0x65 if sync else 0x41]) + bytes([48 + n % 10]) * 395
             return (_box22(b'moof', b'.' * 24)
-                    + _box22(b'mdat', bytes([48 + n % 10]) * 400))
+                    + _box22(b'mdat', struct.pack('>I', len(nal)) + nal))
 
         _head22 = _box22(b'ftyp', b'isom') + _box22(b'moov', b'm' * 60)
         _frag22 = 440
@@ -4991,18 +4998,19 @@ done
                 _units22 += _fr22.feed(_mp4_22[_i:_i + _cut])
             _units22 += _fr22.flush()
             check("framing is exact at every read boundary ({} B)".format(_cut),
-                  b''.join(u for _, u in _units22) == _mp4_22
+                  b''.join(u for _m, u, _s in _units22) == _mp4_22
                   and not _fr22.broken,
                   "{} of {} bytes handed out".format(
-                      sum(len(u) for _, u in _units22), len(_mp4_22)))
+                      sum(len(u) for _m, u, _s in _units22), len(_mp4_22)))
         _fr22 = mirror._Fragments()
         _units22 = _fr22.feed(_mp4_22)
         check("one unit handed out is one whole fragment, and the header is "
               "the first thing out",
-              _units22[0] == (False, _head22)
-              and all(u[4:8] == b'moof' for m22, u in _units22[1:])
+              _units22[0] == (False, _head22, False)
+              and all(u[4:8] == b'moof' for _m22, u, _s22 in _units22[1:])
               and len(_units22) == 9,
-              "{} / {}".format(len(_units22), [u[4:8] for _, u in _units22][:3]))
+              "{} / {}".format(len(_units22),
+                               [u[4:8] for _m, u, _s in _units22][:3]))
         _bc22 = mirror._Broadcaster(init_marker=b'moof', ring_bytes=900)
         for _i in range(9):
             _bc22.feed(_fragment22(_i))
@@ -5667,6 +5675,86 @@ done
               in mirror.content_features(_pal23)
               and 'DLNA.ORG_OP=00' in mirror.content_features(_pal23),
               mirror.content_features(_pal23))
+
+        #: The flags word itself. What this file shipped for two releases was a
+        #: bare `01500000…` literal, and the only way to know what it meant was
+        #: to already know the bit layout -- so the value is asked of the named
+        #: bits, and the named bits are then asked to be the ones on the wire.
+        _flags23 = mirror.DLNA_ORG_FLAGS
+        check("the flags word is 32 hex digits: four of flags, and twelve "
+              "reserved bytes that every field implementation sends as zero",
+              len(_flags23) == 32 and _flags23[8:] == '0' * 24
+              and all(c in '0123456789abcdef' for c in _flags23), _flags23)
+        _word23 = int(_flags23[:8], 16)
+        check("and it is assembled from the named bits rather than typed in -- a "
+              "literal in the test would still be a literal",
+              _word23 == (mirror.DLNA_FLAG_STREAMING_TRANSFER_MODE
+                          | mirror.DLNA_FLAG_BACKGROUND_TRANSFER_MODE
+                          | mirror.DLNA_FLAG_CONNECTION_STALL
+                          | mirror.DLNA_FLAG_DLNA_V15), hex(_word23))
+        #: `017` is VLC's word. `015` is MirrorCast's -- the reference this
+        #: file's flags were copied from, which does not declare a stall because
+        #: it does not cause one. Pinning the exact value is what makes dropping
+        #: the bit a red case instead of a quieter stream.
+        check("the stream declares that it may stall, which is a description of "
+              "our own HTTP layer and not a hedge",
+              _flags23 == '01700000' + '0' * 24
+              and _word23 & mirror.DLNA_FLAG_CONNECTION_STALL != 0, _flags23)
+        #: The bit is only honest if the code really does make a renderer wait.
+        #: Both halves in one case, so that either one going away -- the
+        #: declaration or the behaviour it declares -- reddens the same line.
+        #:
+        #: What "wait" means here has to be observable from outside the log: the
+        #: read has not come back. `_ByteLog.read` deliberately does **not**
+        #: touch `_readers` -- the HTTP handler brackets its whole response with
+        #: `reader_enter`/`reader_leave`, because a renderer that opened a
+        #: connection and has asked nothing yet is still a client. So counting
+        #: readers around a bare `read()` counts nothing at all, which is how
+        #: the first version of this case was red for a reason that had nothing
+        #: to do with the flag it was written to defend.
+        _park23 = mirror._ByteLog()
+        _back23 = []
+        _th23 = threading.Thread(target=lambda: _back23.append(
+            _park23.read(0, 4096, deadline=None)), daemon=True)
+        _th23.start()
+        time.sleep(0.6)                   # two of read()'s own 0.5 s waits
+        check("...and it earns it: a reader that outruns the encoder parks "
+              "instead of being handed a short answer",
+              _word23 & mirror.DLNA_FLAG_CONNECTION_STALL != 0
+              and _th23.is_alive() and _back23 == [],
+              'alive={} returned={}'.format(_th23.is_alive(), _back23))
+        _park23.close()
+        check("and what releases it is the session ending, which says so with "
+              "`complete=False` instead of by handing back a short body",
+              _wait_until(lambda: not _th23.is_alive(), timeout=5)
+              and _back23 == [(b'', False)], repr(_back23))
+        check("one word travels in the DIDL and on the response header, so a "
+              "renderer that checks both cannot be told two things",
+              all('DLNA.ORG_FLAGS={}'.format(_flags23) in text for text in
+                  (_pi23, mirror.content_features(_pal23),
+                   mirror.content_features(_h26423),
+                   mirror.protocol_info(_h26423))),
+              mirror.content_features(_h26423))
+        #: The sibling sender plugin has declared the stall bit all along,
+        #: because its transcode pump parks a reader that outruns ffmpeg for
+        #: exactly the same reason. Until v0.19 this file was the odd one out in
+        #: its own repository: two plugins that behave identically were telling
+        #: televisions two different things, and nothing in the suite could
+        #: notice, because nothing compared them. Read the word out of the other
+        #: file instead of retyping it -- a second literal here is a second
+        #: thing to drift, and drifting is the whole failure this case exists
+        #: for. `count == 1` is what makes the comparison a comparison: if that
+        #: file grew a second flags word, "the word appears somewhere in it"
+        #: would keep passing while saying nothing.
+        with open(os.path.join(MACAST, 'plugins', 'renderer',
+                               'cast_local_file.py'), encoding='utf-8') as _fh23:
+            _clf23 = _fh23.read()
+        check("and the plugin that parks a reader for the same reason declares "
+              "the same flags word",
+              _clf23.count('DLNA.ORG_FLAGS=') == 1
+              and 'DLNA.ORG_FLAGS={}'.format(_flags23) in _clf23,
+              'cast_local_file.py and screen_mirror.py disagree about whether '
+              'their streams may stall, and both of them make a renderer wait')
 
         _didl23 = mirror.build_didl('http://10.0.0.2:9/stream/aa.mpg',
                                     'TV & <b>host</b>', _pal23, _size23, _dur23)
@@ -7563,6 +7651,23 @@ class _FakeCastDevice24(object):
         self.udp.sendto(_checkpoint24(frame8, self.offer_ssrc,
                                       self.answer_ssrc, delay), self.peer)
 
+    def nack(self, frame8, packet_id=0, bits=0, delay=12):
+        """A per-packet loss report, riding on a checkpoint the way the real one
+        does -- openscreen's compound RTCP puts the losses in the CAST block of
+        an acknowledgement, not in a packet of their own.
+
+        The checkpoint names `frame8 - 1` on purpose. A loss field is widened
+        *forwards* from the acknowledgement it travels with, so acknowledging the
+        frame we are asking about would have the sender pop it before it read the
+        request -- which is what a one-frame fixture in Part 24 did, and why that
+        fixture reported zero resends without anything being wrong with the
+        sender.
+        """
+        losses = bytes([frame8 & 0xFF, packet_id >> 8, packet_id & 0xFF, bits])
+        self.udp.sendto(_checkpoint24((frame8 - 1) & 0xFF, self.offer_ssrc,
+                                      self.answer_ssrc, delay,
+                                      losses=losses), self.peer)
+
     def nack_picture(self):
         self.udp.sendto(_pli24(self.offer_ssrc), self.peer)
 
@@ -7757,7 +7862,11 @@ try:
               == [('checkpoint', 200, 37)],
               str(mirror.parse_rtcp(_checkpoint24(200, 0x11, 0x22, 37), 0x11)))
         _lost = bytes([7, 0x01, 0x02, 0xFF]) + bytes([9, 0xFF, 0xFF, 0x01])
-        check("per-packet loss is read and named, then ignored",
+        #: This case used to be called "...then ignored", which was the whole
+        #: claim the retransmission cases below reverse. The parser's job has not
+        #: changed -- it still only reads and names -- but what happens next has,
+        #: and a name that says otherwise would outlive the code it describes.
+        check("per-packet loss is read and named for the sender to act on",
               mirror.parse_rtcp(_checkpoint24(4, 0x11, 0x22, 5, losses=_lost),
                                 0x11) == [('checkpoint', 4, 5),
                                           ('nack', 7, 0x0102, 0xFF),
@@ -7780,6 +7889,308 @@ try:
               and mirror.expand_frame_id(3, 259) == 259
               and mirror.expand_frame_id(3, 258) == 3
               and mirror.expand_frame_id(0, -1) == 0)
+        #: A NACKed frame is normally *newer* than the checkpoint it rides with,
+        #: so it widens in the opposite direction. The two are not
+        #: interchangeable and the difference is 256 frames of silent loss.
+        #: The widening is *strictly* greater, so a loss id equal to the
+        #: checkpoint's own frame means the next time that low byte comes round.
+        #: A receiver cannot ask about a frame it has already acknowledged; if it
+        #: does, 256 frames forward is the only reading that does not reach into
+        #: the past.
+        check("a loss id widens forwards from its checkpoint, not backwards "
+              "from the newest frame",
+              mirror.expand_frame_id_after(5, 4) == 5
+              and mirror.expand_frame_id_after(4, 4) == 260
+              and mirror.expand_frame_id_after(3, 259) == 515
+              and mirror.expand_frame_id_after(0, 255) == 256,
+              str([(mirror.expand_frame_id_after(5, 4),
+                    mirror.expand_frame_id_after(4, 4),
+                    mirror.expand_frame_id_after(3, 259))]))
+        check("...and the checkpoint's own rule would have picked a frame 256 "
+              "in the past",
+              mirror.expand_frame_id(5, 4) == -251
+              and mirror.expand_frame_id_after(5, 4) == 5,
+              str(mirror.expand_frame_id(5, 4)))
+
+        # -- retransmission ----------------------------------------------------
+        #: openscreen's `SenderImpl::OnReceiverIsMissingPackets`
+        #: (`cast/streaming/impl/sender_impl.cc:556`) is a retransmit path, and
+        #: this channel's own docstring used to claim the reference had none. The
+        #: cases below pin the five rules that make it safe, on a sender with no
+        #: threads and no real socket so that each one fails alone.
+        class _Sock24(object):
+            def __init__(self):
+                self.sent = []
+
+            def sendto(self, data, address):
+                self.sent.append(data)
+                return len(data)
+
+        class _Ctl24(object):
+            sock = None
+
+            def close_mirroring(self):
+                pass
+
+            def close(self):
+                pass
+
+        def _sender24():
+            key24, mask24 = mirror.aes_material()
+            sock24 = _Sock24()
+            return mirror._CastStreamSender(_Ctl24(), sock24,
+                                            ('192.0.2.1', 5000), 0x11, 0x22,
+                                            key24, mask24), sock24
+
+        def _aged24(sender, frames):
+            """Push `frames` pictures and make them all look ten seconds old.
+
+            Ten seconds rather than a little: the staleness rule compares against
+            one smoothed round trip, and a fixture that ages a frame by exactly
+            that much is a fixture that passes on a fast machine and fails on a
+            loaded one.
+            """
+            for _ in range(frames):
+                sender.feed(_au24(0))
+                sender.flush()
+            with sender._lock:
+                sender._in_flight = type(sender._in_flight)(
+                    (e[0], e[1], e[2], e[3] - 10.0, e[4])
+                    for e in sender._in_flight)
+            return sender
+
+        def _rtcp24(checkpoint8, losses):
+            """A CAST acknowledgement carrying `losses`, length field included.
+
+            Built here rather than through `_checkpoint24` only where the losses
+            have to be counted in words; the shapes are the same and the
+            socket-level cases below use the device's own copy.
+            """
+            return _checkpoint24(checkpoint8, 0x11, 0x22, 12, losses=losses)
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 3)
+        _n24 = len(_k24.sent)
+        #: `_au24(0)` is ~1.8 KB against a 1381-byte payload ceiling, so every
+        #: frame here is exactly two packets and a bit vector has something to
+        #: point at.
+        check("a two-packet frame really is two packets in flight",
+              [len(e[1]) for e in _s24._in_flight] == [2, 2, 2],
+              str([len(e[1]) for e in _s24._in_flight]))
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0x00, 0x00, 0x01])))
+        _new24 = _k24.sent[_n24:]
+        _orig24 = [e[1] for e in _s24._in_flight if e[0] == 1][0]
+        check("bit 0 of the loss vector asks for the *next* packet as well",
+              len(_new24) == 2 and _s24.retransmits == 2
+              and [struct.unpack('>H', p[14:16])[0] for p in _new24] == [0, 1],
+              str([struct.unpack('>H', p[14:16])[0] for p in _new24]))
+        check("a resend is the same packet wearing a new sequence number",
+              all(p[4:] == _orig24[i][4:] for i, p in enumerate(_new24))
+              and all(p[2:4] != _orig24[i][2:4] for i, p in enumerate(_new24)),
+              str([p[:19].hex() for p in _new24]))
+        _seqs24 = [struct.unpack('>H', p[2:4])[0] for p in _k24.sent]
+        check("no sequence number is ever handed out twice",
+              len(set(_seqs24)) == len(_seqs24), str(_seqs24))
+
+        #: Every fixture below sends two frames and then acknowledges frame 0.
+        #: That is not decoration: a checkpoint means "I have everything up to
+        #: here", so `_on_rtcp` pops it *before* the loss fields in the same
+        #: compound packet are read. A one-frame fixture therefore has nothing
+        #: left to repair, and a case built on one passes for the wrong reason
+        #: the first time and then silently stops testing anything.
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 2)
+        _n24 = len(_k24.sent)
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0xFF, 0xFF, 0xFF])))
+        check("ALL_PACKETS_LOST means the frame, and its bit vector is not read",
+              len(_k24.sent) - _n24 == 2 and _s24.retransmits == 2
+              and [struct.unpack('>H', p[14:16])[0]
+                   for p in _k24.sent[_n24:]] == [0, 1],
+              str([struct.unpack('>H', p[14:16])[0] for p in _k24.sent[_n24:]]))
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 2)
+        _n24 = len(_k24.sent)
+        #: Two loss fields for the same frame: one naming a packet the frame does
+        #: not have (it is two packets long) and one it does. Asking for both and
+        #: getting exactly the real one back is the only shape that tells "the
+        #: bogus id was dropped" apart from "the whole frame was skipped" -- and
+        #: `retransmit_gone` staying at zero is what rules the latter out.
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0x00, 0x09, 0x00])
+                              + bytes([1, 0x00, 0x00, 0x00])))
+        check("a packet id the frame does not have is dropped, not trusted",
+              len(_k24.sent) - _n24 == 1 and _s24.retransmits == 1
+              and _s24.retransmit_gone == 0
+              and struct.unpack('>H', _k24.sent[_n24][14:16])[0] == 0,
+              'sent={} gone={}'.format(len(_k24.sent) - _n24,
+                                       _s24.retransmit_gone))
+
+        _s24, _k24 = _sender24()
+        _s24.feed(_au24(0))
+        _s24.flush()
+        _s24.feed(_au24(0))
+        _s24.flush()
+        _n24 = len(_k24.sent)
+        #: Frame 1 left microseconds ago. The receiver's report may have been
+        #: written while it was still in flight, in which case resending competes
+        #: with the original for the same bandwidth. This is the rule that keeps
+        #: a NACK loop from becoming self-sustaining, and it is the one a
+        #: retransmit path without a reference implementation would omit.
+        #:
+        #: The checkpoint acknowledges frame 0 (and so pops it) because a loss id
+        #: only ever widens *forwards* from the checkpoint it rides with -- a
+        #: receiver cannot ask about a frame older than its own acknowledgement.
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0x00, 0x00, 0x00])))
+        check("a packet sent less than one round trip ago is not resent",
+              len(_k24.sent) == _n24 and _s24.retransmit_stale == 1
+              and _s24.retransmits == 0,
+              'sent={} stale={}'.format(len(_k24.sent) - _n24,
+                                        _s24.retransmit_stale))
+        #: Same frame, same request, now that it has aged: the only thing that
+        #: changed is the send time, so this is the positive control for the case
+        #: above rather than a second opinion about the parser.
+        with _s24._lock:
+            e = _s24._in_flight[-1]
+            _s24._in_flight[-1] = (e[0], e[1], e[2], e[3] - 10.0, e[4])
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0x00, 0x00, 0x00])))
+        check("...and the identical request is honoured once the frame is old",
+              len(_k24.sent) - _n24 == 1 and _s24.retransmits == 1,
+              str(len(_k24.sent) - _n24))
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 1)
+        _n24 = len(_k24.sent)
+        _s24._on_rtcp(_rtcp24(0, bytes([9, 0x00, 0x00, 0x00])))
+        check("a frame we no longer hold is skipped whole, and counted",
+              len(_k24.sent) == _n24 and _s24.retransmit_gone == 1
+              and _s24.retransmits == 0,
+              str(_s24.retransmit_gone))
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 4)
+        #: Lose the copies without losing the records: the window arithmetic and
+        #: the checkpoint pop both read `_in_flight`, so an eviction that popped
+        #: entries would widen the window as a side effect of running out of
+        #: memory.
+        #:
+        #: The overage is computed from the frames actually in flight so that
+        #: exactly the two oldest go. A typed constant would keep working right
+        #: up to the day `_au24` changes size, and then it would evict one frame
+        #: or three and still look like it was testing "the oldest".
+        with _s24._lock:
+            _sizes24 = [e[4] for e in _s24._in_flight]
+        _s24._retained = mirror.RETRANSMIT_BUFFER_BYTES + sum(_sizes24[:2])
+        with _s24._lock:
+            _s24._evict_retransmit_buffer()
+        _gone24 = _s24.retransmit_gone
+        check("the repair budget gives up copies oldest first and stops on "
+              "schedule",
+              _gone24 == 2 and _s24._retained == mirror.RETRANSMIT_BUFFER_BYTES
+              and [len(e[1]) for e in _s24._in_flight] == [0, 0, 2, 2],
+              'gone={} retained={} copies={}'.format(
+                  _gone24, _s24._retained,
+                  [len(e[1]) for e in _s24._in_flight]))
+        _n24 = len(_k24.sent)
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0xFF, 0xFF, 0x00])
+                              + bytes([2, 0xFF, 0xFF, 0x00])))
+        check("over the repair budget the oldest frame loses its copy, not its "
+              "slot",
+              len(_s24._in_flight) == 3
+              and [e[0] for e in _s24._in_flight] == [1, 2, 3]
+              and [len(e[1]) for e in _s24._in_flight] == [0, 2, 2]
+              and _s24._retained <= mirror.RETRANSMIT_BUFFER_BYTES,
+              'in_flight={} copies={} retained={}'.format(
+                  [e[0] for e in _s24._in_flight],
+                  [len(e[1]) for e in _s24._in_flight], _s24._retained))
+        check("...and the frame still inside the budget is repairable, while "
+              "the one outside it is counted and skipped",
+              len(_k24.sent) - _n24 == 2 and _s24.retransmits == 2
+              and _s24.retransmit_gone == _gone24 + 1,
+              'sent={} gone+={}'.format(len(_k24.sent) - _n24,
+                                        _s24.retransmit_gone - _gone24))
+
+        _s24, _k24 = _sender24()
+        #: Forty un-acknowledged frames, one feedback asking for all of them.
+        #: The window is 66 ms wide and cannot be widened (`TARGET_DELAY_MS / 3`
+        #: caps it), so forty frames do not accumulate on their own -- the
+        #: window test is bypassed for this one fixture, which is the honest way
+        #: to ask "what if a receiver reports losses for everything we have".
+        _s24._window_full = lambda now: False
+        _aged24(_s24, 40)
+        _losses24 = b''.join(bytes([i + 1, 0xFF, 0xFF, 0xFF])
+                             for i in range(40))
+        _s24._on_rtcp(_checkpoint24(0, 0x11, 0x22, 12, losses=_losses24))
+        check("one feedback cannot make us resend more than its budget",
+              _s24.retransmits == mirror.MAX_RETRANSMIT_PER_FEEDBACK
+              and len(_losses24) // 4 * 2 > mirror.MAX_RETRANSMIT_PER_FEEDBACK,
+              'resent={} asked={} cap={}'.format(
+                  _s24.retransmits, len(_losses24) // 4 * 2,
+                  mirror.MAX_RETRANSMIT_PER_FEEDBACK))
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 1)
+        _n24 = len(_k24.sent)
+        _s24._kickstart()
+        check("the idle probe still resends the newest frame's last packet",
+              len(_k24.sent) - _n24 == 1
+              and _k24.sent[-1][4:] == _s24._in_flight[-1][1][-1][4:],
+              str(len(_k24.sent) - _n24))
+        with _s24._lock:
+            e = _s24._in_flight[-1]
+            _s24._in_flight[-1] = (e[0], (), e[2], e[3], 0)
+        _n24 = len(_k24.sent)
+        _s24._kickstart()
+        check("...and sends nothing when there is no copy left to send",
+              len(_k24.sent) == _n24, str(len(_k24.sent) - _n24))
+
+        _s24, _k24 = _sender24()
+        _aged24(_s24, 2)
+        #: The one socket carries both planes: our RTP pictures and the 28-byte
+        #: RTCP sender reports we emit ourselves. `socket_bytes` counts media, so
+        #: the comparison has to filter the same way the receiver's demux does --
+        #: a payload type of 96 under the marker bit is RTP, 200 is a sender
+        #: report. Summing everything the fake socket saw would be off by exactly
+        #: one report and would look like a counting bug in the sender.
+        _media24 = lambda: [p for p in _k24.sent if p[1] & 0x7F == 96]
+        check("the socket really does carry both planes, so the filter is not "
+              "vacuous",
+              len(_media24()) < len(_k24.sent)
+              and [p[1] for p in _k24.sent if p[1] & 0x7F != 96] == [200],
+              '{} of {}'.format(len(_media24()), len(_k24.sent)))
+        _n24 = len(_media24())
+        _wire24 = _s24.socket_bytes
+        _made24 = _s24.bytes
+        _s24._on_rtcp(_rtcp24(0, bytes([1, 0xFF, 0xFF, 0xFF])))
+        _new24 = _media24()[_n24:]
+        check("every media byte pushed onto the socket is counted, resends "
+              "included",
+              _s24.socket_bytes == sum(len(p) for p in _media24())
+              and _s24.socket_bytes - _wire24 == sum(len(p) for p in _new24)
+              and len(_new24) == 2,
+              '{} vs {}'.format(_s24.socket_bytes,
+                                sum(len(p) for p in _media24())))
+        check("...and a repair is wire traffic, not encoder output: the gap "
+              "between the two counters is the headers we add plus exactly the "
+              "packets we sent twice",
+              # True here and only here, because this fixture never sheds: the
+              # window is wide open, so every byte the encoder made reached the
+              # socket and the gap is purely headers plus repairs. On a stream
+              # that *is* shedding, `bytes` counts frames that never went out and
+              # runs ahead -- which is what the live-device case in this Part
+              # pins instead. Neither ordering is a bug; a comment claiming one
+              # would be.
+              _s24.bytes == _made24
+              and _s24.socket_bytes - _s24.bytes
+              == _s24.packets * mirror.CAST_PACKET_HEADER
+              + sum(len(p) for p in _new24),
+              'socket={} encoder={} headers={} repairs={}'.format(
+                  _s24.socket_bytes, _s24.bytes,
+                  _s24.packets * mirror.CAST_PACKET_HEADER,
+                  sum(len(p) for p in _new24)))
+        check("the round trip is reported as unknown until a checkpoint lands",
+              _s24.rtt_ms() is None and _s24._rtt_estimate()
+              == mirror.MIN_WINDOW_MS / 2.0,
+              str(_s24.rtt_ms()))
 
         # -- Annex-B access units, with real encoder habits ------------------
         _units = mirror._AccessUnits()
@@ -8015,6 +8426,94 @@ try:
               'frames {} -> {}'.format(_before24, mir24._sink.frames))
         check("and the playout delay the TV reports is kept for the menu",
               mir24.stats()['delay'] == 12, str(mir24.stats()))
+
+        # -- retransmission over a real socket --------------------------------
+        #: Every retransmission case above this line drives a fake socket, which
+        #: proves the plan is built correctly and nothing about getting it onto
+        #: the wire. This one goes through the device's own UDP socket, and the
+        #: two facts only a real socket can tell are these: the media socket is
+        #: *bound and never connected* (so a resend has to carry the peer address
+        #: itself rather than inheriting it), and what arrives has to be the same
+        #: Cast packet id under a *new* RTP sequence number. A resend that reused
+        #: the sequence would be read by the receiver's reorder buffer as a
+        #: duplicate of a packet it already has, and one that changed the packet
+        #: id would be filed against a packet nobody asked for.
+        open(_pause24, 'w').close()
+        try:
+            #: Wait for the fact the request depends on rather than sleeping for
+            #: it: openscreen's staleness rule declines to repair a packet sent
+            #: less than one round trip ago, so NACKing a picture that just left
+            #: would test the rule and be reported as a broken retransmit path.
+            _aged_ok24 = lambda: bool(mir24._sink._in_flight) \
+                and time.monotonic() - mir24._sink._in_flight[0][3] \
+                > mir24._sink._rtt_estimate() / 1000.0 + 0.05
+            check("the frame we are about to ask for is older than one round "
+                  "trip, or the sender would be right to refuse it",
+                  _wait_until(_aged_ok24, timeout=20),
+                  'in_flight={} rtt={}'.format(mir24._sink.in_flight(),
+                                               mir24._sink.rtt_ms()))
+            _fid24 = mir24._sink._in_flight[0][0] & 0xFF
+            _orig24 = [p for p in device24.rtp
+                       if _header24(p)[6] == _fid24 and _header24(p)[7] == 0]
+            _seen24 = len(device24.rtp)
+            _resent24 = mir24._sink.retransmits
+            device24.nack(_fid24, 0, 0)
+            check("a receiver's per-packet loss report gets that packet back "
+                  "over the wire",
+                  _wait_until(lambda: len(device24.rtp) > _seen24
+                              and mir24._sink.retransmits > _resent24,
+                              timeout=10),
+                  '{} new datagram(s), {} repair(s), asked for frame {}'.format(
+                      len(device24.rtp) - _seen24,
+                      mir24._sink.retransmits - _resent24, _fid24))
+            _back24 = [p for p in device24.rtp[_seen24:]
+                       if _header24(p)[6] == _fid24 and _header24(p)[7] == 0]
+            check("...and it is the same packet wearing a new sequence number, "
+                  "which is what tells a repair from a duplicate",
+                  bool(_orig24) and bool(_back24)
+                  and _back24[0][4:] == _orig24[0][4:]
+                  and _back24[0][2:4] != _orig24[0][2:4]
+                  and all(len(p) == len(_orig24[0]) for p in _back24),
+                  'orig={} back={}'.format(
+                      [_header24(p)[2] for p in _orig24],
+                      [_header24(p)[2] for p in _back24]))
+            check("and no sequence number on the wire was handed out twice",
+                  len({_header24(p)[2] for p in device24.rtp})
+                  == len(device24.rtp),
+                  '{} datagrams, {} distinct sequences'.format(
+                      len(device24.rtp),
+                      len({_header24(p)[2] for p in device24.rtp})))
+            #: One snapshot, read once. Three separate `stats()` calls compared
+            #: against a live attribute is a race against the sender's own idle
+            #: probe: the encoder is paused here, so the one thing still putting
+            #: bytes on the wire is `_kickstart`, and it moves `socket_bytes`
+            #: between two reads that the case then declares equal.
+            _card24 = mir24.stats()
+            check("the card the page renders carries the repair traffic and the "
+                  "round trip it was judged against",
+                  _card24['retransmits'] >= 1
+                  and isinstance(_card24['rtt'], float)
+                  and {'retransmit_stale', 'retransmit_gone'} <= set(_card24)
+                  and _card24['delivered'] >= _card24['retransmits']
+                  * mirror.CAST_PACKET_HEADER,
+                  str({k: _card24.get(k) for k in
+                       ('bytes', 'delivered', 'drops', 'retransmits',
+                        'retransmit_stale', 'retransmit_gone', 'rtt')}))
+            #: Not `delivered > bytes`. `bytes` is counted in `feed`, before the
+            #: window is consulted, so on a stream that is shedding frames it
+            #: runs *ahead* of what reached the socket -- and this fixture sheds
+            #: (that is what the window case above proves). Asserting an ordering
+            #: here would be asserting a fact about the fixture's timing.
+            check("and the two byte counters are not ordered, because the "
+                  "encoder's counts frames the window never sent",
+                  _card24['drops'] > 0 and _card24['bytes'] > 0
+                  and _card24['delivered'] > 0,
+                  'bytes={} delivered={} drops={}'.format(
+                      _card24['bytes'], _card24['delivered'],
+                      _card24['drops']))
+        finally:
+            if os.path.exists(_pause24):
+                os.remove(_pause24)
         _dropped24 = mir24._sink.drops
         _keys24_seen = lambda: {
             fid for fid, (is_key, _unit) in
@@ -14934,13 +15433,24 @@ done
           '%s bytes' % m39.REPLAY_BYTES)
 
     # A late joiner must still land on a keyframe, which means the ring keeps
-    # at least one *whole* fragment however small the budget is.
+    # at least one *whole* fragment however small the budget is. This fixture
+    # used to be `b'moof' + 16 KiB of zeros`, which is not a box stream at
+    # all: the size field reads 0x6d6f6f66 > MAX_UNIT, the framer calls it
+    # broken, and the marker search serves the bytes. The rule under test
+    # lives in the *framed* path, so this is a real fragment now -- a 32-byte
+    # moof, then an mdat whose first AVCC sample starts with an IDR byte, so
+    # the ring also has to tag it sync (a dot payload would not).
     _big39 = m39._Broadcaster(maxsize=256, ring_bytes=1024,
                               init_marker=b'moof')
-    _frag39 = b'moof' + b'\x00' * 8192 + b'mdat' + b'\x00' * 8192
+    _frag39 = (struct.pack('>I', 32) + b'moof' + b'\x00' * 24
+               + struct.pack('>I', 8208) + b'mdat'
+               + struct.pack('>I', 8196) + b'\x65' + b'\x00' * 8195)
     _big39.feed(_frag39)
+    _big39.feed(_frag39)      # the first fragment is only handed over when
+                              # the next box arrives; the second stays open
     check("a replay budget smaller than one fragment still keeps that fragment",
-          len(_big39.tail()) == 1 and len(_big39.tail()[0]) >= len(_frag39) - 1,
+          len(_big39.tail()) == 1 and len(_big39.tail()[0]) == len(_frag39)
+          and _big39.tail()[0][4:8] == b'moof',
           'a replay that starts mid-fragment is a green smear, not a picture')
 
     # -- Nagle, on a real socket --------------------------------------------
@@ -15123,6 +15633,59 @@ done
           '发送队列（延迟来源）' in _liverow39
           and '预填缓冲（延迟来源）' not in _liverow39,
           str(sorted(_liverow39)))
+
+    # The low-latency shape is the only one where the round trip is a *budget*:
+    # the in-flight window is `clamp(2 x RTT, floor, target/3)` (AGENTS 4.8), so
+    # a card that shows the window without the measurement that sized it shows a
+    # number nobody can argue with. And it is the only shape with a per-packet
+    # repair path, so `补发` / `未补发` are its rows alone -- the other two shapes
+    # have no NACK to answer and must not grow a row that always reads zero.
+    _cs_sess39 = m39._Session('caststream', has_audio=False, title='x')
+    _cs_diag39 = m39._session_diagnostics(
+        kind='caststream', capture=_cap39, command=['ffmpeg', 'pipe:1'],
+        encoder='hardware', height=720, bitrate=8000000, session=_cs_sess39)
+
+    def _csrows39(**over):
+        """The low-latency card, from a real session's diagnostics.
+
+        Every number here is one the channel actually reports (`stats()` on the
+        sender side), and the ones under test are given values that differ from
+        each other so a mis-wired row cannot land on the right answer by
+        coincidence: 18.4 / 3 / 1 / 2 are four different numbers in four rows.
+        """
+        _st = dict({'diag': _cs_diag39}, mbps=7.4, clients=1, bytes=4 << 20,
+                   delivered=5 << 20, chunks=1024, drops=0, seconds=30,
+                   in_flight=2, rtt=18.4, retransmits=3, retransmit_stale=1,
+                   retransmit_gone=0)
+        _st.update(over)
+        return dict(_mc39.diagnostics_rows(dict(
+            _live39, output={'kind': 'caststream'}, stats=_st)))
+
+    _cs39 = _csrows39()
+    #: Every value the card hands the page is already a string -- `add()` does
+    #: `str(value)` and drops `None`/`''` -- so `在途帧` is `'2'` and not `2`.
+    #: Asserting the number is asserting something the view never produces.
+    check("the low-latency card shows the round trip that sizes its window, "
+          "and the repairs that round trip bought",
+          _cs39.get('往返时延') == '18.4 毫秒' and _cs39.get('补发') == '3 包'
+          and _cs39.get('未补发') == '1 次（太新，或已不在修复缓冲里）'
+          and _cs39.get('在途帧') == '2',
+          str(sorted(_cs39.items())))
+    check("an unmeasured round trip reads 暂无, not 0.0 毫秒 -- a stream nothing "
+          "has acknowledged yet has no measurement, and it sits on the window's "
+          "floor until one lands",
+          _csrows39(rtt=None).get('往返时延') == '暂无',
+          repr(_csrows39(rtt=None).get('往返时延')))
+    _clean39 = _csrows39(retransmits=0, retransmit_stale=0, retransmit_gone=0)
+    check("and a clean link shows zero repairs with no row explaining why there "
+          "were none -- an explanation attached to a zero is noise the user has "
+          "to read every second while the stream is fine",
+          _clean39.get('补发') == '0 包' and '未补发' not in _clean39,
+          str([k for k in _clean39 if '补发' in k]))
+    check("those rows are the low-latency channel's, and only its",
+          all(k not in _flat39 and k not in _dlna_rows39
+              for k in ('往返时延', '补发', '未补发', '在途帧')),
+          'the browser and DLNA shapes have no per-packet repair path to report')
     check("and the console exposes the discovery trace it is drawn from",
           'search_trace' in _src39
           and "'search_trace': {'dlna': dlna_trace()}" in _src39,
@@ -15707,8 +16270,8 @@ try:
         return fr, units
 
     _fr43, _units43 = _frame43(_mkv43)
-    _head43 = [u for is_media, u in _units43 if not is_media]
-    _media43 = [u for is_media, u in _units43 if is_media]
+    _head43 = [u for is_media, u, _sync in _units43 if not is_media]
+    _media43 = [u for is_media, u, _sync in _units43 if is_media]
     check("framing a whole real pipe never loses sync",
           not _fr43.broken, '%d units' % len(_units43))
     check("and the units are byte-for-byte the stream that went in",
@@ -15780,10 +16343,25 @@ try:
           '%d queued: %s' % (len(_q43), [x[:4] for x in _q43]))
     check("the header is kept for replay and never rung as media, so a late "
           "joiner gets it once",
+          # Read the ring itself, not `tail()`: a Cluster boundary is a parse
+          # point, not a promised decode point, so this container's units are
+          # tagged is_sync=False and `tail()` -- correctly -- refuses to hand
+          # any of them over. Asking `tail()` here would make the `all()`
+          # below pass on an empty list, which is how this check would quietly
+          # stop meaning anything.
           _b43.init_segment == _head43[0]
-          and all(_head43[0] not in unit for unit in _b43.tail()),
+          and len(_b43._ring) >= 2
+          and all(_head43[0] not in unit for unit, _sync in _b43._ring),
           'init=%d bytes, ring=%d units' % (len(_b43.init_segment),
-                                            len(_b43.tail())))
+                                            len(_b43._ring)))
+    check("and no Matroska unit is offered as a replay point, so `tail()` "
+          "refuses the whole ring rather than hand a viewer a parse point",
+          all(_sync is False for _unit, _sync in _b43._ring)
+          and _b43.tail() == []
+          and _b43.keyframe_misses == 1,
+          'sync tags=%s, misses=%d (a Cluster boundary promises nothing about '
+          'decoding)' % ([_sync for _u, _sync in _b43._ring],
+                         _b43.keyframe_misses))
     check("and a session that is not fragmented at all still has no framer",
           m43._Broadcaster(init_marker=None)._framer is None
           and m43._Broadcaster(init_marker=b'moof')._framer.__class__
@@ -16056,6 +16634,20 @@ try:
           _num44(r'采集 ([0-9]+) 秒内不返回画面') == int(m44.NO_FRAME_SECONDS),
           'help=%r NO_FRAME_SECONDS=%s' % (
               _num44(r'采集 ([0-9]+) 秒内不返回画面'), m44.NO_FRAME_SECONDS))
+    # The browser target's latency is its fragment cadence, so the number both
+    # the help and the viewer hint quote has to be the one the frame rate
+    # implies -- and the help has to say which frame rate. v0.19 moved this
+    # from "one fragment per half second" to one per frame; the plugin's hint
+    # and the help were rewritten in the same pass, and this is what keeps
+    # them from drifting apart on the next one.
+    _cad44 = '%.1f 毫秒' % (1000.0 / m44.FPS)
+    check("the fragment cadence the help and the viewer hint both quote is the "
+          "one this plugin's frame rate implies",
+          _cad44 in _help44 and _cad44 in m44.LIVE_EDGE_HINT
+          and '%d fps' % m44.FPS in _help44,
+          'at %d fps one frame is %r: help=%s hint=%s' % (
+              m44.FPS, _cad44, _cad44 in _help44,
+              _cad44 in m44.LIVE_EDGE_HINT))
     with open(m44.__file__, encoding="utf-8") as _f44:
         _mirror_src44 = _f44.read()
     check("Wayland is a stated limit in both places, or in neither",
@@ -18318,7 +18910,20 @@ try:
 
     # -- C. the window is a duration -----------------------------------------
     _wm52 = m52._CastStreamSender._window_ms
-    _ms52 = lambda rtt: _wm52(types.SimpleNamespace(_rtt_ms=rtt))
+    _rte52 = m52._CastStreamSender._rtt_estimate
+
+    def _ms52(rtt):
+        """`_window_ms` on a stub whose `_rtt_estimate` is the real one.
+
+        Both are bound rather than the "no measurement yet" default being
+        retyped here, because that default *is* part of what these cases assert:
+        an unmeasured round trip has to land on the floor, and a second copy of
+        the rule in the test would keep passing after the code stopped having it.
+        """
+        stub = types.SimpleNamespace(_rtt_ms=rtt)
+        stub._rtt_estimate = lambda: _rte52(stub)
+        return _wm52(stub)
+
     _cap52 = m52.TARGET_DELAY_MS / 3.0
     _flat52 = [_ms52(rtt) for rtt in (None, 0.0, 1.0, 10.0, 33.0)]
     _ramp52 = [(rtt, _ms52(rtt)) for rtt in range(34, 400, 7)]
@@ -18418,6 +19023,99 @@ try:
           _pair52(_over52, '-b:v') == str(m52.cast_stream_bitrate_cap()),
           '{} vs cap {}'.format(_pair52(_over52, '-b:v'),
                                 m52.cast_stream_bitrate_cap()))
+
+    # -- D2. the two argv shapes that produced zero frames on a real Mac -----
+    # Both were found on 2026-10-02 by *running* the shipped command against the
+    # real capture rather than reading it, and both ended in the same place: no
+    # frames, and a `PERMISSION_DOOR` message sending the user to 系统设置 →
+    # 隐私与安全性 → 屏幕录制 to fix a number we typed ourselves. AGENTS.md 4.8
+    # has the family ("假命令行工具的输出，必须是真工具在这台机器上的逐字输出"):
+    # a stub ffmpeg in Part 21/22/23 would have answered both of these happily,
+    # because neither is a shape question -- they are "does the real encoder
+    # accept this picture" questions.
+    check("the level follows the picture: 4.2 up to 1080 lines, 5.1 up to "
+          "2160, and no pin at all when the size is unknown or bigger than the "
+          "table -- a level is a promise about frame size, and a promise the "
+          "picture cannot keep is not a constraint, it is a crash",
+          m52.vt_level(0) is None and m52.vt_level(None) is None
+          and m52.vt_level(360) == '42' and m52.vt_level(720) == '42'
+          and m52.vt_level(1080) == '42' and m52.vt_level(1081) == '51'
+          and m52.vt_level(2160) == '51' and m52.vt_level(2880) is None,
+          str([(h, m52.vt_level(h))
+               for h in (None, 0, 360, 1080, 1081, 2160, 2880)]))
+    check("原画 means 'do not scale', so it is exactly the case that must not "
+          "pin a level: h264_videotoolbox handed `-level 42` at the native "
+          "3456x2234 desktop exits 187 with five lines of stderr and 2068 "
+          "bytes, while the same argv with the level omitted writes 4194304",
+          '-level' not in m52.encoder_args('hardware', 'darwin', height=0)
+          and _pair52(m52.encoder_args('hardware', 'darwin',
+                                       height=1080), '-level') == '42'
+          and _pair52(m52.encoder_args('hardware', 'darwin',
+                                       height=2160), '-level') == '51'
+          and _pair52(m52.encoder_args('hardware', 'darwin',
+                                       height=2160), '-c:v')
+          == 'h264_videotoolbox',
+          str(m52.encoder_args('hardware', 'darwin', height=0)))
+    check("the x264 branch derives its own level and is right about it, so the "
+          "height changes nothing there; and no other platform is told a "
+          "VideoToolbox level, because none of them has VideoToolbox",
+          m52.encoder_args('software', 'darwin', height=0)
+          == m52.encoder_args('software', 'darwin', height=2160)
+          and '-level' not in m52.encoder_args('hardware', 'linux', height=2160)
+          and '-level' not in m52.encoder_args('hardware', 'win32', height=0)
+          and 'videotoolbox' not in ''.join(
+              m52.encoder_args('hardware', 'linux', height=0)), '')
+    _nat52 = m52.build_ffmpeg_command('ffmpeg', _cap52b, 0, 6000000,
+                                      kind='cast', encoder='hardware')
+    check("and that reaches the real argv -- 原画 + hardware is what `auto` "
+          "picks on a Mac, i.e. the shipped default was the broken one",
+          '-level' not in _nat52 and '-vf' not in _nat52
+          and _pair52(_nat52, '-c:v') == 'h264_videotoolbox', str(_nat52))
+    _cs52 = m52.build_ffmpeg_command('ffmpeg', _cap52b, 0, 6000000,
+                                     kind='caststream', encoder='hardware')
+    check("caststream is the exception that proves the rule: it *does* pin 42, "
+          "because `cast_stream_shape` has just replaced the requested 0 with "
+          "the 1920x1080 the OFFER promised the receiver. There the level is a "
+          "real promise, not a guess -- which is the whole difference",
+          _pair52(_cs52, '-level') == '42'
+          and 'pad=1920:1080' in _pair52(_cs52, '-vf'), str(_cs52))
+    _dl52 = m52.build_ffmpeg_command(
+        'ffmpeg', _cap52b, 0, 6000000, kind='dlna', encoder='hardware',
+        profile=m52.DLNA_PROFILES['ts-h264'])
+    check("the DLNA target takes both numbers from the profile rather than "
+          "from the quality menu, because the profile is what the television's "
+          "demuxer knows: `-level 42` is true at the 720 lines it ships, and "
+          "the frame rate is the profile's 25, not the capture's 24",
+          _pair52(_dl52, '-level') == '42'
+          and _pair52(_dl52, '-r')
+          == str(m52.DLNA_PROFILES['ts-h264'].fps)
+          and str(m52.DLNA_PROFILES['ts-h264'].fps) != str(m52.FPS),
+          str(_dl52))
+
+    _live52 = [(k, e) for k in ('cast', 'browser', 'caststream')
+               for e in ('software', 'hardware')]
+    _cmd_live52 = {(k, e): m52.build_ffmpeg_command(
+        'ffmpeg', _cap52b, 0, 6000000, kind=k, encoder=e)
+        for k, e in _live52}
+    _no_r52 = [k for k, e in _live52
+               if _pair52(_cmd_live52[(k, e)], '-r') != str(m52.FPS)]
+    check("every live shape pins the output frame rate, and the muxer is still "
+          "the last thing on the argv. Without `-r` a capture whose rate "
+          "cannot be estimated hands x264 a timebase near 1e6, and it answers "
+          "`MB rate (14400000000) > level limit (16711680)` with zero bytes; "
+          "the same argv plus `-r 24` writes 3932160. VideoToolbox tolerates "
+          "the degenerate input, which is why `auto` on a Mac hid this: the "
+          "fallback to software is exactly when the capture is already unhappy",
+          not _no_r52
+          and all(c[-len(m52.OUTPUTS[k][3]):] == list(m52.OUTPUTS[k][3])
+                  for (k, _e), c in _cmd_live52.items()),
+          'missing -r on %s' % _no_r52)
+    check("`-r` and `-fps_mode` never ride together: CFR duplicates straight "
+          "back every frame a decimate filter just dropped, so a future "
+          "mpdecimate variant has to *replace* the pin, not join it",
+          all(not ('-r' in c and '-fps_mode' in c)
+              for c in _cmd_live52.values())
+          and '-fps_mode' not in _nat52 and '-fps_mode' not in _dl52, '')
 
     # -- E. the two knobs ----------------------------------------------------
     def _set52(prop, value):
@@ -18599,6 +19297,189 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved52[0], _saved52[1]
     utils.SETTING_DIR = _saved52[2]
     _shutil.rmtree(_tmp52, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# Part 53: the browser replay ring starts on a keyframe (v0.19)
+#
+# `frag_every_frame` is where this target's latency went: measured on this
+# machine with the hardware encoder, 1305 ms -> 838 ms end to end, same VMAF,
+# about 1% more bytes (`scripts/mse_latency_probe.py` is the harness and the
+# numbers with their qualifiers live on `LIVE_EDGE_SECONDS` in the plugin).
+# The price is the one thing `frag_keyframe` gave for free: a fragment
+# boundary that is also a decode point. Eleven fragments in twelve now begin
+# on a P-frame, and a viewer handed one of those watches green smear until the
+# next IDR. So the bytes themselves are asked (`starts_with_keyframe`, reading
+# the first sample's leading NALs out of the `mdat`), the framer tags every
+# whole fragment with the answer, and `tail()` hands out only from the newest
+# fragment that passes -- the viewer starts on a picture and starts *behind*
+# the live edge, which is the direction a live stream tolerates.
+#
+# Every failure in this family leans the same way: unreadable answers False,
+# because a wrong False costs one GOP of waiting (the stream reaches its next
+# keyframe) while a wrong True costs a smear. The cases below are built as
+# real moof+mdat box streams with AVCC sample tables -- not as fixtures the
+# parser and the test could agree on -- and each one names the failure it
+# would let through if it stopped asking.
+# --------------------------------------------------------------------------
+print("\n=== Part 53: the browser replay ring starts on a keyframe ===")
+import traceback as _traceback53
+import logging as _logging53
+
+_tmp53 = _tempfile.mkdtemp(prefix="macast-replay53-")
+_saved53 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+try:
+    utils.SETTING_DIR = _tmp53
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp53, "macast_setting.json")
+    mirror53 = _load_plugin("screen_mirror_plugin_v53", "screen_mirror.py")
+    m53 = mirror53
+
+    # One moof followed by one mdat, AVCC-framed (length-prefixed samples) --
+    # `-movflags` never asks for Annex-B, so this is the shape the keyframe
+    # test has to read.
+    def _box53(kind, body):
+        return struct.pack('>I', 8 + len(body)) + kind + body
+
+    def _avcc53(*types):
+        return b''.join(struct.pack('>I', 21) + bytes([t]) + b'\x3c' * 20
+                        for t in types)
+
+    def _frag53(types=(), pad=b'', body=None):
+        payload = _avcc53(*types) if body is None else body
+        return _box53(b'moof', b'.' * 24) + pad + _box53(b'mdat', payload)
+
+    _init53 = _box53(b'ftyp', b'isom' + b'\x00' * 8)
+    _idr53 = _frag53((0x65,))
+    _p53 = _frag53((0x41,))
+    _st53 = m53.starts_with_keyframe
+
+    check("a fragment that opens on an IDR is a replay point, and one that "
+          "opens on a P-slice is not",
+          _st53(_idr53) and not _st53(_p53),
+          'idr=%s p=%s' % (_st53(_idr53), _st53(_p53)))
+    check("a later sample's IDR does not answer for the first: the walk stops "
+          "at the first slice, not the last",
+          not _st53(_frag53((0x41, 0x65))),
+          'a fragment with an IDR behind a P-frame must not be offered as a '
+          'place to start')
+    check("SEI/SPS/PPS/AUD in front of the slice are stepped over, and leading "
+          "units alone are not a picture",
+          _st53(_frag53((0x06, 0x09, 0x07, 0x08, 0x65)))
+          and not _st53(_frag53((0x07, 0x08, 0x06))),
+          'headers with no slice must answer False: there is nothing to decode')
+    check("the mdat is found by walking top-level boxes, and a wrong box "
+          "header is not guessed past",
+          _st53(_frag53((0x65,), pad=_box53(b'free', b'\x00' * 8)))
+          and not _st53(_box53(b'moof', b'.' * 24)
+                        + struct.pack('>I', 3) + b'junk'
+                        + _box53(b'mdat', _avcc53(0x65))),
+          'a free/skip box between moof and mdat must not cost the answer')
+
+    _trunc53 = (_box53(b'moof', b'.' * 24)
+                + struct.pack('>I', 400) + b'mdat' + _avcc53(0x65)[:20])
+    _toend53 = (_box53(b'moof', b'.' * 24)
+                + struct.pack('>I', 1) + b'mdat' + struct.pack('>Q', 400)
+                + _avcc53(0x65))
+    check("anything unreadable answers False -- an mdat that claims more bytes "
+          "than exist, the 64-bit size form, and a sample cut mid-NAL",
+          not _st53(_trunc53) and not _st53(_toend53)
+          and not _st53(_frag53(body=_avcc53(0x65)[:6])),
+          'the expensive direction is a wrong True, so these must all refuse')
+
+    # -- what the framer hands the ring ------------------------------------
+    _fr53 = m53._Fragments()
+    _units53 = _fr53.feed(_init53 + _idr53 + _p53 + _p53)
+    check("the framer books the header as non-media and tags each whole "
+          "fragment with whether a replay may start at it",
+          [(im, s) for im, _u, s in _units53]
+          == [(False, False), (True, True), (True, False)]
+          and _units53[0][1] == _init53 and _units53[1][1] == _idr53
+          and _units53[2][1] == _p53,
+          '%s' % [(im, len(u), s) for im, u, s in _units53])
+    _fr53c = m53._Fragments()
+    _fr53c.feed(_init53 + _idr53)
+    _fr53c.feed(b'\x00' * 5)
+    _fl53c = _fr53c.flush()
+    check("the fragment the encoder died inside keeps its tag; a few bytes "
+          "that cannot start a box are handed over but are not a fragment",
+          _fl53c == [(True, _idr53, True), (True, b'\x00' * 5, False)],
+          '%s' % [(im, len(u), s) for im, u, s in _fl53c])
+    _fr53d = m53._Fragments()
+    _fr53d.feed(_init53 + _p53)
+    _fl53d = _fr53d.flush()
+    check("and one that opens on a P-slice is still not a replay point when "
+          "it is the last thing the encoder wrote",
+          _fl53d == [(True, _p53, False)],
+          '%s' % [(im, len(u), s) for im, u, s in _fl53d])
+
+    # -- what the ring does with the tags ----------------------------------
+    class _Grab53(_logging53.Handler):
+        def __init__(self):
+            _logging53.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append((record.levelno, record.getMessage()))
+
+    _grab53 = _Grab53()
+    _lg53 = _logging53.getLogger(m53.logger.name)
+    _lg53.addHandler(_grab53)
+    _lvl53 = _lg53.level
+    _lg53.setLevel(_logging53.DEBUG)
+
+    def _misses53():
+        return [m for lvl, m in _grab53.lines
+                if lvl >= _logging53.WARNING and 'none begins on a keyframe' in m]
+
+    _ring53 = m53._Broadcaster(init_marker=b'moof')
+    for _f53 in (_p53, _p53, _idr53, _p53, _p53, _p53):
+        _ring53.feed(_f53)
+    _tail53 = _ring53.tail()
+    check("a replay starts at the newest keyframe, hands out everything after "
+          "it, and says nothing when it has one",
+          _tail53 == [_idr53, _p53, _p53]
+          and _ring53.keyframe_misses == 0 and _misses53() == [],
+          'ring of %d cut back to %d, misses=%d' % (
+              len(_ring53._ring), len(_tail53), _ring53.keyframe_misses))
+
+    _ring53b = m53._Broadcaster(init_marker=b'moof')
+    for _f53 in (_p53, _p53):
+        _ring53b.feed(_f53)
+    _tail53b = _ring53b.tail()
+    check("a ring with no keyframe hands out nothing at all -- empty, not "
+          "unplayable bytes -- counts the miss and says so once",
+          _tail53b == [] and _ring53b.keyframe_misses == 1
+          and len(_misses53()) == 1,
+          'tail=%d units, misses=%d, log=%s' % (
+              len(_tail53b), _ring53b.keyframe_misses, _misses53()))
+
+    _ring53c = m53._Broadcaster(init_marker=b'moof')
+    check("an empty ring is not a miss: there was nothing to replay, which is "
+          "a different answer from 'no keyframe in it'",
+          _ring53c.tail() == [] and _ring53c.keyframe_misses == 0
+          and len(_misses53()) == 1,
+          'the log must still hold exactly the one miss from above')
+
+    _ring53d = m53._Broadcaster(init_marker=None)
+    _ring53d.feed(b'plain live bytes')
+    _ring53d.feed(b'and then some more')
+    check("a shape that predates the tag keeps its old observable behaviour: "
+          "a ring whose every unit is entrable replays whole rather than "
+          "being cut back to its newest unit",
+          _ring53d.tail() == [b'plain live bytes', b'and then some more']
+          and all(sync is True for _u, sync in _ring53d._ring),
+          '%s' % [_u for _u, _s in _ring53d._ring])
+
+    _lg53.setLevel(_lvl53)
+    _lg53.removeHandler(_grab53)
+except Exception as _e53:
+    _traceback53.print_exc()
+    check("Part 53 runs", False, "{}: {}".format(type(_e53).__name__, _e53))
+finally:
+    utils.Setting.setting, utils.Setting.setting_path = _saved53[0], _saved53[1]
+    utils.SETTING_DIR = _saved53[2]
+    _shutil.rmtree(_tmp53, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

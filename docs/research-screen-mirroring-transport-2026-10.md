@@ -43,7 +43,7 @@ LAN = same subnet, wired or good 5 GHz, screen capture (no camera/USB term).
 | **SRT** | UDP/TSBPD | **fixed** ≈ `RTT₀/2 + negotiated latency` (max of both ends) | your configured `latency` | Strong: draft-sharabayko-srt-00 §4.4–4.5, `libavformat/libsrt.c` |
 | **LL-CMAF / LL-DASH (chunked)** | HTTP/1.1 chunked or HTTP/2 | ≈ **chunk duration** once mid-segment start is allowed (1 s chunks → ~3 s total in the Fraunhofer worked example) | segment/chunk duration + player target latency | Strong: Fraunhofer video-dev; W3C/ISO ATO signalling |
 | **LL-HLS** | HTTP | **2–5 s** (200 ms parts, 1 s segments) | part duration + playlist reload | Moderate: 100ms.live, cloudinary |
-| **fMP4 + MSE (`browser`, today)** | HTTP, ring buffer | = fragment duration + append cadence + live-edge seek; **spec-soft** (see §2) | `SourceBuffer.appendBuffer` cadence | Mixed: W3C media-source-2 says cadence is implementation-defined |
+| **fMP4 + MSE (`browser`, today)** | HTTP, ring buffer | **measured on this machine, real capture: 1194 ms as shipped** (`frag_keyframe -g 12`, park 1.0 s); **591 ms** with `frag_every_frame` + park 0.15 s. Of that, only ~100–330 ms is the player's park — ~500–870 ms is upstream (capture + encode + pipe) | was assumed to be `SourceBuffer.appendBuffer` cadence; **the measurement says the dominant term is upstream of the player** | **Measured** (2026-10-02, `scripts/mse_latency_probe.py`, headless Chromium 151 + real avfoundation capture, 12 s windows). Spec-strength unchanged: W3C still says cadence is implementation-defined, so this is a Chromium fact, not a standard one |
 | **Progressive MPEG-TS over HTTP (`cast`, today)** | HTTP pull by Chromecast | **not measured anywhere public** — Google's live-receiver docs were unreachable both via WebFetch and curl | Cast receiver buffering | **Unverified** |
 | **Classic HLS/DASH** | HTTP | 10–30 s (HLS 30–60 s) | segment count × duration | Strong, multiple |
 | **RTSP** | RTP/TCP or UDP | **~2 s** (single anecdote, MediaMTX discussion #1691) | server + player buffering | Weak (n=1) |
@@ -60,6 +60,67 @@ W3C `media-source-2`, Segment Parser Loop, verbatim:
 So per-frame fragments *can* give per-frame latency, but a browser MAY wait for the whole media segment. The ffmpeg lever exists: `movflags=+frag_every_frame` (plus `delay_moov`, `cmaf`, `default_base_moof`, `skip_sidx`, `separate_moof`), with `frag_duration` / `min_frag_duration` / `frag_custom` for coarser control (verified in `libavformat/movenc.c`, ~9697 lines; cut logic ~line 7532).
 
 Plain-HTTP chunked transfer alone is **not** enough for LL-CMAF: the low-latency behaviour is signalled in the manifest (`@availabilityTimeComplete="false"` + `@availabilityTimeOffset` for DASH; parts + blocking playlist reload for LL-HLS), and MediaMTX defaults to `hlsVariant: lowLatency`, `hlsSegmentDuration: 1s`, `hlsPartDuration: 200ms`.
+
+### …and it is now measured, not argued (`scripts/mse_latency_probe.py`, 2026-10-02)
+
+The "MAY" above resolves **in favour of per-frame processing on Chromium**. The probe drives a real headless Chromium (`chrome-headless-shell` 151.0.7922.34 — this machine has no Google Chrome; Vivaldi headless dies with `CVDisplayLinkCreateWithCGDisplay failed. CVReturn: -6670`) against a real ffmpeg pipe, and reads `buffered.end` every rAF. The median positive step of that head — the granularity — tracks the configured fragment cadence in every variant tried: 500 ms for `frag_keyframe -g 12`, 41.7 ms (= 1/24 s) for `frag_every_frame`, 125 ms for `-frag_duration 100000`. If Chromium batched to the media segment, the per-frame row would still have come out at 500 ms. It does not.
+
+Three things the measurement found that the reasoning had wrong:
+
+**1. The synthetic source is not a stand-in for capture, and the difference changes the verdict.** With `lavfi testsrc2 -re`, the first fragment leaves the encoder at ~50 ms already carrying a full cadence of media (encoder priming), so the media timeline runs *ahead* of the wall clock: median drift `+212…+430 ms`, which makes the absolute "lag" come out negative (−336 ms — a frame presented before it was captured). On real capture (`-f avfoundation -i "2:none"`; the screen is device **2** on this machine, not the 3 that older notes here and in AGENTS.md §8 use) drift is negative (`−508…−870 ms`) and lag becomes physically sensible. Cross-variant comparison was sound on the synthetic source; the absolute zero never was. **Any latency number quoted from a synthetic source is a difference, not a latency.**
+
+**2. Synthetic capture overstates stalls by ~25×, which inverted a conclusion.** `every_frame @ park 0.15 s`: synthetic 104 stalls / 1761 ms and 243 hard seeks; real capture 4 stalls / 603 ms and **0 seeks**. A second playhead controller (`playbackRate` servo, gain 0.25, clamp 0.06) was built on the strength of the synthetic numbers, where it looked decisive (104 stalls → 2). On real capture it *loses*: at matched cells it costs 270–415 ms of lag for 1–2 fewer stalls, because it does not jump to the edge, it creeps there at ≤1.06×, so `behind` p50 is 656 ms where the seek controller's sawtooth medians 330. **The rate controller is dropped.** The shipping hard seek was never the problem.
+
+**3. The park is not the dominant term on this target, which contradicts the comment sitting on `LIVE_EDGE_SECONDS`.** That comment says the park "is the floor on this target's end-to-end latency and no sender-side change can beat it". Real capture, shipping config (`frag_keyframe -g 12`, park 1.0 s): `behind` p50 = 330 ms, absolute lag p50 = **1194 ms**. So ~870 ms sits upstream of the player entirely — capture + encode + pipe — and no player-side knob touches it. The park is *a* floor, not *the* floor. (`behind = lag + drift` holds exactly at any one instant and reconciles at the median in all 22 cells run; the last-instant residual was 0–8 ms throughout, which is the arithmetic that makes the split trustworthy rather than a story.)
+
+**4. The probe was not measuring the shipping argv, and every absolute number above inherits that.** This one is about the instrument, and it went the same way three times in a row — each drift silent, each in the direction that flattered the result:
+
+1. It hardcoded `libx264 -preset ultrafast -tune zerolatency -profile:v high`. That is not even the product's x264 branch (which also carries `-flags +low_delay -thread_type slice`), and it is certainly not what `auto` picks on a Mac, which is `h264_videotoolbox`. So the ~870 ms of "upstream" in finding 3 **excludes VideoToolbox's ~200 ms first-frame cost** — the shipped configuration is worse than those rows by roughly that much.
+2. It omitted the half-second VBV (`rate_caps`: `-maxrate` 1.5×, `-bufsize` 0.5×). That is not a detail here: a short GOP turns every keyframe into a burst, and an uncapped encoder is free to spend it. The comparison this section exists to make is the one the omission biases.
+3. It omitted `-level 42`, on the strength of a comment asserting `vt_level(720)` returns None. `VT_LEVELS` is a **threshold** table (`height <= limit`), so 720 returns `'42'`. The same pass caught `-vf scale=-2:720` having been copied as `scale=1280:720`, which squashes a 3456×2234 desktop rather than letterboxing it — a different pixel count, so different bits per pixel, so different rate control.
+
+Three for three, all invisible in the output, all found only by diffing the two argvs token by token. The fix is not a better transcription: the probe now **asks the product** — it runs `build_ffmpeg_command(..., kind='browser')` in a subprocess and takes everything from `-map` onward, overriding only the two numbers a variant exists to change (`-g`, `-movflags`), with `replace_value` raising rather than appending if the product stops emitting one. A transcription of a shipping configuration is a *claim* that the two match; nothing was checking the claim.
+
+The absolute latencies quoted above and in the §1 table are therefore **lower bounds from a non-shipping encoder**, not measurements of what a user gets. The cross-variant ordering survived the re-run (it is a property of the muxer's cut, which was never wrong), but the zero did not.
+
+What the same data says about the lever that *does* reach the upstream term: switching the muxer to `frag_every_frame` moves lag from 1208 → 658 ms at park 1.0 s and 830 → 610 ms at park 0.15 s, with stalls going from 56 → 4. Tightening the park alone, on the shipping cadence, is not survivable — `prod @ park 0.15` stalls 56 times for 9.5 s in a 12 s window, exactly as the old comment predicted, because a 0.15 s park under a 0.5 s cadence pins the playhead to the write head. The two knobs were coupled by reasoning ("the floor exists to cover the cadence") and the measurement confirms the coupling — but in the direction that says **change the cadence first, then the park becomes affordable**.
+
+One confound is recorded here rather than quietly fixed: the `every_frame` variant carries `-g 24` while `prod` carries `-g 12`, so those two rows differ in *both* where the muxer cuts and how often a keyframe lands — and the keyframe half moves the bitrate too (4007 vs 4864 kbps), which is the number a design would quote for "what does the finer cadence cost". A `gop 12 + frag_every_frame` row was added afterwards to separate them; see the probe's `VARIANTS` comment.
+
+**Cost of the finer cadence: not a kbps number, and the kbps column cannot supply one.** This section used to quote "~2% on the wire (3847–3858 vs 3781)". That is unsound twice over. First, `-b:v` is a *target*: rate control absorbs whatever a shorter GOP costs by raising QP, so the delivered kbps measures the rate controller's obedience, not the price of the change. Second, with the VBV now in the argv (finding 4) every variant is additionally clamped by `-maxrate`, so the column converges on the target regardless and stops carrying information at all. What a short GOP actually buys with is **quality at a fixed bitrate** — more keyframes is more bits spent on the same picture — and the honest statement of it is a VMAF delta, which `scripts/encoder_latency_probe.py --quality` now measures. (The box count is still verified, and is not a rate claim: `frag_every_frame` at `-g 12`, 24 fps → **96 `moof` for 96 frames**.)
+
+**5. That VMAF delta has been run, and it inverts which lever to pull** (`--quality --encoder vt --seconds 12 --shapes prod,every12,gop2`, 2026-10-02, one 12 s lossless reference encoded three times offline, so the rows differ in the muxer/GOP and in nothing else — not even in what was on the screen):
+
+| row | `-g` | muxer cut | kbps | VMAF mean | p1 | min |
+|---|---|---|---|---|---|---|
+| `prod` (shipping) | 12 | `frag_keyframe` | 2346 | 94.42 | 91.86 | 91.79 |
+| `every12` | 12 | `frag_every_frame` | 2367 | 94.42 | 91.86 | 91.79 |
+| `gop2` | 2 | `frag_keyframe` | 5759 | 89.89 | 89.56 | 89.51 |
+
+`prod` and `every12` are **bit-for-bit identical in picture** (+22 kbps, +1%, and the same three VMAF figures to two decimals) — which is what the reasoning predicted, since the muxer's cut point does not reach the encoder's rate control at all. `gop2` is **+145% bytes and −4.53 VMAF**, i.e. it pays a lot and gets *less* picture. A GOP sweep run minutes earlier on a different desktop (12/8/4/2 → 94.41 / 94.19 / 86.66 / 81.75 at 3494 / 5119 / 5542 / 5892 kbps) shows the same sign with a bigger magnitude, so **the sign is reproducible and the magnitude is content-dependent**; both runs were near-static desktops (mean `integer_motion2` 0.0064, lossless reference 737–886 kbps for 12 s of 720p), which is the caveat the probe now prints rather than leaving to the reader.
+
+The per-frame trace says *why* `gop2` loses, and it is not "the codec got worse": g2 starts at 93.9 and **decays monotonically to 81.1 by the last frame**, while g12/g8 stay flat at 94.4–94.9 the whole way. That is the VBV draining — an IDR every 2 frames inside `-maxrate 1.5×b -bufsize 0.5×b` spends the budget on keyframes and never recovers. Frame counts were verified equal (288 in every file) before believing any of it, because a one-frame misalignment against the reference produces exactly this signature of a uniform-looking loss.
+
+Consequence: **the lever is the muxer, not the GOP.** `frag_every_frame` at the shipping `-g 12` is the change that buys latency for nothing on the encoder side, and `-g 2` — which the latency matrix alone ranked as the safer option because it keeps every fragment starting on an IDR — is the one that must not ship at this bitrate.
+
+The latency half was then re-run **at the shipping default park (1.0 s), which the earlier matrix had never measured** (`--capture 2 --encoder vt --variants prod,every12,gop2 --edges 1.0,0.5`, real desktop, seek controller):
+
+| row | park | granularity p50 | behind p50/p95 | lag p50 | drift | seeks | stalls | kbps |
+|---|---|---|---|---|---|---|---|---|
+| `prod` | **1.0** (shipping) | 500 | 341 / 566 | **1305** | −989 | 0 | 3 / 1319 ms | 2783 |
+| `prod` | 0.5 | 500 | 318 / 500 | 1201 | −959 | **205** | **69 / 3447 ms** | 2782 |
+| `every12` | **1.0** | 41.7 | 123 / 148 | **838** | −730 | 0 | 8 / 844 ms | 2905 |
+| `every12` | 0.5 | 41.7 | 139 / 155 | 829 | −721 | 0 | 6 / 848 ms | 2904 |
+| `gop2` | 1.0 | 83.3 | 127 / 168 | 851 | −743 | 0 | 5 / 863 ms | 6634 |
+
+So the shipping configuration is **1305 ms** and the muxer change alone takes it to **838 ms (−467 ms, −36%)**, with `behind` p50 dropping 341 → 123 ms and total stall time 1319 → 844 ms (against 3 → 8 stall *events*: shorter, more of them). The kbps column here reads +4.4% where the controlled offline run says +1%; the difference is that these are separate 12 s windows of a live desktop taken minutes apart, which is precisely why the offline run is the one to quote for cost.
+
+Two secondary findings fall out of the same table:
+
+* **The park is inert at a fine cadence.** `every12` at park 1.0 vs 0.5 differs by 9 ms (838 / 829) and `gop2` by 7 ms, both inside noise, with **0 seeks** in every fine-cadence cell. The park only fires when `behind` exceeds it, and a 500 ms cadence swings `behind` across a 500 ms threshold constantly — that is the 205-seek / 3.4 s-stalled storm in `prod @ 0.5`. So `LIVE_EDGE_SECONDS` stops being a latency control and becomes only a recovery distance: **the default does not need to move**, and tightening it buys nothing. What *does* need to move is `LIVE_EDGE_MIN_SECONDS = 0.5`, whose stated justification ("分片节奏本来就是 0.5 秒，1.0 秒留了两个分片余量") is a claim about a fragment interval that this change makes 41.7 ms.
+* **`prod @ 1.0` does not storm** (0 seeks, 3 stalls) where `prod @ 0.5` does (205 seeks). The earlier matrix, which only ran parks 0.5 and 0.3, therefore showed the shipping shape at its worst and never at its default. Any before/after quoted from it overstated the win by ~100 ms of lag and understated the shipping stall count by 20×.
+
+The probe never touches `Setting` and never writes a config dir — the subprocess it uses to ask the product for its argv stubs `appdirs.user_config_dir` to a temp dir before `import macast` (AGENTS.md §4.9). It is the tool of record for this shape. Two lists live in two places and are not the same list: its docstring carries **eight findings about the instrument and the synthetic matrix** (finding 8 there is the drift described above, with the token-level detail), while this section carries the four that only real capture could produce. Its docstring also carries the pitfalls that produced them (`BufferedReader.read(n)` batches until it has n bytes — use `read1`, or the granularity reads 166.7 ms regardless; spawning the encoder before the browser puts launch backlog into the measurement; `b''.join(chunks)` per send is O(n²) and makes the *sender* the bottleneck, which is how two variants came to report an identical 41.7 ms).
 
 ---
 
@@ -389,7 +450,7 @@ Decoder probing uses `avcodec_receive_frame_flags(ctx, frame, AV_CODEC_RECEIVE_F
 **Transport latency table (Q2)**
 - **Progressive MPEG-TS over HTTP pulled by a real Chromecast** — no public number. `developers.google.com/cast/docs/web_receiver/live` failed via WebFetch *and* `curl -sL` (empty body).
 - **RIST** — no latency numbers found at all.
-- Cost of `SourceBuffer.appendBuffer` + `video.currentTime` live-edge chasing in a real browser. Chromium issue 41161663 was unreachable ("fetch failed").
+- ~~Cost of `SourceBuffer.appendBuffer` + `video.currentTime` live-edge chasing in a real browser. Chromium issue 41161663 was unreachable ("fetch failed").~~ **Now measured locally** — see §1 "…and it is now measured, not argued". The upstream Chromium issue is still unread; the local measurement answers the question directly instead. What it does *not* answer is whether Firefox and Safari behave the same, since the probe ran against one Chromium build on one machine.
 - LL-HLS blocking-playlist-reload specifics.
 - RTSP ~2 s is a **single anecdote** (mediamtx discussion #1691).
 - Wowza's low-latency-CMAF article returned only nav/CSS; Fraunhofer was substituted.

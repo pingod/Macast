@@ -353,6 +353,22 @@ def diagnostics_rows(state):
         add('已运行', '{} 秒'.format(stats['seconds']))
     if kind == 'caststream':
         add('在途帧', stats.get('in_flight'))
+        # The round trip is what sizes the in-flight window (2 x RTT, clamped to
+        # the protocol's own target delay), so a card that shows the window
+        # without it shows a number nobody can argue with. 「暂无」 is not a
+        # missing measurement: it is the honest state of a stream nothing has
+        # acknowledged yet, and the window sits on its floor until one lands.
+        add('往返时延', '暂无' if stats.get('rtt') is None
+            else '{:.1f} 毫秒'.format(stats['rtt']))
+        add('补发', '{} 包'.format(stats.get('retransmits') or 0))
+        # The two ways we decline to repair, and they are worth a row only when
+        # they happened: a packet too recent to have been lost is the reference
+        # sender's own rule, and a frame we no longer hold means the next key
+        # frame is the recovery. Both at zero is the good case and says nothing.
+        _unrepaired = (stats.get('retransmit_stale') or 0) \
+            + (stats.get('retransmit_gone') or 0)
+        if _unrepaired:
+            add('未补发', '{} 次（太新，或已不在修复缓冲里）'.format(_unrepaired))
     if kind == 'dlna':
         add('电视上报状态', stats.get('state'))
         # The renderer's word and our own measurement, side by side: the two

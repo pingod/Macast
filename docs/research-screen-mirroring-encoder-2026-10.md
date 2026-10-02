@@ -276,6 +276,21 @@ VT variants **200.9–253.1** in every combination: realtime 219.9, plain 208.5,
 
 ### 2.3 Throughput and CPU cost [measured, 30 fps target, 20 Mbps]
 
+> **这张表量的是离线吞吐，不是投屏的成本 —— 2026-10-02 补记。**
+> 表里的源是"能喂多快就编多快"，所以 `fps` 一列是编码器的**上限**，`% of one core`
+> 是跑在那个上限时的 CPU。它被误读成"实时镜像桌面时的开销"过一次，误读的结果
+> （"x264 吃约 4.5 核 / VideoToolbox 约 0.2 核"）写进了 AGENTS.md §4.8，
+> 于是硬件编码看起来便宜了二十倍。实时路径的同一对数字是 **0.59 核 vs 0.41 核**
+> （见下面 §2.3b）。**两组数都是真的，回答的不是同一个问题**：
+> 这组回答"还有多少余量"，那组回答"镜像的时候风扇转不转"。
+>
+> 复核（2026-10-02，`-f lavfi -i testsrc2=size=…:rate=30:duration=6`、`-f null -`、
+> 与本表同样的 x264 argv）：1920×1080 **486 fps / 4.20 核**、2560×1600 **295 fps / 4.63 核**、
+> 3456×2234 **171 fps / 4.94 核** —— 与下表 536.9 / 315.9 / 185.3 fps、436% / 450% / 483%
+> 逐档对得上（差异是本机负载与取样时长）。所以**下表不是重复帧假象**；
+> 同一趟里"重复帧假象"另有其人，是**实时采集**在缺输出 `-r` 时的 442 fps，
+> 见 `scripts/encoder_latency_probe.py` 的 `insane`。
+
 | resolution | config | fps | × realtime | % of one core | ms/frame |
 |---|---|---|---|---|---|
 | 1920×1080 | x264 ultrafast+zl | **536.9** | **17.90×** | 436.0 | 8.12 |
@@ -297,9 +312,101 @@ VT variants **200.9–253.1** in every combination: realtime 219.9, plain 208.5,
 | | hevc_videotoolbox rt | 46.7 | 1.56× | 27.0 | 5.78 |
 
 ⇒ **x264 ultrafast+zerolatency sustains 5.6–17.9× realtime at every resolution up to 4K**, but burns
-~4.5 cores. VT uses ~0.2–0.3 of a core with only 1.6–5.1× headroom.
+~4.5 cores *while doing so*. VT uses ~0.2–0.3 of a core with only 1.6–5.1× headroom.
 The repo's premise that x264 cannot sustain Retina is **false on throughput** and only true on
-CPU/thermal grounds. The real trade is **latency (x264 wins by ~190 ms) vs CPU (VT wins by ~15×)**.
+CPU/thermal grounds *at the throughput ceiling*. The real trade is **latency (x264 wins by ~190 ms)
+vs CPU (VT wins, but by 0.18 of a core on the live path, not by 15×)**.
+
+### 2.3b What the live path actually costs [measured 2026-10-02, real desktop capture, 24 fps, 4 Mbps, 8 s, three runs each]
+
+§2.3 answers "how fast can it go". Mirroring never asks that: the capture hands over 24 fps and the
+encoder waits for the next one, so its CPU is the cost of encoding 24 fps and nothing more.
+`scripts/encoder_latency_probe.py` measures that shape (`cores = cpu_seconds / wall_seconds`, the
+clock stopped *before* `terminate()` so VideoToolbox's slow death does not inflate `wall`):
+
+| variant (1080p, native 3456×2234 capture scaled down) | first byte ms | cores | bytes | realtime |
+|---|---|---|---|---|
+| x264 ultrafast+zerolatency | 528.9 / 509.4 / 519.9 | **0.59** | 4,915,200 | 0.94× |
+| h264_videotoolbox | 753.4 / 706.5 / 734.0 | **0.41** | 2,949,120 | 0.94× |
+| hevc_videotoolbox | 720.2 / 760.9 / 726.9 | 0.42 | 2,621,440 | 0.94× |
+| libx265 ultrafast | 574.8 / 544.9 / 562.1 | 1.67 | 4,980,736 | 0.94× |
+| x264 zl + `mpdecimate`/vfr | 532.9 / 522.3 / 534.1 | 0.52 | 3,538,944 | 0.68× |
+| h264_videotoolbox + `mpdecimate`/vfr | 761.7 / 768.4 / 738.4 | 0.41 | 2,293,760 | 0.70× |
+| x264 **without** `-tune zerolatency` + `mpdecimate`/vfr | 1353.5 / 1419.2 / 1395.9 | 0.47 | 3,145,728 | 0.56× |
+
+`first byte` includes ~0.5 s of ffmpeg startup that every row pays, so **the number to read is the
+difference between rows, not any row**. At 2160p: x264 zl 541.4 ms / 1.12 cores / 0.94×;
+hevc_videotoolbox 800.1 ms / 0.64 cores / **0.82× (it fell behind)**; libx265 646.2 ms / **4.17 cores**.
+
+Five conclusions, each of which killed or deferred a planned change:
+
+1. **The CPU argument for `auto`→hardware is much weaker than the repo said.** 0.59 vs 0.41 cores,
+   i.e. VT saves 0.18 of a core and costs ~200 ms of first byte. The ~190–250 ms VT penalty in §2.2
+   is confirmed; the "4.5 cores is a fan and a battery" framing is not, because 4.5 cores is the
+   offline ceiling. Changing the `auto` default is a user decision, not a measurement — it is
+   deferred, and `ENCODER_TRADEOFF` (user-visible, bound by suite cases) still says hardware.
+2. **HEVC buys bandwidth, not latency.** hevc_vt vs h264_vt first byte across three runs:
+   −33 / +54 / −7 ms ⇒ indistinguishable. Bytes 11–13% smaller, cores identical. At 2160p HEVC
+   produced *more* bytes than x264 and fell behind (0.82×). ⇒ the multi-codec OFFER moves to
+   batch 3, where codec negotiation is needed anyway (WebRTC). No television on this LAN to verify
+   HEVC acceptance in a Cast Streaming OFFER either.
+3. **`mpdecimate` buys bandwidth, not latency.** vs plain x264-zl: first byte +3.9/+12.9/+14.2 ms
+   (≈free), bytes **−26 to −28%**, cores 0.52 vs 0.59. That is the *best* case (a static desktop);
+   with video playing it drops almost nothing. It also collides with two shipped things: CFR
+   (`-r`) duplicates back every dropped frame, and the DLNA fake-file shape derives its
+   `Content-Length` from a nominal bitrate, so producing fewer bytes can drain the television's
+   buffer. ⇒ not shipped.
+4. **Software HEVC is strictly worse and the question is closed.** libx265 ultrafast: +42 ms first
+   byte at 1080p for 1.67 cores (2.8× x264, 4× VT) and *no* byte saving (+1.3%); 4.17 cores at 2160p.
+5. **Dropping `-tune zerolatency` costs +743 to +910 ms of first byte** — the single largest latency
+   term in the table, and an independent confirmation of the choice the plugin already makes.
+
+### 2.3c Two zero-frame bugs this measurement found in the shipped argv [measured 2026-10-02]
+
+Neither is a shape question, which is why the stub ffmpeg in Parts 21/22/23 answered both happily.
+Both end in the same wrong place: no frames, and a `PERMISSION_DOOR` message telling the user to
+fix 系统设置 → 隐私与安全性 → 屏幕录制 for a number we typed ourselves.
+
+**(a) `-level 42` was hardcoded for `h264_videotoolbox`.** Level 4.2 caps a frame at 8704
+macroblocks (2208×1242); a 3456×2234 desktop is 30384 of them. Real ffmpeg, real capture:
+
+| argv | result |
+|---|---|
+| 1080p + `-level 42` + maxrate/bufsize (**shipped**) | works, 3/3 |
+| native 3456×2234 + `-level 42` | **exit 187, 2068 bytes, 2/2** |
+| native + `-level 51` | works, 1,797,725 bytes |
+| native + no `-level` | works, 1,799,372 bytes |
+| 2160p + `-level 42` | exit 187 |
+| 2160p + no `-level` | works, 2,130,382 bytes, 67 frames, 0.959× |
+| 1080p + `-level 42`, no maxrate/bufsize | fails |
+| no `-level`, VT's own choice at 1080p | **level 4.0**, High, 1920×1080 |
+
+Reproduced a second time with a *file* source, so the capture is not involved at all:
+`testsrc2` at 2560×1600 and 3456×2234 both give **0 frames** under `VT + -level 42`, while
+1920×1080 gives 180. Since `auto` picks hardware on a Mac, the shipped default for the 原画
+preset was "produce nothing". Fix: `vt_level(height)` — 42 up to 1080 lines, 51 up to 2160,
+**omitted when the size is unknown or larger** (`height == 0` is 原画). Omitting is not a shrug:
+VT computes a level matching the real picture at every size tried, and at 1080p it picks 4.0,
+*more* conservative than the 4.2 we pinned. `caststream` still gets 42 because
+`cast_stream_shape` has already replaced the request with the 1920×1080 the OFFER promised —
+there the level is a real promise. `has_hardware_encoder` cannot catch this class: it greps
+`ffmpeg -encoders`, which lists an encoder that then refuses the picture.
+
+**(b) The live shapes passed no output `-r`.** When avfoundation cannot estimate the rate it
+prints `Configuration of video device failed, falling back to default` then
+`Stream #0: not enough frames to estimate rate`, and the input arrives with a degenerate timebase.
+x264 multiplies the frame's macroblock count by something near 1e6 and answers
+`MB rate (14400000000) > level limit (16711680)` with **zero bytes**. One variable changed, same
+environment: no `-r` ⇒ 0 bytes; `-r 24` ⇒ **3,932,160 bytes**. VideoToolbox tolerates the same
+input and emits bytes, which is exactly why `auto` on a Mac hid it — the fallback to software
+happens when the capture is already unhappy. `build_dlna_command` has always passed
+`-r profile.fps`; the other three shapes were the ones left guessing.
+
+After both fixes, all seven shapes produce real bytes at 原画 (cast/browser/caststream ×
+software/hardware, plus dlna), verified by running the plugin's own `build_ffmpeg_command` against
+the real capture. `-r` and `-fps_mode vfr` are mutually exclusive and a suite case now says so,
+which is the constraint conclusion 3 above would have hit.
+
 
 ### 2.4 Quality per bit — VMAF [measured, 1080p `testsrc2`, 8 s, `-g 30`]
 
@@ -713,6 +820,17 @@ packet was in-flight"*), counting `retransmitted_count`, logging `"RETRANSMITTIN
 ⇒ Cast Streaming **does** have retransmission. Macast omitting it is an implementation choice, not a
 protocol limit. On a LAN with ~1 ms RTT the feedback loop is nearly free.
 
+> **已落地（2026-10-02，plugin v0.19）。** 这一节是研究当时的结论，那时 Macast 确实没有重传路径，
+> 而且 AGENTS.md 里还写着"没有重传路径（设计如此）"—— 那句话就是被本节证伪的。现在
+> `_retransmit` 按 openscreen 的规则实现了：staleness 判定（发出不到一个 RTT 的包不算丢）、
+> `ALL_PACKETS_LOST = 0xffff` 时不读位图、否则第 i 位（LSB 起）补 `packet_id + 1 + i`、
+> 修复缓冲 8 MiB（最老的先换成只留元数据的空壳）、一次反馈上限 64 包（**故意不转写 openscreen
+> 的 router 节流**，用这个上限夹住）。补发复用原密文、只换 RTP 序号。红线在 AGENTS.md §4.8 的 ⑧，
+> 回归用例在 Part 24（含真 UDP socket 上的一条）。**仍未在任何真电视上验证过** ——
+> 本机局域网没有 Chromecast，Part 24 的假设备与发送端共用同一张字段表，只能证明自洽（§4.9）。
+> §6.2 的时长窗口同样已落地（v0.18）。原文保留不动，因为可复查的是它的取证过程
+> （读的是 openscreen 的哪一处、哪一句），不是它的结论。
+
 ### 6.2 The in-flight limit is **duration-based**, and 12 frames is 10× tighter than the protocol allows
 
 `sender_impl.cc GetMaxInFlightMediaDuration()`:
@@ -839,6 +957,13 @@ when the network is clean. On a wired/clean-WiFi LAN ARQ wins; on lossy 2.4 GHz 
 **Cast gives you ARQ for free (it is in the protocol, §6.1); implementing RS-FEC would mean writing
 a Galois-field encoder in Python, which is a real cost.** Recommended order: (1) implement NACK
 retransmission, (2) make the in-flight window duration-based, (3) only then consider FEC.
+
+> **进度（2026-10-02）**：(1) 与 (2) 都已落地（v0.19 / v0.18）。(3) RS-FEC **没做，也不建议现在做**：
+> 在 Python 里写伽罗华域编码器的代价，只有在 2.4 GHz 那种丢包链路上才换得回来，而要不要付这个代价
+> 现在是个**可以量的问题**了 —— 设置页「统计信息」上的 `补发` 就是那条链路的丢包率读数
+> （`补发` 非零而 `丢块` 为零 = 无线在丢包）。先拿到真电视上的这个数，再谈 FEC。
+> 上面那句 "there is no retransmission at all" 说的是 **Moonlight/GameStream 的模型**（RS-FEC + IDR，
+> 从不 ARQ），不是 Macast，别读成对我们的描述。
 
 ### 6.6 Jitter buffer latency
 

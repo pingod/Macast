@@ -237,6 +237,41 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   「采集」卡上那行提示），否则那个开关读起来就是「硬件=好，软件=差」，没人会去关它。
   **没有加第四档 `lowlatency`**（原计划里有）：`encoder_args('software')` 已经就是
   x264 `ultrafast` + `zerolatency`，再加一档是两个菜单项做同一件事。
+- **2026-10-02：上一条自己也被更正了一半 —— 它引的是**离线**吞吐，而镜像的成本要按**在线**量。**
+  本机重测两遍（`scripts/encoder_latency_probe.py` 量在线、`testsrc2` 文件源 + `-f null` 量离线）：
+  离线那栏是 486 / 295 / 171 fps 对 4.20 / 4.63 / 4.94 核，与上条的 536.9 / 315.9 / 185.3 逐行对得上；
+  但**在线**（真实 24 fps 采集）同一条 argv 在 1080p 只吃 **0.59 核**，VideoToolbox **0.41 核**
+  （三次跑），2160p 是 1.12 核对硬件 HEVC 的 0.64 核。所以"约 4.5 核"是**天花板不是成本**，
+  真实取舍是 **约 200 ms 首帧 换 0.18 个核**，上条那句"笔记本上 4.5 核是风扇和电池"**因此不成立**：
+  硬件默认看起来便宜二十倍，实际便宜不到一半。`auto` 仍然落在硬件，但这已经是一个
+  **理由变弱了的默认值**，翻不翻是用户的决定，所以没在代码里替用户翻；
+  `ENCODER_TRADEOFF` 同步改成引**在线**数，并注明两边都含约 0.5 秒 ffmpeg 启动所以要看差值
+  （否则用户拿秒表量到 700 ms 会以为页面在骗他）。上条把"用户报的看不到画面"归给
+  `NO_FRAME_SECONDS` 那一路是对的，但**不完整**：同一趟量出**两个各自独立的零帧成因**，
+  都只在软件路径上现形、都把读者送去屏幕录制授权那个**真实却不是他们需要的门** ——
+  ① `-level 42` 曾写死给 `h264_videotoolbox`，画面大于 level 4.2 的 8704 宏块上限就退出 **187**、
+  只写约 2 KB（原画 3456×2234 与 2160p 各复现两次，换 `testsrc2` 文件源照旧 ⇒ 与采集无关），
+  而 `auto` 在 Mac 上就是硬件 ⇒ **原画档出厂即"什么都不产出"**；修成 `vt_level(height)`
+  按将被编码的高度查表、查不到就不钉（VT 自己在 1080p 选 level 4.0，比我们钉的 4.2 更保守），
+  caststream 仍钉 42 是对的（那里 OFFER 已经把画面钉成 1920×1080，level 是承诺不是猜测）。
+  ② 直播形状曾没有输出 `-r`：采集在 `Configuration of video device failed, falling back to default`
+  之后时间基退化到无法估帧率，x264 于是算出 `MB rate (14400000000) > level limit (16711680)`
+  而**一个字节都不编**（VideoToolbox 容忍同一个畸形输入，所以只在软件回落时现形）；
+  单变量实测 **0 字节 → 3,932,160 字节**，修成每条直播形状都钉 `-r FPS`
+  （`build_dlna_command` 一直钉 `-r profile.fps`，所以 DLNA 从没中过这一枪）。
+- **2026-10-02：三条量完不做/推迟的**（数在 `docs/research-screen-mirroring-encoder-2026-10.md` §2.3b）。
+  ① **`mpdecimate` + `-fps_mode vfr` 不采纳**：收益是**带宽不是延迟**（首帧 +3.9/+12.9/+14.2 ms ≈ 免费，
+  字节 **−26～−28%**，核 0.52 对 0.59），而那是静止桌面的最好情况、放视频时几乎不掉；
+  两个碰撞让它进不来 —— **`-r` 与 `-fps_mode vfr` 互斥**（CFR 会把丢掉的帧原样复制回来，
+  而 `-r` 正是上面②那条零帧 bug 的修法），以及 DLNA"伪装成文件"的 `Content-Length`
+  由名义码率推出、少产字节会抽干电视的缓冲。
+  ② **多编解码 OFFER（H.264 + HEVC）推迟到第 3 批**：`hevc_videotoolbox` 对 `h264_videotoolbox`
+  三次跑的首帧差是 −33/+54/−7 ms ⇒ **不可分辨**，字节小 11–13%、核相同；2160p 上 HEVC 反而
+  **多产字节**并掉到 **0.82×（跟不上了）**。软件 HEVC 直接关掉这个问题：libx265 ultrafast
+  首帧 +42 ms、**1.67 核**（x264 的 2.8 倍、VT 的 4 倍）而字节只省 1.3%（2160p 4.17 核）。
+  ⇒ HEVC 买的是带宽，而编解码协商在第 3 批（WebRTC）本来就要做，放一起谈。
+  ③ **顺带量到一条独立确认**：拿掉 `-tune zerolatency` 的代价是首帧 **+743～+910 ms** ——
+  这张表里最大的一项延迟，也就是说插件早就在做的那个选择是对的。
 - **多 slice 图像是这一阶段最大的坑**：`-tune zerolatency` 下 720p 一帧切成 **10 个 slice NAL**
   （真 ffmpeg 实测），所以访问单元只能按 `first_mb_in_slice == 0`（NAL 头后第一字节的最高位，
   即 ue(v) 0）判定新帧起点。按「一个 NAL = 一张图」写的结果是电视上永远只有十分之一张画。
@@ -251,6 +286,20 @@ JustStream（macOS 菜单栏投屏发送端，现属 Electronic Team/Eltima，v2
   `<video src=/live.mp4>`** —— 两条路共用同一条字节流。MJPEG 带宽爆炸且没声音，WebCodecs
   各家支持度不齐（Safari 26 才完整，Firefox 的 H.264 解码器可用性存疑），都不作为主路。
 - 关键帧间隔 = 分片节奏（1 s），**服务端缓存每代的 init segment** 让晚到观众能中途接上而不影响已有观众。
+- **2026-10-02：上一条被真浏览器探针推翻了一半 —— 分片节奏确实是延迟，而且是最贵的一段。**
+  v0.18 从"上一条"推出一句结论：「分片节奏是 `FPS // 2` = 0.5 秒，所以 `+frag_every_frame`
+  买不到东西」；v0.19 用 `scripts/mse_latency_probe.py`（真采集 + 硬件编码 + 无头 Chromium
+  当观看端，A/B 打的就是**同一棵树改动前的那份代码**、同一个 `-g 12`）量到：只把 `movflags`
+  从 `frag_keyframe` 换成 `frag_every_frame`，端到端 lag p50 **1305 → 838 毫秒（−36%）**，
+  画质同值（VMAF 94.42 对 94.42），字节只多约 1%。也就是约 470 毫秒的延迟正好住在
+  "等一个 GOP 长的片段封完"里。连带三条：停在直播边缘后 0.5 秒对 1 秒只差 9 毫秒
+  （829 / 838 ⇒ `Mirror_Live_Edge` 从"延迟旋钮"变成"恢复距离"）；`-g 2` 单独否掉
+  （码控被抽干，93.9 → 81.1，不值得）；`-g 12` 保留但语义变了 —— 它现在是**恢复粒度**
+  （重播割点最多往回退这么远才遇到一个可播画面），不再是发布节奏。
+  代价是一条新契约：分片不再保证以 IDR 开头，所以晚加入者的重播要逐片做真关键帧检查
+  （`starts_with_keyframe`，读不准一律当"不是"），一个可播起点都没有时**不从尾部喂旧字节**
+  （计入 `keyframe_misses` 并 warning 一次），而"每片都 entrable"的旧形状（marker 回退路径）
+  照旧整环重播 —— 这一条是被 Part 22 的旧契约当场抓出来的（第一版把回退环也割短了）。
 - 自动播放策略：先试非静音 `play()`，失败退静音，任意键/点击/触摸解锁后**重连也保持解锁**。
 - 实时边缘留 3 s 缓冲 + 8 s 卡死看门狗；`Wake Lock` 防手机熄屏。
 - 一个 GPU 帧相关的坑：VideoToolbox 出来的帧不发带标签的关键帧，要过一道 `OffscreenCanvas`。
@@ -395,7 +444,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | 阶段 | 交付 | 关键技术点 | 新增用例 | 风险 |
 |---|---|---|---|---|
 | **P0** | 本文档 + 台账 | 取证与许可判定 | — | 无 |
-| **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
+| **P1** ✅ | `screen_mirror` v0.4：目标=**浏览器**；多显示器选择；画质四档（**360 / 720 默认 / 1080 / 原始分辨率**，计划里的「4K」并入「原始分辨率」—— 采集高度由 `avfoundation` 给，缩放档位没有意义）；光标开关；macOS **VideoToolbox 硬件编码**（先探测再允许）；`caffeinate` 防休眠；菜单状态页显示 时长·码率·观看端·丢块 | fMP4(`frag_keyframe+empty_moov`；**v0.19 起 `frag_every_frame`**，见 §2.3 的更正条目) + init-segment 缓存 + **每会话** token 门控的播放器页（MSE，1.5 s 超时退渐进式）+ 自动播放解锁 | **Part 22**（69 条） | 低（全部复用已验证的采集/扇出）；iOS Safari 的 MSE 支持待实测 |
 | **P2** ✅ | `screen_mirror` v0.5：目标=**DLNA 电视** | 假装有长度的直播 HTTP：对外 `Content-Length` = 按档位码率算出的固定值且 **< 2³¹**（`DLNA_MAX_ADVERTISED_SIZE = 1.9e9`）、探测请求**恰好回 n 字节**（不足补 MPEG-PS 填充包）、`Accept-Ranges` + `transferMode.dlna.org: Streaming` + `contentFeatures.dlna.org`、**48 MiB**（`DLNA_RING_BYTES`，计划里的 64 KiB 太小：按 4.5 Mbps 只有 0.1 秒余量）按绝对字节偏移的阻塞式重连 + 20 MiB 预填（`DLNA_PREFILL_BYTES` ⇒ 菜单明说的 ~35 s 延迟）、stdlib SSDP/SOAP（`urllib`，不打第三方）、`GetTransportInfo` 看门狗 + `RelTime` 前进才算活着、**5 档 profile**（ps-pal / ps-ntsc / ts-mpeg2 / ts-h264 / mkv-h264，PAL/NTSC 用 AC-3）、连续失败自动换档并在用尽后提示手选 | **Part 23**（93 条） | 中：**没有老电视可验**，只能拿 Macast 自己的 DLNA 接收端当替身；真实兼容矩阵必须标注「未验证」 |
 | **P3** | `screen_mirror` v0.6：目标=**Chromecast 低延迟镜像**（Cast Streaming），失败自动回落 LOAD mpegts | LAUNCH `0F5096E8` + 残留 app 清理 + webrtc OFFER/ANSWER；不 connect 的 UDP；19 字节 RTP+Cast 头；**OS 原生 AES-128-CTR**（ctypes，无新依赖；2026-10 前是纯 Python，见 §2.2 末的偏差段）；Annex-B AU 切分；RTCP SR（首帧立即发）；PLI/kickstart/**在途窗口按时长算**（`clamp(2×RTT, 66 ms, targetDelay/3)` + 120 帧硬顶；2026-10 前是固定 12 帧 = 24 fps 下 500 ms 排队）；视频优先（音频二期） | **Part 24** + `cast_streaming_probe.py` | **高**：作者自己没对真机验过，各家固件/代际差异未知；无手机时只能自证字节自洽（AGENTS §4.9 明确这不算证据） |
 | **P4** ✅ | `cast_local_file` v0.1 | 本地文件/URL/播放列表 → Cast(含真 QUIT_APP)/DLNA；stdlib Range/206 静态服务；ffprobe copy-vs-transcode 启发式；音轨/字幕选择 + `AudioDelay`；只投系统声音的音频档（码率上限遵守 §2.6）；被抢占后的重连接看门狗。**偏差见 §2.6 末**（含"这一阶段动了 `protocol_cast.py` 的会话账本"） | **Part 25**（155 条） | 低-中：DLNA 侧的 `SetAVTransportURI` 语义已有；Cast MEDIA 命令收发已有；**真机一台没验** |

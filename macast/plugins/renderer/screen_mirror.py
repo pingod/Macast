@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.18</macast.version>
+# <macast.version>0.19</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的延迟下限（0.5–5，默认 1.0，原来是 3）。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -135,7 +135,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.18'
+PLUGIN_VERSION = '0.19'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -156,28 +156,42 @@ LIVE_QUEUE_MAX_CHUNKS = 256
 EARLY_DEATH_SECONDS = 5.0
 #: Rolling tail replayed to a late-joining browser viewer. Enough for one
 #: fragment plus the keyframe it starts on -- which is the whole requirement,
-#: because a replay that begins mid-fragment is a green smear until the next
-#: keyframe.
+#: because a replay that begins mid-GOP is a green smear until the next
+#: keyframe. Since 2026-10 that requirement is **enforced** by
+#: `_Broadcaster.tail()` rather than handed over by the muxer: fragments now
+#: start on any frame, so the tail is cut back to the last one whose first
+#: sample is a keyframe. Measured at a shipping bitrate this ring is ~6 s of
+#: tail, i.e. a dozen times the 0.5 s of GOP the cut can cost.
 #:
 #: Deliberately small: the replay is a *standing* delay, not a one-off. The
 #: browser decodes everything it is handed before it shows anything, so 8 MiB
 #: of tail meant a viewer that opened the page sat 10 s behind live at these
-#: bitrates and stayed there. 2 MiB is still four GOPs at the highest preset
-#: and cuts that to under three seconds.
+#: bitrates and stayed there. 2 MiB cuts that to under three seconds -- and
+#: with the park doing the parking (see `LIVE_EDGE_SECONDS`) a late viewer
+#: measured 123 ms behind in practice.
 REPLAY_BYTES = 2 << 20
 #: How far behind the live edge the browser player parks itself, in seconds.
 #: Like `REPLAY_BYTES` and the DLNA prefill, this is a *standing* delay: the
-#: player seeks back to it once and then never catches up, so it is the floor
-#: on this target's end-to-end latency and no sender-side change can beat it.
+#: player seeks back to it once and then never catches up.
 #:
-#: 3 s was transcribed from Mac-Screencast and never questioned. The floor it
-#: has to clear is one fragment, and a fragment on this target is
-#: `gop_size('browser')` = FPS // 2 = 12 frames = **0.5 s**, so 1.0 s leaves
-#: two fragments of slack -- the player is never waiting on bytes that have not
-#: been written yet. That is also why `movflags=+frag_every_frame` is *not*
-#: part of this change: it would cut the fragment interval to one frame and buy
-#: nothing at a 0.5 s cadence, while adding a `moof` per frame (~40 kbps at
-#: 24 fps) that the same LAN has to carry.
+#: 3 s was transcribed from Mac-Screencast and never questioned. It is **not**
+#: the floor on this target's end-to-end latency, which an earlier version of
+#: this comment claimed: on a real desktop (2026-10-02) the shape sat at
+#: 1305 ms with the park at 1.0 s and 1201 ms with it at 0.5 s, so halving it
+#: bought 8%. The term that actually held latency up was the fragment cadence,
+#: upstream of the player, and it is the one that changed.
+#:
+#: The park still has to clear a fragment. Until 2026-10 that was
+#: `gop_size('browser')` = FPS // 2 = 12 frames = 0.5 s and this was 1.0 s, two
+#: fragments of slack; the muxer now cuts a fragment per frame, so a fragment
+#: is 1/FPS = 41.7 ms and this is twelve of them. Measured at both ends of the
+#: range the pill row offers: 838 ms at 1.0 against 829 ms at 0.5, with **0
+#: controller seeks at either** -- at a fine cadence the player's `behind` no
+#: longer swings across the park value, so the park stops being a latency
+#: control and is only a recovery distance. That is why the default did not
+#: move, and why the floor below did not either: 0.5 s is now a dozen
+#: fragments of slack rather than exactly one, and nothing measured asks for
+#: less.
 #:
 #: Half a second is the floor rather than zero because a park distance of zero
 #: means the player is always exactly at the write head, where one encoder
@@ -209,12 +223,16 @@ def live_edge_seconds():
 LIVE_EDGE_OPTIONS = (LIVE_EDGE_MIN_SECONDS, LIVE_EDGE_SECONDS, 2.0, 3.0,
                      LIVE_EDGE_MAX_SECONDS)
 
-#: What the control has to say about itself. The number is a floor on latency,
-#: and the page has to name the failure mode of pushing it down, or「更快」is
-#: the only thing the user reads.
+#: What the control has to say about itself. The page has to say what pushing it
+#: down does *not* buy, or「更快」is the only thing the user reads -- and after
+#: 2026-10 that includes admitting the knob is nearly spent: the measured
+#: difference between 1.0 and 0.5 is 9 ms, because what held this path back was
+#: the fragment cadence rather than the park.
 LIVE_EDGE_HINT = ('播放页会把自己停在直播边缘后面这么多秒，而且一直停在这里、'
-                  '不会追上来——所以它就是这一路端到端延迟的下限。调小更快，'
-                  '但小于一个分片（本机是 0.5 秒）时播放会卡，卡够 8 秒整页重载。')
+                  '不会追上来。实测把它从 1.0 调到 0.5 只快了 9 毫秒——这一路'
+                  '的延迟主要由分片节奏决定（现在是每帧一片，41.7 毫秒），'
+                  '这一格再调小基本买不到什么。调到 0.5 秒以下会让播放头'
+                  '接近写入头，一次编码打嗝就是卡顿，卡够 8 秒整页重载。')
 #: A system-audio tap (BlackHole on macOS, a PulseAudio monitor on Linux) is
 #: clocked by whatever the audio stack feels like, not by ffmpeg. Left alone,
 #: the two clocks slide past each other by a sample at a time and every slip
@@ -288,13 +306,18 @@ FPS = 24
 def gop_size(kind):
     """Frames between keyframes for the browser and Chromecast targets.
 
-    A fragmented-MP4 fragment ends when the *next* `moof` shows up, so on the
-    browser target the GOP is not just a seek granularity, it is the floor on
-    how long a finished picture sits in the encoder before the viewer can have
-    it -- half a second there is half a second of latency bought back. The
-    MPEG-TS targets are not framed by keyframes at all, so their figure is only
-    a seek granularity and a second of it is affordable; the DLNA target, which
-    *is* joined mid-stream by a television, uses `live_gop` instead.
+    Until 2026-10 this described the browser target's *publish* cadence: a
+    fragmented-MP4 fragment ends when the *next* `moof` shows up, keyframes
+    were where `movflags=frag_keyframe` cut, so the GOP was the floor on how
+    long a finished picture sat in the encoder before the viewer could have
+    it. `frag_every_frame` cut that floor to 1/FPS; what this number still
+    buys on `browser` is **recovery granularity** -- a late joiner's replay
+    is cut back to the newest fragment whose first sample is a keyframe
+    (`_Broadcaster.tail()`), so the keyframe spacing is how far back of
+    live such a viewer may start. The MPEG-TS targets are not framed by
+    keyframes at all, so their figure is only a seek granularity and a
+    second of it is affordable; the DLNA target, which *is* joined
+    mid-stream by a television, uses `live_gop` instead.
     """
     return FPS // 2 if kind == 'browser' else FPS
 
@@ -347,7 +370,7 @@ OUTPUTS = {
              ['-f', 'mpegts', '-muxdelay', '0', '-muxpreload', '0', 'pipe:1']),
     'browser': ('浏览器（打开网址即可看）', 'm4s', 'video/mp4',
                 ['-f', 'mp4', '-movflags',
-                 'frag_keyframe+empty_moov+default_base_moof', 'pipe:1']),
+                 'frag_every_frame+empty_moov+default_base_moof', 'pipe:1']),
     #: Not a different device: the same Chromecast, driven by its mirroring app
     #: instead of by LOAD. No HTTP suffix and no Content-Type because nothing is
     #: served -- these bytes are pushed to a UDP port.
@@ -629,7 +652,41 @@ DLNA_RING_BYTES = 48 << 20
 #: `Range: bytes=0-18446744072566584319` and "this file is unsupported".
 DLNA_MAX_ADVERTISED_SIZE = 1900000000
 DLNA_SECONDARY_HEADER = 'Streaming'
-DLNA_ORG_FLAGS = '01500000000000000000000000000000'
+#: `DLNA.ORG_FLAGS` bits, named because the wire form is 32 hex digits of which
+#: a reader can verify exactly nothing. What this file shipped for two releases
+#: was the bare string `01500000…`, and the only way to know that means
+#: STREAMING | BACKGROUND | DLNA_V15 is to already know it.
+DLNA_FLAG_STREAMING_TRANSFER_MODE = 1 << 24
+DLNA_FLAG_BACKGROUND_TRANSFER_MODE = 1 << 22
+#: "This stream may stall while the renderer waits for data." Not a hedge -- a
+#: description of what our own HTTP layer does. When a renderer reads faster
+#: than the encoder writes, the byte log **waits** instead of answering short
+#: (AGENTS.md §4.8, red line ③), so the connection genuinely goes quiet, and
+#: firmware that was not told about that is firmware that concludes the file
+#: ended. VLC declares the bit (`01700000…`); MirrorCast, whose flags we
+#: copied, does not (`01500000…`).
+#:
+#: **So does our own sibling sender, and it always has**: `cast_local_file.py`
+#: has shipped the literal `01700000…` since its first release, because its
+#: transcode pump parks a reader that outruns ffmpeg for exactly the same
+#: reason. Until v0.19 this file was the odd one out *in its own repository* --
+#: two plugins that behave identically were telling televisions two different
+#: things, and nothing could notice because nothing compared them. Part 23 now
+#: reads the word out of that file instead of retyping it, and asserts it
+#: occurs there exactly once, so a second flags word cannot hide a drift.
+#:
+#: **Whether any real television changes its behaviour because of this is
+#: unverified and cannot be verified here** -- there is no DLNA renderer on
+#: this LAN that stalls. The claim being made is the weaker and defensible one:
+#: declaring a stall we really do cause is honest, and the bit is in the
+#: specification.
+DLNA_FLAG_CONNECTION_STALL = 1 << 21
+DLNA_FLAG_DLNA_V15 = 1 << 20
+#: The flags word occupies the first four bytes; the remaining twelve are
+#: reserved and every field implementation sends them as zeros.
+DLNA_ORG_FLAGS = '{:08x}{}'.format(
+    DLNA_FLAG_STREAMING_TRANSFER_MODE | DLNA_FLAG_BACKGROUND_TRANSFER_MODE
+    | DLNA_FLAG_CONNECTION_STALL | DLNA_FLAG_DLNA_V15, '0' * 24)
 #: An MPEG-PS padding packet (private_stream_1, zero length). A renderer that
 #: asks for exactly n bytes gets exactly n bytes -- it is sniffing a file, and
 #: a short answer is what makes it give up.
@@ -1001,45 +1058,65 @@ def output_kind():
 #:
 #: This comment used to say "x264 at `ultrafast` cannot keep a Retina desktop at
 #: a watchable frame rate, which is what「不开硬件就几乎看不到画面」was". It
-#: cannot: libx264 ultrafast+zerolatency on this machine encodes a *desktop*
-#: at **17.9x realtime at 1080p, 10.5x at 2560x1600, 6.2x at 3456x2234 and
-#: 5.65x at 4K** -- the throughput half of that sentence was never true at any
-#: resolution we ship, and a user who reported「看不到画面」was reporting
-#: something else (see NO_FRAME_SECONDS: the cause there was a capture that
-#: returned no frames at all, not an encoder that fell behind).
+#: cannot, and undoing that claim has two halves -- the second of which this
+#: block itself got wrong for one revision:
 #:
-#: The tradeoff that *is* real is latency against CPU, and it runs the opposite
-#: way on each axis:
+#: **Throughput (offline).** libx264 ultrafast+zerolatency handed a *file* and
+#: told to go as fast as it can measures 486 fps at 1920x1080, 295 fps at
+#: 2560x1600 and 171 fps at the native 3456x2234 -- i.e. 5.6x-17.9x realtime,
+#: costing 4.20 / 4.63 / 4.94 cores. Every one of those numbers is real. None of
+#: them is what mirroring costs, because mirroring never asks for more frames
+#: than the capture hands over.
 #:
-#:     x264 ultrafast+zl   first byte out 41-49 ms     ~4.5 cores
-#:     h264_videotoolbox   first byte out 200.9-253.1 ms   ~0.2 cores
+#: **Cost (live).** Fed the real 24 fps desktop capture, the same argv costs
+#: **0.59 of a core at 1080p** against VideoToolbox's **0.41** (2026-10-02,
+#: three runs each, `scripts/encoder_latency_probe.py`; at 2160p it is 1.12
+#: against 0.64 for hardware HEVC). So the tradeoff that is real is ~200 ms of
+#: first byte against **0.18 of a core**, not 41 ms against 4.5 cores -- quoting
+#: the offline ceiling as the live cost made the hardware default look twenty
+#: times cheaper than it is.
 #:
-#: VideoToolbox's ~190 ms is not a setting we forgot to turn: `-realtime`,
+#: And a user who reported「不开硬件就几乎看不到画面」was reporting something
+#: else entirely: a capture that produced **zero frames**, of which this file
+#: shipped two independent causes (`vt_level` pinning a level too small for the
+#: picture, and the missing output `-r` pin in build_ffmpeg_command). Both were
+#: invisible on the hardware path and both pointed the reader at
+#: PERMISSION_DOOR, which is a real door but not the one they needed.
+#:
+#: VideoToolbox's ~200 ms is not a setting we forgot to turn: `-realtime`,
 #: `-prio_speed`, `+constant_bit_rate`, `+max_ref_frames 1`, `-bf 0` and
 #: `-coder cabac` were each tried and none of them moved it (and `-realtime 1`
 #: produced byte-identical output to not passing it -- it only selects the
 #: low-delay rate-control path, it does not buy latency here). It is the
 #: hardware pipeline's own depth.
 #:
-#: So `auto` still lands on hardware, because 4.5 cores on a laptop is a fan and
-#: a battery, and 190 ms is not what most people mean by「投屏卡」. But it is a
-#: *default*, not a verdict: 软件编码 buys that 190 ms back and the page now says
-#: so out loud (ENCODER_TRADEOFF). The resolution has to come from a probe that
+#: So `auto` still lands on hardware -- but that is now a **default whose reason
+#: got weaker**, not a verdict: 0.2 of a core is cheap and 200 ms is not, and
+#: flipping the default is a user decision rather than a measurement, so it has
+#: not been made here. Either way the page has to say the tradeoff out loud
+#: (ENCODER_TRADEOFF), because a switch that reads as「硬件 = 好，软件 = 差」is
+#: a switch nobody turns off. The resolution has to come from a probe that
 #: may not have answered yet, hence "hardware if something already proved it
 #: exists, otherwise software".
 ENCODER_AUTO = 'auto'
 
 #: The one sentence the encoder switch on the page has to carry, because without
 #: it the switch reads as「硬件 = 好，软件 = 差」and nobody turns it off. Both
-#: numbers are measured on this machine, on a desktop capture, and they are the
-#: whole tradeoff -- there is no third axis (VT also undershoots its bitrate
-#: target by 30%, which is why rate_target() asks it for 1.5x, but that is
-#: correctness, not a quality difference the user has to choose between).
-ENCODER_TRADEOFF = ('关掉硬件编码可以省下约 190 毫秒的延迟'
-                    '（x264 出首帧 41-49 毫秒，VideoToolbox 200-253 毫秒），'
-                    '代价是约 4.5 个 CPU 核心：笔记本上会发热、耗电。'
-                    '两者都能撑住 4K 桌面的实时帧率（x264 实测 5.65-17.9 倍速），'
-                    '所以这不是「软件编码跟不上」，只是延迟换 CPU。')
+#: numbers are measured on this machine, on a live desktop capture (not a file
+#: source -- see ENCODER_AUTO for why the distinction is the whole point), and
+#: they are the entire tradeoff: there is no third axis. VT also undershoots its
+#: bitrate target by 30%, which is why rate_target() asks it for 1.5x, but that
+#: is correctness, not a quality difference the user has to choose between.
+#:
+#: Both readings carry ~0.5 s of ffmpeg startup, so the sentence quotes them as
+#: a *difference* and says so -- a user who times it with a stopwatch and gets
+#: 700 ms will otherwise conclude the page lied.
+ENCODER_TRADEOFF = ('关掉硬件编码大约省下 200 毫秒的首帧延迟（实测同一台机器、'
+                    '同一份采集：x264 509-529 毫秒，VideoToolbox 706-753 毫秒，'
+                    '两边都含约 0.5 秒的 ffmpeg 启动，所以要看的是差值）。'
+                    '代价是 CPU：1080p 下 0.59 核对 0.41 核。'
+                    '这不是「软件编码跟不上」——两者都跑满 24 fps——'
+                    '只是多耗约 0.2 个核心：笔记本上会发热、耗电。')
 
 
 def encoder_kind():
@@ -1730,7 +1807,65 @@ def rate_target(bitrate, kind, platform=None):
     return int(bitrate)
 
 
-def encoder_args(kind, platform=None):
+#: The H.264 level VideoToolbox is told to write into the SPS, by the height of
+#: the picture it is actually encoding. A level is a promise about frame size
+#: and luma rate; pinning one that the picture does not fit is not a constraint,
+#: it is a crash -- see `vt_level`.
+VT_LEVELS = ((1080, '42'), (2160, '51'))
+
+
+def vt_level(height):
+    """The `-level` value for a picture of `height` lines, or None for "let
+    VideoToolbox work it out".
+
+    This used to be a hardcoded `'42'` in `encoder_args`, and it was a live
+    bug on this machine (measured 2026-10-02, `h264_videotoolbox`, 3 s of real
+    desktop, same capture and same rate control in every row):
+
+        1080p   + `-level 42`  + maxrate/bufsize  -> works, 3/3
+        2160p   + `-level 42`                     -> exit 187, 0 bytes
+        2160p   + `-level 51`                     -> works, 2130382 bytes
+        2160p   + no `-level`                     -> works, VT picks its own
+        native 3456x2234 + `-level 42`            -> exit 187, 0 bytes, 2/2
+        native 3456x2234 + `-level 51`            -> works, 1797725 bytes
+        native 3456x2234 + no `-level`            -> works, 1799372 bytes
+        1080p   + `-level 42`, no maxrate/bufsize -> fails too
+        no `-level`, VT's own choice at 1080p     -> level 4.0, High, 1920x1080
+
+    Level 4.2 caps the frame at 8704 macroblocks (2208x1242); a 3456x2234
+    desktop is 30384 of them, so the encoder is handed a promise it cannot
+    keep and dies. ffmpeg prints
+    `Error encoding a frame: Generic error in an external library` and exits
+    187 with **five lines of stderr and no output at all**.
+
+    The reason that is worse than an ordinary crash: `auto` picks hardware
+    whenever the probe finds it, so on a Mac the shipped default for the 原画
+    preset was "produce zero frames", and the no-frame path sends the user to
+    the **screen-recording permission** door (`PERMISSION_DOOR`) -- the wrong
+    door for a number we typed ourselves. `has_hardware_encoder` cannot catch
+    it either: it greps `ffmpeg -encoders`, which happily lists an encoder
+    that then refuses the picture.
+
+    So: pin the level where the pin is a real promise (a Cast device's decoder
+    limit, which is what `42` was chosen for, and which only means something up
+    to 1080p), name the next one up for pictures that fit it, and **omit it
+    entirely when we cannot know the size** (`height == 0` is the 原画 preset:
+    "do not scale", so the picture is whatever the display is -- 3456x2234
+    here, 5120x2880 on a Studio Display). Omitting is not a shrug: measured
+    above, VT computes a level that matches the real picture at every size we
+    tried, and at 1080p it picks **4.0**, which is *more* conservative than the
+    4.2 we were pinning. A table that stopped at 5.1 would just move this bug
+    to the next display someone buys.
+    """
+    if not height:
+        return None
+    for limit, level in VT_LEVELS:
+        if height <= limit:
+            return level
+    return None
+
+
+def encoder_args(kind, platform=None, height=None):
     """Video encoder flags. Hardware encoding is opt-in and macOS-only:
     ffmpeg's h264_videotoolbox is the one tap Apple actually ships, and unlike
     the Castify reference (which never probes for it and always lands on CPU
@@ -1744,10 +1879,19 @@ def encoder_args(kind, platform=None):
     it for a thread type is asking for an option it does not have. x264 already
     gets sliced threads implicitly from `-tune zerolatency`; naming it is cheap
     insurance against a preset change quietly costing a frame of latency.
+
+    `height` is the encoded picture height, and only the VideoToolbox branch
+    reads it (`vt_level`); x264 computes its own level and is right about it.
+    It defaults to None -- "unknown" -- which for VT means "do not pin one",
+    the safe direction: a missing level costs a slightly less explicit SPS,
+    while a wrong one costs every frame.
     """
     if uses_videotoolbox(kind, platform):
-        return ['-c:v', 'h264_videotoolbox', '-profile:v', 'high',
-                '-level', '42', '-flags', '+low_delay', '-realtime', '1']
+        args = ['-c:v', 'h264_videotoolbox', '-profile:v', 'high']
+        level = vt_level(height)
+        if level:
+            args += ['-level', level]
+        return args + ['-flags', '+low_delay', '-realtime', '1']
     return ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
             '-profile:v', 'high', '-flags', '+low_delay',
             '-thread_type', 'slice']
@@ -1819,7 +1963,11 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     elif height:
         # -2 keeps the aspect ratio and still satisfies yuv420p's even edges.
         cmd += ['-vf', 'scale=-2:{}'.format(height)]
-    cmd += encoder_args(encoder)
+    # `height` here is the height that will actually be encoded, not the one
+    # the menu asked for: the caststream branch above has just replaced it with
+    # the size the OFFER pinned, and 0 means "do not scale" (原画), which is
+    # exactly the case `vt_level` must not pin a level for.
+    cmd += encoder_args(encoder, height=height)
     # Decided once, then used for both `-b:v` and the VBV that bounds it: a
     # ceiling computed from a different number than the target is not a
     # ceiling. Note the ordering against the caststream clamp above -- that one
@@ -1827,7 +1975,41 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     # the request so the wire actually lands there. Reversing the two would
     # either overshoot the promise or underfill it.
     target = rate_target(bitrate, encoder)
-    cmd += ['-pix_fmt', 'yuv420p', '-g', str(gop_size(kind)),
+    # `-r` is not a frame-rate *preference* here, it is the thing that keeps the
+    # encoder from being handed an impossible one. Measured on this machine
+    # (2026-10-02) with the shipped argv, one variable changed, video-only
+    # capture, 原画 (no `-vf` at all so the scaler is not involved):
+    #
+    #     no output `-r`  -> 0 bytes, stderr
+    #         [libx264] MB rate (14400000000) > level limit (16711680)
+    #     `-r 24`         -> 3,932,160 bytes
+    #
+    # The mechanism: when avfoundation cannot estimate the rate -- it prints
+    # `Configuration of video device failed, falling back to default` and then
+    # `Stream #0: not enough frames to estimate rate` -- the input arrives with
+    # a degenerate timebase, x264 multiplies the frame's macroblock count by
+    # something near 1e6 to get its MB rate, cannot find a level that covers
+    # it, and encodes **nothing at all**. VideoToolbox tolerates the same input
+    # and emits bytes, which is why this never showed up on the `auto` default
+    # on a Mac: the fallback to software is precisely when the capture is
+    # already unhappy, and that is when x264 dies.
+    #
+    # So the failure the user sees is "no frames", and the door the no-frame
+    # path points at is **screen-recording permission** (`PERMISSION_DOOR`) --
+    # a real door, but not this one. Pinning the rate we already promise
+    # everywhere else closes it: the input asks for `-framerate FPS`, the GOP
+    # is `gop_size(kind)` frames, the Cast Streaming OFFER advertises `FPS` in
+    # its `resolutions`, and `build_dlna_command` has always passed
+    # `-r profile.fps`. This branch was the only one left guessing.
+    #
+    # What it costs: CFR duplicates frames when the capture delivers fewer
+    # than FPS (a sleeping or occluded display). That is the honest behaviour
+    # for a live stream whose receiver is told 24 fps -- the alternative is a
+    # clock that runs slow. **It does collide with `mpdecimate`**, which needs
+    # `-fps_mode vfr`: CFR puts straight back every frame mpdecimate dropped,
+    # so if that filter is ever added here it must replace this `-r`, not
+    # ride alongside it.
+    cmd += ['-pix_fmt', 'yuv420p', '-r', str(FPS), '-g', str(gop_size(kind)),
             '-b:v', str(target)]
     cmd += rate_caps(target)
     # Encoder private options only resolve after -c:v, so they ride at the end.
@@ -1855,7 +2037,10 @@ def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
         # picture a television can start on is the one after an IDR, and on
         # Matroska the cluster holding it cannot be published before that IDR
         # arrives. See `live_gop` for what that buys and what it costs.
-        cmd += encoder_args(encoder)
+        # The profile owns the frame size (`video_filter` above scales to it),
+        # so it also owns the level: a profile is a promise about what the
+        # television's demuxer knows, and `-level` is part of that promise.
+        cmd += encoder_args(encoder, height=profile.height)
         # `profile.total_bitrate` is what the fake-file shape advertises as a
         # Content-Length and what the prefill budget is derived from, so it
         # describes the wire. `rate_target` turns that into the request that
@@ -3049,6 +3234,103 @@ def restore_system_audio(report=lambda message: None):
 # not something to hand to "anything that can open a socket", and a TV cannot
 # present a token -- but it can be given a URL it invented nothing about.
 
+#: H.264 NAL unit type that says "this sample needs no earlier picture":
+#: 5 = IDR. The browser target is H.264 only -- `encoder_args` offers
+#: `h264_videotoolbox` and `libx264` and nothing else, and no HEVC path exists
+#: in this file -- so one type is the whole table. A future HEVC browser path
+#: must add 19/20/21 here, and would notice by getting no replay at all
+#: (`_Broadcaster.tail` returns empty rather than unplayable bytes), not by
+#: getting a smear.
+H264_IDR_NAL = 5
+
+
+def _first_mdat(fragment):
+    """Offset of the first `mdat` box in a fragment, or None.
+
+    A fragment as `_Fragments` assembles it is a `moof` followed by the
+    `mdat`(s) it describes, and its own length is in its first four bytes, so
+    this walks boxes from there rather than assuming the `mdat` is adjacent --
+    an `free`/`skip` box in between would otherwise make the keyframe test
+    answer "no" for every fragment, which silently costs the replay rather
+    than breaking anything loudly.
+    """
+    if len(fragment) < 8:
+        return None
+    offset = int.from_bytes(fragment[:4], 'big')
+    if offset < 8:
+        return None
+    while offset + 8 <= len(fragment):
+        size = int.from_bytes(fragment[offset:offset + 4], 'big')
+        if size < 8:
+            return None
+        if fragment[offset + 4:offset + 8] == b'mdat':
+            return offset
+        offset += size
+    return None
+
+
+#: H.264 NAL types that are not the picture itself: SEI, SPS, PPS, AUD, filler.
+#: A keyframe sample may carry any of them in front of its slice, so the walk
+#: in `_sample_nal_types` steps over them; the first type outside this set is
+#: the sample's first VCL NAL, and that one decides.
+H264_LEADING_NAL_TYPES = frozenset((6, 7, 8, 9, 12))
+
+
+def _sample_nal_types(fragment):
+    """The H.264 NAL types up to the fragment's **first slice**.
+
+    First sample's leading units and its first slice, deliberately not the
+    whole fragment: the question is whether a decoder can start here, and a
+    later sample's IDR (a fragment cut by `-frag_duration` can contain one)
+    must not answer it. Samples are AVCC length-prefixed -- `-movflags` does
+    not request Annex-B -- and a keyframe sample may carry `SPS`/`PPS`/`AUD`
+    before its slice, so this collects the leading set rather than reading one
+    byte. Anything unreadable or truncated stops the walk with what it has,
+    which for a cut-off keyframe means "no" -- the direction that costs a
+    replay, not a picture.
+    """
+    start = _first_mdat(fragment)
+    if start is None:
+        return frozenset()
+    # A short `mdat` is a wrong box header by construction, and a replay must
+    # not hand one over -- `flush` can produce exactly this shape when the
+    # encoder dies mid-fragment. (0 and 1 are the "to the end" and 64-bit
+    # size forms; a live `mdat` uses neither, so both mean "not a fragment".)
+    size = int.from_bytes(fragment[start:start + 4], 'big')
+    if size < 8 or start + size > len(fragment):
+        return frozenset()
+    types = set()
+    at = start + 8
+    while at + 4 <= len(fragment):
+        size = int.from_bytes(fragment[at:at + 4], 'big')
+        if size <= 0 or at + 4 + size > len(fragment):
+            break
+        nal_type = fragment[at + 4] & 0x1F
+        types.add(nal_type)
+        at += 4 + size
+        if nal_type not in H264_LEADING_NAL_TYPES:
+            break
+    return frozenset(types)
+
+
+def starts_with_keyframe(fragment):
+    """Can a decoder begin at this fragment's first byte?
+
+    Until 2026-10 the answer for the browser target was structural -- the
+    muxer cut only on keyframes (`movflags=frag_keyframe`), so every fragment
+    began with an IDR and nobody had to ask. Cutting per frame
+    (`frag_every_frame`) is what took this path's latency from 1305 ms to
+    838 ms on a real desktop, and it gives that guarantee up: eleven fragments
+    in twelve now begin on a P-frame, and a viewer handed one of those decodes
+    nothing until the next IDR -- 0.5 s of green smear.
+
+    Conservative on purpose: anything unreadable answers False, which costs a
+    replay (the viewer waits one GOP for the live stream to reach a keyframe)
+    rather than costing a picture. A wrong True is the expensive direction.
+    """
+    return H264_IDR_NAL in _sample_nal_types(fragment)
+
+
 class _Fragments(object):
     """Re-frame an encoder pipe into whole container fragments.
 
@@ -3060,7 +3342,13 @@ class _Fragments(object):
     while the byte counter keeps climbing. Grouping the bytes into `moof` plus
     the `mdat`(s) that follow it is what makes "drop whole blocks" true for this
     container. The price is that a fragment is sent as a whole, so the browser
-    target lags the encoder by up to one GOP (measured: ~0.5 s).
+    target lags the encoder by up to one fragment -- 41.7 ms since the muxer
+    went to `frag_every_frame`, where this used to say "one GOP (measured:
+    ~0.5 s)". That is most of where this target's latency went.
+
+    Units carry a third field, "this fragment's first sample is a keyframe".
+    It exists because the muxer no longer guarantees the property the replay
+    path needs; see `starts_with_keyframe` and `_Broadcaster.tail`.
     """
 
     #: A top-level box bigger than this is not a box: an `mdat` of one GOP is
@@ -3084,7 +3372,13 @@ class _Fragments(object):
         self.backlog = b''
 
     def feed(self, chunk):
-        """Return `[(is_media, unit)]` for the fragments these bytes complete."""
+        """Return `[(is_media, unit, is_sync)]` for the completed fragments.
+
+        `is_sync` answers `tail()`'s question -- may a replay begin at this
+        unit's first byte -- and for this container the answer is a keyframe
+        test (`starts_with_keyframe`), asked here because this is where the
+        whole fragment exists.
+        """
         self.backlog += chunk
         out = []
         self._buf += chunk
@@ -3099,9 +3393,11 @@ class _Fragments(object):
         """The pipe ended; a fragment that never completed is still a picture."""
         head, tail = self._open, self._buf
         self._open = self._buf = b''
-        out = [(True, head)] if head else []
+        out = [(True, head, starts_with_keyframe(head))] if head else []
         if tail:
-            out.append((True, tail))
+            # Unparsed leftover bytes: whatever they are, they are not a
+            # fragment, so a replay may not begin here.
+            out.append((True, tail, False))
         return out
 
     def _take(self):
@@ -3140,10 +3436,10 @@ class _Fragments(object):
         if not self._started:
             self._started = True
             if self._header:
-                out.append((False, self._header))
+                out.append((False, self._header, False))
                 self._header = b''
         elif self._open:
-            out.append((True, self._open))
+            out.append((True, self._open, starts_with_keyframe(self._open)))
         self._open = box
         return out
 
@@ -3203,7 +3499,15 @@ class _Clusters(object):
         self.backlog = b''
 
     def feed(self, chunk):
-        """Return `[(is_media, unit)]` for the clusters these bytes complete."""
+        """Return `[(is_media, unit, is_sync)]` for the completed Clusters.
+
+        `is_sync` is always False here: a Cluster boundary is a *parse* point
+        (that is the whole reason this framer exists) but this framer does not
+        read the SimpleBlock flags, so it cannot promise a *decode* point, and
+        a wrong True is the expensive direction. Nothing replays this shape
+        today -- `_Session.replay` is the browser target, which is fMP4 -- so
+        the refusal costs nothing and is the direction that cannot smear.
+        """
         self.backlog += chunk
         self._buf += chunk
         out = []
@@ -3227,10 +3531,12 @@ class _Clusters(object):
                     # Everything before the first cluster names the codecs, and
                     # `_hold` keeps a `is_media=False` unit out of the replay
                     # ring: it is written onto each connection instead.
-                    out.append((False, prefix))
+                    out.append((False, prefix, False))
             elif prefix:
-                out.append((True, prefix))    # media, in front of this cluster
-            out.append((True, body))
+                # Stray elements in front of a cluster: media bytes for the
+                # byte stream, but not a picture anyone can start on.
+                out.append((True, prefix, False))
+            out.append((True, body, False))
         return out
 
     def _take(self):
@@ -3291,7 +3597,7 @@ class _Clusters(object):
             # viewer that stops getting bytes is the worse report to the user --
             # so hand them over and let `_retain` stop framing for the run.
             if junk:
-                out.append((True, junk))
+                out.append((True, junk, False))
         # Before the first cluster this is "not the container we were promised",
         # and `backlog` holds every byte of it. `_retain` restarts framing from
         # there without this framer, which for the live DLNA shape means the
@@ -3306,7 +3612,7 @@ class _Clusters(object):
             return []
         # Never started: what is left is a header with no picture in it, and it
         # belongs to `init_segment`, not to the replay ring.
-        return [(False if not self._started else True, head)]
+        return [(False if not self._started else True, head, False)]
 
 
 class _Broadcaster(object):
@@ -3359,6 +3665,11 @@ class _Broadcaster(object):
         self.chunks = 0
         self.bytes = 0
         self.drops = 0
+        #: Replays that found no keyframe to start on and so were not handed
+        #: out at all -- see `tail`. Counted (and logged) because the
+        #: alternative reading of "the viewer got nothing" is "the ring was
+        #: empty", and those want different fixes.
+        self.keyframe_misses = 0
 
     @property
     def init_segment(self):
@@ -3387,8 +3698,51 @@ class _Broadcaster(object):
             self._subs.discard(q)
 
     def tail(self):
+        """The ring from its newest keyframe on, or `[]` if it holds none.
+
+        The muxer used to guarantee this by construction: `frag_keyframe` cut
+        only on keyframes, so the newest whole fragment always began with an
+        IDR and "replay the ring" was safe without asking. Cutting per frame
+        (`frag_every_frame`, where this target's 1305 -> 838 ms came from) gave
+        that up -- eleven fragments in twelve now begin on a P-frame, and a
+        viewer handed one of those watches ~0.5 s of smear before the stream
+        catches up.
+
+        So walk back to the newest unit that says a replay may begin there and
+        hand out from it: the viewer starts on a picture, and starts *behind*
+        the live edge, which is the direction a live stream tolerates. When the
+        ring holds no such unit -- a ring shorter than one GOP of fragments,
+        which a keyframe every 0.5 s and ~6 s of ring makes rare -- the answer
+        is no replay at all: the viewer waits for the live stream to reach its
+        next keyframe, which costs the same wait without the smear. Empty,
+        never unplayable bytes; counted in `keyframe_misses` and said in the
+        log so "the viewer got nothing" and "there was nothing to send" stay
+        two different answers.
+
+        And when *every* unit says a replay may begin there -- the unframed
+        shapes, where nothing in the ring is ever unplayable -- there is
+        nothing to cut back to: the whole ring goes, which is also exactly
+        what it handed out before the tag existed. Cutting to the newest unit
+        in that case would quietly turn "the ring is entrable end to end" into
+        "one fragment of pre-roll", and this path is the one a failed framing
+        falls back to, not a place to make the late joiner's buffer smaller.
+        """
         with self._lock:
-            return list(self._ring)
+            if all(sync for _chunk, sync in self._ring):
+                return [chunk for chunk, _sync in self._ring]
+            for index in range(len(self._ring) - 1, -1, -1):
+                if self._ring[index][1]:
+                    return [chunk for chunk, _sync in list(self._ring)[index:]]
+            missed = bool(self._ring)
+            held = (len(self._ring), self._ring_bytes)
+            if missed:
+                self.keyframe_misses += 1
+        if missed:
+            logger.warning(
+                'screen_mirror: replay ring holds %d fragments / %d bytes and '
+                'none begins on a keyframe; this viewer starts at the next '
+                'one instead of being fed a smear', held[0], held[1])
+        return []
 
     def feed(self, chunk):
         if self._align:
@@ -3436,9 +3790,9 @@ class _Broadcaster(object):
         if self._framer is not None:
             units = self._framer.feed(chunk)
             if not self._framer.broken:
-                for is_media, unit in units:
-                    self._hold(is_media, unit)
-                return [unit for _, unit in units]
+                for is_media, unit, is_sync in units:
+                    self._hold(is_media, unit, is_sync)
+                return [unit for _media, unit, _sync in units]
             if self._framer.restartable:
                 # Not this container after all, and nothing has been handed out
                 # yet -- the first header is the only thing that can say so -- so
@@ -3451,9 +3805,9 @@ class _Broadcaster(object):
                 # on the wire a second time, so keep what was framed and stop
                 # framing for the rest of the run.
                 self._framer = None
-                for is_media, unit in units:
-                    self._hold(is_media, unit)
-                return [unit for _, unit in units]
+                for is_media, unit, is_sync in units:
+                    self._hold(is_media, unit, is_sync)
+                return [unit for _media, unit, _sync in units]
         if not self._init_ready.is_set():
             self._init += chunk
             cut = self._init.find(self._init_marker)
@@ -3470,24 +3824,30 @@ class _Broadcaster(object):
             chunk = self._init[cut:]
             self._init = self._init[:cut]
             self._init_ready.set()
-        self._ring_append(chunk)
+        # Self-synchronising bytes (MPEG-TS/PS, and the marker-search fallback)
+        # can be entered on any unit boundary -- that is what packet alignment
+        # exists to guarantee -- so a replay starting here is sound. Nothing
+        # asks today (`_Session.replay` is the browser target only); this keeps
+        # the ring's old observable behaviour for the shapes that predate the
+        # tag rather than inventing a refusal they never had.
+        self._ring_append(chunk, True)
         return [chunk]
 
-    def _hold(self, is_media, unit):
+    def _hold(self, is_media, unit, is_sync):
         """Book one framed unit: the header is kept for replay, media is rung."""
         if is_media:
-            self._ring_append(unit)
+            self._ring_append(unit, is_sync)
         else:
             self._init = unit
             self._init_ready.set()
 
-    def _ring_append(self, chunk):
+    def _ring_append(self, chunk, is_sync):
         if not self._ring_limit:
             return
-        self._ring.append(chunk)
+        self._ring.append((chunk, is_sync))
         self._ring_bytes += len(chunk)
         while self._ring_bytes > self._ring_limit and len(self._ring) > 1:
-            self._ring_bytes -= len(self._ring.popleft())
+            self._ring_bytes -= len(self._ring.popleft()[0])
 
     def flush(self):
         """stdout ended: the last picture is still inside the framer."""
@@ -3502,9 +3862,9 @@ class _Broadcaster(object):
             return
         units = self._framer.flush()
         with self._lock:
-            for is_media, unit in units:
-                self._hold(is_media, unit)
-        self._publish([unit for _, unit in units])
+            for is_media, unit, is_sync in units:
+                self._hold(is_media, unit, is_sync)
+        self._publish([unit for _media, unit, _sync in units])
 
     def clients(self):
         with self._lock:
@@ -4106,6 +4466,9 @@ class _Session(object):
         #: keyframe, so replaying the header plus a short tail is what makes
         #: "open the URL a second time" work. A TV is never replayed: it would
         #: inherit a backlog and sit seconds behind for the rest of the session.
+        #: `frag_every_frame` (see `OUTPUTS`) means the newest fragment usually
+        #: is *not* a keyframe, so `_Broadcaster.tail` cuts the replay back to
+        #: the newest one that is.
         self.replay = self.kind == 'browser'
         self.init_marker = b'moof' if self.kind == 'browser' else None
         #: The one-time container header, written onto *every* connection.
@@ -6165,6 +6528,26 @@ MIN_WINDOW_MS = 66.0
 RTT_MAX_MS = 1000.0
 #: Exponential smoothing weight for a new round-trip sample.
 RTT_SMOOTHING = 0.25
+#: The receiver's "none of this frame arrived" marker -- `kAllPacketsLost` in
+#: openscreen's `cast/streaming/rtp_defines.h`. It occupies the packet-id field,
+#: so it must be tested *before* any bitmask expansion: expanding it would ask
+#: for packets 65536..65543 of a frame that has thirty, and the reference is
+#: explicit that the bit vector carries no meaning in this case.
+ALL_PACKETS_LOST = 0xFFFF
+#: Ceiling on the packets one RTCP feedback may make us resend. At the 8 Mbps
+#: ceiling a frame is about forty-two kilobytes = thirty packets, and the
+#: un-acknowledged window is one and a half frames wide, so two frames' worth is
+#: already more than the protocol says can be outstanding. A receiver asking for
+#: more than this is asking for frames we shed on purpose, and answering it would
+#: turn a confused television into a traffic amplifier pointed at itself.
+MAX_RETRANSMIT_PER_FEEDBACK = 64
+#: How much of the un-acknowledged window we keep a resendable copy of. The span
+#: guard allows 120 frames at ~42 KB each, so the arithmetic worst case is 5 MB;
+#: this is the number that says the ceiling is intended rather than discovered.
+#: When it is exceeded the *oldest* frames lose their copies and their NACKs are
+#: then ignored -- losing the ability to repair a frame nobody has acknowledged
+#: in five seconds is cheaper than losing the process.
+RETRANSMIT_BUFFER_BYTES = 8 * 1024 * 1024
 #: A receiver will not paint anything until it has the NTP<->RTP mapping, so
 #: the first sender report rides with the first picture rather than waiting for
 #: this timer.
@@ -6321,6 +6704,18 @@ def cast_packet(payload, ssrc, sequence, timestamp, frame_id, is_key,
         referenced_frame_id & 0xFF) + payload
 
 
+def cast_packet_count(length):
+    """How many packets one access unit of `length` bytes becomes.
+
+    Separate from `cast_packets` because the answer is needed *before* the
+    encryption, and it can be: AES-CTR is length preserving, so the ciphertext is
+    exactly as long as the plaintext. That is what lets the sender claim its
+    sequence numbers under the lock while leaving the keystream work outside it.
+    A zero-length unit still sends one header-only packet.
+    """
+    return max(1, -(-length // MAX_PAYLOAD))
+
+
 def cast_packets(ciphertext, frame_id, is_key, referenced_frame_id, ssrc,
                  sequence, timestamp):
     """Slice one encrypted frame into packets; returns (packets, next sequence).
@@ -6331,7 +6726,7 @@ def cast_packets(ciphertext, frame_id, is_key, referenced_frame_id, ssrc,
     resend, because the receiver's reorder buffer counts arrivals rather than
     ids. A zero-length frame still sends one header-only packet.
     """
-    count = max(1, -(-len(ciphertext) // MAX_PAYLOAD))
+    count = cast_packet_count(len(ciphertext))
     out = []
     for index in range(count):
         chunk = ciphertext[index * MAX_PAYLOAD:(index + 1) * MAX_PAYLOAD]
@@ -6365,8 +6760,23 @@ def parse_rtcp(data, media_ssrc):
     ('nack', frame-id-8, packet-id, bitmask). The receiver's feedback is RTCP on
     the media socket, not a message on the control plane: payload-specific
     (206) with FMT 1 is a picture loss, and FMT 15 carrying the ASCII word
-    CAST is the acknowledgement. A trailing CST2 block is skipped -- we do not
-    retransmit individual packets, so per-packet loss tells us nothing.
+    CAST is the acknowledgement.
+
+    The loss fields that follow the CAST word are the receiver asking for
+    specific packets back, and they are parsed rather than skipped: this docstring
+    used to say "we do not retransmit individual packets, so per-packet loss
+    tells us nothing", which was a claim about the protocol rather than about us
+    and it was wrong -- openscreen's
+    `cast/streaming/impl/sender_impl.cc:556`
+    (`OnReceiverIsMissingPackets`) is exactly a retransmit path, and its own
+    comment on the feedback loop counts two round trips, one to learn about the
+    loss and one to repair it. See `_CastStreamSender._retransmit`.
+
+    A nack always arrives behind a checkpoint in the same block, and its frame id
+    is relative to *that* checkpoint (`ExpandGreaterThan` in
+    `cast/streaming/impl/compound_rtcp_parser.cc:507`), not to the newest frame
+    we sent -- which is why the caller expands it with `expand_frame_id_after`
+    and not with `expand_frame_id`.
     """
     events = []
     position = 0
@@ -6411,6 +6821,25 @@ def expand_frame_id(id8, latest):
     return candidate - 256 if candidate > latest else candidate
 
 
+def expand_frame_id_after(id8, anchor):
+    """Widen a NACKed 8-bit frame id against the checkpoint it came with.
+
+    The *opposite* convention to `expand_frame_id`, and the difference is not
+    cosmetic. A checkpoint says "everything up to here arrived", so its id is at
+    most the newest thing we sent. A loss field says "this one did not arrive",
+    and that frame is normally *newer* than the checkpoint in the same block --
+    the receiver reports what it has already accepted, then what it is still
+    waiting for. Widening a loss id with the "at most" rule therefore returns a
+    frame 256 in the past, which is a frame we no longer hold, so every NACK
+    would be silently dropped as unrecognised.
+
+    openscreen spells this `FrameId::ExpandGreaterThan(other)`: same low-byte
+    splice, then add 256 if the result is not strictly greater than the anchor.
+    """
+    candidate = (anchor & ~0xFF) | id8
+    return candidate + 256 if candidate <= anchor else candidate
+
+
 class _CastStreamSender(object):
     """Access units in, a picture on a television out.
 
@@ -6421,10 +6850,23 @@ class _CastStreamSender(object):
     receiver's feedback, sender reports, kickstart probes and the Cast
     keepalive), because all four are timers rather than data.
 
-    There is no retransmit path on purpose. This is a live desktop: the next
+    There *is* a retransmit path, and this docstring used to say the opposite:
+    "There is no retransmit path on purpose. This is a live desktop: the next
     frame supersedes a lost one within 42 ms, and the protocol's own recovery
     (checkpoint, PLI, the next one-second GOP) is what the reference relies on
-    too.
+    too." The last clause was the load-bearing one and it was false --
+    openscreen's `cast/streaming/impl/sender_impl.cc:556`
+    (`OnReceiverIsMissingPackets`) marks the NACKed packets for resend and asks
+    the packet router to send them, and the receiver's per-packet loss fields
+    exist precisely to drive it. The "next frame supersedes it" half was also
+    wrong on its own terms: a frame that arrives with a hole in it is not
+    superseded, it is undecodable, and the receiver then waits for the next IDR
+    -- up to a second of frozen picture to repair thirty packets we still had.
+
+    Retransmit is still *not* the primary recovery: the window is one and a half
+    frames wide, so anything older than that has been shed and cannot be
+    repaired. What it buys is the common case -- a single datagram lost on the
+    way to a television that is otherwise keeping up.
     """
 
     def __init__(self, control, sock, address, ssrc, receiver_ssrc, key,
@@ -6440,10 +6882,15 @@ class _CastStreamSender(object):
         self._units = _AccessUnits()
         self._frame_id = 0
         self._sequence = secrets.randbelow(0x10000)
-        # (frame id, last packet, rtp timestamp, monotonic send time). The send
-        # time is what makes the window a duration rather than a count; see
-        # `_window_full`.
+        # (frame id, every packet of the frame, rtp timestamp, monotonic send
+        # time, bytes retained for that frame). The send time is what makes the
+        # window a duration rather than a count; see `_window_full`. The packets
+        # are what makes a NACK answerable, and the byte count is what bounds
+        # keeping them; see `_evict_retransmit_buffer`.
         self._in_flight = deque()
+        #: Bytes of un-acknowledged packets we are holding copies of, against
+        #: RETRANSMIT_BUFFER_BYTES.
+        self._retained = 0
         #: Smoothed round trip in milliseconds, from checkpoint acks. None
         #: until the receiver has acknowledged something.
         self._rtt_ms = None
@@ -6469,6 +6916,22 @@ class _CastStreamSender(object):
         self.drops = 0
         self.frames = 0
         self.packets = 0
+        #: Bytes actually pushed onto the media socket, resends included. This is
+        #: the low-latency channel's answer to `delivered`: `bytes` above is what
+        #: the encoder made, and the two part company by exactly the amount of
+        #: repair traffic -- which is the number worth seeing, because it is the
+        #: only evidence on our side that the wireless is dropping datagrams.
+        self.socket_bytes = 0
+        #: Packets resent because a receiver asked for them.
+        self.retransmits = 0
+        #: NACKs we declined because the packet was sent less than one round trip
+        #: ago. openscreen's rule: the receiver may have written the report while
+        #: the packet was still in flight, and resending it then is redundant.
+        self.retransmit_stale = 0
+        #: Frames a NACK asked about that we no longer hold -- either shed by the
+        #: window or evicted from the repair buffer. Both mean the same thing to
+        #: the receiver: the next IDR is the recovery.
+        self.retransmit_gone = 0
 
     # -- handshake -----------------------------------------------------------
 
@@ -6530,14 +6993,24 @@ class _CastStreamSender(object):
         for unit in self._units.flush():
             self._send_unit(unit)
 
+    def _rtt_estimate(self):
+        """The round trip, or the one we assume before the first checkpoint.
+
+        Half of MIN_WINDOW_MS, so that a sender with no measurement yet sizes its
+        window at exactly the floor instead of at zero. One definition, because
+        both the window and the stale-NACK rule below would otherwise invent
+        their own idea of "we do not know yet".
+        """
+        return MIN_WINDOW_MS / 2.0 if self._rtt_ms is None else self._rtt_ms
+
     def _window_ms(self):
         """How long an un-acknowledged frame may stay in flight, in ms.
 
         openscreen's `clamp(2 x RTT, 66 ms, targetDelay / 3)`, transcribed.
         Callers hold `_lock`.
         """
-        rtt = MIN_WINDOW_MS / 2.0 if self._rtt_ms is None else self._rtt_ms
-        return min(max(2.0 * rtt, MIN_WINDOW_MS), TARGET_DELAY_MS / 3.0)
+        return min(max(2.0 * self._rtt_estimate(), MIN_WINDOW_MS),
+                   TARGET_DELAY_MS / 3.0)
 
     def _window_full(self, now):
         """Whether sending one more frame would overrun the window.
@@ -6566,44 +7039,100 @@ class _CastStreamSender(object):
         # timestamp and `_last_sent` all describe this same moment, and
         # encrypting plus packetising in between is tens of microseconds.
         now = time.monotonic()
-        with self._lock:
-            behind = self._window_full(now)
-        if behind or (self._awaiting_key and not is_key):
+        if self._awaiting_key and not is_key:
             # Shed *whole* frames: half a picture stays on the screen until the
             # next IDR, which is worse than the last complete one still there.
+            self.drops += 1
+            return
+        claimed = self._begin_frame(now, cast_packet_count(len(unit)))
+        if claimed is None:
             # Even a key frame waits when the window is full -- the next GOP is
             # a second away and the checkpoint will free the slots by then.
             self._awaiting_key = True
             self.drops += 1
             return
-        frame_id = self._frame_id
-        self._frame_id += 1
+        frame_id, sequence = claimed
         timestamp = int((now - self._t0) * VIDEO_CLOCK) & 0xFFFFFFFF
         cipher = self._cipher.crypt(frame_iv(self._iv_mask, frame_id), unit)
-        packets, self._sequence = cast_packets(
+        packets, _ = cast_packets(
             cipher, frame_id, is_key, frame_id if is_key else frame_id - 1,
-            self.ssrc, self._sequence, timestamp)
+            self.ssrc, sequence, timestamp)
+        pushed = 0
         try:
             for packet in packets:
                 self._sock.sendto(packet, self._address)
+                pushed += len(packet)
         except OSError:
             # Teardown closed the media socket under us. Counting a frame the
-            # receiver never got would be the worse lie; hand the slot back.
-            self._frame_id -= 1
+            # receiver never got would be the worse lie; hand the slot back. The
+            # sequence numbers stay burned: a gap in them is what a lost packet
+            # already looks like, whereas reusing one is not.
+            with self._lock:
+                if self._frame_id - 1 == frame_id:
+                    self._frame_id = frame_id
             self._awaiting_key = True
             raise
+        self._end_frame(frame_id, packets, timestamp, now, cipher, pushed,
+                        is_key)
+
+    def _begin_frame(self, now, count):
+        """Claim a frame id and `count` sequence numbers; None if the window is
+        full. Callers must not hold `_lock`.
+
+        One atomic step because the window test and both counters describe the
+        same decision, and because the sequence counter has had two allocators
+        since retransmission landed: this thread and the feedback thread. Handing
+        the same RTP sequence number out twice is not a cosmetic collision -- the
+        receiver's reorder buffer counts arrivals rather than ids, so a duplicate
+        reads as a packet that was delivered and then lost, and the repair it
+        asks for costs more than the loss it reports.
+        """
         with self._lock:
-            self._in_flight.append((frame_id, packets[-1], timestamp, now))
+            if self._window_full(now):
+                return None
+            frame_id = self._frame_id
+            self._frame_id += 1
+            sequence = self._sequence
+            self._sequence = (sequence + count) & 0xFFFF
+            return frame_id, sequence
+
+    def _end_frame(self, frame_id, packets, timestamp, now, cipher, pushed,
+                   is_key):
+        with self._lock:
+            self._in_flight.append((frame_id, packets, timestamp, now,
+                                    len(cipher)))
+            self._retained += len(cipher)
+            self._evict_retransmit_buffer()
             self._timestamp = timestamp
             self._octets = (self._octets + len(cipher)) & 0xFFFFFFFF
             self.packets += len(packets)
             self.frames += 1
+            self.socket_bytes += pushed
             self._last_sent = now
             if is_key:
                 self._awaiting_key = False
             first = not self._reported
         if first:
             self._send_report()
+
+    def _evict_retransmit_buffer(self):
+        """Give up the ability to repair our oldest frames, not the frames.
+
+        The in-flight record has to stay -- the window arithmetic and the
+        checkpoint pop both read it -- so what goes is the copy of the packets,
+        and a NACK for a frame with no copy is then answered the same way as one
+        for a frame we never sent: ignored, and the next IDR is the recovery.
+        Callers hold `_lock`.
+        """
+        position = 0
+        while self._retained > RETRANSMIT_BUFFER_BYTES \
+                and position < len(self._in_flight):
+            entry = self._in_flight[position]
+            if entry[1]:
+                self._retained -= entry[4]
+                self._in_flight[position] = (entry[0], (), entry[2], entry[3], 0)
+                self.retransmit_gone += 1
+            position += 1
 
     # -- timers and feedback (the one background thread) ---------------------
 
@@ -6621,27 +7150,48 @@ class _CastStreamSender(object):
 
     def _kickstart(self):
         with self._lock:
-            packet = self._in_flight[-1][1] if self._in_flight else None
-        if packet is None:
-            return
-        self._sequence = (self._sequence + 1) & 0xFFFF
-        resend = packet[:2] + struct.pack('>H', self._sequence) + packet[4:]
+            packet = self._in_flight[-1][1][-1] if self._in_flight \
+                and self._in_flight[-1][1] else None
+            if packet is None:
+                return
+            self._sequence = (self._sequence + 1) & 0xFFFF
+            resend = self._restamped(packet, self._sequence)
+            self.socket_bytes += len(resend)
         try:
             self._sock.sendto(resend, self._address)
         except OSError:
             pass
 
+    @staticmethod
+    def _restamped(packet, sequence):
+        """A copy of `packet` wearing a fresh RTP sequence number.
+
+        Everything else -- the Cast header's frame and packet ids, the marker
+        bit, the payload -- stays byte for byte, because that is how the receiver
+        recognises the packet it asked for. Only the arrival counter moves.
+        """
+        return packet[:2] + struct.pack('>H', sequence) + packet[4:]
+
     def _on_rtcp(self, data):
+        #: One clock read for the whole compound packet: the staleness rule
+        #: below compares a frame's send time against the moment this feedback
+        #: *arrived*, and per-event reads would make that comparison depend on
+        #: how much parsing happened in between.
+        arrived = time.monotonic()
+        groups = {}
+        anchor = None
         for event in parse_rtcp(data, self.ssrc):
             if event[0] == 'picture-loss':
                 self._awaiting_key = True
             elif event[0] == 'checkpoint':
-                acked_at = time.monotonic()
                 with self._lock:
-                    acked = expand_frame_id(event[1], self._frame_id - 1)
+                    anchor = expand_frame_id(event[1], self._frame_id - 1)
+                    acked = anchor
                     newest = None
                     while self._in_flight and self._in_flight[0][0] <= acked:
                         newest = self._in_flight.popleft()
+                        if newest is not None:
+                            self._retained -= newest[4]
                     if newest is not None:
                         # The newest frame this ack covers is the freshest round
                         # trip; the older ones have been waiting behind it. The
@@ -6649,7 +7199,7 @@ class _CastStreamSender(object):
                         # sizes it -- and a sample above RTT_MAX_MS is a lost
                         # checkpoint rather than a slow network, so it is
                         # dropped instead of widening the queue for nothing.
-                        sample = (acked_at - newest[3]) * 1000.0
+                        sample = (arrived - newest[3]) * 1000.0
                         if 0.0 <= sample <= RTT_MAX_MS:
                             self._rtt_ms = (
                                 sample if self._rtt_ms is None
@@ -6657,7 +7207,105 @@ class _CastStreamSender(object):
                                 * (sample - self._rtt_ms))
                     self.acked = max(self.acked, acked)
                     self.playout_delay = event[2]
-            # 'nack': noted and dropped. See the class docstring.
+            elif event[0] == 'nack':
+                if anchor is None:
+                    # Loss fields without the checkpoint they are relative to.
+                    # Our own parser cannot produce that, so this is a receiver
+                    # speaking a shape we have not seen -- guessing the frame
+                    # would mean resending a picture 256 frames out.
+                    continue
+                frame_id = expand_frame_id_after(event[1], anchor)
+                groups.setdefault(frame_id, []).append((event[2], event[3]))
+        if groups:
+            self._retransmit(groups, arrived)
+
+    def _retransmit(self, groups, arrived):
+        """Answer a receiver's per-packet loss report.
+
+        openscreen's `SenderImpl::OnReceiverIsMissingPackets`
+        (`cast/streaming/impl/sender_impl.cc:556`), transcribed rule by rule:
+
+        * a packet sent less than one round trip before this feedback arrived is
+          *not* resent. The receiver may have written the report while the packet
+          was still in flight, and resending then is redundant traffic that
+          competes with the original. This is the rule that keeps a NACK loop
+          from becoming self-sustaining.
+        * a frame we no longer hold is skipped whole, not per packet. The
+          reference names out-of-order RTCP as the reason a receiver can ask
+          about a frame the sender does not have; ours are shed by the window or
+          evicted from the repair buffer. Either way the next IDR is the
+          recovery, and there is nothing to gain from saying so forty times.
+        * `ALL_PACKETS_LOST` means every packet of the frame, and its bit vector
+          is not read at all.
+        * otherwise bit *i* of the vector adds packet `id + 1 + i`, lowest bit
+          first (`compound_rtcp_parser.cc:507`).
+        * an id past the end of the frame is warned about and dropped rather than
+          trusted.
+
+        What is deliberately *not* transcribed is the pacing. The reference hands
+        its resends to a packet router that interleaves them with new frames; we
+        send the burst inline on the feedback thread, bounded by
+        MAX_RETRANSMIT_PER_FEEDBACK. At one and a half frames of window there is
+        no queue to interleave with.
+        """
+        plan = []
+        with self._lock:
+            too_recent = arrived - self._rtt_estimate() / 1000.0
+            budget = MAX_RETRANSMIT_PER_FEEDBACK
+            for frame_id, losses in sorted(groups.items()):
+                record = None
+                for entry in self._in_flight:
+                    if entry[0] == frame_id:
+                        record = entry
+                        break
+                if record is None or not record[1]:
+                    self.retransmit_gone += 1
+                    continue
+                packets, sent_at = record[1], record[3]
+                if sent_at > too_recent:
+                    self.retransmit_stale += 1
+                    continue
+                wanted = []
+                for packet_id, bits in losses:
+                    if packet_id == ALL_PACKETS_LOST:
+                        wanted.extend(range(len(packets)))
+                        continue
+                    wanted.append(packet_id)
+                    identifier, remaining = packet_id, bits
+                    while remaining:
+                        identifier += 1
+                        if remaining & 1:
+                            wanted.append(identifier)
+                        remaining >>= 1
+                beyond = [i for i in wanted if i >= len(packets)]
+                if beyond:
+                    logger.debug('ignoring %d NACKed packet id(s) that frame %d '
+                                 'does not have (%d packets)', len(beyond),
+                                 frame_id, len(packets))
+                chosen = 0
+                for packet_id in sorted(set(wanted)):
+                    if budget <= 0:
+                        break
+                    if packet_id >= len(packets):
+                        continue
+                    budget -= 1
+                    chosen += 1
+                    self._sequence = (self._sequence + 1) & 0xFFFF
+                    resend = self._restamped(packets[packet_id], self._sequence)
+                    self.socket_bytes += len(resend)
+                    plan.append(resend)
+                # Per frame, not `len(plan)`: this is inside the loop over
+                # frames, and accumulating the running total would report the
+                # first frame once, the second twice and so on.
+                self.retransmits += chosen
+        for packet in plan:
+            try:
+                self._sock.sendto(packet, self._address)
+            except OSError:
+                return
+        if plan:
+            logger.debug('retransmitted %d packet(s) for %d frame(s)', len(plan),
+                         len(groups))
 
     def _keepalive(self):
         self._last_ping = time.monotonic()
@@ -6716,6 +7364,16 @@ class _CastStreamSender(object):
     def in_flight(self):
         with self._lock:
             return len(self._in_flight)
+
+    def rtt_ms(self):
+        """The smoothed round trip, or None before the first checkpoint.
+
+        A reading, not `_rtt_estimate()`: the statistics card must be able to say
+        "the receiver has acknowledged nothing yet", and the estimate hides that
+        behind a floor value it invented for the window arithmetic.
+        """
+        with self._lock:
+            return round(self._rtt_ms, 1) if self._rtt_ms is not None else None
 
     def stop(self):
         if self._stop.is_set():
@@ -6878,16 +7536,39 @@ class ScreenMirrorRenderer(Renderer):
         #: and a statistics card that only shows the second one describes a
         #: mirror nobody is watching as if someone were.
         #:
-        #: Only the HTTP targets can answer it, and only they answer it: the
-        #: low-latency channel pushes UDP datagrams with no receive window and no
-        #: retransmission, so "delivered" there would be `bytes` in a different
-        #: shirt -- exactly the claim this field exists to avoid making.
+        #: Every target answers it, each from its own socket. This used to say
+        #: that only the HTTP ones could, because "the low-latency channel pushes
+        #: UDP datagrams with no receive window and no retransmission" -- and
+        #: since retransmission landed that sentence is simply false.
+        #:
+        #: **The two counters have no fixed ordering, and a comment here once
+        #: claimed they did.** On this channel `bytes` is incremented in `feed`,
+        #: before the window is consulted, so it counts pictures the window then
+        #: shed and never put on the wire; `socket_bytes` counts datagrams, each
+        #: 19 bytes larger than its payload, plus every repair and every idle
+        #: probe. So a stream that is dropping frames has `bytes` *ahead*, and a
+        #: stream that is not has `socket_bytes` ahead. Reading the gap either
+        #: way as "the repair traffic" is wrong twice over -- the number that
+        #: says the wireless is losing datagrams is `retransmits`, below, which
+        #: counts repairs directly and is not a difference of two moving totals.
         if server is not None:
             info['delivered'] = server.session.written
         if kind == 'caststream':
+            info['delivered'] = sink.socket_bytes
             info['frames'] = sink.frames
             info['in_flight'] = sink.in_flight()
             info['delay'] = sink.playout_delay
+            #: Repair traffic, and the two reasons we decline to repair: the
+            #: packet was too recent to have been lost (openscreen's staleness
+            #: rule) or the frame is gone (shed by the window, or evicted from
+            #: the repair buffer). A nonzero `retransmits` with `drops` also
+            #: climbing is a congested link; a nonzero one with `drops` at zero
+            #: is a lossy one, and only the second is what this channel's
+            #: repair path exists for.
+            info['retransmits'] = sink.retransmits
+            info['retransmit_stale'] = sink.retransmit_stale
+            info['retransmit_gone'] = sink.retransmit_gone
+            info['rtt'] = sink.rtt_ms()
         elif kind == 'dlna':
             # Both shapes serve this target, and both need the same three facts.
             # Keying this on the byte log made the *default* shape (the live
@@ -8727,7 +9408,7 @@ class ScreenMirrorSetting(RendererSetting):
         try:
             seconds = float(raw)
         except ValueError:
-            return self._no('延迟下限得是个数字：{}'.format(raw))
+            return self._no('播放页落后上限得是个数字：{}'.format(raw))
         if seconds not in LIVE_EDGE_OPTIONS:
             return self._no('只能选这几档：{}'.format(
                 '、'.join('%g' % one for one in LIVE_EDGE_OPTIONS)))
