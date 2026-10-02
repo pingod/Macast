@@ -14,8 +14,16 @@ Everything marked **[unverified]** could not be reached from this host — see �
 | 1 | CommonCrypto `CCCryptorReset`+`CCCryptorUpdate` via ctypes replaces the pure-Python AES-128-CTR | **~7,900× crypto throughput**; removes the `CAST_STREAM_MAX_BITRATE = 4500000` ceiling entirely (protocol default max is **10 Mbps**) | Very low — zero new deps, byte-exact vs LibreSSL, one `dlopen` of a dylib that exists on every macOS | **Do first** |
 | 2 | Make the Cast OFFER multi-codec (H.264 + HEVC, hardware-first → software-fallback) and relax `parse_answer`'s `if 0 not in indexes: raise` | Higher quality/bitrate on receivers that have HEVC; hardware encode off the CPU | Low — the protocol already specifies exactly this negotiation and Chrome implements it verbatim | **Do second** |
 | 3 | Re-examine the hardware/software encoder choice with the measured numbers: `libx264 ultrafast + zerolatency` is **~190 ms lower latency** than `h264_videotoolbox` and holds 5.6–17.9× realtime at every resolution up to 4K | ~190 ms glass-to-glass | Low — pure flag change | **Do third** |
-| 4 | ScreenCaptureKit via `pyobjc-framework-ScreenCaptureKit` (~10 KB wheel): native system audio (**retires BlackHole + the CoreAudio aggregate device**), `SCFrameStatusIdle`, `SCStreamFrameInfoDirtyRects` | Removes the single worst UX requirement; enables change-driven VFR | Medium — new pyobjc subpackage (same family as the already-declared `pyobjc-framework-Cocoa`), new capture pipeline | Strong, but larger |
+| 4 | ScreenCaptureKit via `pyobjc-framework-ScreenCaptureKit` (~10 KB wheel): native system audio (**retires BlackHole + the CoreAudio aggregate device**) | **Shipped in v0.21** (2026-10-02): measured **~450 ms off spawn-to-first-frame** (medians 600 vs 1048 ms, three runs each) and one installer fewer. Counterpart: idle-frame bookkeeping (`SCFrameStatusIdle` / `dirtyRects`) is **not implemented** — the pipe is pinned to CFR, so change-driven VFR stays an open idea | The "medium" bill landed as three declared places, macOS job only (requirements/darwin.txt, setup_py2app.py, build.yml) plus a runtime fallback to the old path — §4.5 | **Done** |
 | 5 | `mpdecimate` + `-fps_mode vfr` for change-driven frame rate | Big CPU/bandwidth win on static desktops | Medium — Cast path already tolerant (wall-clock RTP timestamps); browser-MSE / MPEG-TS paths need care | Worth prototyping |
+
+> **状态补注（2026-10-02）**：表中“裁决”列是研究期的快照，落地情况如下。#1 已落地（原生 AES 与它带来的 8 Mbps 上限，见 `AGENTS.md`
+> §4.8 的 caststream 段）；#2 维持 H.264-only（browser 目标没有 HEVC 路径，`screen_mirror.py` 里有
+> "no HEVC path exists" 一句为证）；#3 的延迟数字站得住，被改写的是成本那一半
+> （§2.3b 的在线实测：0.59 核对 0.41 核），**默认没有翻** —— 约 0.2 个核换 200 毫秒，
+> 翻不翻是用户的决定；#4 已落地（v0.21，见本行与 §4.5）；#5 未采纳（`-r` 与
+> `-fps_mode vfr` 互斥、且 DLNA 的 `Content-Length` 由名义码率推出 —— 见 `AGENTS.md` §4.8）。
+> 原文保留，因为可复查的是它的取证过程。
 
 ---
 
@@ -667,26 +675,43 @@ normal and well-tolerated downstream (see §5.3).
 ContentScale/PresenterOverlayContentRect`, `capturesAudio`, `minimumFrameInterval`.
 It is a pure-Python metadata package — the actual framework comes from the OS.
 
-Against Macast's surface this is: **+1 line in `requirements/darwin.txt`** (right next to the
-already-declared `pyobjc-framework-Cocoa`), **+1 entry in `setup_py2app.py`'s `packages` or
-`includes`** (line 474 / 494), and **+1 `--hidden-import` in each of the PyInstaller jobs** in
-`.github/workflows/build.yml` (lines 324–347 and 423–426 — note the macOS job uses py2app, so the
-hidden-import entries are for Win/Linux where SCK is not used; check whether a macOS-only dep needs
-any CI change at all). Small, but it *is* the 3-place drift the repo has been burned by.
+Against Macast's surface this is — **as it actually shipped in v0.21 (2026-10-02)**: **+2 lines in
+`requirements/darwin.txt`** (`pyobjc-framework-ScreenCaptureKit` + `pyobjc-framework-CoreMedia`,
+right next to the already-declared `pyobjc-framework-Cocoa`; both imported lazily, so a missing
+binding downgrades to avfoundation instead of failing the plugin), **+2 entries in
+`setup_py2app.py`'s `includes`** (`ScreenCaptureKit`, `CoreMedia`), **+2 packages in the `build.yml`
+macOS job's pip list**. The Win/Linux PyInstaller jobs are **untouched** — SCK is a macOS-only path
+with a runtime feature check, so the hidden-import question above answered itself "no". Small, but
+it *is* the 3-place drift the repo has been burned by, and this is the first new-dependency change
+since that paragraph was written; Part 30's whitelist and the v0.21 regression part cover all
+three places.
 
-**What it would take to capture via SCK and pipe to ffmpeg:** an `SCStream` + delegate on a
-`DispatchQueue`, read `CMSampleBuffer` → `CVPixelBuffer`, convert BGRA→I420 (or hand ffmpeg
-`-pix_fmt bgra` rawvideo and let it convert), write to ffmpeg's stdin as
-`-f rawvideo -video_size WxH -pixel_format bgra -framerate <measured> -i -` with
-**`-fps_mode passthrough`** so dropped/idle frames are not re-duplicated. The hard parts are the
-Objective-C delegate + GCD queue under pyobjc (Macast already does CoreAudio aggregate-device calls
-through `Foundation`/`objc`, per `requirements/darwin.txt`'s own comment, so the pattern is
-established) and `CVPixelBuffer` → bytes without a copy per frame.
+**What the shipped capture does** (the plan did not survive contact): the feeder opens an
+`SCStream` with `SCStreamConfiguration`, and pipes **NV12** — the native `420v` (`0x34323076`)
+format, copied out of a recycled `CMSampleBuffer` without conversion — into ffmpeg's stdin as
+`-f rawvideo -pix_fmt nv12 -s WxH -framerate FPS -use_wallclock_as_timestamps 1 -i -`, with
+`-r FPS` upstream pinning a CFR timeline (measured cost: 2 duplicated frames in a 6 s probe).
+Two differences from the plan, both learned the hard way: the input is **not**
+`-fps_mode passthrough` — `-r` and `-fps_mode vfr` are **mutually exclusive** (CFR re-duplicates
+what a VFR mode would drop), the same pairing that kept `mpdecimate` (row #5) unadopted; and the
+audio side is its own pipe (`-f f32le -ar 48000 -ac 2 -i pipe:@AUDIO_FD@`), where the measured
+facts are that an open-but-silent pipe **freezes the whole command at open time**, a silent
+desktop is not that case (full-size zero PCM arrives every 20 ms), and EOF on that pipe freezes
+nothing — which is why "give up on audio" is implemented as *closing the write end*, not a
+capture restart. Idle-frame bookkeeping (`SCFrameStatusIdle`, `dirtyRects`) is **not exploited**;
+the stream is CFR like every other platform, and change-driven VFR is still an open idea.
 
-**Screen-recording permission:** [unverified] whether SCK avoids the TCC quirks. SCK uses the same
-Screen Recording TCC prompt as `AVCaptureScreenInput`; the practical difference is that SCK is the
-*supported* API and AVCaptureScreenInput is deprecated, so the risk profile is better, not the
-permission flow.
+**Measured win — this closed the gap §7 used to carry:** spawn→first-frame-encoded, three runs
+each on the dev machine — SCK **624 / 600 / 575 ms**, avfoundation **1954 / 1048 / 1031 ms**.
+Comparing medians: **600 vs 1048 ms, ~450 ms off the start of every mirror** (the widest pairing
+saved 1.3 s).
+
+**Screen-recording permission (the [unverified] above is now resolved in shape):** SCK sits
+behind the **same Screen Recording TCC gate** as `AVCaptureScreenInput`, but Macast never lets
+SCK *prompt*: a system dialog cannot be answered from the background thread the probe runs on, so
+`CGPreflightScreenCaptureAccess` **asks without prompting** and an un-granted machine silently
+falls through to avfoundation — whose own prompt flow stays the one users have always met. The
+grant is still per code identity, so "replace the `.app`, re-grant once" applies to both paths.
 
 ### 4.6 Windows
 
@@ -1031,12 +1056,10 @@ open):
    negotiation approach in §3.3 makes this moot, which is the point.
 7. **DLNA HEVC-in-MPEG-TS reality** — no reachable primary source.
 8. **WGC-vs-gdigrab latency/fps numbers**, **PipeWire portal latency numbers**,
-   **measured SCK-vs-avfoundation latency** — none measured. A real Windows host is now
-   available (§4.6 carries its attach/output measurements) but no *latency* comparison was run
-   there; PipeWire and SCK still need hardware not available. The SCK *capability* claims are
-   from Apple docs and from OBS/WebKit source, but I have **no measured latency delta** between
-   `avfoundation` and ScreenCaptureKit. That number is the one I would most want before
-   committing to the SCK rewrite.
+   **measured SCK-vs-avfoundation latency** — the last is **closed** (2026-10-02, measured while
+   shipping v0.21, §4.5: medians 600 vs 1048 ms, ~450 ms in SCK's favour). The Windows half also
+   moved — ddagrab shipped in v0.11 with the attach/output measurements in §4.6 — but still no
+   *latency* A/B there; PipeWire needs hardware not available.
 9. **Browser MSE and WebRTC jitter-buffer latencies** — no primary source reached.
 10. **Sunshine/Parsec static-content frame-skipping policy** — searched, not found; Sunshine appears
     to encode every frame, Parsec is closed source.
@@ -1048,8 +1071,12 @@ open):
 
 ## 8. Source index
 
-**Local measurement scripts (in `/tmp`, not in the repo):** `cc_bench.py`, `vmaf.py`, `vtlat.py`;
-raw output `vmaf_out.txt`, `vtlat_out.txt`. Scratch YUV (`/tmp/lat2`, `/tmp/lat3`, 8.9 GB) deleted.
+**Local measurement scripts:** the /tmp one-offs (`cc_bench.py`, `vmaf.py`, `vtlat.py`; raw
+output `vmaf_out.txt`, `vtlat_out.txt`; scratch YUV `/tmp/lat2`, `/tmp/lat3`, 8.9 GB, deleted)
+have in-repo successors now — `scripts/encoder_latency_probe.py` (encoder first-frame / CPU
+cost), `scripts/mse_latency_probe.py` (browser-side lag), `scripts/sck_capture_probe.py` and
+`scripts/sck_pipe_probe.py` (the SCK feasibility spike and its ffmpeg pipe contract; the §4.5
+numbers come from the first of those).
 
 **Apple:**
 - <https://developer.apple.com/documentation/ScreenCaptureKit/SCStreamConfiguration/capturesAudio.md> (`macOS: 13.0.0 -`)

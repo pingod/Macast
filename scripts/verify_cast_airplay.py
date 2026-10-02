@@ -2732,6 +2732,18 @@ def _load_plugin(name, filename=None):
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
+    # screen_mirror's ScreenCaptureKit probe is defanged for the whole suite:
+    # on this Mac the pyobjc bindings are really installed, so an undefanged
+    # probe would try to touch the real capture stack from inside every
+    # pretend-mirror part. The real function is kept as
+    # `_probe_screencapturekit_real` for Part 55, which is the one part that
+    # feeds it fake bindings and a fake ffmpeg on purpose. Pinning every other
+    # part to avfoundation is also what keeps their fixtures honest: their
+    # device tables are avfoundation shapes, and this is the same seam they
+    # already get from CI (where pyobjc does not exist at all).
+    if hasattr(module, "_probe_screencapturekit"):
+        module._probe_screencapturekit_real = module._probe_screencapturekit
+        module._probe_screencapturekit = lambda ffmpeg, cursor=True: None
     return module
 
 
@@ -6973,6 +6985,11 @@ done
 
             def audio_dropped(self):
                 return False
+
+            def capture_method(self):
+                # The status line keys its「没有声音」mark off this; '' is the
+                # platform-default sentence, which is what these lines assert.
+                return ''
 
         _base_stats23 = {'kind': 'dlna', 'seconds': 42, 'profile': 'ts-h264',
                          'buffered': 4 << 20}
@@ -11998,6 +12015,10 @@ try:
     _PLATFORM_OPTIONAL = {
         'Foundation': ('pyobjc-framework-Cocoa', 'darwin.txt'),
         'objc': ('pyobjc-framework-Cocoa', 'darwin.txt'),
+        # screen_mirror's ScreenCaptureKit capture path (macOS 13+), reached
+        # only from function bodies -- see the module-level check below.
+        'ScreenCaptureKit': ('pyobjc-framework-ScreenCaptureKit', 'darwin.txt'),
+        'CoreMedia': ('pyobjc-framework-CoreMedia', 'darwin.txt'),
     }
     for _mod, (_dist, _rfile) in _PLATFORM_OPTIONAL.items():
         check("{} is allowed in plugins only because {} declares {}"
@@ -14991,6 +15012,12 @@ esac
             def audio_dropped(self):
                 return self._dropped
 
+            def capture_method(self):
+                # '' means the platform's own sentence -- the AVFoundation
+                # microphone-grant one on darwin. Which dialect the mark speaks
+                # is Part 55's subject; the sentences here are the two old ones.
+                return ''
+
             def stats(self):
                 return self.s
 
@@ -15818,9 +15845,14 @@ try:
         @staticmethod
         def audio_dropped():
             return True
-    _cap40 = type('C40', (), {
-        'audio_map': ['0:a'],
-        'label': '屏幕 (GDI) + 系统声音 (立体声混音 (Realtek(R) Audio))'})()
+    # Built from the real constructor, not an ad-hoc object: `_audio_line`
+    # reads whatever the current probe shape carries (the SCK branch reads
+    # `.method`), and a hand-rolled stand-in silently stops standing in the
+    # day a field is added -- which is how this pair broke the first run of
+    # the SCK change.
+    _cap40 = m40._Capture(
+        '屏幕 (GDI) + 系统声音 (立体声混音 (Realtek(R) Audio))',
+        [['-f', 'gdigrab', '-i', 'desktop']], audio_map=['0:a'])
     m40._capture_cache['part40'] = _cap40
     _holder40 = next(obj for obj in vars(m40).values()
                      if isinstance(obj, type) and hasattr(obj, '_audio_line'))
@@ -15841,8 +15873,7 @@ try:
     # ran on exactly where it names the settings panel to open.
     _kept40 = dict(m40._capture_cache)
     m40._capture_cache.clear()
-    m40._capture_cache['part40-none'] = type('C40b', (), {
-        'audio_map': None, 'label': ''})()
+    m40._capture_cache['part40-none'] = m40._Capture('', [])
     try:
         _linux40 = _holder40._audio_line(None, platform='linux')
         _win40row = _holder40._audio_line(None, platform='win32')
@@ -19957,6 +19988,1384 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved54[0], _saved54[1]
     utils.SETTING_DIR = _saved54[2]
     _shutil.rmtree(_tmp54, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# Part 55: macOS captures with ScreenCaptureKit (v0.21)
+#
+# avfoundation on this Mac grabs a screen by device index (`-i 2:none`) and
+# system audio only through BlackHole -- a third-party driver the user has to
+# install, route the default output into, and re-grant the microphone for.
+# ScreenCaptureKit captures one display by its own displayID and taps the
+# system mix directly, so the picture no longer depends on a device table the
+# machine can move under the user (a plugged-in camera shifts `Capture screen
+# 0` off its index), and a silent tap can no longer drag the picture down
+# with it.
+#
+# The shape: SCShareableContent -> displayID -> SCContentFilter +
+# SCStreamConfiguration (even pixel size from the display's own points times
+# NSScreen's scale, 420v, audio 48k/2ch) -> SCStream with one delegate; the
+# delegate's samples are copied to NV12 (rawvideo stdin) and float32 PCM (a
+# second ffmpeg input riding a tokenized pipe) by `_SckFeeder`. The token
+# `@AUDIO_FD@` is swapped for the real fd by `_resolve_audio_fd` at spawn
+# time; a command still carrying the token is a ValueError -- an ffmpeg
+# started against an unopened `pipe:@AUDIO_FD@` would be a silent mystery,
+# not a failure.
+#
+# What the cases below pin, in the order the product decides:
+#
+#   * the probe's gates in order -- macOS 13, importable bindings, the
+#     screen-recording grant -- all BEFORE SCShareableContent is asked; a
+#     missing grant must fall through to the avfoundation flow and its own
+#     permission dialog, byte for byte as it was;
+#   * display selection by stored displayID with the main display as the
+#     fallback (a stored id the machine no longer has is warned about, not
+#     fatal); the screen list carries every display at its even size;
+#   * the feeder's first-said failure rule (later reasons are discarded, not
+#     appended), the stop-before-failure swallow, and the promise that a
+#     recorded failure closes ffmpeg's stdin so the encoder cannot outlive
+#     the capture with the page still saying it runs;
+#   * the run-time latch: a stream the OS refuses at start costs one warning
+#     and one avfoundation re-probe, and the latch (which `invalidate`
+#     deliberately keeps) stops every later probe from asking SCK again --
+#     the same shape Part 54 pinned for ddagrab;
+#   * the drop sentence: a silent SCK tap is a THIRD failure, and neither
+#     the microphone door nor BlackHole (both wrong doors for it) may be
+#     printed over it; and the routing warning is skipped for SCK (which
+#     reads the system mix, not a device the default output must point at);
+#   * end to end, through the real renderer: the resolved command line
+#     (NV12 stdin, `-map 1:a:0`, the real fd in `pipe:N`, no token), the
+#     config's eleven knobs in the order the feeder sets them, both stream
+#     outputs attached, and a graceful stop that joins the feeder.
+#
+# The fakes print what this machine printed: the avfoundation table is the
+# real `-list_devices` shape (`[AVFoundation indev @ 0x1] [0] OBS Virtual
+# Camera`, lower-case block names, no quotes -- the exact shape whose
+# fictional predecessor Part 31 was born from), and the SCK side answers with
+# a pure-Python stand-in for the Objective-C stack, so every case runs in CI
+# on Linux exactly as it does here.
+#
+# Seven single-line mutants were run against the full suite on 2026-10-02,
+# each restored byte-for-byte afterwards (md5-checked): never asking SCK at
+# all, deleting the wallclock flag, ignoring the latch once set, skipping the
+# stdin close that records a failure, never building the feeder, keeping the
+# dropped audio input in the no-sound rewrite, and blinding the two
+# `_audio_line` branches to SCK. Each reddens only the cases that read through
+# the line it broke -- 13 / 2 / 4 / 1 / 12 / 4 / 2 non-Part-34 reds, thirty-
+# eight in total. All but three live in this Part; the exception is m6, whose
+# four reds are the four platform drop cases (x11grab / dshow / ddagrab /
+# SCK) because the no-sound rewrite is one line shared by all of them --
+# three of those are older cases that read the same line, and nothing else
+# outside this Part moved.
+#
+# Two more single-line mutants followed the same day, aimed at the
+# pending-window defect this Part was written around. Removing the pump's
+# deadline slide (the `deadline = time.time() + budget` taken while
+# `audio_pending()` holds) reddens one case, H -- the stand-in parks exactly
+# where that slide is the whole difference. Skipping the prime (so ffmpeg
+# opens onto a silent but open audio pipe) reddens six: E's three, D2a, D2b
+# and H. Its first run counted a seventh -- G caught the no-frame warning
+# that E's instance leaked into the shared `_grab55` capture because the
+# buffer accumulates for the whole Part; that was the test coupling its own
+# evidence, not a seventh product line, so `_reset55` now cuts the capture
+# at every sub-case boundary and the red list is exactly the set that reads
+# the primed pipe.
+# --------------------------------------------------------------------------
+print("\n=== Part 55: macOS captures with ScreenCaptureKit ===")
+import traceback as _traceback55
+import logging as _logging55
+import re as _re55
+
+_tmp55 = _tempfile.mkdtemp(prefix="macast-sck55-")
+_saved55 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+try:
+    utils.SETTING_DIR = _tmp55
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp55, "macast_setting.json")
+    m55 = _load_plugin("screen_mirror_plugin_v55", "screen_mirror.py")
+    _bin55 = os.path.join(_tmp55, "bin")
+
+    # Every case below is a macOS case, wherever this suite runs, and the
+    # version/importability gates are asked through the module's own seams.
+    _saved55_platform55 = m55.platform
+    _saved55_probe = m55._probe_screencapturekit
+    _real55_probe = m55._probe_screencapturekit_real
+    _real55_version_ok = m55._sck_version_ok
+    _saved55_find = m55.find_ffmpeg
+    _saved55_awake = m55._keep_awake
+    _saved55_pixel = m55._sck_pixel_size
+    _saved55_nv12 = m55._sck_nv12_bytes
+    _saved55_audio = m55._sck_audio_bytes
+    _saved55_route = m55.system_audio_routed
+    _saved55_avf_probe = m55._probe_avfoundation
+    _saved55_sys_platform = m55.sys.platform
+    m55.sys.platform = 'darwin'
+
+    class _Grab55(_logging55.Handler):
+        def __init__(self):
+            _logging55.Handler.__init__(self)
+            self.lines = []
+
+        def emit(self, record):
+            self.lines.append((record.levelno, record.getMessage()))
+
+    _grab55 = _Grab55()
+    _lg55 = _logging55.getLogger(m55.logger.name)
+    _lg55.addHandler(_grab55)
+    _lvl55 = _lg55.level
+    _lg55.setLevel(_logging55.DEBUG)
+
+    def _said55(needle):
+        return [msg for _lvl, msg in _grab55.lines if needle in msg]
+
+    def _lines55(path):
+        if not os.path.exists(path):
+            return []
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            return [ln for ln in handle.read().splitlines() if ln.strip()]
+
+    _notify55 = []
+
+    def _notify55_rec(*args, **kwargs):
+        _notify55.append(' '.join(str(one) for one in args))
+
+    cherrypy.engine.subscribe('app_notify', _notify55_rec)
+
+    # -- A: the version gate -------------------------------------------------
+    # Asked of the platform module the plugin imports; the answer must be
+    # yes only for a clean two-component release at or above 13.
+    class _Plat55(object):
+        value = '14.0'
+
+        @classmethod
+        def mac_ver(cls):
+            return (cls.value, ('', '', ''), '')
+
+    _got55a = []
+    for _ver55 in ('12.7.6', '13.0.0', '26.1.0'):
+        _Plat55.value = _ver55
+        m55.platform = _Plat55
+        _got55a.append(_real55_version_ok())
+    check("the ScreenCaptureKit gate is macOS 13+, read off the platform "
+          "module's two-component release",
+          _got55a == [False, True, True], str(_got55a))
+
+    _got55b = []
+    for _ver55 in ('', '13', '13.x.2'):
+        _Plat55.value = _ver55
+        m55.platform = _Plat55
+        _got55b.append(_real55_version_ok())
+    check("a release string the parser cannot read cleanly is not a yes -- "
+          "empty, one component, or a non-number all answer no",
+          _got55b == [False, False, False], str(_got55b))
+
+    m55.platform = _saved55_platform55
+    m55._sck_version_ok = lambda: True
+
+    # -- the stand-in stack --------------------------------------------------
+    # A pure-Python ScreenCaptureKit: enough of the ObjC shape for the probe
+    # and the feeder to drive, and nothing more.
+    class _Display55(object):
+        def __init__(self, did, w, h):
+            self._did = did
+            self._w = w
+            self._h = h
+
+        def displayID(self):
+            return self._did
+
+        def width(self):
+            return self._w
+
+        def height(self):
+            return self._h
+
+    class _Content55(object):
+        def __init__(self, displays):
+            self._displays = list(displays)
+
+        def displays(self):
+            return list(self._displays)
+
+    class _ShareableClass55(object):
+        calls = 0
+        content = None
+        error = None
+
+        @classmethod
+        def getShareableContentWithCompletionHandler_(cls, cb):
+            cls.calls += 1
+            cb(cls.content, cls.error)
+
+    class _FilterInst55(object):
+        def __init__(self):
+            self.ctor = None
+
+        def initWithDisplay_excludingApplications_exceptingWindows_(
+                self, display, apps, windows):
+            self.ctor = ('apps', display)
+            return self
+
+        def initWithDisplay_excludingWindows_(self, display, windows):
+            self.ctor = ('windows', display)
+            return self
+
+        def pointPixelScale(self):
+            return _FilterFactory55.scale
+
+    class _FilterFactory55(object):
+        scale = 1.0
+
+        @staticmethod
+        def alloc():
+            return _FilterInst55()
+
+    class _NSScreen55(object):
+        def __init__(self, number, scale):
+            self._number = number
+            self._scale = scale
+
+        def deviceDescription(self):
+            return {'NSScreenNumber': self._number}
+
+        def backingScaleFactor(self):
+            return self._scale
+
+    class _NS55(object):
+        all = []
+
+        @classmethod
+        def screens(cls):
+            return list(cls.all)
+
+    class _FakeNSObject55(object):
+        pass
+
+    class _FakeFoundation55(object):
+        NSObject = _FakeNSObject55
+        NSScreen = _NS55
+
+    class _Objc55(object):
+        @staticmethod
+        def pyobjc_id(obj):
+            return obj
+
+    class _CoreMedia55(object):
+        @staticmethod
+        def CMTimeMake(a, b):
+            return ('CMTime', int(a), int(b))
+
+    class _ConfigInst55(object):
+        def __init__(self):
+            self.sets = []
+            self.values = []
+
+        def init(self):
+            return self
+
+        def setWidth_(self, value):
+            self.sets.append('Width')
+            self.values.append(value)
+
+        def setHeight_(self, value):
+            self.sets.append('Height')
+            self.values.append(value)
+
+        def setScalesToFit_(self, value):
+            self.sets.append('ScalesToFit')
+            self.values.append(value)
+
+        def setMinimumFrameInterval_(self, value):
+            self.sets.append('MinimumFrameInterval')
+            self.values.append(value)
+
+        def setQueueDepth_(self, value):
+            self.sets.append('QueueDepth')
+            self.values.append(value)
+
+        def setShowsCursor_(self, value):
+            self.sets.append('ShowsCursor')
+            self.values.append(value)
+
+        def setPixelFormat_(self, value):
+            self.sets.append('PixelFormat')
+            self.values.append(value)
+
+        def setCapturesAudio_(self, value):
+            self.sets.append('CapturesAudio')
+            self.values.append(value)
+
+        def setExcludesCurrentProcessAudio_(self, value):
+            self.sets.append('ExcludesCurrentProcessAudio')
+            self.values.append(value)
+
+        def setSampleRate_(self, value):
+            self.sets.append('SampleRate')
+            self.values.append(value)
+
+        def setChannelCount_(self, value):
+            self.sets.append('ChannelCount')
+            self.values.append(value)
+
+    class _Config55(object):
+        instances = []
+
+        @staticmethod
+        def alloc():
+            one = _ConfigInst55()
+            _Config55.instances.append(one)
+            return one
+
+    class _StreamInst55(object):
+        def __init__(self):
+            self.filter = None
+            self.config = None
+            self.delegate = None
+            self.outputs = []
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        def initWithFilter_configuration_delegate_(self, filt, config,
+                                                   delegate):
+            self.filter = filt
+            self.config = config
+            self.delegate = delegate
+            return self
+
+        def addStreamOutput_type_sampleHandlerQueue_error_(
+                self, handler, otype, queue, err):
+            self.outputs.append(int(otype))
+            return (True, None)
+
+        def _deliver(self, otype):
+            self.delegate.stream_didOutputSampleBuffer_ofType_(
+                self, ('sample-%d' % otype, otype), otype)
+
+        def startCaptureWithCompletionHandler_(self, cb):
+            self.start_calls += 1
+            behavior = _Stream55.behavior
+            if behavior == 'refuse':
+                cb('mock refusal')
+                return
+            cb(None)
+            if behavior == 'healthy':
+                self._deliver(0)
+                self._deliver(1)
+            elif behavior == 'video_only':
+                self._deliver(0)
+
+        def stopCaptureWithCompletionHandler_(self, cb):
+            self.stop_calls += 1
+            if cb is not None:
+                cb()
+
+    class _Stream55(object):
+        behavior = 'healthy'
+        instances = []
+
+        @staticmethod
+        def alloc():
+            one = _StreamInst55()
+            _Stream55.instances.append(one)
+            return one
+
+    class _FakeSCK55(object):
+        SCStreamOutputTypeScreen = 0
+        SCStreamOutputTypeAudio = 1
+        SCShareableContent = _ShareableClass55
+        SCContentFilter = _FilterFactory55
+        SCStreamConfiguration = _Config55
+        SCStream = _Stream55
+
+    _fake_modules55 = (_Objc55, _FakeFoundation55, _CoreMedia55, _FakeSCK55)
+
+    _calls55 = {'n': 0}
+
+    def _counting55(ffmpeg, cursor=True):
+        _calls55['n'] += 1
+        return _real55_probe(ffmpeg, cursor=cursor)
+
+    m55._probe_screencapturekit = _counting55
+    _fake55c = os.path.join(_bin55, "ffmpeg55c")
+
+    def _reset55(displays=None, ns_screens=None, scale=1.0, preflight=True,
+                 modules=True):
+        # Sub-case isolation for the shared log capture. `_grab55` accumulates
+        # for the whole Part unless told otherwise, and a warning leaking from
+        # one sub-case into the next one's count is not hypothetical: under
+        # the 2026-10-02 "prime removed" mutant, E's own no-frame warning
+        # made G's `len(_warns55g) == 1` count two, so G reddened a second
+        # time for E's cause and its evidence read like a refuse-path bug.
+        # Every sub-case's checks are about its own instance's window, so the
+        # boundary between sub-cases is the right place for the cut.
+        _grab55.lines[:] = []
+        _calls55['n'] = 0
+        m55._SCK_MODULES['mods'] = _fake_modules55 if modules else False
+        m55._CG_PREFLIGHT['ok'] = bool(preflight)
+        _NS55.all = list(ns_screens or [])
+        _FilterFactory55.scale = scale
+        _ShareableClass55.calls = 0
+        _ShareableClass55.error = None
+        _ShareableClass55.content = _Content55(
+            displays if displays is not None else [_Display55(77, 101, 51)])
+        m55._capture_cache.clear()
+        utils.Setting.unset(m55.SettingProperty.Mirror_Screen)
+
+    # -- B: the probe's shape -------------------------------------------------
+    _reset55(ns_screens=[_NSScreen55(77, 2.0)])
+    _capB55 = m55._probe_screencapturekit(_fake55c)
+    _wantB55 = [['-f', 'rawvideo', '-pix_fmt', 'nv12', '-s', '202x102',
+                 '-framerate', str(m55.FPS), '-use_wallclock_as_timestamps',
+                 '1', '-i', '-'],
+                ['-f', 'f32le', '-ar', '48000', '-ac', '2', '-i',
+                 'pipe:' + m55._AUDIO_FD_TOKEN]]
+    check("the SCK probe describes a capture whose video rides in on stdin "
+          "as NV12 and whose audio rides a tokenized pipe -- inputs, screen "
+          "list, spec and method written here once",
+          _capB55 is not None and _capB55.method == 'sck'
+          and _capB55.label == '屏幕 + 系统声音 (ScreenCaptureKit)'
+          and _capB55.audio_map == '1:a:0'
+          and _capB55.inputs == _wantB55
+          and _capB55.screens == [(77, '屏幕 1（202×102）')]
+          and _capB55.spec == {'display_id': 77, 'size': (202, 102),
+                               'cursor': True}
+          and _ShareableClass55.calls == 1,
+          '%s / %s / %s' % (_capB55.inputs if _capB55 else None,
+                            _capB55.screens if _capB55 else None,
+                            _capB55.spec if _capB55 else None))
+
+    _reset55(displays=[_Display55(77, 101, 51), _Display55(88, 100, 51)])
+    utils.Setting.set(m55.SettingProperty.Mirror_Screen, '88')
+    _capB55b = m55._probe_screencapturekit(_fake55c)
+    check("a stored display id picks its display out of several, and the "
+          "screen list keeps every display's position at its even size",
+          _capB55b.spec['display_id'] == 88
+          and _capB55b.spec['size'] == (100, 50)
+          and _capB55b.screens == [(77, '屏幕 1（100×50）'),
+                                   (88, '屏幕 2（100×50）')],
+          '%s / %s' % (_capB55b.spec, _capB55b.screens))
+
+    utils.Setting.set(m55.SettingProperty.Mirror_Screen, '999')
+    _capB55c = m55._probe_screencapturekit(_fake55c)
+    _goneB55 = _said55('screen 999 is gone')
+    check("a stored display id this machine does not have falls back to the "
+          "main display and says so once, rather than asking SCK for a hole",
+          _capB55c.spec['display_id'] == 77 and len(_goneB55) == 1,
+          '%s / %s' % (_capB55c.spec, _goneB55))
+    utils.Setting.unset(m55.SettingProperty.Mirror_Screen)
+
+    _reset55(displays=[_Display55(88, 100, 51)], ns_screens=[], scale=2.0)
+    _capB55d = m55._probe_screencapturekit(_fake55c, cursor=False)
+    check("when NSScreen cannot name the display the filter's own "
+          "point-pixel scale answers instead -- 100x51 points at 2x is "
+          "200x102 -- and the cursor choice lands in the spec",
+          _capB55d.spec == {'display_id': 88, 'size': (200, 102),
+                            'cursor': False},
+          str(_capB55d.spec))
+
+    _reset55(preflight=False)
+    _capB55e = m55._probe_screencapturekit(_fake55c)
+    check("with no screen-recording grant the SCK probe stays silent and "
+          "hands the machine to the avfoundation flow -- and it does not "
+          "even ask SCShareableContent",
+          _capB55e is None and _ShareableClass55.calls == 0,
+          '%s / calls=%d' % (_capB55e, _ShareableClass55.calls))
+
+    _reset55()
+    _pinB55 = m55._sck_version_ok
+    m55._sck_version_ok = _real55_version_ok
+    m55.platform = _Plat55
+    _Plat55.value = '12.7.6'
+    _capB55f = m55._probe_screencapturekit(_fake55c)
+    m55._sck_version_ok = _pinB55
+    m55.platform = _saved55_platform55
+    check("below macOS 13 the probe is off before anything else is asked",
+          _capB55f is None and _ShareableClass55.calls == 0,
+          '%s / calls=%d' % (_capB55f, _ShareableClass55.calls))
+
+    _reset55(modules=False)
+    _capB55g = m55._probe_screencapturekit(_fake55c)
+    check("when the bindings are not importable the probe answers None "
+          "without asking the OS anything",
+          _capB55g is None and _ShareableClass55.calls == 0,
+          '%s / calls=%d' % (_capB55g, _ShareableClass55.calls))
+
+    _reset55(displays=[])
+    _capB55h = m55._probe_screencapturekit(_fake55c)
+    check("a machine that answers with no displays is not a capture",
+          _capB55h is None and _ShareableClass55.calls == 1,
+          '%s / calls=%d' % (_capB55h, _ShareableClass55.calls))
+
+    # -- C: the latch, consulted by the darwin chooser ------------------------
+    _sentinel55 = m55._Capture('sentinel', [])
+    m55._probe_avfoundation = lambda ffmpeg, cursor=True: _sentinel55
+    try:
+        _reset55()
+        _capC55 = m55._probe_darwin(_fake55c)
+        check("an unlatched darwin probe asks ScreenCaptureKit first and "
+              "takes its answer",
+              _capC55 is not _sentinel55 and _capC55 is not None
+              and _capC55.method == 'sck' and _calls55['n'] == 1,
+              '%s / calls=%s' % (_capC55 and _capC55.method, _calls55['n']))
+
+        m55._sck_refused.add(_fake55c)
+        m55.invalidate_capture_cache()
+        _capC55b = m55._probe_darwin(_fake55c)
+        check("once a machine's SCK hung or refused at runtime the latch "
+              "survives invalidate: the next probe goes straight to "
+              "avfoundation without asking SCK again",
+              _capC55b is _sentinel55 and _calls55['n'] == 1,
+              '%s / calls=%s' % (_capC55b and _capC55b.label, _calls55['n']))
+    finally:
+        m55._sck_refused.discard(_fake55c)
+        m55._probe_avfoundation = _saved55_avf_probe
+
+    # -- D: the units ---------------------------------------------------------
+    check("NV12 planes assemble luma-then-chroma row by row, dropping each "
+          "plane's stride",
+          m55._nv12_from_planes([(b'ABxxCDyy', 4, 2), (b'UVzz', 4, 1)],
+                                2, 2) == b'ABCDUV',
+          repr(m55._nv12_from_planes([(b'ABxxCDyy', 4, 2), (b'UVzz', 4, 1)],
+                                     2, 2)))
+
+    _badD55 = [m55._nv12_from_planes([(b'ABCD', 4, 2)], 2, 2),
+               m55._nv12_from_planes([(b'ABxxCDyy', 4, 2), (b'UV', 4, 1)],
+                                     2, 2),
+               m55._nv12_from_planes([(b'ABCD', 2, 2)], 2, 2),
+               m55._nv12_from_planes([], 2, 2),
+               m55._nv12_from_planes([(b'', 0, 0)], 0, 0)]
+    check("every malformed plane set is refused whole -- short luma, short "
+          "chroma, missing chroma, empty, zero-sized -- instead of a "
+          "half-frame reaching the encoder",
+          _badD55 == [None] * 5, str(_badD55))
+
+    _plainD55 = ['ffmpeg', '-i', 'pipe:5']
+    check("a command without the audio token is returned untouched",
+          m55._resolve_audio_fd(_plainD55, None) is _plainD55,
+          str(m55._resolve_audio_fd(_plainD55, None)))
+
+    _raisedD55 = None
+    try:
+        m55._resolve_audio_fd(
+            ['ffmpeg', '-i', 'pipe:' + m55._AUDIO_FD_TOKEN], None)
+    except ValueError as _exc55:
+        _raisedD55 = _exc55
+    check("a command carrying the token with no pipe is a ValueError that "
+          "says the attempt must never spawn -- an ffmpeg against an "
+          "unopened pipe would be a silent mystery",
+          _raisedD55 is not None and 'must never spawn' in str(_raisedD55),
+          str(_raisedD55))
+
+    _tokensD55 = ['ffmpeg', '-i', 'pipe:' + m55._AUDIO_FD_TOKEN]
+    _doneD55 = m55._resolve_audio_fd(_tokensD55, 7)
+    check("with a real pipe the token is swapped in a fresh list -- the "
+          "original keeps its token, so a retry can resolve again",
+          _doneD55 == ['ffmpeg', '-i', 'pipe:7']
+          and _doneD55 is not _tokensD55
+          and _tokensD55[2] == 'pipe:' + m55._AUDIO_FD_TOKEN,
+          '%s / %s' % (_doneD55, _tokensD55))
+
+    _feedD55 = m55._SckFeeder()
+    _feedD55._note_failure('D5 first reason')
+    _feedD55._note_failure('D5 second reason')
+    check("the first failure is the failure: a later reason is discarded, "
+          "not appended, and it is warned exactly once",
+          _feedD55.failed() == 'D5 first reason'
+          and len(_said55('ScreenCaptureKit capture failed: D5 first')) == 1
+          and _said55('D5 second reason') == [],
+          '%s / %s' % (_feedD55.failed(),
+                       _said55('D5 second reason')))
+
+    _feedD55b = m55._SckFeeder()
+    _feedD55b.request_stop()
+    _feedD55b._note_failure('D5 late reason')
+    check("a failure arriving after the stop was asked for is swallowed -- a "
+          "stream we told to stop reports an abort, and counting that would "
+          "turn every clean teardown into a retry",
+          _feedD55b.failed() is None
+          and _said55('D5 late reason') == [],
+          str(_feedD55b.failed()))
+
+    class _Writer55(object):
+        def __init__(self, explode=False):
+            self.closed = False
+            self._explode = explode
+
+        def close(self):
+            self.closed = True
+            if self._explode:
+                raise ValueError('already closed')
+
+    _writerD55 = _Writer55()
+    _feedD55c = m55._SckFeeder()
+    _feedD55c.attach(_writerD55)
+    _feedD55c._note_failure('D5 third reason')
+    _writerD55b = _Writer55(explode=True)
+    _feedD55d = m55._SckFeeder()
+    _feedD55d.attach(_writerD55b)
+    _boomD55 = None
+    try:
+        _feedD55d._note_failure('D5 fourth reason')
+    except Exception as _exc55:
+        _boomD55 = _exc55
+    check("a recorded failure closes ffmpeg's stdin at that moment -- the "
+          "encoder must not stay blocked on a pipe nobody writes again -- "
+          "and a close that raises is swallowed",
+          _writerD55.closed and _writerD55b.closed and _boomD55 is None,
+          'closed=%s/%s boom=%s' % (_writerD55.closed, _writerD55b.closed,
+                                    _boomD55))
+
+    _capD55 = m55._Capture(
+        '屏幕 + 系统声音 (ScreenCaptureKit)',
+        [['-f', 'rawvideo', '-pix_fmt', 'nv12', '-i', '-'],
+         ['-f', 'f32le', '-ar', '48000', '-ac', '2', '-i',
+          'pipe:' + m55._AUDIO_FD_TOKEN]],
+        audio_map='1:a:0', screens=[(77, '屏幕 1（202×102）')],
+        method='sck',
+        spec={'display_id': 77, 'size': (202, 102), 'cursor': True})
+    _voD55 = m55.video_only_capture(_capD55)
+    check("dropping SCK's sound removes the audio input whole and keeps the "
+          "method, spec and screen list -- the next probe can rebuild the "
+          "same capture without the tap",
+          _voD55 is not None and _voD55.method == 'sck'
+          and _voD55.audio_map is None
+          and _voD55.spec == _capD55.spec
+          and _voD55.screens == _capD55.screens
+          and len(_voD55.inputs) == 1
+          and _voD55.inputs[0] == _capD55.inputs[0]
+          and _voD55.label == '屏幕 (无系统声音)'
+          and len(_capD55.inputs) == 2 and _capD55.audio_map == '1:a:0',
+          '%s / %s' % (_voD55.inputs if _voD55 else None,
+                       _capD55.inputs))
+
+    _capD55b = m55._Capture('屏幕 (avfoundation)',
+                            [['-f', 'avfoundation', '-i', '1:none']])
+    check("a capture with nothing to drop answers None, and so does no "
+          "capture at all",
+          m55.video_only_capture(None) is None
+          and m55.video_only_capture(_capD55b) is None,
+          '%s' % (m55.video_only_capture(_capD55b),))
+
+    check("the SCK audio-drop sentence outranks the platform dialect -- it "
+          "is a third failure, not a third platform -- while plain "
+          "win32/darwin callers still get their own door",
+          m55.audio_dropped_suffix(platform='win32', method='sck')
+          == m55.AUDIO_DROPPED_SCK_SUFFIX
+          and m55.audio_dropped_mark(platform='darwin', method='sck')
+          == m55.AUDIO_DROPPED_SCK_MARK
+          and m55.audio_dropped_suffix(platform='win32')
+          == m55.AUDIO_DROPPED_WIN32_SUFFIX
+          and m55.audio_dropped_mark(platform='darwin')
+          == m55.AUDIO_DROPPED_MARK,
+          'sck=%s' % m55.audio_dropped_suffix(platform='win32', method='sck'))
+
+    _holder55 = next(obj for obj in vars(m55).values()
+                     if isinstance(obj, type) and hasattr(obj, '_audio_line'))
+
+    class _Dropped55(object):
+        @staticmethod
+        def audio_dropped():
+            return True
+
+    class _Healthy55(object):
+        @staticmethod
+        def audio_dropped():
+            return False
+
+    _cap55_sck = m55._Capture(
+        '屏幕 + 系统声音 (ScreenCaptureKit)',
+        [['-f', 'rawvideo', '-pix_fmt', 'nv12', '-i', '-']],
+        audio_map='1:a:0', method='sck',
+        spec={'display_id': 77, 'size': (202, 102), 'cursor': True})
+    _cap55_avf = m55._Capture(
+        '屏幕 + 系统声音 (BlackHole)',
+        [['-f', 'avfoundation', '-i', '1:1']],
+        audio_map='0:a:0')
+    _kept55 = dict(m55._capture_cache)
+    _route55 = {'n': 0}
+
+    def _route_rec55():
+        _route55['n'] += 1
+        return False
+
+    m55.system_audio_routed = _route_rec55
+    try:
+        m55._capture_cache.clear()
+        m55._capture_cache['part55-d8'] = _cap55_sck
+        _line55a = _holder55._audio_line(_Dropped55(), platform='darwin')
+        check("a session that gave up a silent SCK tap is told exactly that: "
+              "the drop names ScreenCaptureKit and the restart, and neither "
+              "the microphone door nor BlackHole is printed over it",
+              'ScreenCaptureKit' in _line55a
+              and '重启 Macast' in _line55a
+              and '麦克风' not in _line55a
+              and 'BlackHole' not in _line55a
+              and '一键设置' not in _line55a
+              and not _line55a.startswith('系统声音：已启用'),
+              _line55a)
+
+        m55._capture_cache.clear()
+        m55._capture_cache['part55-d9'] = m55._Capture(
+            '屏幕 (无系统声音)', [['-f', 'rawvideo', '-i', '-']],
+            audio_map=None, method='sck',
+            spec={'display_id': 77, 'size': (202, 102), 'cursor': True})
+        _line55b = _holder55._audio_line(None, platform='darwin')
+        check("a latched run shows「未启用」with the same words: ScreenCaptureKit "
+              "never sent audio, later sessions skip it, restart to retry -- "
+              "not an invitation to install BlackHole for a tap it cannot feed",
+              _line55b.startswith('系统声音：未启用')
+              and 'ScreenCaptureKit' in _line55b
+              and '重启 Macast' in _line55b
+              and '一键安装' not in _line55b
+              and 'BlackHole' not in _line55b,
+              _line55b)
+
+        m55._capture_cache.clear()
+        m55._capture_cache['part55-d10a'] = _cap55_sck
+        _route55['n'] = 0
+        _line55c = _holder55._audio_line(_Healthy55(), platform='darwin')
+        _route55a = _route55['n']
+        m55._capture_cache.clear()
+        m55._capture_cache['part55-d10b'] = _cap55_avf
+        _route55['n'] = 0
+        _line55d = _holder55._audio_line(_Healthy55(), platform='darwin')
+        _route55b = _route55['n']
+        check("the routing warning is for device-fed taps only: an SCK "
+              "capture reads the system mix, so it is never told the "
+              "default output is pointed elsewhere -- and an avfoundation "
+              "tap still is, once",
+              _line55c == '系统声音：已启用 · {}'.format(_cap55_sck.label)
+              and _route55a == 0
+              and '没有路由' in _line55d and '一键设置' in _line55d
+              and _route55b == 1,
+              '%s / route=%d // %s / route=%d' % (
+                  _line55c, _route55a, _line55d, _route55b))
+    finally:
+        m55.system_audio_routed = _saved55_route
+        m55._capture_cache.clear()
+        m55._capture_cache.update(_kept55)
+
+    # -- the fakes ------------------------------------------------------------
+    _rec55a = os.path.join(_tmp55, "receiptA")
+    _rec55f = os.path.join(_tmp55, "receiptF")
+    _rec55b = os.path.join(_tmp55, "receiptB")
+    _rec55h = os.path.join(_tmp55, "receiptH")
+    _avf_body55 = r"""  *list_devices*)
+    printf '%s\n' \
+      '[AVFoundation indev @ 0x1] AVFoundation video devices:' \
+      '[AVFoundation indev @ 0x1] [0] OBS Virtual Camera' \
+      '[AVFoundation indev @ 0x1] [1] Capture screen 0' \
+      '[AVFoundation indev @ 0x1] AVFoundation audio devices:' \
+      '[AVFoundation indev @ 0x1] [0] MacBook Pro麦克风' \
+      '[AVFoundation indev @ 0x1] [1] BlackHole 2ch' >&2
+    exit 0
+    ;;
+  *-encoders*)
+    printf '%s\n' \
+      'V..... libx264              libx264 H.264 / AVC' \
+      'A..... aac                  AAC (Advanced Audio Coding)' \
+      'A..... ac3                  ATSC A/52A (AC-3)'
+    exit 0
+    ;;
+"""
+    # The parentheses around each concatenation below are load-bearing:
+    # without them `.replace` binds to the *last fragment alone*, so the
+    # argv line -- written by the first fragment -- lands in a file literally
+    # named `@RECEIPT@` in the CWD while the GOT/PRIME/AUD lines go to the
+    # real receipt. Four full-suite runs were spent reading a receipt that
+    # could never contain the line the assertions looked for; the check
+    # details said `[]`, which read exactly like a timing race and was not
+    # one.
+    #
+    # The counted reads below are the 2026-10-02 prime's witnesses: the
+    # first 7680 bytes off the audio pipe must be the feeder's all-zero
+    # silence (PRIME_NONZERO_0), and the 1920 that follow must be real
+    # delivered audio (AUDNONZERO_1920). They read with `dd bs=1`, never
+    # `head -c N`: BSD head reads a bigger buffer than it was asked for and
+    # throws the surplus away, so with the prime and the real bytes already
+    # both in the pipe it swallows part of the audio and the next read then
+    # blocks forever (measured 2026-10-02 on this machine -- the second
+    # `head` never returned). `dd bs=1` is one byte per read: it can neither
+    # over-read nor truncate. `wc -c` output is space-padded, so the count
+    # is squeezed before it becomes part of the marker -- a
+    # `PRIME_NONZERO_       0` line would match no assertion and read like a
+    # missing marker.
+    _fake55a = _write_fake(_bin55, "ffmpeg55a", (r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+""" + _avf_body55 + r"""  *nv12*)
+    ap=$(printf '%s\n' "$*" | grep -o 'pipe:[0-9][0-9]*' | head -1 | cut -d: -f2)
+    head -c 12 > /dev/null
+    printf 'GOT12\n' >> "@RECEIPT@"
+    n=$(dd bs=1 count=7680 < /dev/fd/$ap 2>/dev/null | tr -d '\000' | wc -c | tr -d '[:space:]')
+    printf 'PRIME_NONZERO_%s\n' "$n" >> "@RECEIPT@"
+    m=$(dd bs=1 count=1920 < /dev/fd/$ap 2>/dev/null | tr -d '\000' | wc -c | tr -d '[:space:]')
+    printf 'AUDNONZERO_%s\n' "$m" >> "@RECEIPT@"
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""").replace("@RECEIPT@", _rec55a))
+    _fake55f = _write_fake(_bin55, "ffmpeg55f", (r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+""" + _avf_body55 + r"""  *nv12*)
+    head -c 12 > /dev/null
+    printf 'GOT12\n' >> "@RECEIPT@"
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""").replace("@RECEIPT@", _rec55f))
+    _fake55b = _write_fake(_bin55, "ffmpeg55b", (r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+""" + _avf_body55 + r"""  *nv12*)
+    sleep 2
+    exit 0
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""").replace("@RECEIPT@", _rec55b))
+    # The H stand-in reproduces ffmpeg's real open-time behavior, which is
+    # the whole defect: it blocks on the audio pipe (first the prime, then a
+    # read that only ends when our side closes it -- the grace's abandon,
+    # ~2 s after the first video), then needs 1.5 s more before its first
+    # output byte. Against the old fixed 3 s budget that byte never came in
+    # time; `AUDEOF_0` says the blocking read ended with the abandon and
+    # zero real audio bytes -- video_only really was silent.
+    _fake55h = _write_fake(_bin55, "ffmpeg55h", (r"""#!/bin/sh
+printf '%s\n' "$*" >> "@RECEIPT@"
+case "$*" in
+""" + _avf_body55 + r"""  *nv12*)
+    ap=$(printf '%s\n' "$*" | grep -o 'pipe:[0-9][0-9]*' | head -1 | cut -d: -f2)
+    head -c 12 > /dev/null
+    printf 'GOT12\n' >> "@RECEIPT@"
+    n=$(dd bs=1 count=7680 < /dev/fd/$ap 2>/dev/null | tr -d '\000' | wc -c | tr -d '[:space:]')
+    printf 'PRIME_NONZERO_%s\n' "$n" >> "@RECEIPT@"
+    k=$(head -c 15360 < /dev/fd/$ap | wc -c | tr -d '[:space:]')
+    printf 'AUDEOF_%s\n' "$k" >> "@RECEIPT@"
+    sleep 1.5
+    ;;
+esac
+while true; do
+  head -c 8192 /dev/zero | tr '\0' 'T'
+  sleep 0.2
+done
+""").replace("@RECEIPT@", _rec55h))
+
+    # Every end-to-end case drives the real renderer with the fake stack: the
+    # sample copiers are stubbed at the module seam (they would touch a real
+    # CoreVideo that CI does not have), and the frames are tiny so a 64 KiB
+    # pipe never fills.
+    m55._keep_awake = lambda *a, **k: None      # no caffeinate in a test
+    m55._sck_pixel_size = lambda sample: (202, 102)
+    m55._sck_nv12_bytes = lambda sample, width=0, height=0: b'Y' * 12
+    m55._sck_audio_bytes = lambda sample: b'A' * 1920
+
+    _rec55 = _StateRec()
+
+    class _Mirror55(m55.ScreenMirrorRenderer):
+        @property
+        def protocol(self):
+            return _rec55
+
+    # -- E: a healthy SCK session, end to end ---------------------------------
+    _Stream55.behavior = 'healthy'
+    _Stream55.instances[:] = []
+    _Config55.instances[:] = []
+    _notify55[:] = []
+    _rec55.rows[:] = []
+    _reset55(scale=2.0)
+    open(_rec55a, 'w').close()
+    utils.Setting.set(m55.SettingProperty.Mirror_Output, 'browser')
+    m55.find_ffmpeg = lambda: _fake55a
+    mir55 = None
+    try:
+        mir55 = _Mirror55()
+        mir55.start_mirror()
+        _up55 = _wait_until(lambda: mir55.is_mirroring(), timeout=25)
+        check("a granted machine comes up on ScreenCaptureKit: the mirror "
+              "runs, the method the console will read is 'sck', and no "
+              "retry happened",
+              _up55 and mir55.capture_method() == 'sck'
+              and mir55._audio_refused is False
+              and mir55._audio_dropped is False,
+              'up=%s method=%s' % (_up55, mir55.capture_method()))
+
+        # `is_mirroring()` flips only after the fake ffmpeg has written the
+        # 12-byte frame and the audio-pipe markers -- the script emits its
+        # `T` filler last -- so by the time the session is up, every receipt
+        # line the checks below read is already on disk.
+        _nv55 = [ln for ln in _lines55(_rec55a)
+                 if 'nv12' in ln and '-i -' in ln]
+        check("the command ffmpeg was really handed reads NV12 from stdin, "
+              "maps the audio as 1:a:0, and carries the resolved pipe fd -- "
+              "never the token",
+              len(_nv55) == 1
+              and '-s 202x102' in _nv55[0]
+              and '-use_wallclock_as_timestamps 1' in _nv55[0]
+              and '-map 1:a:0' in _nv55[0]
+              and _re55.search(r'-i pipe:\d+', _nv55[0]) is not None
+              and '@AUDIO_FD@' not in _nv55[0],
+              str(_nv55))
+
+        _rec55a_lines = _lines55(_rec55a)
+        check("the feeder really pumped both streams in the prime-first "
+              "shape: 12 bytes of video frame from stdin, then the 20 ms "
+              "all-zero prime at the head of the audio pipe, then the real "
+              "1920-byte buffer",
+              'GOT12' in _rec55a_lines
+              and 'PRIME_NONZERO_0' in _rec55a_lines
+              and 'AUDNONZERO_1920' in _rec55a_lines
+              and _rec55a_lines.index('GOT12')
+              < _rec55a_lines.index('PRIME_NONZERO_0')
+              < _rec55a_lines.index('AUDNONZERO_1920'),
+              str(_rec55a_lines))
+
+        _conf55 = _Config55.instances
+        check("the stream configuration was built exactly once, with every "
+              "knob in the order the feeder sets it and the values the "
+              "probe promised",
+              len(_conf55) == 1
+              and _conf55[0].sets == [
+                  'Width', 'Height', 'ScalesToFit', 'MinimumFrameInterval',
+                  'QueueDepth', 'ShowsCursor', 'PixelFormat', 'CapturesAudio',
+                  'ExcludesCurrentProcessAudio', 'SampleRate', 'ChannelCount']
+              and _conf55[0].values == [
+                  202, 102, True, ('CMTime', 1, int(m55.FPS)), 3, True,
+                  m55.SCK_PIXEL_FORMAT_420V, True, True, 48000, 2],
+              '%s / %s' % (_conf55[0].sets if _conf55 else None,
+                           _conf55[0].values if _conf55 else None))
+
+        check("both stream outputs were attached -- screen then audio -- the "
+              "stream started once, and the probe was asked exactly once "
+              "with the latch left alone",
+              _Stream55.instances
+              and _Stream55.instances[0].outputs == [0, 1]
+              and _Stream55.instances[0].start_calls == 1
+              and _calls55['n'] == 1
+              and _fake55a not in m55._sck_refused,
+              'outputs=%s start=%s calls=%s' % (
+                  _Stream55.instances[0].outputs if _Stream55.instances
+                  else None,
+                  _Stream55.instances[0].start_calls
+                  if _Stream55.instances else None,
+                  _calls55['n']))
+
+        check("nothing was announced as a failure, the start said which page "
+              "to open, and no audio-drop sentence appeared: the tap "
+              "delivered",
+              not any('启动失败' in one or '中断' in one for one in _notify55)
+              and any('镜像已开始' in one for one in _notify55)
+              and not any('一直没有送来' in one or '未送出音频' in one
+                          for one in _notify55)
+              and ('error', True) not in _rec55.rows,
+              'notes=%s' % _notify55)
+
+        mir55.stop_mirror()
+        _torn55 = _wait_until(
+            lambda: not mir55.is_mirroring() and mir55._proc is None
+            and mir55._feeder is None, timeout=10)
+        check("stopping the mirror joins the feeder and the encoder -- "
+              "nothing SCK-side outlives the session",
+              _torn55 and _Stream55.instances
+              and _Stream55.instances[0].stop_calls >= 1,
+              'torn=%s stop=%s' % (
+                  _torn55,
+                  _Stream55.instances[0].stop_calls
+                  if _Stream55.instances else None))
+    finally:
+        if mir55 is not None:
+            mir55.stop_mirror()
+            _wait_until(lambda: not mir55.is_mirroring()
+                        and mir55._proc is None and mir55._feeder is None,
+                        timeout=10)
+
+    # -- F: the audio tap never delivers, the picture stays -------------------
+    _Stream55.behavior = 'video_only'
+    _Stream55.instances[:] = []
+    _Config55.instances[:] = []
+    _notify55[:] = []
+    _reset55(scale=2.0)
+    open(_rec55f, 'w').close()
+    utils.Setting.set(m55.SettingProperty.Mirror_Output, 'browser')
+    m55.find_ffmpeg = lambda: _fake55f
+    mir55f = None
+    try:
+        mir55f = _Mirror55()
+        mir55f.start_mirror()
+        _up55f = _wait_until(lambda: mir55f.is_mirroring(), timeout=25)
+        check("with the tap silent the picture still comes up on "
+              "ScreenCaptureKit -- dropping the audio is the whole point",
+              _up55f and mir55f.capture_method() == 'sck',
+              'up=%s method=%s' % (_up55f, mir55f.capture_method()))
+
+        _dropped55 = _wait_until(lambda: mir55f.audio_dropped(), timeout=10)
+        check("the two-second audio grace ends in a one-way drop: the "
+              "session says it has no system sound and will not re-ask "
+              "until a restart",
+              _dropped55 and mir55f._audio_dropped is True
+              and mir55f._audio_refused is True,
+              'dropped=%s flags=%s/%s' % (_dropped55,
+                                          mir55f._audio_dropped,
+                                          mir55f._audio_refused))
+
+        _said55f = [msg for _lvl, msg in _grab55.lines]
+        check("both halves of the drop are said exactly once -- the "
+              "feeder's decision and the renderer's latch",
+              len([m for m in _said55f
+                   if 'delivered no audio; continuing video-only'
+                   in m]) == 1
+              and len([m for m in _said55f
+                       if 'audio never arrived; this session continues '
+                          'without system sound' in m]) == 1,
+              str([m for m in _said55f if 'audio' in m]))
+    finally:
+        if mir55f is not None:
+            mir55f.stop_mirror()
+            _wait_until(lambda: not mir55f.is_mirroring()
+                        and mir55f._proc is None and mir55f._feeder is None,
+                        timeout=10)
+
+    # -- G: the OS refuses the stream at start, avfoundation takes over -------
+    _Stream55.behavior = 'refuse'
+    _Stream55.instances[:] = []
+    _Config55.instances[:] = []
+    _notify55[:] = []
+    _reset55(scale=2.0)
+    open(_rec55b, 'w').close()
+    utils.Setting.set(m55.SettingProperty.Mirror_Output, 'browser')
+    m55.find_ffmpeg = lambda: _fake55b
+    mir55g = None
+    try:
+        mir55g = _Mirror55()
+        mir55g.start_mirror()
+        _up55g = _wait_until(lambda: mir55g.is_mirroring(), timeout=25)
+
+        _warns55g = [msg for _lvl, msg in _grab55.lines
+                     if 'ScreenCaptureKit gave no frame' in msg]
+        check("a stream the OS refuses at start is one warning -- with the "
+              "refusal inside it -- and a latch that keeps the next probe "
+              "from asking SCK again",
+              len(_warns55g) == 1
+              and 'start refused (mock refusal)' in _warns55g[0]
+              and 'retrying with avfoundation' in _warns55g[0]
+              and _fake55b in m55._sck_refused,
+              str(_warns55g))
+
+        check("the retry came up on avfoundation -- method '' is what the "
+              "console will read -- with nothing announced as a failure",
+              _up55g and mir55g.capture_method() == ''
+              and not any('启动失败' in one or '中断' in one
+                          for one in _notify55)
+              and _calls55['n'] == 1,
+              'up=%s method=%s notes=%s calls=%s' % (
+                  _up55g, mir55g.capture_method(), _notify55, _calls55['n']))
+
+        # The two avfoundation lines are safe to read for the same reason as
+        # the E read -- `is_mirroring()` implies the start invocation is
+        # already pumping `T`s -- but the SCK attempt's own argv line is
+        # allowed to be missing: its refusal is recorded inside
+        # `feeder.start()`, and the retry path tears that ffmpeg down a
+        # millisecond or two after spawning it, which is quicker than a POSIX
+        # shell reaches its first `printf` (measured 2026-10-02: 0 of 48
+        # shells wrote their line with 0-5 ms of head start). What proves SCK
+        # went first is the warning above -- it can only fire after a
+        # successful Popen -- plus `_calls55['n'] == 1`; the receipt is
+        # trusted for the avfoundation leg (a synchronous probe, then a
+        # long-lived start) and for what must never appear (the pipe token).
+        # A line that does make it in must still sit before the avfoundation
+        # probe, or the order it describes is not this story.
+        _lines55b = _lines55(_rec55b)
+
+        def _idx55b(needle):
+            return next((i for i, ln in enumerate(_lines55b)
+                         if needle in ln), -1)
+
+        _i55nv, _i55ld, _i55cue = (_idx55b('nv12'), _idx55b('list_devices'),
+                                   _idx55b('-capture_cursor'))
+        check("the fallback really fell back -- avfoundation was probed and "
+              "started, in that order, and the token never leaked to any "
+              "command line",
+              _i55ld != -1 and _i55cue != -1
+              and _i55ld < _i55cue
+              and (_i55nv == -1 or _i55nv < _i55ld)
+              and not any('@AUDIO_FD@' in ln for ln in _lines55b),
+              'idx=%s/%s/%s' % (_i55nv, _i55ld, _i55cue))
+    finally:
+        if mir55g is not None:
+            mir55g.stop_mirror()
+            _wait_until(lambda: not mir55g.is_mirroring()
+                        and mir55g._proc is None and mir55g._feeder is None,
+                        timeout=10)
+
+    # -- D2: the audio prime and the pending window (2026-10-02) --------------
+    # Two halves of one defect, both measured on this machine. (1) FFmpeg
+    # blocks at open on a silent-but-open audio pipe: it never prints its
+    # banner, let alone a frame, so the no-frame budget could expire on a
+    # capture that was merely waiting for SCK's first audio buffer -- and the
+    # session then fell back to avfoundation with nothing wrong. The prime,
+    # one 20 ms block of zeroed f32le queued before any thread runs, gives
+    # that open a buffer to read. (2) While the first real buffer is still in
+    # flight the encoder legitimately cannot have output, so the window is
+    # published (`audio_pending()`) for the pump to slide its deadline; the
+    # feeder itself bounds it -- the first delivered buffer, the grace's
+    # `_abandon_audio` (EOF on the pipe, which ffmpeg treats like no audio
+    # input at all), or a failure reason that ends the capture outright.
+    # The units below drive the feeder directly on real pipes; H drives the
+    # whole renderer against a stand-in that reproduces the open-time block.
+    check("the prime is exactly one 20 ms block of silence in the shape the "
+          "SCK configuration promises the audio pipe -- f32le, 48 kHz, "
+          "stereo, 7680 = 48000 x 0.02 x 2 x 4 -- and every byte of it is "
+          "zero",
+          m55.SCK_AUDIO_SILENCE == bytes(7680)
+          and not any(m55.SCK_AUDIO_SILENCE),
+          'len=%d' % len(m55.SCK_AUDIO_SILENCE))
+
+    def _drain55(fd, want, timeout=6.0):
+        """Read up to `want` bytes off a non-blocking fd; b'' on timeout."""
+        buf = bytearray()
+        end = time.time() + timeout
+        while len(buf) < want and time.time() < end:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                time.sleep(0.02)
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        return bytes(buf)
+
+    _reset55(scale=2.0)
+    _Stream55.behavior = 'healthy'
+    _Stream55.instances[:] = []
+
+    # -- D2a: a healthy tap -- prime first, real buffer second ----------------
+    _vrA55, _vwA55 = os.pipe()
+    _arA55, _awA55 = os.pipe()
+    os.set_blocking(_arA55, False)
+    _feederA55 = None
+    try:
+        _feederA55 = m55._SckFeeder(audio_w=_awA55)
+        _awA55 = None
+        _feederA55.attach(os.fdopen(_vwA55, 'wb'))
+        _vwA55 = None
+        _feederA55.start({'display_id': 77, 'size': (202, 102),
+                          'cursor': True}, feed_audio=True)
+        _gotA55 = _drain55(_arA55, 7680 + 1920)
+        check("a healthy tap feeds ffmpeg the all-zero prime first and the "
+              "real buffer second, and that delivery closes the pending "
+              "window -- while 'seen' remains a fact about the tap's real "
+              "bytes, which is what it was always for",
+              _gotA55[:7680] == bytes(7680)
+              and _gotA55[7680:] == b'A' * 1920
+              and not _feederA55.audio_pending()
+              and _feederA55._audio_seen.is_set()
+              and not _feederA55.audio_absent(),
+              'got=%d/%d pending=%s seen=%s absent=%s' % (
+                  len(_gotA55[:7680]), len(_gotA55[7680:]),
+                  _feederA55.audio_pending(),
+                  _feederA55._audio_seen.is_set(),
+                  _feederA55.audio_absent()))
+    finally:
+        if _feederA55 is not None:
+            _feederA55.request_stop()
+            _feederA55.finish()
+        elif _awA55 is not None:
+            os.close(_awA55)
+        os.close(_arA55)
+        os.close(_vrA55)
+
+    # -- D2b: the tap never delivers -- the grace closes the window ----------
+    _Stream55.behavior = 'video_only'
+    _Stream55.instances[:] = []
+    _vrB55, _vwB55 = os.pipe()
+    _arB55, _awB55 = os.pipe()
+    os.set_blocking(_arB55, False)
+    _absentB55 = []
+    _feederB55 = None
+    try:
+        _feederB55 = m55._SckFeeder(
+            audio_w=_awB55, on_audio_absent=lambda: _absentB55.append(1))
+        _awB55 = None
+        _feederB55.attach(os.fdopen(_vwB55, 'wb'))
+        _vwB55 = None
+        _feederB55.start({'display_id': 77, 'size': (202, 102),
+                          'cursor': True}, feed_audio=True)
+        _wait_until(lambda: _feederB55._first_video.is_set(), timeout=6)
+        _pendB55 = _feederB55.audio_pending()
+        _seenB55 = _feederB55._audio_seen.is_set()
+        _absB55 = _feederB55.audio_absent()
+        _primeB55 = _drain55(_arB55, 7680, 4)
+        _droppedB55 = _wait_until(lambda: _feederB55.audio_absent(),
+                                  timeout=6)
+        check("when the tap never delivers, the pending window stays open "
+              "for the whole grace -- this is the window the pump reads -- "
+              "and then closes exactly once: the callback fires, the flag "
+              "latches, the prime was the only audio the pipe ever carried, "
+              "and nothing was ever 'seen'",
+              _pendB55 and not _seenB55 and not _absB55
+              and _primeB55 == bytes(7680)
+              and _droppedB55 and _absentB55 == [1]
+              and not _feederB55.audio_pending()
+              and not _feederB55._audio_seen.is_set(),
+              'pend=%s seen=%s absent=%s prime=%d dropped=%s calls=%s' % (
+                  _pendB55, _seenB55, _absB55, len(_primeB55),
+                  _droppedB55, _absentB55))
+    finally:
+        if _feederB55 is not None:
+            _feederB55.request_stop()
+            _feederB55.finish()
+        elif _awB55 is not None:
+            os.close(_awB55)
+        os.close(_arB55)
+        os.close(_vrB55)
+
+    # -- D2c: feed_audio=False queues nothing, even with a pipe attached -----
+    _Stream55.behavior = 'video_only'
+    _Stream55.instances[:] = []
+    _vrC55, _vwC55 = os.pipe()
+    _arC55, _awC55 = os.pipe()
+    os.set_blocking(_arC55, False)
+    _feederC55 = None
+    try:
+        _feederC55 = m55._SckFeeder(audio_w=_awC55)
+        _awC55 = None
+        _feederC55.attach(os.fdopen(_vwC55, 'wb'))
+        _vwC55 = None
+        _feederC55.start({'display_id': 77, 'size': (202, 102),
+                          'cursor': True}, feed_audio=False)
+        _gotC55 = _drain55(_arC55, 1, 1.5)
+        check("a session asked not to feed audio queues no prime and writes "
+              "nothing to a pipe that is attached: the window never opens, "
+              "so the budget was never in question",
+              _gotC55 == b'' and not _feederC55.audio_pending()
+              and not _feederC55._audio_seen.is_set()
+              and not _feederC55.audio_absent(),
+              'got=%d pending=%s' % (len(_gotC55),
+                                     _feederC55.audio_pending()))
+    finally:
+        if _feederC55 is not None:
+            _feederC55.request_stop()
+            _feederC55.finish()
+        elif _awC55 is not None:
+            os.close(_awC55)
+        os.close(_arC55)
+        os.close(_vrC55)
+
+    # -- H: an encoder parked at open still comes up on ScreenCaptureKit -----
+    # The end-to-end shape of the defect. The stand-in blocks inside its open
+    # on the prime, then on a 15360-byte read that only the grace's abandon
+    # (EOF) can end, and only then -- ~3.5 s after the feeder started --
+    # produces its first output byte. The old fixed 3 s no-frame budget
+    # expired first and the session fell back to avfoundation with nothing
+    # wrong; with the window-slide the mirror comes up on ScreenCaptureKit,
+    # no retry is taken, and the receipt tells the story in order: GOT12,
+    # the zero prime, the EOF'd read -- with `is_mirroring()` proving the
+    # output that followed.
+    _Stream55.behavior = 'video_only'
+    _Stream55.instances[:] = []
+    _Config55.instances[:] = []
+    _notify55[:] = []
+    _reset55(scale=2.0)
+    open(_rec55h, 'w').close()
+    utils.Setting.set(m55.SettingProperty.Mirror_Output, 'browser')
+    m55.find_ffmpeg = lambda: _fake55h
+    mir55h = None
+    try:
+        mir55h = _Mirror55()
+        mir55h.start_mirror()
+        _up55h = _wait_until(lambda: mir55h.is_mirroring(), timeout=25)
+        _lines55h = _lines55(_rec55h)
+        check("an encoder parked on our own audio pipe does not spend the "
+              "no-frame budget: the mirror comes up on ScreenCaptureKit "
+              "with the receipt reading 12 bytes of video, then the "
+              "all-zero prime, then the EOF the grace's abandon wrote -- "
+              "and no avfoundation retry, no second probe, was ever taken",
+              _up55h and mir55h.capture_method() == 'sck'
+              and _fake55h not in m55._sck_refused
+              and mir55h.audio_dropped()
+              and _calls55['n'] == 1
+              and 'GOT12' in _lines55h
+              and 'PRIME_NONZERO_0' in _lines55h
+              and 'AUDEOF_0' in _lines55h
+              and _lines55h.index('GOT12')
+              < _lines55h.index('PRIME_NONZERO_0')
+              < _lines55h.index('AUDEOF_0'),
+              'up=%s method=%s dropped=%s calls=%s lines=%s' % (
+                  _up55h, mir55h.capture_method(), mir55h.audio_dropped(),
+                  _calls55['n'], _lines55h))
+    finally:
+        if mir55h is not None:
+            mir55h.stop_mirror()
+            _wait_until(lambda: not mir55h.is_mirroring()
+                        and mir55h._proc is None and mir55h._feeder is None,
+                        timeout=10)
+
+    # The third table. Part 30 already rules that these two packages must be
+    # declared in requirements/darwin.txt (or the plugin may not import them
+    # at all) and that the macOS CI job installs everything darwin.txt names.
+    # The one list no rule looked at until now is the .app build's own --
+    # and it is the one that turns a declared dependency into working
+    # pixels: py2app's modulegraph cannot see imports inside function
+    # bodies, which is exactly how screen_mirror reaches ScreenCaptureKit.
+    # Dropped from here, the shipped .app still builds, still runs, and
+    # silently stays on avfoundation forever.
+    with open(os.path.join(REPO, "scripts", "setup_py2app.py"),
+              encoding="utf-8") as _fh55:
+        _p2a55 = _fh55.read()
+    _inc55 = _re55.search(r"'includes'\s*:\s*\[(.*?)\]", _p2a55, _re55.S)
+    _inc55_body = _inc55.group(1) if _inc55 else ''
+    check("screen_mirror's two ScreenCaptureKit packages are named in the "
+          "py2app bundle list -- modulegraph cannot see imports inside "
+          "function bodies, so an omission here degrades the .app silently",
+          "'ScreenCaptureKit'" in _inc55_body
+          and "'CoreMedia'" in _inc55_body,
+          'includes=%s' % (_inc55_body[:200] if _inc55 else None))
+except Exception as _e55:
+    _traceback55.print_exc()
+    check("Part 55 runs", False, "{}: {}".format(type(_e55).__name__, _e55))
+finally:
+    m55._probe_screencapturekit = _saved55_probe
+    m55._sck_version_ok = _real55_version_ok
+    m55.platform = _saved55_platform55
+    m55.find_ffmpeg = _saved55_find
+    m55._keep_awake = _saved55_awake
+    m55._sck_pixel_size = _saved55_pixel
+    m55._sck_nv12_bytes = _saved55_nv12
+    m55._sck_audio_bytes = _saved55_audio
+    m55.system_audio_routed = _saved55_route
+    m55._probe_avfoundation = _saved55_avf_probe
+    m55._SCK_MODULES.pop('mods', None)
+    m55._CG_PREFLIGHT.pop('ok', None)
+    m55._SCK_HANDLER_CLASSES.clear()
+    m55._capture_cache.clear()
+    m55._sck_refused.discard(_fake55a)
+    m55._sck_refused.discard(_fake55f)
+    m55._sck_refused.discard(_fake55b)
+    m55._sck_refused.discard(_fake55h)
+    for _key55 in list(m55._hw_encoder_cache):
+        if 'ffmpeg55' in repr(_key55):
+            m55._hw_encoder_cache.pop(_key55, None)
+    m55.sys.platform = _saved55_sys_platform
+    cherrypy.engine.unsubscribe('app_notify', _notify55_rec)
+    utils.Setting.unset(m55.SettingProperty.Mirror_Output)
+    _lg55.setLevel(_lvl55)
+    _lg55.removeHandler(_grab55)
+    utils.Setting.setting, utils.Setting.setting_path = _saved55[0], _saved55[1]
+    utils.SETTING_DIR = _saved55[2]
+    _shutil.rmtree(_tmp55, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

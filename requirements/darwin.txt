@@ -21,6 +21,16 @@ pyperclip
 # pulls in as pyobjc-framework-Cocoa -- declared here rather than inherited, so
 # dropping rumps cannot silently take the audio bridge with it.
 pyobjc-framework-Cocoa
+# The screen-mirror plugin's ScreenCaptureKit capture path (macOS 13+), which
+# replaced the avfoundation + BlackHole rig as the default grab. These are
+# imported lazily inside screen_mirror.py -- a machine without them falls back
+# to avfoundation, so a missing entry here degrades silently instead of
+# crashing. That is exactly why they are declared: a *shipped* .app must carry
+# them, or users never see the ~450 ms-faster path. ScreenCaptureKit already
+# depends on CoreMedia; both are named rather than inherited (same principle
+# as pyobjc-framework-Cocoa above).
+pyobjc-framework-ScreenCaptureKit
+pyobjc-framework-CoreMedia
 # Required by macast/discovery.py (mDNS advertisement for Chromecast/AirPlay).
 # Missing it is not a graceful degradation: the module import fails and the
 # app does not start at all.

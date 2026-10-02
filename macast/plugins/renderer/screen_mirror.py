@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.20</macast.version>
+# <macast.version>0.21</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集（avfoundation / gdigrab / x11grab）与编码，由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -27,12 +27,16 @@
 #     built from a random id, and /browser requires the matching token --
 #     a live mirror is not something to hand to "any host that can reach
 #     this port" (see the note on _StreamHandler and AGENTS.md 4.7);
-#   * capture is platform dispatched: avfoundation (macOS), ddagrab preferred
-#     with gdigrab behind it (Windows; see the DDAGRAB_* notes for what the
-#     gdigrab path costs on a multi-monitor desk), x11grab (Linux/X11).
+#   * capture is platform dispatched: ScreenCaptureKit first on macOS 13+
+#     with avfoundation behind it (see the ScreenCaptureKit section for when
+#     each wins), ddagrab preferred with gdigrab behind it (Windows; see the
+#     DDAGRAB_* notes for what the gdigrab path costs on a multi-monitor
+#     desk), x11grab (Linux/X11).
 #     System audio rides along where a tap
-#     exists: macOS needs a BlackHole device (no released FFmpeg can see
-#     system audio natively -- the screencapturekit demuxer never shipped),
+#     exists: on macOS 13+ that tap is ScreenCaptureKit's own -- no device
+#     needed -- and older systems fall back to a BlackHole device (no
+#     released FFmpeg can see system audio natively -- the screencapturekit
+#     demuxer never shipped),
 #     Windows needs a dshow *loopback* recording device (Stereo Mix where the
 #     driver ships it, otherwise a virtual cable -- ffmpeg's dshow input reads
 #     whatever the system exposes as an input, so a device that carries the
@@ -82,8 +86,9 @@
 #     Chrome's own "Cast desktop" uses: LAUNCH(0F5096E8) -> an OFFER on
 #     urn:x-cast:com.google.cast.webrtc -> an ANSWER that names a UDP port ->
 #     RTP packets with a 7-byte Cast header, each access unit encrypted once
-#     with AES-128-CTR (pure Python -- a single-file plugin has no crypto
-#     library) and keyed per frame. Nothing is served over HTTP for this one,
+#     with AES-128-CTR (the OS's own cipher via ctypes where one loads, pure
+#     Python only as the last resort) and keyed per frame. Nothing is served
+#     over HTTP for this one,
 #     so it has no viewer URL and no audio, and because the field layouts are
 #     transcribed rather than observed on a television it is opt-in and falls
 #     back to LOAD when the device refuses the mirroring app;
@@ -104,6 +109,7 @@ import json
 import locale
 import logging
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -118,7 +124,7 @@ import urllib.request
 from collections import deque
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Queue, Empty
+from queue import Queue, Empty, Full
 
 import cherrypy
 
@@ -137,7 +143,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.20'
+PLUGIN_VERSION = '0.21'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -1022,7 +1028,7 @@ class _Capture(object):
     audio too if a sink for it exists."""
 
     def __init__(self, label, inputs, audio_map=None, screens=None,
-                 method=''):
+                 method='', spec=None):
         self.label = label        # for the menu / logs
         self.inputs = inputs      # one list of input args per ffmpeg -i
         self.audio_map = audio_map  # '0:a:0' / '1:a:0' / None
@@ -1030,12 +1036,18 @@ class _Capture(object):
         #: devices on macOS, ddagrab's DXGI outputs on Windows (0.20+), empty
         #: where the platform has no list to offer (Linux).
         self.screens = screens or []
-        #: How this grab was built: 'ddagrab' / 'gdi' on Windows, '' elsewhere.
+        #: How this grab was built: 'ddagrab' / 'gdi' on Windows, 'sck' on
+        #: macOS 13+ (an in-process ScreenCaptureKit feeder), '' elsewhere.
         #: The mirror's runtime fallback keys on it -- ddagrab can refuse a
         #: display at attach time ("Generic error in an external library" on a
-        #: desktop the DWM will not duplicate), and only this field tells the
-        #: starter thread that the refusal it just watched is that one.
+        #: desktop the DWM will not duplicate), sck can be denied at
+        #: SCStream start, and only this field tells the starter thread that
+        #: the refusal it just watched is that one.
         self.method = method
+        #: Build parameters the in-process feeder needs and ffmpeg does not:
+        #: 'sck' carries {'display_id', 'size': (w, h), 'cursor'}. None for
+        #: every ffmpeg-driven method.
+        self.spec = spec
 
 
 #: probe results are cached per (ffmpeg, platform): probing spawns ffmpeg, and
@@ -1049,10 +1061,10 @@ def invalidate_capture_cache():
     _capture_cache.clear()
     # The ddagrab attach test is cached separately (it spawns one ffmpeg per
     # output), so it has to be cleared here too or a cursor/screen change would
-    # keep serving the old answer. `_ddagrab_refused` is deliberately NOT
-    # cleared: a display that refused to be duplicated will refuse again in
-    # this process, and forgetting that would send the next session back into
-    # the same multi-second refusal.
+    # keep serving the old answer. `_ddagrab_refused` and `_sck_refused` are
+    # deliberately NOT cleared: a display that refused to be duplicated will
+    # refuse again in this process, and forgetting that would send the next
+    # session back into the same multi-second refusal.
     _ddagrab_cache.clear()
 
 
@@ -1478,7 +1490,7 @@ def probe_capture(ffmpeg, platform=None, cursor=None):
     if platform == 'win32':
         capture = _probe_windows(ffmpeg, cursor=cursor)
     elif platform == 'darwin':
-        capture = _probe_avfoundation(ffmpeg, cursor=cursor)
+        capture = _probe_darwin(ffmpeg, cursor=cursor)
     else:
         capture = _probe_linux(ffmpeg, cursor=cursor)
     if capture is not None:
@@ -1566,9 +1578,13 @@ def _probe_avfoundation(ffmpeg, cursor=True):
         else:
             logger.warning("screen %s is gone, falling back to %s",
                            wanted, screen)
-    # macOS exposes no system-audio sink to avfoundation (FFmpeg's proposed
-    # screencapturekit demuxer was never released); BlackHole is the open
-    # source way to make one appear. Absent it, we mirror video only.
+    # avfoundation itself exposes no system-audio sink (the ScreenCaptureKit
+    # demuxer FFmpeg proposed was never released); BlackHole is the open
+    # source way to make one appear on *this* path. Since 0.21 the preferred
+    # darwin path is `_probe_darwin`, which taps SCK in-process and carries
+    # audio natively -- this probe is the fallback when SCK is unavailable
+    # (macOS < 13, missing pyobjc bindings) or has been refused at runtime.
+    # Absent an SCK tap, an absent BlackHole means we mirror video only.
     blackhole = None
     for index, name in enumerate(audios):
         if 'blackhole' in name.lower():
@@ -1613,10 +1629,916 @@ def video_only_capture(capture):
                     and re.match(r'^\d+:\d+$', inputs[0][pos + 1]):
                 inputs[0][pos + 1] = inputs[0][pos + 1].split(':')[0] + ':none'
     else:
-        # One input per device (PulseAudio's monitor sink): drop that input.
+        # One input per device (PulseAudio's monitor sink): the audio half of
+        # an SCK pair is its own `-i pipe:` entry and drops the same way.
         del inputs[audio_input:audio_input + 1]
     return _Capture('屏幕 (无系统声音)', inputs, screens=capture.screens,
-                    method=capture.method)
+                    method=capture.method, spec=capture.spec)
+
+
+# ---------------------------------------------------------------------------
+# ScreenCaptureKit (macOS 13+): darwin capture without avfoundation
+# ---------------------------------------------------------------------------
+#
+# avfoundation can only see what a capture *device* exposes, and on macOS no
+# device exposes the system's own audio -- which is why the BlackHole
+# aggregate rig exists. ScreenCaptureKit taps the screen and system audio
+# directly, from inside this process, and starts sooner: measured 2026-10-02
+# on this machine (ffmpeg spawn -> first encoded frame, three runs each),
+# SCK at 624/600/575 ms against avfoundation's 1954/1048/1031 ms -- roughly
+# 450 ms off every mirror session, plus a setup dialog that no longer
+# exists. The price is two pyobjc packages (ScreenCaptureKit, CoreMedia)
+# which are used lazily, never at module import (Part 30).
+#
+# The division of labour: ffmpeg still does the encoding, exactly as for
+# every other capture. What changes is that ffmpeg's first input is
+# `rawvideo nv12` reading *stdin*, which this plugin's feeder thread fills
+# from SCK callbacks, and its optional second input is `f32le` PCM from a
+# pipe the feeder also owns. The token below stands in for the fd at
+# command-build time and is resolved at spawn time, because the command is
+# also composed by probes and tests that have no pipe at all.
+#
+# Four pipe facts were measured before this design was fixed (2026-10-02,
+# local ffmpeg, this machine); each one is load-bearing:
+#
+#   * `-use_wallclock_as_timestamps 1` on the rawvideo stdin is what makes
+#     the frames' timestamps real arrival times, and `-r FPS` then stamps a
+#     CFR timeline from them (2 duplicate frames in a 6 s probe).
+#   * An f32le pipe that is open but silent **freezes the whole command at
+#     open time** -- ffmpeg consumes ~1.2 MB of video and then waits. The
+#     silent desktop is not that case: SCK delivers full-size zero PCM at
+#     its 20 ms cadence (measured), so the pipe is never silent in practice.
+#   * Zero bytes of audio followed by EOF does *not* freeze anything: a
+#     noise-video run reading mpegts back from a pipe produced 179,540
+#     bytes against 179,352 for the same run with no audio input at all.
+#     That is why giving up on audio is `close the write end`, not a
+#     capture restart.
+#   * CMSampleBuffers are recycled the moment the callback returns, so
+#     every byte that outlives the callback is copied inside it.
+#
+# Fallback shape: `_probe_darwin` tries SCK first and falls back to
+# `_probe_avfoundation` -- unchanged -- whenever SCK is unavailable (macOS
+# too old, bindings missing), unproven (no screen-recording grant yet; the
+# avfoundation path owns that permission flow), or refused at runtime (the
+# feeder's first frame never arrives; `_sck_refused` then keeps every later
+# session of this run on avfoundation, so one refusal costs one attempt).
+
+#: Stands in for the read end of the audio pipe in a built command. The real
+#: fd is not known when the command is composed -- and most callers (probes,
+#: fixtures, the DLNA builder's own tests) have no pipe at all, which is why
+#: `_resolve_audio_fd` refuses loudly rather than letting the token reach
+#: ffmpeg as a filename.
+_AUDIO_FD_TOKEN = '@AUDIO_FD@'
+
+
+def _resolve_audio_fd(cmd, audio_fd):
+    """Replace the audio-pipe placeholder in `cmd` with the real read fd.
+
+    A command that carries no token -- every non-SCK command -- passes
+    through untouched. A token without a pipe is a programming error and
+    must never spawn: ffmpeg would read a file literally named
+    `@AUDIO_FD@`, fail, and look like a capture problem.
+    """
+    if not any(_AUDIO_FD_TOKEN in one for one in cmd):
+        return cmd
+    if audio_fd is None:
+        raise ValueError(
+            'ffmpeg was handed the ScreenCaptureKit audio pipe token but '
+            'no pipe: this attempt must never spawn')
+    return [one.replace(_AUDIO_FD_TOKEN, str(audio_fd)) for one in cmd]
+
+
+#: ffmpeg binary -> True for the rest of the run once an SCK attempt died
+#: without producing a frame. Same latch shape as `_ddagrab_refused`: not
+#: cleared by invalidate_capture_cache(), because a cursor or screen change
+#: is not new evidence that SCK works now.
+_sck_refused = set()
+
+#: SCK exists from macOS 13; below that the API this file drives does not.
+SCK_MIN_MACOS = (13, 0)
+#: How long the feeder waits for the first SCK video frame before calling the
+#: attempt dead. Measured first frame is well under 300 ms; a denied or
+#: revoked screen-recording grant produces nothing at all, and the mirror
+#: must learn that in seconds, not at the no-frame watchdog's 3 s (which is
+#: needed for the ffmpeg side and stays).
+SCK_FIRST_FRAME_SECONDS = 2.0
+#: After video is flowing, how long an audio tap gets to deliver anything.
+#: The silent desktop still delivers zero-PCM every 20 ms, so silence this
+#: long means the audio output never attached or the tap is broken.
+SCK_AUDIO_GRACE_SECONDS = 2.0
+#: Frames dropped (`Queue(maxsize=...)`) rather than blocked on: a stalled
+#: writer must not stall ScreenCaptureKit's callback queue. 2 frames bounds
+#: worst-case queue latency to ~83 ms at 24 fps; older frames are worth less
+#: than current ones on a live stream.
+SCK_VIDEO_QUEUE = 2
+#: ~6 seconds of 20 ms audio buffers; dropping oldest keeps the pipe near
+#: live when the encoder hiccups.
+SCK_AUDIO_QUEUE = 300
+#: One 20 ms block of silence in the shape the audio pipe carries (f32le,
+#: 48 kHz, stereo: 48 000/50 samples x 2 ch x 4 bytes). Queued into the pipe
+#: before the capture starts -- see `_SckFeeder.start` -- because ffmpeg
+#: blocks the whole command at open on a *silent but open* audio pipe
+#: (measured 2026-10-02), and on a run where SCK's first real buffer was
+#: slow that freeze consumed the mirror's no-frame budget and killed an
+#: otherwise healthy session. Twenty milliseconds of zeros are inaudible
+#: and the pipe is a byte stream, so the first real buffer follows seamlessly.
+SCK_AUDIO_SILENCE = bytes((48000 // 50) * 2 * 4)
+#: The failure text the retry path keys on; a constant so the log line, the
+#: page and the suite cannot drift apart.
+SCK_REASON_NO_VIDEO = 'sck: no frames from ScreenCaptureKit'
+#: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange -- what SCK's default
+#: configuration delivers, and the one format the copy path understands.
+SCK_PIXEL_FORMAT_420V = 0x34323076
+
+
+def _sck_version_ok():
+    """True when this macOS is new enough for the SCK API used here."""
+    release = platform.mac_ver()[0] or ''
+    try:
+        parts = tuple(int(one) for one in release.split('.')[:2])
+    except ValueError:
+        return False
+    return len(parts) == 2 and parts >= SCK_MIN_MACOS
+
+
+#: One-shot caches. Nothing here runs at import time -- on Windows/Linux the
+#: framework paths below do not exist and must never be touched.
+_COREGRAPHICS = {}
+_CG_PREFLIGHT = {}
+_SCK_MODULES = {}
+_CV_API = {}
+_SCK_HANDLER_CLASSES = {}
+
+
+def _coregraphics():
+    lib = _COREGRAPHICS.get('lib')
+    if lib is None:
+        lib = ctypes.CDLL(
+            '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics')
+        lib.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        lib.CGPreflightScreenCaptureAccess.argtypes = []
+        _COREGRAPHICS['lib'] = lib
+    return lib
+
+
+def _preflight_screen_capture():
+    """True when this process already holds Screen Recording permission.
+
+    ScreenCaptureKit would *prompt* on first use, but a prompt cannot be
+    answered from a background thread -- and a probe that blocks on a dialog
+    the user never sees is worse than not probing. The preflight call asks
+    without prompting; a machine that has not granted the permission falls
+    through to avfoundation, whose own prompt flow is the one users have
+    always met.
+    """
+    if 'ok' not in _CG_PREFLIGHT:
+        answer = False
+        try:
+            answer = bool(_coregraphics().CGPreflightScreenCaptureAccess())
+        except Exception as e:              # pragma: no cover - darwin only
+            logger.debug('CGPreflightScreenCaptureAccess unavailable: %s', e)
+        _CG_PREFLIGHT['ok'] = answer
+    return _CG_PREFLIGHT['ok']
+
+
+def _sck_modules():
+    """(objc, Foundation, CoreMedia, ScreenCaptureKit), or None.
+
+    Imported lazily and cached: the plugin must load on Windows and Linux,
+    where these imports either fail or succeed against the wrong framework
+    set. A failed attempt is cached too, so the probe does not pay for the
+    import machinery on every run.
+    """
+    if 'mods' not in _SCK_MODULES:
+        try:
+            import objc
+            import Foundation
+            import CoreMedia
+            import ScreenCaptureKit
+            _SCK_MODULES['mods'] = (objc, Foundation, CoreMedia,
+                                    ScreenCaptureKit)
+        except Exception as e:
+            logger.debug('ScreenCaptureKit bindings unavailable: %s', e)
+            _SCK_MODULES['mods'] = False
+    return _SCK_MODULES['mods'] or None
+
+
+def _cv_api():
+    """(CoreVideo, CoreMedia) CDLLs with every signature this file uses.
+
+    ctypes without argtypes truncates 64-bit pointers, and these entry
+    points pass nothing but pointers. Loaded lazily; the feeder thread is
+    the only caller, and it exists only on darwin.
+    """
+    api = _CV_API.get('api')
+    if api is not None:
+        return api
+    cv = ctypes.CDLL('/System/Library/Frameworks/CoreVideo.framework/'
+                     'CoreVideo')
+    cm = ctypes.CDLL('/System/Library/Frameworks/CoreMedia.framework/'
+                     'CoreMedia')
+    vp = ctypes.c_void_p
+    cv.CVPixelBufferGetWidth.argtypes = [vp]
+    cv.CVPixelBufferGetWidth.restype = ctypes.c_size_t
+    cv.CVPixelBufferGetHeight.argtypes = [vp]
+    cv.CVPixelBufferGetHeight.restype = ctypes.c_size_t
+    cv.CVPixelBufferGetPixelFormatType.argtypes = [vp]
+    cv.CVPixelBufferGetPixelFormatType.restype = ctypes.c_uint32
+    cv.CVPixelBufferGetPlaneCount.argtypes = [vp]
+    cv.CVPixelBufferGetPlaneCount.restype = ctypes.c_size_t
+    cv.CVPixelBufferGetBaseAddressOfPlane.argtypes = [vp, ctypes.c_size_t]
+    cv.CVPixelBufferGetBaseAddressOfPlane.restype = vp
+    cv.CVPixelBufferGetBytesPerRowOfPlane.argtypes = [vp, ctypes.c_size_t]
+    cv.CVPixelBufferGetBytesPerRowOfPlane.restype = ctypes.c_size_t
+    cv.CVPixelBufferLockBaseAddress.argtypes = [vp, ctypes.c_ulong]
+    cv.CVPixelBufferLockBaseAddress.restype = ctypes.c_int32
+    cv.CVPixelBufferUnlockBaseAddress.argtypes = [vp, ctypes.c_ulong]
+    cv.CVPixelBufferUnlockBaseAddress.restype = ctypes.c_int32
+    cm.CMSampleBufferGetImageBuffer.argtypes = [vp]
+    cm.CMSampleBufferGetImageBuffer.restype = vp
+    cm.CMSampleBufferGetDataBuffer.argtypes = [vp]
+    cm.CMSampleBufferGetDataBuffer.restype = vp
+    cm.CMBlockBufferGetDataLength.argtypes = [vp]
+    cm.CMBlockBufferGetDataLength.restype = ctypes.c_size_t
+    cm.CMBlockBufferCopyDataBytes.argtypes = [vp, ctypes.c_size_t,
+                                              ctypes.c_size_t, vp]
+    cm.CMBlockBufferCopyDataBytes.restype = ctypes.c_int32
+    api = (cv, cm)
+    _CV_API['api'] = api
+    return api
+
+
+def _objc_ptr(obj):
+    """The raw pointer behind a pyobjc-wrapped object."""
+    return _sck_modules()[0].pyobjc_id(obj)
+
+
+def _sck_pixel_size(sample):
+    """(width, height) of the pixel buffer inside a video sample, or None."""
+    cv, cm = _cv_api()
+    image = cm.CMSampleBufferGetImageBuffer(_objc_ptr(sample))
+    if not image:
+        return None
+    return (int(cv.CVPixelBufferGetWidth(image)),
+            int(cv.CVPixelBufferGetHeight(image)))
+
+
+def _nv12_from_planes(planes, width, height):
+    """Strip row padding from NV12 planes into one tightly packed frame.
+
+    `planes` is [(data, bytes_per_row, rows)] in NV12 order -- Y, then the
+    interleaved UV plane -- exactly the layout `CVPixelBufferGetPlaneCount`
+    promises. Rows wider than the frame are cut down; anything that cannot
+    add up to exactly width*height*3//2 bytes returns None. A short frame
+    would be silent corruption downstream (green smear) that the encoder
+    cannot notice, so it is refused here instead. Pure function: the copy
+    path feeds it real plane bytes, the suite feeds it synthetic ones.
+    """
+    if width <= 0 or height <= 0:
+        return None
+    luma = width * height
+    out = bytearray(luma + luma // 2)
+    pos = 0
+    for data, row_bytes, rows in planes:
+        if row_bytes < width or len(data) < row_bytes * rows:
+            return None
+        for row in range(rows):
+            start = row * row_bytes
+            out[pos:pos + width] = data[start:start + width]
+            pos += width
+    if pos != len(out):
+        return None
+    return bytes(out)
+
+
+def _sck_nv12_bytes(sample, width, height):
+    """Copy an NV12 pixel buffer out as tightly packed bytes, or None.
+
+    Synchronous by contract: SCStream recycles sample buffers the moment
+    the handler returns. Padding is stripped by `_nv12_from_planes`, so the
+    byte stream matches the `-s WxH` rawvideo input exactly.
+    """
+    cv, cm = _cv_api()
+    image = cm.CMSampleBufferGetImageBuffer(_objc_ptr(sample))
+    if not image:
+        return None
+    if int(cv.CVPixelBufferGetPixelFormatType(image)) != SCK_PIXEL_FORMAT_420V:
+        return None
+    if cv.CVPixelBufferLockBaseAddress(image, 1) != 0:  # kCVPixelBufferLock_ReadOnly
+        return None
+    try:
+        if int(cv.CVPixelBufferGetPlaneCount(image)) < 2:
+            return None
+        y_row = int(cv.CVPixelBufferGetBytesPerRowOfPlane(image, 0))
+        c_row = int(cv.CVPixelBufferGetBytesPerRowOfPlane(image, 1))
+        y_ptr = cv.CVPixelBufferGetBaseAddressOfPlane(image, 0)
+        c_ptr = cv.CVPixelBufferGetBaseAddressOfPlane(image, 1)
+        if not y_ptr or not c_ptr:
+            return None
+        planes = [(ctypes.string_at(y_ptr, y_row * height), y_row, height),
+                  (ctypes.string_at(c_ptr, c_row * (height // 2)), c_row,
+                   height // 2)]
+    finally:
+        cv.CVPixelBufferUnlockBaseAddress(image, 1)
+    return _nv12_from_planes(planes, width, height)
+
+
+def _sck_audio_bytes(sample):
+    """The float32 PCM inside an audio sample, or b''.
+
+    The size cannot come from `CMSampleBufferGetTotalSampleSize` (it answers
+    0 for audio buffers -- it is defined for image data), so it comes from
+    the sample's block buffer. `CMBlockBufferCopyDataBytes` is used rather
+    than `GetDataPointer` because the buffer is not promised to be
+    contiguous.
+    """
+    _, cm = _cv_api()
+    block = cm.CMSampleBufferGetDataBuffer(_objc_ptr(sample))
+    if not block:
+        return b''
+    length = int(cm.CMBlockBufferGetDataLength(block))
+    if length <= 0:
+        return b''
+    out = ctypes.create_string_buffer(length)
+    if cm.CMBlockBufferCopyDataBytes(block, 0, length, out) != 0:
+        return b''
+    return out.raw
+
+
+def _shareable_content(Foundation, SCK, timeout=8.0):
+    """SCShareableContent, asked synchronously. None on error or timeout.
+
+    Completion-handler API run on an SCK-owned queue; a semaphore turns it
+    back into a blocking call. The probe runs on a background thread
+    (probes never run on the UI thread) and the feeder reuses this. The
+    wait is bounded: a machine that never calls back returns None instead
+    of hanging a session forever.
+    """
+    box = {}
+    done = threading.Event()
+
+    def on_content(content, error):
+        box['content'] = content
+        box['error'] = error
+        done.set()
+
+    SCK.SCShareableContent.getShareableContentWithCompletionHandler_(
+        on_content)
+    if not done.wait(timeout):
+        logger.warning('SCShareableContent did not answer within %.1f s',
+                       timeout)
+        return None
+    if box.get('error') is not None or box.get('content') is None:
+        logger.debug('SCShareableContent answered an error: %s',
+                     box.get('error'))
+        return None
+    return box['content']
+
+
+def _sck_filter(SCK, display):
+    """An SCContentFilter for one display, excluding nothing.
+
+    Both constructors exist across the macOS 13-27 range; the four-argument
+    one is preferred (it is the one that can later exclude overlay windows)
+    and the deprecation-era two-argument one is the fallback.
+    """
+    try:
+        return SCK.SCContentFilter.alloc(
+        ).initWithDisplay_excludingApplications_exceptingWindows_(
+            display, [], [])
+    except Exception:
+        return SCK.SCContentFilter.alloc().initWithDisplay_excludingWindows_(
+            display, [])
+
+
+def _display_scale(display, Foundation, SCK):
+    """Pixels per point for this display (Retina panels report 2.0).
+
+    SCDisplay sizes are in points; the rawvideo input is sized in pixels.
+    Getting this wrong makes ffmpeg reject every frame as a size mismatch,
+    so this asks NSScreen first (display id lives in its device
+    description), then the content filter's own pointPixelScale, then
+    falls back to 1.0.
+    """
+    display_id = int(display.displayID())
+    try:
+        for screen in Foundation.NSScreen.screens():
+            device = screen.deviceDescription() or {}
+            if int(device.get('NSScreenNumber', 0)) == display_id:
+                return float(screen.backingScaleFactor()) or 1.0
+    except Exception as e:
+        logger.debug('NSScreen scale lookup failed: %s', e)
+    try:
+        return float(_sck_filter(SCK, display).pointPixelScale()) or 1.0
+    except Exception as e:
+        logger.debug('pointPixelScale lookup failed: %s', e)
+    return 1.0
+
+
+def _sck_handler_class(Foundation):
+    """One NSObject subclass carrying both SCK callback protocols.
+
+    The ObjC runtime names classes globally, so a class is created once per
+    Foundation module and reused (tests load the plugin under several names,
+    each with its own fake Foundation -- keying on the module object keeps
+    those apart). One instance serves as both the stream delegate
+    (`stream_didStopWithError_`) and the sample handler for both outputs
+    (`stream_didOutputSampleBuffer_ofType_`); the feeder is hung off it as
+    a plain Python attribute.
+    """
+    cls = _SCK_HANDLER_CLASSES.get(id(Foundation))
+    if cls is None:
+        class _SckHandler(Foundation.NSObject):
+
+            def stream_didOutputSampleBuffer_ofType_(self, stream, sample,
+                                                     otype):
+                feeder = self._feeder
+                if feeder is not None:
+                    feeder.on_sample(sample, int(otype))
+
+            def stream_didStopWithError_(self, stream, error):
+                feeder = self._feeder
+                if feeder is not None:
+                    feeder.on_stream_stopped(error)
+
+        # The class statement binds `_SckHandler`, not `cls`: caching and
+        # returning `cls` right after the block shipped None (it was still
+        # the `.get()`'s None), so every call raised "'NoneType' object is
+        # not callable" at the `handler = ...()` line and the feeder died
+        # three seconds later looking exactly like "SCK gave no frame".
+        # The first end-to-end run caught it.
+        cls = _SckHandler
+        _SCK_HANDLER_CLASSES[id(Foundation)] = cls
+    return cls
+
+
+def _probe_screencapturekit(ffmpeg, cursor=True):
+    """An SCK capture spec, or None when this machine cannot run one.
+
+    Returns a _Capture whose `method` is 'sck': first input reads rawvideo
+    NV12 from stdin (the feeder writes frames there), optional second input
+    reads float32 PCM from the tokenized pipe (`_resolve_audio_fd` swaps in
+    the real fd at spawn time; only this probe ever emits the token).
+    """
+    if not _sck_version_ok():
+        return None
+    modules = _sck_modules()
+    if not modules:
+        return None
+    if not _preflight_screen_capture():
+        # No grant yet. Stay silent so the avfoundation probe's permission
+        # flow -- the one users have always met, with its own dialog and
+        # its own doors -- stays byte-for-byte what it was.
+        logger.debug('ScreenCaptureKit preflight: no screen-recording grant')
+        return None
+    _objc, Foundation, _coremedia, SCK = modules
+    content = _shareable_content(Foundation, SCK)
+    if content is None:
+        return None
+    try:
+        displays = list(content.displays())
+    except Exception as e:
+        logger.debug('cannot list displays: %s', e)
+        return None
+    if not displays:
+        return None
+    wanted = str(Setting.get(SettingProperty.Mirror_Screen, '') or '')
+    display = None
+    if wanted.isdigit():
+        for one in displays:
+            if str(int(one.displayID())) == wanted:
+                display = one
+                break
+        if display is None:
+            logger.warning('screen %s is gone, falling back to the main '
+                           'display', wanted)
+    if display is None:
+        display = displays[0]
+    screens = []
+    for position, one in enumerate(displays, 1):
+        scale = _display_scale(one, Foundation, SCK)
+        screens.append((int(one.displayID()),
+                        '屏幕 {}（{}×{}）'.format(
+                            position,
+                            int(int(one.width()) * scale) & ~1,
+                            int(int(one.height()) * scale) & ~1)))
+    scale = _display_scale(display, Foundation, SCK)
+    width = int(int(display.width()) * scale) & ~1
+    height = int(int(display.height()) * scale) & ~1
+    if width <= 0 or height <= 0:
+        return None
+    inputs = [['-f', 'rawvideo', '-pix_fmt', 'nv12', '-s',
+               '{}x{}'.format(width, height), '-framerate', str(FPS),
+               '-use_wallclock_as_timestamps', '1', '-i', '-'],
+              ['-f', 'f32le', '-ar', '48000', '-ac', '2', '-i',
+               'pipe:' + _AUDIO_FD_TOKEN]]
+    return _Capture('屏幕 + 系统声音 (ScreenCaptureKit)',
+                    inputs,
+                    audio_map='1:a:0', screens=screens, method='sck',
+                    spec={'display_id': int(display.displayID()),
+                          'size': (width, height),
+                          'cursor': bool(cursor)})
+
+
+def _probe_darwin(ffmpeg, cursor=True):
+    """Darwin capture: ScreenCaptureKit when possible, avfoundation else.
+
+    SCK carries system audio natively (no BlackHole, no aggregate device)
+    and starts ~450 ms sooner; avfoundation is the unchanged fallback for
+    macOS < 13, missing pyobjc bindings, no screen-recording grant yet, or
+    an SCK attempt that was refused earlier in this run.
+    """
+    if ffmpeg not in _sck_refused:
+        capture = _probe_screencapturekit(ffmpeg, cursor=cursor)
+        if capture is not None:
+            return capture
+    return _probe_avfoundation(ffmpeg, cursor=cursor)
+
+
+class _SckFeeder(object):
+    """Pumps ScreenCaptureKit frames (and audio) into ffmpeg's stdin(s).
+
+    One capture thread drives SCK and two writer threads drain the queues
+    into the pipes. Every failure path sets the same one-way stop flag and
+    records the first reason; the mirror thread reads `failed()` to decide
+    whether the no-frame it watched was SCK's refusal (retry once on
+    avfoundation, then latch). Dropping is always oldest-first and never
+    blocking: a stalled encoder must not stall ScreenCaptureKit, and on a
+    live stream an old frame is worth less than a current one.
+    """
+
+    def __init__(self, audio_w=None, on_audio_absent=None):
+        self._audio_w = audio_w
+        self._on_audio_absent = on_audio_absent
+        self._video_w = None
+        self._stop = threading.Event()
+        self._failure = None
+        self._audio_absent_flag = False
+        self._audio_seen = threading.Event()
+        self._audio_pending = threading.Event()
+        self._first_video = threading.Event()
+        self._audio_lock = threading.Lock()
+        self._lock = threading.Lock()
+        self._threads = []
+        self._video_q = Queue(maxsize=SCK_VIDEO_QUEUE)
+        self._audio_q = Queue(maxsize=SCK_AUDIO_QUEUE)
+        self._sinks = []
+        self._stream = None
+        self._spec = None
+        self._expected_size = None
+        self._screen_type = None
+        self._audio_type = None
+
+    # -- status ------------------------------------------------------------
+
+    def failed(self):
+        """The first failure reason, or None while healthy."""
+        with self._lock:
+            return self._failure
+
+    def audio_absent(self):
+        """True once video runs but the audio tap never delivered."""
+        return self._audio_absent_flag
+
+    def audio_pending(self):
+        """True while a fed audio pipe has neither delivered nor been given up.
+
+        FFmpeg blocks at open on a fed-but-silent audio pipe (measured
+        2026-10-02), so while this lasts the encoder legitimately cannot have
+        produced a frame yet and the mirror's no-frame budget must not count
+        this window against the capture. The feeder bounds it: the first
+        delivered buffer, the grace's `_abandon_audio`, or a failure reason
+        that ends the capture outright.
+        """
+        return self._audio_pending.is_set()
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def attach(self, video_w):
+        """Hand over the write end of ffmpeg's stdin, exactly once."""
+        self._video_w = video_w
+
+    def start(self, spec, feed_audio=True):
+        """Spawn the capture and writer threads; call once per session."""
+        self._spec = spec or {}
+        self._expected_size = tuple(self._spec.get('size') or ()) or None
+        if feed_audio and self._audio_w is not None:
+            # The prime: 20 ms of silence queued before any thread runs, so
+            # ffmpeg never opens onto a silent but open audio pipe -- that
+            # freeze (measured 2026-10-02) used to eat the no-frame budget
+            # on runs where SCK's first audio buffer was slow, and the
+            # session died as "SCK gave no frame" though nothing was wrong.
+            # Deliberately not `_audio_seen`: this silence is ours, and the
+            # "delivered no audio" verdict must keep meaning "SCK delivered
+            # nothing". Cleared by `_on_audio` (first real buffer) or
+            # `_abandon_audio`; until either, `audio_pending()` reports the
+            # window during which the encoder cannot yet have output.
+            self._audio_q.put_nowait(SCK_AUDIO_SILENCE)
+            self._audio_pending.set()
+        # (target, name, args) built here, not compared in the loop: bound
+        # methods are created fresh on every attribute access, so
+        # `target is self._run` was always False -- `_run` never got its
+        # `feed_audio` and died with a TypeError the instant the thread
+        # started, which looked exactly like "ScreenCaptureKit gave no
+        # frame" three seconds later. The first end-to-end run caught it.
+        workers = [(self._run, 'SCREEN_MIRROR_SCK', (bool(feed_audio),)),
+                   (self._write_video, 'SCREEN_MIRROR_SCK_W', ())]
+        if self._audio_w is not None:
+            workers.append((self._write_audio, 'SCREEN_MIRROR_SCK_A', ()))
+        for target, name, args in workers:
+            thread = threading.Thread(target=target, args=args,
+                                      name=name, daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def request_stop(self):
+        """Ask the capture to end; safe before start and repeatedly."""
+        self._stop.set()
+        self._stop_capture()
+
+    def finish(self, timeout=2.0):
+        """Join the workers and close the write ends; idempotent."""
+        for thread in list(self._threads):
+            thread.join(timeout)
+        self._close_video()
+        self._close_audio()
+
+    # -- closing -----------------------------------------------------------
+
+    def _close_video(self):
+        writer = self._video_w
+        self._video_w = None
+        if writer is not None:
+            try:
+                writer.close()
+            except (OSError, ValueError):
+                pass
+
+    def _close_audio(self):
+        with self._audio_lock:
+            fd = self._audio_w
+            self._audio_w = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _stop_capture(self):
+        """Best-effort SCStream shutdown; also runs from callback threads."""
+        stream = self._stream
+        if stream is None:
+            return
+        try:
+            stream.stopCaptureWithCompletionHandler_(None)
+        except Exception as e:
+            logger.debug('stopCapture failed: %s', e)
+
+    def _note_failure(self, reason):
+        """Record the first failure and end the capture.
+
+        A failure arriving while stopping (the user asked for it, or an
+        earlier failure is already recorded) is not one: SCStream reports
+        an abort error for a stream it was told to stop, and counting that
+        would turn every clean teardown into a retry.
+        """
+        if self._stop.is_set():
+            return
+        with self._lock:
+            if self._failure is None:
+                self._failure = reason
+                logger.warning('ScreenCaptureKit capture failed: %s', reason)
+        self._stop.set()
+        self._stop_capture()
+        # Close the video write end so ffmpeg cannot outlive the capture. It
+        # would otherwise stay blocked on a stdin nobody writes again, the
+        # pump would never see stdout close, and the mirror would freeze with
+        # the page still saying it runs. The writer thread polls the handle
+        # each iteration, so it exits on the next one; a concurrent close
+        # under an in-flight `write` surfaces as a `ValueError` there and is
+        # swallowed by its own handler (the stop flag is already set).
+        self._close_video()
+
+    def _abandon_audio(self):
+        """Stop feeding audio for this session (one-way).
+
+        Closing the write end is what tells ffmpeg to end the audio stream:
+        a silent-but-open audio input freezes the whole command at open
+        time, while a zero-byte EOF'd one is byte-for-byte as harmless as
+        no audio input at all (both measured 2026-10-02).
+        """
+        if self._audio_absent_flag:
+            return
+        self._audio_absent_flag = True
+        self._audio_pending.clear()
+        logger.warning('ScreenCaptureKit delivered no audio; continuing '
+                       'video-only')
+        self._close_audio()
+        callback = self._on_audio_absent
+        if callback is not None:
+            try:
+                callback()
+            except Exception as e:
+                logger.debug('audio-absent callback failed: %s', e)
+
+    # -- SCK callbacks (SCK-owned queues) ----------------------------------
+
+    def on_sample(self, sample, otype):
+        if self._stop.is_set():
+            return
+        if otype == self._screen_type:
+            self._on_video(sample)
+        elif otype == self._audio_type and self._audio_w is not None:
+            self._on_audio(sample)
+
+    def on_stream_stopped(self, error):
+        self._note_failure('sck: capture stopped ({})'.format(error))
+
+    def _on_video(self, sample):
+        try:
+            size = _sck_pixel_size(sample)
+        except Exception as e:
+            self._note_failure('sck: cannot read a frame (%s)' % e)
+            return
+        if size is None:
+            self._note_failure('sck: sample has no pixel buffer')
+            return
+        if self._expected_size is not None and size != self._expected_size:
+            self._note_failure(
+                'sck: display geometry changed ({}x{}, expected {}x{})'
+                .format(size[0], size[1], self._expected_size[0],
+                        self._expected_size[1]))
+            return
+        try:
+            frame = _sck_nv12_bytes(sample, size[0], size[1])
+        except Exception as e:
+            self._note_failure('sck: frame copy failed (%s)' % e)
+            return
+        if frame is None:
+            self._note_failure('sck: frame copy failed')
+            return
+        self._first_video.set()
+        self._enqueue(self._video_q, frame)
+
+    def _on_audio(self, sample):
+        try:
+            data = _sck_audio_bytes(sample)
+        except Exception:
+            data = b''
+        if not data:
+            return
+        self._audio_seen.set()
+        self._audio_pending.clear()
+        self._enqueue(self._audio_q, data)
+
+    @staticmethod
+    def _enqueue(queue, item):
+        """Put without ever blocking; oldest goes when full."""
+        while True:
+            try:
+                queue.put_nowait(item)
+                return
+            except Full:
+                try:
+                    queue.get_nowait()
+                except Empty:
+                    pass
+
+    # -- threads -----------------------------------------------------------
+
+    def _run(self, feed_audio):
+        if self._stop.is_set():
+            return
+        modules = _sck_modules()
+        if not modules:
+            self._note_failure('sck: bindings vanished after the probe')
+            return
+        _objc, Foundation, CoreMedia, SCK = modules
+        try:
+            self._screen_type = int(SCK.SCStreamOutputTypeScreen)
+            self._audio_type = int(SCK.SCStreamOutputTypeAudio)
+            content = _shareable_content(Foundation, SCK)
+            if content is None:
+                self._note_failure('sck: shareable content unavailable')
+                return
+            wanted = int((self._spec or {}).get('display_id', -1))
+            display = None
+            for one in content.displays():
+                if int(one.displayID()) == wanted:
+                    display = one
+                    break
+            if display is None:
+                self._note_failure('sck: display {} is gone'.format(wanted))
+                return
+            width, height = self._spec['size']
+            config = SCK.SCStreamConfiguration.alloc().init()
+            config.setWidth_(width)
+            config.setHeight_(height)
+            config.setScalesToFit_(True)
+            config.setMinimumFrameInterval_(CoreMedia.CMTimeMake(1, int(FPS)))
+            config.setQueueDepth_(3)
+            config.setShowsCursor_(bool(self._spec.get('cursor')))
+            config.setPixelFormat_(SCK_PIXEL_FORMAT_420V)
+            feed = bool(feed_audio) and self._audio_w is not None
+            config.setCapturesAudio_(feed)
+            config.setExcludesCurrentProcessAudio_(True)
+            config.setSampleRate_(48000)
+            config.setChannelCount_(2)
+            filt = _sck_filter(SCK, display)
+            handler = _sck_handler_class(Foundation)()
+            handler._feeder = self
+            self._sinks.append(handler)
+            stream = SCK.SCStream.alloc(
+            ).initWithFilter_configuration_delegate_(filt, config, handler)
+            self._stream = stream
+            ok, err = stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                handler, self._screen_type, None, None)
+            if not ok:
+                self._note_failure('sck: cannot attach the video output '
+                                   '({})'.format(err))
+                return
+            if feed:
+                ok, err = stream.\
+                    addStreamOutput_type_sampleHandlerQueue_error_(
+                        handler, self._audio_type, None, None)
+                if not ok:
+                    # Video-only is still better than avfoundation; the
+                    # console line will say so once the grace below runs
+                    # out (this path only shortens it).
+                    logger.warning('cannot attach the SCK audio output: %s',
+                                   err)
+                    self._abandon_audio()
+            start_error = {}
+
+            def on_start(*args):
+                start_error['error'] = args[0] if args else None
+                start_error['done'].set()
+
+            start_error['done'] = threading.Event()
+            stream.startCaptureWithCompletionHandler_(on_start)
+            if not start_error['done'].wait(8.0):
+                self._note_failure('sck: SCStream did not start within 8 s')
+                return
+            if start_error['error'] is not None:
+                self._note_failure('sck: SCStream start refused ({})'
+                                   .format(start_error['error']))
+                return
+            if not self._first_video.wait(SCK_FIRST_FRAME_SECONDS):
+                self._note_failure(SCK_REASON_NO_VIDEO)
+                return
+            if feed:
+                deadline = time.monotonic() + SCK_AUDIO_GRACE_SECONDS
+                while not self._stop.is_set() and \
+                        not self._audio_seen.is_set():
+                    if time.monotonic() >= deadline:
+                        self._abandon_audio()
+                        break
+                    time.sleep(0.05)
+            while not self._stop.is_set():
+                time.sleep(0.2)
+        except Exception as e:
+            self._note_failure('sck: {}'.format(e))
+
+    def _write_video(self):
+        while not self._stop.is_set():
+            writer = self._video_w
+            if writer is None:
+                break
+            try:
+                item = self._video_q.get(timeout=0.2)
+            except Empty:
+                continue
+            if item is None:
+                break
+            try:
+                writer.write(item)
+                writer.flush()
+            except (OSError, ValueError) as e:
+                self._note_failure('sck: encoder pipe closed (%s)' % e)
+                break
+
+    def _write_audio(self):
+        while not self._stop.is_set():
+            try:
+                item = self._audio_q.get(timeout=0.2)
+            except Empty:
+                continue
+            if item is None:
+                break
+            view = memoryview(item)
+            try:
+                with self._audio_lock:
+                    fd = self._audio_w
+                    if fd is None:
+                        break
+                    while view:
+                        view = view[os.write(fd, view):]
+            except OSError as e:
+                if self._stop.is_set():
+                    break
+                logger.debug('SCK audio write failed: %s', e)
+                self._abandon_audio()
+                break
 
 
 #: What `ffmpeg -f dshow -list_devices true -i dummy` prints on Windows
@@ -2115,14 +3037,19 @@ def has_hardware_encoder(ffmpeg, platform=None):
 
 
 def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
-                         encoder='software', profile=None):
+                         encoder='software', profile=None, audio_fd=None):
+    # `audio_fd` resolves the ScreenCaptureKit audio pipe token (see
+    # `_AUDIO_FD_TOKEN`): the command carries a placeholder because the fd does
+    # not exist until the spawn, and resolution is deliberately loud -- a
+    # command that still holds the token at exec time is a bug, not a video
+    # stream. Every non-SCK capture passes None and the resolver is a no-op.
     if kind == 'dlna':
         # A renderer of ten years ago is being handed this file, so the
         # profile -- not the user's quality menu -- decides the shape: the
         # height, the codec, the rate control and the container all have to be
         # ones that TV's demuxer knows.
-        return build_dlna_command(ffmpeg, capture,
-                                  profile or dlna_profile(), encoder)
+        return _resolve_audio_fd(build_dlna_command(ffmpeg, capture,
+                                  profile or dlna_profile(), encoder), audio_fd)
     cmd = [ffmpeg, '-hide_banner', '-loglevel', 'warning', '-nostdin']
     for one_input in capture.inputs:
         cmd += one_input
@@ -2208,7 +3135,7 @@ def build_ffmpeg_command(ffmpeg, capture, height, bitrate, kind=DEFAULT_OUTPUT,
     # Encoder private options only resolve after -c:v, so they ride at the end.
     cmd += extra
     cmd += OUTPUTS[kind][3]
-    return cmd
+    return _resolve_audio_fd(cmd, audio_fd)
 
 
 def build_dlna_command(ffmpeg, capture, profile, encoder='software'):
@@ -2331,15 +3258,37 @@ AUDIO_DROPPED_WIN32_SUFFIX = (
 
 AUDIO_DROPPED_WIN32_MARK = '· 本次无系统声音（回环设备未出帧）'
 
+#: ScreenCaptureKit's tap dies for a third reason, and the two doors above
+#: are wrong for it: there is no microphone grant behind an SCK audio tap,
+#: and BlackHole cannot feed one either. The failure latches for the whole
+#: run, so the only honest retry is the restart that clears the latch --
+#:「重启镜像」would promise a second audio attempt this run has already
+#: decided to skip (`_mirror` reads `_audio_refused`, not this sentence).
+AUDIO_DROPPED_SCK_SUFFIX = (
+    '（本次镜像没有系统声音：ScreenCaptureKit 一直没有送来系统音频，'
+    '已改为只采集画面。本次运行里之后的镜像也会先跳过声音；'
+    '要再试一次，请重启 Macast）')
 
-def audio_dropped_suffix(platform=None):
-    """The long sentence for a session that gave up its system audio."""
+AUDIO_DROPPED_SCK_MARK = '· 本次无系统声音（ScreenCaptureKit 未送出音频）'
+
+
+def audio_dropped_suffix(platform=None, method=None):
+    """The long sentence for a session that gave up its system audio.
+
+    `method` outranks `platform`: the SCK tap is not a third platform, it
+    is a third failure, and only the capture that ran knows which one it
+    was. `platform` stays positional for the existing callers.
+    """
+    if method == 'sck':
+        return AUDIO_DROPPED_SCK_SUFFIX
     return (AUDIO_DROPPED_WIN32_SUFFIX if (platform or sys.platform) == 'win32'
             else AUDIO_DROPPED_SUFFIX)
 
 
-def audio_dropped_mark(platform=None):
-    """The short one for the status line."""
+def audio_dropped_mark(platform=None, method=None):
+    """The short one for the status line (same precedence as the suffix)."""
+    if method == 'sck':
+        return AUDIO_DROPPED_SCK_MARK
     return (AUDIO_DROPPED_WIN32_MARK if (platform or sys.platform) == 'win32'
             else AUDIO_DROPPED_MARK)
 
@@ -3397,9 +4346,17 @@ def _audio_setup_worker():
 
 def audio_setup_needed():
     """False only once a probe has actually produced system audio; the menu
-    must not spawn ffmpeg to decide (it runs on the UI thread)."""
+    must not spawn ffmpeg to decide (it runs on the UI thread).
+
+    An SCK capture with no audio map is the one exception to「没有 map 就是
+    没有声音可采」: the run gives the tap up after it failed, and BlackHole
+    cannot feed an SCK input -- offering the setup button there would walk
+    the user through an installer that changes nothing.
+    """
     capture = next(iter(_capture_cache.values()), None)
-    return capture is None or capture.audio_map is None
+    if capture is None:
+        return True
+    return capture.audio_map is None and capture.method != 'sck'
 
 
 def restore_system_audio(report=lambda message: None):
@@ -7603,12 +8560,14 @@ class _RetryVideoOnly(Exception):
 
 
 class _RetryCapture(Exception):
-    """ddagrab refused the display before producing a frame: latch it and
-    start again on the gdigrab fallback, without calling it a failure.
+    """The capture source refused before producing a frame: latch it and start
+    again on the fallback, without calling it a failure.
 
-    Distinct from `_RetryVideoOnly` because the *capture source* changes, not
-    the audio: the retry keeps whatever audio the probe found, and the latch
-    (`_ddagrab_refused`) keeps every later session of this run off ddagrab.
+    Two raisers, one shape. Windows: ddagrab exits without a frame, the latch
+    is `_ddagrab_refused`, the fallback is gdigrab. macOS: ScreenCaptureKit
+    dies or stalls in the feeder, the latch is `_sck_refused`, the fallback is
+    avfoundation. Distinct from `_RetryVideoOnly` because the *capture source*
+    changes, not the audio: the retry keeps whatever audio the probe found.
     """
 
 
@@ -7656,11 +8615,18 @@ class ScreenMirrorRenderer(Renderer):
         #: again costs the viewer seconds of black before the picture starts.
         self._audio_refused = False
         #: The capture source the running attempt was built on ('ddagrab' /
-        #: 'gdi' on Windows, '' elsewhere). Read by `_encoder_died`: a ddagrab
-        #: session that died before its first byte is a refusal the starter
-        #: thread is about to answer (gdigrab fallback, or a considered
-        #: failure), and the pump must not race it with a「启动失败」of its own.
+        #: 'gdi' on Windows, 'sck' / 'avfoundation' on macOS, '' elsewhere).
+        #: Read by `_encoder_died`: a ddagrab session that died before its
+        #: first byte is a refusal the starter thread is about to answer
+        #: (gdigrab fallback, or a considered failure), and the pump must not
+        #: race it with a「启动失败」of its own. `sck` shares this meaning, and
+        #: the pump additionally asks the feeder whether it failed.
         self._capture_method = ''
+        #: The in-process ScreenCaptureKit feeder for the running session
+        #: (`_SckFeeder`), handed over exactly like `_proc`: the starter thread
+        #: builds it, the pump owns its lifetime, `_teardown` stops it. None
+        #: for every other capture method.
+        self._feeder = None
         #: Which compatibility shape *this run* is on, when the watchdog moved
         #: it, and how many moves it has spent. Both belong to the run rather
         #: than to the setting: `Mirror_Dlna_Profile` is the user's choice, and
@@ -7945,6 +8911,15 @@ class ScreenMirrorRenderer(Renderer):
         """
         return self._audio_dropped
 
+    def capture_method(self):
+        """Which grab is (or was last) feeding this session: 'sck',
+        'avfoundation', 'ddagrab', 'gdi', or '' before any ran. Called by
+        `_status_line` to pick the right「没有声音」annotation -- the SCK tap,
+        the microphone-granted one and the Windows loopback die for three
+        different reasons and each sentence offers a different door.
+        """
+        return self._capture_method
+
     def stop_mirror(self):
         with self._lock:
             self._generation += 1
@@ -8046,29 +9021,74 @@ class ScreenMirrorRenderer(Renderer):
                            title=socket.gethostname() or 'Macast',
                            profile=profile, bitrate=bitrate)
         handed = False
+        # Locals the unwind paths below hand to `_cleanup` when an attempt
+        # never reaches its `handed` moment: nothing else has ever seen them,
+        # so `_teardown` -- which reads the published fields -- cannot reap
+        # them. All of them are None on every non-SCK capture.
+        proc = None
+        feeder = None
+        feed_audio = False
+        audio_r = audio_w = None
         try:
-            # Built once and reused for the spawn and for the log line: the same
-            # argv is what the「统计信息」card shows, and building it twice was
-            # two chances for the logged command to differ from the run one.
-            command = build_ffmpeg_command(ffmpeg, capture, height, bitrate,
-                                           kind=kind, encoder=encoder,
-                                           profile=profile)
-            diagnostics = _session_diagnostics(
-                kind=kind, capture=capture, command=command, encoder=encoder,
-                height=height, bitrate=bitrate, session=session,
-                audio_expected=with_audio, refused=refused)
-            #: Attached before the server exists to answer: the viewing page's
-            #: overlay reads its facts off the session, and a viewer that opens
-            #: the URL inside the first second would otherwise get an empty
-            #: panel and conclude the overlay is broken.
-            session.diag = diagnostics
-            server = None if stream is not None else start_stream_server(session)
-            proc = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                env=_clean_env())
+            # The ScreenCaptureKit pair: ffmpeg reads NV12 frames from stdin
+            # and f32le PCM from a second pipe whose read fd is argv material
+            # (`_AUDIO_FD_TOKEN`), so the pipe exists before the command is
+            # built. The low-latency target unmaps audio entirely (`-an`), so
+            # feeding it would be wasted work -- but its write end must still
+            # be closed: an audio input that is open and silent freezes the
+            # whole command at open time (measured 2026-10-02).
+            try:
+                if capture.method == 'sck' and capture.audio_map:
+                    audio_r, audio_w = os.pipe()
+                    feed_audio = kind != 'caststream'
+                # Built once and reused for the spawn and for the log line: the
+                # same argv is what the「统计信息」card shows, and building it
+                # twice was two chances for the logged command to differ from
+                # the run one.
+                command = build_ffmpeg_command(
+                    ffmpeg, capture, height, bitrate, kind=kind,
+                    encoder=encoder, profile=profile, audio_fd=audio_r)
+                diagnostics = _session_diagnostics(
+                    kind=kind, capture=capture, command=command,
+                    encoder=encoder, height=height, bitrate=bitrate,
+                    session=session, audio_expected=with_audio,
+                    refused=refused)
+                #: Attached before the server exists to answer: the viewing
+                #: page's overlay reads its facts off the session, and a viewer
+                #: that opens the URL inside the first second would otherwise
+                #: get an empty panel and conclude the overlay is broken.
+                session.diag = diagnostics
+                server = None if stream is not None \
+                    else start_stream_server(session)
+                proc = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE if capture.method == 'sck'
+                    else subprocess.DEVNULL,
+                    pass_fds=(audio_r,) if audio_r is not None else (),
+                    env=_clean_env())
+            finally:
+                # The read end lives in the child now. The write end goes to
+                # the feeder -- or, when nothing will feed it, closes right
+                # here, which is the audio-absent shape ffmpeg is known to
+                # accept (measured 2026-10-02). A failed spawn leaves neither
+                # end open.
+                if audio_r is not None:
+                    os.close(audio_r)
+                    audio_r = None
+                if audio_w is not None and (proc is None or not feed_audio):
+                    os.close(audio_w)
+                    audio_w = None
             logger.info('screen capture command: %s', ' '.join(command))
+            if capture.method == 'sck':
+                # The feeder is the only source of frames for this attempt: it
+                # owns the video stdin from here on, plus the audio pipe's
+                # write end when one was left open. Handed over to the pump
+                # below exactly like `proc`, and stopped by `_teardown`.
+                feeder = _SckFeeder(audio_w=audio_w,
+                                    on_audio_absent=self._sck_audio_absent)
+                audio_w = None
+                feeder.attach(proc.stdin)
             with self._lock:
                 if generation != self._generation:
                     raise _Aborted()
@@ -8082,6 +9102,7 @@ class ScreenMirrorRenderer(Renderer):
                 # Which grab this attempt runs on. `_encoder_died` reads it
                 # to know whose death it is looking at; see the field comment.
                 self._capture_method = capture.method
+                self._feeder = feeder
                 handed = True
             threading.Thread(
                 target=_pump,
@@ -8099,6 +9120,12 @@ class ScreenMirrorRenderer(Renderer):
                    if kind == 'dlna' else stream_url(server))
             if stream is not None:
                 stream.start()
+            if feeder is not None:
+                # Started only after the pump and the drain thread are up: the
+                # first frames land in the pipe buffer instead of on the floor,
+                # and the no-frame watchdog below measures the capture rather
+                # than our own bookkeeping.
+                feeder.start(capture.spec, feed_audio=feed_audio)
             # Wait for the encoder to actually produce something: a Screen
             # Recording denial exits in under a second, and the pump is
             # reporting that while we wait. A process that dies calls the wait
@@ -8111,6 +9138,23 @@ class ScreenMirrorRenderer(Renderer):
             while not first_bytes.is_set():
                 if proc.poll() is not None or generation != self._generation:
                     break
+                if feeder is not None and feeder.failed():
+                    # The feeder records its reason; ffmpeg may still be
+                    # alive, blocked on a stdin nobody will write again, so
+                    # waiting out the budget beside it buys nothing.
+                    break
+                if feeder is not None and feeder.audio_pending():
+                    # The SCK audio tap has neither delivered nor been given
+                    # up on yet: ffmpeg is (or just was) frozen at open on
+                    # that silent pipe (measured 2026-10-02), so no output
+                    # can exist through no fault of the capture. This window
+                    # spent most of the budget and killed the session as an
+                    # "SCK gave no frame" -- over our own audio grace, which
+                    # is the only thing allowed to end it. Push the deadline
+                    # while it lasts; the feeder bounds it (first delivery,
+                    # the grace that closes the pipe, or a failure that
+                    # breaks the loop above).
+                    deadline = time.time() + budget
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
@@ -8146,6 +9190,28 @@ class ScreenMirrorRenderer(Renderer):
                         # the pump reports our own kill as an interruption.
                         self._generation += 1
                         _ddagrab_refused.add(ffmpeg)
+                        invalidate_capture_cache()
+                    raise _RetryCapture()
+                if capture.method == 'sck' and feeder is not None:
+                    # Three shapes, one verdict: the feeder recorded a reason
+                    # (bindings died, the stream stopped, the frame copy
+                    # failed), ffmpeg exited on a stdin that produced almost
+                    # nothing, or the stream started and delivered no frame at
+                    # all. Every one of them is the capture source refusing
+                    # -- none is the audio -- so latch the build, re-probe
+                    # (which now answers avfoundation) and take the attempt
+                    # again with the same audio the probe found.
+                    why = feeder.failed() or (
+                        'ffmpeg exited (code %s)' % proc.poll()
+                        if proc.poll() is not None
+                        else 'no frames within %g s' % budget)
+                    logger.warning('ScreenCaptureKit gave no frame (%s);'
+                                   ' retrying with avfoundation', why)
+                    with self._lock:
+                        # Retire the generation before the process dies, or
+                        # the pump reports our own kill as an interruption.
+                        self._generation += 1
+                        _sck_refused.add(ffmpeg)
                         invalidate_capture_cache()
                     raise _RetryCapture()
                 if with_audio and capture.audio_map and kind != 'caststream':
@@ -8198,22 +9264,28 @@ class ScreenMirrorRenderer(Renderer):
                                session.profile)
                 sender.play()
         except _Aborted:
-            if stream is not None and not handed:
-                # Nobody else ever held this sender, and the mirroring app is
-                # already up on the device: leave without saying goodbye and
-                # the next session meets the stale instance it refuses.
-                _cleanup(None, None, None, stream)
+            if not handed:
+                # The unpublished attempt's locals: an encoder nobody has
+                # seen, an HTTP server that was already accepting viewers,
+                # the SCK feeder, and a Cast Streaming sender whose mirroring
+                # app is already up on the device (leave without saying
+                # goodbye and the next session meets the stale instance it
+                # refuses). `_teardown` reaps the published fields only --
+                # nothing was published here -- so this is the one place
+                # these can be released.
+                _cleanup(None, proc, server, stream, feeder)
             self._teardown()
             return
         except (_RetryVideoOnly, _RetryCapture):
             # Not a failure, so nothing goes on the status line: the next
-            # attempt -- video only, or gdigrab after a ddagrab refusal -- is
-            # already under way and will report its own outcome.
+            # attempt -- video only, gdigrab after a ddagrab refusal, or
+            # avfoundation after an SCK one -- is already under way and will
+            # report its own outcome.
             self._teardown()
             return True
         except Exception as e:
-            if stream is not None and not handed:
-                _cleanup(None, None, None, stream)
+            if not handed:
+                _cleanup(None, proc, server, stream, feeder)
             self._teardown()
             detail = str(e).strip() or ' '.join(list(tail)[-3:])
             target_label = name if kind in ('cast', 'caststream', 'dlna') \
@@ -8265,8 +9337,10 @@ class ScreenMirrorRenderer(Renderer):
         if self._audio_dropped:
             # Same rule as the fallback above: the picture arrived, so the
             # sentence is green -- but the sound the user asked for did not,
-            # and only this line says so and where the door is.
-            message += audio_dropped_suffix()
+            # and only this line says so and where the door is. Which door is
+            # the capture's to say: the SCK tap dies differently from the
+            # two the platform sentences were written for.
+            message += audio_dropped_suffix(method=capture.method)
         notify(message, sound=True)
         logger.info('mirroring screen (%s) to %s via %s', kind, name or 'LAN',
                     url)
@@ -8502,6 +9576,11 @@ class ScreenMirrorRenderer(Renderer):
         """
         if self._proc is None:
             return
+        with self._lock:
+            # The teardown below kills the encoder on purpose; without this
+            # bump the pump reports that kill as「屏幕采集中断」，overwriting
+            # the sentence that sent us here (同一形状见 `_stream_lost`).
+            self._generation += 1
         self._teardown()
 
     def _give_up(self, sender, reason, session=None):
@@ -8555,6 +9634,22 @@ class ScreenMirrorRenderer(Renderer):
         self._fail(reason, generation)
         self._teardown()
 
+    def _sck_audio_absent(self):
+        """The SCK audio tap never delivered; the session goes on video-only.
+
+        Called back from the feeder's grace timer (`_abandon_audio`), by
+        which time the start notification has already gone out -- so the
+        durable answer lives on the page rather than in a second balloon:
+        `audio_dropped()` turns True here and `_audio_line` stops saying
+        「已启用」. Latching `_audio_refused` spares every later session on
+        this run the same two-second grace.
+        """
+        with self._lock:
+            self._audio_dropped = True
+            self._audio_refused = True
+        logger.warning('ScreenCaptureKit audio never arrived; this session'
+                       ' continues without system sound')
+
     def _cast_url(self, url, generation):
         """Bridge path: play a finished URL on the device, no capture."""
         host, port, name = self.target()
@@ -8581,32 +9676,37 @@ class ScreenMirrorRenderer(Renderer):
     def _encoder_died(self, generation, proc, started_at, produced=True):
         """ffmpeg exited while we still wanted it running.
 
-        `produced` is whether any encoder output had arrived. A ddagrab
-        session that died before its first byte is answered by the starter
-        thread -- gdigrab fallback, or a failure sentence that carries
-        ffmpeg's own last words -- so reporting it here as well would race
-        that. And a「启动失败」that is about to turn into a working fallback is
-        a lie the user reads just before the picture that was already coming.
-        Every other death, on every other capture, is reported here exactly as
-        before.
+        `produced` is whether any encoder output had arrived. A ddagrab or
+        ScreenCaptureKit session that died before its first byte is answered
+        by the starter thread -- fallback capture, or a failure sentence that
+        carries the capture's own last words -- so reporting it here as well
+        would race that. And a「启动失败」that is about to turn into a working
+        fallback is a lie the user reads just before the picture that was
+        already coming. Every other death, on every other capture, is
+        reported here exactly as before -- with the feeder's recorded reason
+        standing in for the exit code when there is one, because「ffmpeg 退出
+        码 0」is what an SCK death with a closed stdin looks like on paper.
         """
         with self._lock:
             if generation != self._generation:
                 return
             method = self._capture_method
-        if method == 'ddagrab' and not produced:
-            logger.info('ffmpeg (ddagrab) exited before its first frame'
+            feeder = self._feeder
+        if method in ('ddagrab', 'sck') and not produced:
+            logger.info('ffmpeg (%s) exited before its first frame'
                         ' (code %s); the capture starter owns this verdict',
-                        proc.poll())
+                        method, proc.poll())
             return
         code = proc.poll()
+        why = feeder.failed() if feeder is not None else None
         if time.time() - started_at < EARLY_DEATH_SECONDS:
             hint = ('：若是首次使用，{}，勾选后重启 Macast'.format(PERMISSION_DOOR)
                     if sys.platform == 'darwin' else '')
-            self._fail('屏幕采集启动失败（ffmpeg 退出码 {}）{}'.format(code, hint),
-                       generation)
+            self._fail('屏幕采集启动失败（{}）{}'.format(
+                why or 'ffmpeg 退出码 {}'.format(code), hint), generation)
         else:
-            self._fail('屏幕采集中断（ffmpeg 退出码 {}）'.format(code), generation)
+            self._fail('屏幕采集中断（{}）'.format(
+                why or 'ffmpeg 退出码 {}'.format(code)), generation)
         self._teardown()
 
     def _fail(self, message, generation):
@@ -8627,8 +9727,10 @@ class ScreenMirrorRenderer(Renderer):
         with self._lock:
             sender, proc, server = self._sender, self._proc, self._server
             sink = self._sink
+            feeder = self._feeder
             self._sender = self._proc = self._server = None
             self._sink = None
+            self._feeder = None
             self._kind = ''
             self._diag = {}
             self._mirroring = False
@@ -8636,22 +9738,33 @@ class ScreenMirrorRenderer(Renderer):
             # Claim the assert here so a second teardown (the encoder dying
             # right after a manual stop) cannot release someone else's.
             awake, self._awake = self._awake, None
-        _cleanup(sender, proc, server, sink)
+        _cleanup(sender, proc, server, sink, feeder)
         if awake is not None:
             _stop_awake(awake)
 
 
-def _cleanup(sender, proc, server, sink=None):
+def _cleanup(sender, proc, server, sink=None, feeder=None):
     for thing in (sender, sink):
         if thing is not None:
             thing.stop()
             _close_quietly(thing)
+    if feeder is not None:
+        # Ask the capture to end before killing the encoder: the feeder's
+        # `finish` closes stdin's write end, and EOF should land where the
+        # frame boundary is rather than mid-write.
+        feeder.request_stop()
     if proc is not None and proc.poll() is None:
         proc.terminate()
         try:
             proc.wait(timeout=3)
         except Exception:
             proc.kill()
+    if feeder is not None:
+        # Joined only after the terminate: a writer blocked in `write()` on a
+        # full pipe unblocks with BrokenPipe the moment the reader is gone,
+        # so the joins cannot hold this up for long. The threads are daemons
+        # regardless, and `finish` is idempotent.
+        feeder.finish(timeout=2.0)
     if server is not None:
         # A DLNA reader is parked in _ByteLog.read() waiting for the next
         # byte; nothing else releases it before server_close() would block.
@@ -9831,7 +10944,7 @@ class ScreenMirrorSetting(RendererSetting):
             line = '已镜像 {:d}:{:02d} · {:.1f} Mbps · {:d} 个观看端 · 丢块 {:d}'.format(
                 minutes, seconds, stats['mbps'], stats['clients'], stats['drops'])
         if renderer.audio_dropped():
-            line += ' ' + audio_dropped_mark()
+            line += ' ' + audio_dropped_mark(method=renderer.capture_method())
         return line
 
     @staticmethod
@@ -9874,6 +10987,15 @@ class ScreenMirrorSetting(RendererSetting):
         if capture.audio_map:
             line = '系统声音：已启用 · {}'.format(capture.label)
             if renderer is not None and renderer.audio_dropped():
+                if capture.method == 'sck':
+                    # A third failure, and the two platform sentences are
+                    # both wrong doors for it: there is no microphone grant
+                    # behind an SCK tap and no BlackHole to install under
+                    # one. The latch holds for the whole run, so the only
+                    # retry that actually re-asks is a Macast restart.
+                    return ('系统声音：这一次镜像没有声音 —— ScreenCaptureKit'
+                            ' 一直没有送来系统音频，所以只采了画面。本次运行里'
+                            '之后的镜像也会先跳过声音；要再试一次，请重启 Macast')
                 if platform == 'win32':
                     return ('系统声音：这一次镜像没有声音 —— 回环录音设备没能'
                             '及时出帧，所以只采了画面。要声音请确认「立体声混音」'
@@ -9882,16 +11004,28 @@ class ScreenMirrorSetting(RendererSetting):
                 return ('系统声音：这一次镜像没有声音 —— 那个采集口打不开，'
                         '连画面也不给，所以只采了画面。要声音请{}，勾选后重启 '
                         'Macast').format(MICROPHONE_DOOR)
-            if system_audio_routed() is False:
+            if capture.method != 'sck' and system_audio_routed() is False:
                 # "已启用" is a statement about the tap, not about the sound.
                 # Saying only that is what made a silent mirror look like an
                 # encoder bug: the machine's output was never pointed at the
-                # device being captured.
+                # device being captured. SCK is exempt: its tap reads the
+                # system mix directly, so which device the default output is
+                # cannot make this capture silent, and the BlackHole-routing
+                # sentence would name a device this capture never touches.
                 line += ('；但系统声音没有路由到它（默认输出不是「{}」），'
                          '镜像里会是静音。点「一键设置」切换，或在「音频 MIDI '
                          '设置」里做一个包含它的多输出设备').format(
                     MACAST_AGGREGATE_NAME)
             return line
+        if capture.method == 'sck':
+            # audio_map is None under SCK only when this run already gave the
+            # tap up (`_sck_audio_absent` latches, and every later probe has
+            # it stripped by `video_only_capture`). The BlackHole sentence
+            # would send the user to install a driver that cannot feed an SCK
+            # capture; the latch, not the system, is what has to change.
+            return ('系统声音：未启用 —— 本次运行里 ScreenCaptureKit 没能送出'
+                    '系统音频，之后的镜像先只采画面。要再试一次系统声音，'
+                    '请重启 Macast')
         if platform == 'darwin':
             return '系统声音：未启用（可一键安装 BlackHole）'
         if platform == 'win32':

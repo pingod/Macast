@@ -157,10 +157,16 @@ jobs:
           # the build environment py2app cannot see the import, the dependency
           # is silently left out of the bundle, and the shipped .app dies at
           # launch with "ModuleNotFoundError: No module named 'zeroconf'".
+          # This list mirrors requirements/darwin.txt; the two ScreenCaptureKit
+          # entries are the screen-mirror plugin's fast capture path (lazy
+          # imports, silently absent from the bundle if the build env lacks
+          # them -- see the pyobjc comment in requirements/darwin.txt).
           pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
                       'requests' 'pillow' 'zeroconf' \
-                      'pyobjc-framework-Cocoa'
+                      'pyobjc-framework-Cocoa' \
+                      'pyobjc-framework-ScreenCaptureKit' \
+                      'pyobjc-framework-CoreMedia'
 
       # No mpv is bundled. Playback uses the mpv already on the machine
       # (`brew install mpv`), which is what the source repo's README asks for

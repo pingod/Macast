@@ -493,6 +493,12 @@ OPTIONS = {
     # "ModuleNotFoundError: No module named 'zeroconf'".
     'includes': ['cherrypy', 'lxml', 'netifaces', 'appdirs', 'pyperclip',
                  'requests', 'cheroot.ssl.builtin',
+                 # The screen-mirror plugin's ScreenCaptureKit path imports
+                 # these *inside functions* (a module-level import would break
+                 # Windows/Linux plugin loading), so they are spelled out here
+                 # rather than left to modulegraph. Both must also be in the
+                 # build environment -- see requirements/darwin.txt.
+                 'ScreenCaptureKit', 'CoreMedia',
                  # All first-party plugins are shipped in the application. The
                  # loader discovers them from os.listdir, so py2app cannot
                  # infer these imports on its own.

@@ -15,8 +15,10 @@
 # that only degrade behaviour) do not fail the run.
 
 import glob
+import importlib.util
 import json
 import os
+import platform
 import shutil
 import socket
 import subprocess
@@ -382,40 +384,68 @@ if os.path.exists(ffmpeg):
 
 # System audio: where a tap exists at all, and whether it is set up.
 if sys.platform == "darwin":
-    taps = sorted(glob.glob("/Library/Audio/Plug-Ins/HAL/BlackHole*.driver") +
-                  glob.glob(os.path.expanduser(
-                      "~/Library/Audio/Plug-Ins/HAL/BlackHole*.driver")))
-    if taps:
-        # Two questions, not one: the files being on disk does not mean the
-        # audio daemon loaded them (the official .pkg's postinstall only
-        # chmods), and the plugin's capture probe talks to avfoundation.
-        # Reporting "installed, so you're covered" for a driver that never
-        # loaded is how "装了却没有设备" ended up looking like the user's
-        # problem -- and Screen Mirror then re-ran its installer forever.
-        live = True
-        if ffmpeg:
-            try:
-                listing = subprocess.run(
-                    [ffmpeg, "-hide_banner", "-f", "avfoundation",
-                     "-list_devices", "true", "-i", ""],
-                    capture_output=True, text=True, timeout=20)
-                text = (listing.stdout or "") + (listing.stderr or "")
-                live = "blackhole" in text.lower()
-            except Exception:
-                live = False
-        if live:
-            ok("a BlackHole HAL driver is installed and ffmpeg lists it, so "
-               "Screen Mirror can carry system audio")
-        else:
-            warn("a BlackHole HAL driver is on disk but ffmpeg does not list "
-                 "it: coreaudiod has not loaded it",
-                 "Screen Mirror -> 系统声音 -> 一键设置 reloads the audio "
-                 "service with one admin password (it will not re-download "
-                 "the .pkg); rebooting does the same thing")
+    # Since v0.21 the preferred darwin capture is ScreenCaptureKit: on
+    # macOS 13+ with the bindings present it carries system audio natively
+    # (no BlackHole, no aggregate device), and the BlackHole question below
+    # only describes the fallback (macOS < 13, bindings missing, no
+    # screen-recording grant yet, or an SCK attempt refused earlier this
+    # run). Answering "mirroring will be video-only" on a machine whose
+    # mirror will carry sound is exactly the confident lie this preflight
+    # exists to prevent, so the native answer comes first. The version and
+    # binding tests mirror `screen_mirror._probe_screencapturekit`.
+    _rel = platform.mac_ver()[0] or ''
+    try:
+        _parts = tuple(int(one) for one in _rel.split('.')[:2])
+    except ValueError:
+        _parts = ()
+    _sck_version = len(_parts) == 2 and _parts >= (13, 0)
+    if _sck_version and \
+            importlib.util.find_spec("ScreenCaptureKit") is not None:
+        ok("macOS {} with the ScreenCaptureKit bindings: Screen Mirror "
+           "captures system audio natively (no BlackHole, no aggregate "
+           "device)".format(_rel))
     else:
-        warn("no BlackHole driver, so mirroring will be video-only",
-             "Screen Mirror -> 系统声音 -> 一键设置 installs and configures it "
-             "(the .pkg still asks for your password)")
+        if _sck_version:
+            warn("this Python environment has no ScreenCaptureKit bindings, "
+                 "so Screen Mirror falls back to avfoundation and system "
+                 "audio depends on the BlackHole tap below",
+                 "use the packaged .app, or: pip install "
+                 "pyobjc-framework-ScreenCaptureKit")
+        taps = sorted(glob.glob("/Library/Audio/Plug-Ins/HAL/BlackHole*.driver") +
+                      glob.glob(os.path.expanduser(
+                          "~/Library/Audio/Plug-Ins/HAL/BlackHole*.driver")))
+        if taps:
+            # Two questions, not one: the files being on disk does not mean the
+            # audio daemon loaded them (the official .pkg's postinstall only
+            # chmods), and the plugin's capture probe talks to avfoundation.
+            # Reporting "installed, so you're covered" for a driver that never
+            # loaded is how "装了却没有设备" ended up looking like the user's
+            # problem -- and Screen Mirror then re-ran its installer forever.
+            live = True
+            if ffmpeg:
+                try:
+                    listing = subprocess.run(
+                        [ffmpeg, "-hide_banner", "-f", "avfoundation",
+                         "-list_devices", "true", "-i", ""],
+                        capture_output=True, text=True, timeout=20)
+                    text = (listing.stdout or "") + (listing.stderr or "")
+                    live = "blackhole" in text.lower()
+                except Exception:
+                    live = False
+            if live:
+                ok("a BlackHole HAL driver is installed and ffmpeg lists it, so "
+                   "Screen Mirror can carry system audio")
+            else:
+                warn("a BlackHole HAL driver is on disk but ffmpeg does not list "
+                     "it: coreaudiod has not loaded it",
+                     "Screen Mirror -> 系统声音 -> 一键设置 reloads the audio "
+                     "service with one admin password (it will not re-download "
+                     "the .pkg); rebooting does the same thing")
+        else:
+            warn("no BlackHole driver on the avfoundation fallback path, so "
+                 "that path mirrors video only",
+                 "Screen Mirror -> 系统声音 -> 一键设置 installs and configures "
+                 "it (the .pkg still asks for your password)")
 elif sys.platform.startswith("linux"):
     try:
         sinks = subprocess.run(["pactl", "list", "short", "sinks"],
