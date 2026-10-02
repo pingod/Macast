@@ -332,7 +332,19 @@ Part 46 的三条变异体已逐个验过：改开一个门 / 删 `actions: writ
   搜 `PIL/Image` 得 0，搜 `PIL.Image` 得 15（Linux 与 Windows 一样多）。
   我第一遍用斜杠搜，据此差点断言"Linux 产物缺 Pillow ⇒ `gui.py` 模块级 `from PIL import Image`
   会毒掉 `import macast.macast` ⇒ 整个 Linux CLI 起不来"。**那条推理链是对的，前提是假的** ——
-  所以报警之前先把 grep 模式验一遍（§10 那条"先拿证据再动手"同样适用于自己的探针）。macOS 产物不是 onefile，`Contents/Resources/lib/python3.12/` 下能直接 `ls`
+  所以报警之前先把 grep 模式验一遍（§10 那条"先拿证据再动手"同样适用于自己的探针）。
+  **而且这个方法只答"模块在不在"，答不了"代码是哪一版"**（2026-10-03 验 v0.15.0 的 Windows
+  `.exe` 时差点把这条读反）：`.pyc` 在 CArchive 里是 zlib 压缩的，`strings -a` 只看得见 TOC
+  的模块名（`macast.plugins.renderer.screen_mirror` 2 次）和 PyInstaller 自己那条运行时路径串，
+  看不见任何源码里的常量 —— `Mirror_Max_Duration` / `h264_nvenc` / `avc_codec_of` / `ddagrab` /
+  `ffmpeg` 量出来**全是 0 次**，而这个 0 **不证明产物是旧的**。判版本要么解包
+  （`pyinstxtractor`）问 `.pyc` 里的常量，要么把产物真跑起来问设置页。macOS 那一侧没有这一层：
+  `.app` 里的 `Resources/lib/python3.12/macast/plugins/renderer/screen_mirror.py` 是明文，
+  `grep PLUGIN_VERSION` 当场读到 `0.24`（同一份产物里 `aiortc` 在 `python312.zip`、
+  `av/.dylibs` 与 `cffi/` 是实体目录、`_cffi_backend.so` 在 `lib-dynload/`、
+  `ScreenCaptureKit` 与 `CoreMedia` 的 `.so` 在 `lib-dynload/` —— §4.4 与 §4.6 那两处"只有人记得"
+  的打包面，在 CI 产物里逐条核对过）。
+  macOS 产物不是 onefile，`Contents/Resources/lib/python3.12/` 下能直接 `ls`
   （`zeroconf/`、`zeroconf/_services/`、`ifaddr/` 都是真目录 = §4.3 那条修复还在），
   其余纯 Python 依赖在 `Contents/Resources/lib/python312.zip`（注意这一层，不在 `python3.12/` 里面）。
 - **Linux 产物搜不到 `pystray`（0 次），Windows 有（13 次）—— 这是设计，不是漏装。**
