@@ -593,6 +593,12 @@ byte-identical, which is why one table serves both machines:
 | VideoToolbox 1080p, unpinned | `avc1.640028` |
 | NVENC 1080p (6 M) | `avc1.640028` |
 | NVENC 2160p (9 M) | `avc1.640033` |
+| NVENC 720p (4 M) | `avc1.64001f` |
+
+The last row was not read with the probe: it is `codec` from `/browser/stats` on a live
+packaged-Windows mirror session (§11), i.e. what the fourcc reader gets off the shipping
+init segment. It is the third NVENC picture size to answer with a different string from
+the same argv shape, which is the whole point of reading it off the wire.
 
 Telling x264 `-profile:v baseline` still yields `avc1.42c028`, while NVENC told the same
 `high` writes `0x64` and takes its level from the picture (`0x28` at 1080p, `0x33` at
@@ -605,13 +611,14 @@ would be right for one picture size and silently wrong for the rest.
 
 **What this still does not answer**
 
-- **No end-to-end lag number for the `webrtc` shape across machines.** The cross-machine
-  session proved the picture moves (decoded frames, canvas non-uniformity, viewer counts
-  agreeing with the sender); it did not reproduce the `mse_latency_probe.py` measurement
-  shape on that link, so §1's "<50 ms" row is still third-party, not ours. **A same-machine
-  screen-to-screen number now exists (§10: 369 ms against the `browser` shape's 492 ms on
-  one instrument)** — the open half is exactly the words "across machines": the flash
-  instrument has never been run with the source on .68.
+- **No end-to-end lag number for either shape across machines** — as of this section.
+  The cross-machine session proved the picture moves (decoded frames, canvas
+  non-uniformity, viewer counts agreeing with the sender); it did not reproduce the
+  `mse_latency_probe.py` measurement shape on that link, so §1's "<50 ms" row is still
+  third-party, not ours. Same-machine screen-to-screen numbers came next (§10: 369 ms
+  against the `browser` shape's 492 ms on one instrument), and the cross-machine leg is
+  **§11** — one of those two shapes now has a number on that link, the other turned out
+  not to have one to measure.
 - **Safari, phone browsers, and true wireless remain unverified** for every shape — the
   viewer in all of this was Chromium on the Mac over cable.
 - **No real Chromecast / no real old-TV firmware** was ever in these runs (this LAN has
@@ -688,9 +695,177 @@ buffer is not a term worth arguing about; under real wireless it remains unmeasu
    player's buffer edge, a different segment of the same chain. The help page now names
    which number measures what, and a test requires that qualifier to stay.
 
-**Still open here:** the same instrument across machines (source on .68, viewer on the
-Mac) — §9's cross-machine run proved the picture moves without reproducing this
-measurement shape; plus Safari, phones, true wireless and real TV firmware. The probe
-itself was a throwaway spike (`/tmp/webrtc-lag/measure.py`, not committed); if the
-cross-machine figure is the next question, the recipe above is what to promote into
-`scripts/`.
+**Still open here:** the cross-machine leg of this instrument is now §11 (source on .68,
+viewer on the Mac). Still unmeasured from this section: Safari, phones, true wireless,
+real TV firmware. The probe itself was a throwaway spike (`/tmp/webrtc-lag/measure.py`,
+not committed); §11 is what it was re-pointed at.
+
+---
+
+## 11. Follow-up (2026-10-03) — §10's instrument, with the source on Windows
+
+§10 settled the label on one machine. The user's complaint is about a *different* link, and
+the approved item was "finish the Windows half once .68 is back up", so the same flash
+instrument was re-pointed: **source = .68 (ddagrab output 1, `h264_nvenc`, 1280x720, 4 Mbit/s
+tier), viewer = a real browser on the Mac, wired LAN**, both shapes, shipping code (Macast
+0.16.0 / screen_mirror 0.25).
+
+**Two things had to be built that §10 did not need.**
+
+1. **A cross-machine epoch.** §10's two clocks were one clock. Here the flash window runs on
+   .68 and the sampler runs on the Mac, so the offset is measured NTP-style against a listener
+   on .68 (`offset = ((t1-t0)+(t2-t3))/2`, median of the lowest-RTT half). Spread came out
+   under 1.5 ms and drift about 1 ms per run — negligible against a ~400 ms quantity, and the
+   per-flip pairing is insensitive to it (±4 ms of offset moves every delay by the same 4 ms).
+   **The offset is not a constant**: across four sessions on that box it read 442 → 446 → 455 →
+   476 ms, so it must be re-measured per run and never cached.
+2. **A viewer that outlives the run.** `chrome-headless-shell` exits with **code 0, 31.1 s after
+   launch, on `about:blank`** — its own default `--timeout`, which cannot be raised while remote
+   debugging is on (`Headless commands are not compatible with remote debugging`,
+   `headless_shell.cc:204`). Every cross-machine sample run is 30 s, so it looked like the page
+   had died. The full Chromium build (`…/ms-playwright/chromium-1234/…/Google Chrome for
+   Testing`) stays alive past 45 s and is what `pick_browser()` now prefers. **This also bounds
+   `scripts/webrtc_page_probe.py`** (§6 of AGENTS.md): its timed observations are cut by the
+   same 31 s timer when it drives the shell.
+
+### `webrtc`: 400 ms, and the label needs no cross-machine qualifier
+
+| quantity | cross-machine | same-machine (§10) |
+|---|---|---|
+| p50 screen-to-screen | **400 ms** | 369 ms |
+| min–max | 371–442 | 327–396 |
+| flash agreement | 14/15 (peak 403 ms) | 16/16 |
+| encoder | h264_nvenc | h264_videotoolbox |
+| presented / decoded fps | 24 / 24 | 24 / 24 |
+| rVFC samples drawn | 1152 of 1152 | — |
+| receiver | `framesReceived` 643 = `framesDecoded` 643, `framesDropped` 0, `packetsLost` 6, `nackCount` 68, rtt 2 ms | 305 = 305, 0 dropped, `nackCount` 0 |
+| jitter buffer | 72 ms actual, 95 ms target | 3.5 ms |
+
++31 ms against a different encoder on a different machine is inside the instrument's own known
+upward bias (~1 capture frame) plus the two encoders' difference; the honest reading is that
+**the extra machine and the extra hop did not produce a visible term**. Sender counters over the
+run: `sent` 149.6 → 159.3 MB, `drops` 835 → 970 (the handshake-window scroll, by design),
+`misses` 0, `clients` 1.
+
+One uncontrolled variable, recorded rather than smoothed over: ICE selected
+`remote_ip 100.122.246.80` — .68's **Tailscale** address — although signalling went over
+`192.168.1.68`. rtt 2 ms says the packets did not detour through a relay, but the media did not
+go out the plain LAN address, so a future run that pins the 192.168 candidate should re-measure
+before treating 400 ms as the cable-only number.
+
+### `browser`: there is no lag number to report, and the reason is ours
+
+The same instrument on the same link with `Output=browser` produced **nothing pairable**: the
+correlation peak was 239 ms with **1 of 15** flips agreeing (run 2: 208 ms, 1/15). The peak is
+noise; quoting it would be the false-934-ms mistake of §10's positional pairing, dressed up by a
+scan. What the archived samples say instead (the raw records are
+`/tmp/macast-v016/{flips-browser.jsonl,samples68-browser.json,run-browser-*.log}`, scored by
+`analyze68.py` — see the provenance note at the end of this section):
+
+- the flash window scheduled **16 transitions**; the Mac's page produced **10** luminance
+  crossings in 30.4 s (second run: **6** in ~30 s) — a third attempt never painted at all
+  (`readyState` 1, playhead 0 s, `presented_fps` 0 while rAF sampled 3951 times);
+- the player itself reported **no problem**: `正在镜像`, playback speed 1.004×, 0.444 s behind
+  the live edge, `written` 16.6 MB, `exchanges` 2, `drops` 0, `misses` 0, `queued` 0,
+  `codec avc1.64001f`;
+- pairing each scheduled flip to the next available crossing gives 278 … 3463 ms (p50 1712).
+  **Read that as drift, not as a latency distribution** — 10 crossings serving 15 flips means
+  five flips were never painted, so the "delays" are a greedy artefact of a starving picture.
+
+So the transport was never the thing being measured: on Windows the **browser shape's frame
+delivery** collapses. The player is starving, not the network.
+
+### Why: reading the dshow loopback into the output gates the video
+
+Twelve arms of the production argv, each 6 s, all scored on the same rect (desktop pixels 64,0
+for 32×32) against a window flashing every 16 ms — **the dependent variable is the picture's
+content, not bytes** (round 1 of the bisect had found
+a ~500 ms *byte* cadence, and bytes can be paced by the muxer while the picture still advances):
+
+| arm | what differs from as-shipped | crossings | of frames |
+|---|---|---|---|
+| `prod` | nothing (ddagrab + dshow 立体声混音 mapped) | **9** / 5 (round 3) | 125 |
+| `b50` | `-audio_buffer_size 50` | 5 | 142 |
+| `minbuf` | smaller buffer | 4 | 145 |
+| `tqs` | `-thread_queue_size 1024` on the dshow input | 4 | 116 |
+| `noasync` | drop our `-af aresample=async=1` | 3 | 116 |
+| `noresample` | drop resampling entirely | 2 | 136 |
+| `maxdelta` | `-max_interleave_delta` default | 2 | 124 |
+| `delta40` | `-max_interleave_delta 0.04` | 6 | 126 |
+| `ts` | MPEG-TS instead of fragmented MP4 | 8 | 124 |
+| `unused` | device still opened, `-an` discards it — **exactly what `webrtc`/`caststream` do** | **45** | 144 |
+| `lavaf` | audio from `lavfi sine` instead of dshow | **54** | 145 |
+| `video` | no audio input at all | **55** | 144 |
+
+Four conclusions, each of which kills a plausible fix:
+
+1. **The audio *read* owns it, not the audio *device***: `unused` (45) and `lavaf` (54) both
+   recover, so it is not the Realtek driver and not the device being open. Media clock ratio
+   agrees (round 3: prod 0.69× vs unused 0.91× wall).
+2. **No ffmpeg knob wins it back**: buffer size, thread queue, dropping our resampler, and the
+   interleave cap all stay in the 2–8 band. Note `aresample=async=1` is **not** the culprit
+   (`noasync` 3) — removing it makes it worse, which is the opposite of the guess I went in with.
+3. **The container is not the culprit** either: `delta40` (6) and `ts` (8) rule out the
+   fragmented-MP4 interleaver — this is round 4's question, answered no.
+4. **Stock ffmpeg here has no `wasapi` demuxer**, so the obvious "use the other audio input"
+   escape does not exist on that build.
+
+`webrtc` and `caststream` escape **by construction**: `screen_mirror.py:3471` maps the capture
+audio only `if capture.audio_map and kind not in ('caststream', 'webrtc')`, else `-an` — which
+is precisely the healthy `unused` shape. That is why the same Windows box serves 400 ms to a
+browser over WebRTC and about **1.5 content changes per second** over MSE (`prod`: 9 crossings
+in 6 s of wall, 125 frames delivered).
+
+### What the reader of this section must not take from it
+
+- **Do not compute a "healthy" cross-machine `browser` lag by adding §10's +123 ms MSE
+  penalty to 400 ms.** That would be ≈520 ms and it is an **inference**, not a measurement; the
+  shipping code offers no way to get a video-only browser capture on Windows (next point), so
+  no run could produce the number.
+- **There is no shipped knob that gets the good shape.** `windows_loopback_device()` returns a
+  device whenever the dshow table contains anything in `WINDOWS_LOOPBACK_HINTS` (this machine's
+  「立体声混音 (Realtek(R) Audio)」 does), `_probe_windows()` then maps `1:a:0`, and the runtime
+  video-only latch (`_audio_refused` / `_RetryVideoOnly`) only fires when a with-audio session
+  produces **zero** frames inside the budget — Windows delivers its first frame in about 1.4 s,
+  so it never fires. `CONSOLE_ACTIONS` has no audio switch. **Disabling Stereo Mix in the
+  Windows sound settings would fix the symptom and was declined**: that is the user's machine
+  and his audio configuration, not a test fixture.
+- Two single runs per shape for `browser` (the third could not be repeated: .68's flash/clock
+  helper scripts were removed mid-session while the user was sitting at that machine, so the
+  instrument could no longer be armed — see the teardown note below).
+- Same caveats as §10 carried: the reference instant is taken before AppKit/.68 pushes the
+  window to the panel (**biased high by up to one frame**), and Safari / phones / true wireless
+  / real TV firmware remain unverified for every shape.
+
+### Decision on 「低延迟」
+
+**Keep it, unqualified on the lag axis.** `webrtc` wins on both machines it has been measured
+on (369 vs 492 local; 400 ms with no cross-machine `browser` number that is valid at all), and
+`MEASURED_LAG_MS` stays the single truth point. The qualifier that *should* exist is a different
+sentence and it belongs to the capture, not the transport: **on Windows, choosing the browser
+target with system sound enabled costs the picture's freshness**, and today the only
+browser-facing target that delivers full frame cadence from Windows is `webrtc`. That is a
+product decision (the target picker's copy, or a per-target sound switch), so it is proposed in
+`docs/Casting-Suite.md` §1.5 and **not silently shipped**.
+
+**Teardown state on .68** (so a future session does not inherit instrumentation): mirror
+stopped, `Mirror_Screen` cleared back to 「第一块屏幕（默认）」, the four flash/busy/time-server
+`powershell.exe` processes killed by identified PID, all 29 scheduled tasks this instrument
+created deleted (only `DOpusRT_RunStd_{…}`, not ours, remains), 0 surviving instrument processes
+verified. `D:\Downloads\lag` and the settings backup taken before the first change
+(`macast-cfg-backup-20261003-132130`, sha `f05a7098…`, 6115 B) are still listed by `dir /b`, but
+`type` on the backup now returns rc 1 / 0 bytes — **it could not be read back**, so the one
+thing still owed to that machine is a comparison of its current `Api_Token`
+(`winlatprobe00001`, which looks like a probe-era value written into his real settings) against
+that backup, and a restore if it differs. Nothing further was touched there.
+
+**Provenance of the numbers in this section.** The instrument and its scorers were a throwaway
+spike and are **not committed**: they live in `/tmp/macast-v016/` (`measure68.py` drives it,
+`scanwire.py` counts content changes inside a rect of decoded frames, `analyze68.py` pairs
+scheduled flips to crossings after subtracting the measured clock offset, `ab68_remote.py` +
+`abdrive68.py` run the twelve arms on .68). That directory is scratch and will be cleaned, so
+treat every figure above as reported evidence, not a command to re-run — the method is described
+in enough detail to rebuild (same rect, same pairing window, offset re-measured per run).
+One caveat for anyone who does rebuild it: `analyze68.py` reads the clock offset out of
+`flips-browser.jsonl.meta`, and that file was hand-edited during the re-scoring, so it is the
+record of a *derived* quantity rather than raw capture output.
