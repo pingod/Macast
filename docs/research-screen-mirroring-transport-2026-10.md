@@ -845,8 +845,16 @@ on (369 vs 492 local; 400 ms with no cross-machine `browser` number that is vali
 sentence and it belongs to the capture, not the transport: **on Windows, choosing the browser
 target with system sound enabled costs the picture's freshness**, and today the only
 browser-facing target that delivers full frame cadence from Windows is `webrtc`. That is a
-product decision (the target picker's copy, or a per-target sound switch), so it is proposed in
-`docs/Casting-Suite.md` §1.5 and **not silently shipped**.
+product decision (the target picker's copy, or a per-target sound switch), so it was proposed in
+`docs/Casting-Suite.md` §1.5 rather than shipped on the strength of this document.
+**Decided and shipped 2026-10-03 (plugin v0.26, Macast 0.17.0):** the user chose the copy option,
+so the `browser` row of 「投屏方式」 now appends the cost — gated on the *described* machine being
+Windows **and** the probe mapping a system-sound input into the output (`system_audio_mapped()`),
+with the figures read from `WINDOWS_LOOPBACK_CONTENT_HZ` / `FPS` rather than typed into prose. The
+per-target 「带系统声音」 switch was declined, so nothing about the shape itself changed: the
+reader still chooses the target, and this section's "no valid cross-machine `browser` lag number"
+boundary is enforced by Part 58 (the sentence may contain neither `毫秒` nor any
+`MEASURED_LAG_MS` figure).
 
 **Teardown state on .68** (so a future session does not inherit instrumentation): mirror
 stopped, `Mirror_Screen` cleared back to 「第一块屏幕（默认）」, the four flash/busy/time-server

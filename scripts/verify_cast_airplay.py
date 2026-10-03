@@ -23088,6 +23088,358 @@ finally:
 # --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
+# Part 58: what the browser card owes a Windows machine that reads system sound.
+#
+# The finding is in `docs/research-screen-mirroring-transport-2026-10.md` §11,
+# measured cross-machine on 2026-10-03 (Windows .68 capturing, this machine's
+# browser watching), twelve arms of the production argv. In short: mapping the
+# dshow 「立体声混音」 loopback *into the output* gates the video. The score is
+# content changes in the decoded picture, not bytes -- the flashing square
+# appeared 9 times in 6 s of wall clock (`prod`) while the capture handed over
+# 125 frames, against 45 for the arm that opens the same device and discards it
+# with `-an` (which is precisely what `webrtc` and `caststream` do). Round 3 of
+# the same A/B read 5. No knob bought it back: buffer size, thread queue, our
+# resampler, the interleave cap, MPEG-TS instead of fragmented MP4 -- all still
+# in the 2..8 band.
+#
+# The shipped behaviour does not change. There is no per-target sound switch,
+# and disabling Stereo Mix is the user's audio configuration, not a test fixture
+# we get to re-arrange. So what this Part tests is a *sentence*: the「投屏方式」
+# card has to state the price of the option it is offering, on the one machine
+# that pays it. Four failures it exists to prevent, each of them a shape this
+# repo has already been bitten by:
+#  * copy that follows the machine *running* the code instead of the machine
+#    being described -- §4.8's Part 40 lesson, verbatim. Hence `platform=` is a
+#    parameter, and case A1 pins `sys.platform` to 'win32' underneath a
+#    no-argument call to prove the function never reads it.
+#  * a number typed into prose. 1.5 and 24 are read from the constant carrying
+#    the measurement and from `FPS`; a card that quotes the same figure twice
+#    is the same「提示比代码活得久」failure as the stale 4.5 Mbps (§4.8).
+#  * the sentence appearing where nothing is read (no loopback device found on
+#    that machine) or where it was never measured (macOS's tap, and the three
+#    other targets). A warning about a cost this setup does not pay trains the
+#    user to distrust the card.
+#  * the worst temptation this finding creates: inventing a lag figure for the
+#    starving browser shape. It does not have one (§11: no pairable peak, and
+#    the ≈520 ms you could arithmetic your way to is an *inference*), so a case
+#    forbids 「毫秒」 in the added sentence entirely.
+# --------------------------------------------------------------------------
+print("\n=== Part 58: the Windows price on the browser card ===")
+import traceback as _traceback58
+
+_tmp58 = _tempfile.mkdtemp(prefix="macast-hint58-")
+_saved58 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+m58 = None
+_platform58 = sys.platform
+_NONE58 = object()
+try:
+    utils.SETTING_DIR = _tmp58
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp58, "macast_setting.json")
+    m58 = _load_plugin("screen_mirror_plugin_v58", "screen_mirror.py")
+
+    # The added sentence, isolated by subtraction rather than copied here: no
+    # case below re-types the card's prose, so re-wording it can never leave a
+    # green assertion pointed at a sentence the page no longer shows.
+    def _cost58():
+        full = m58.output_hint('browser', platform='win32', audio_mapped=True)
+        assert full.startswith(m58.OUTPUT_HINTS['browser'])
+        return full[len(m58.OUTPUT_HINTS['browser']):]
+
+    def _cache_capture58(audio_map):
+        """One probe verdict in the cache, exactly as the menu would see it."""
+        m58._capture_cache.clear()
+        if audio_map is _NONE58:
+            return
+        m58._capture_cache[('ffmpeg58', 'win32')] = m58._Capture(
+            '立体声混音 (Realtek(R) Audio)', [['-i', 'x']],
+            audio_map=audio_map, screens=[(0, 'DISPLAY1')], method='ddagrab')
+
+    _LITERAL58 = m58.OUTPUT_HINTS['browser']
+
+    # -- A: the function's two shapes ---------------------------------------
+    m58.sys.platform = 'win32'
+    try:
+        check("a no-argument call returns the module literal *verbatim*, even on "
+              "a machine that would pay the cost: the sentence is a caller's "
+              "claim about a described machine, never something this function "
+              "discovers by looking at itself (Part 40's seam; and Part 52's "
+              "`output_hint(k) == OUTPUT_HINTS[k]` has to keep meaning the same "
+              "thing on every runner)",
+              m58.output_hint('browser') == _LITERAL58,
+              repr(m58.output_hint('browser'))[:160])
+    finally:
+        m58.sys.platform = _platform58
+
+    _added58 = _cost58()
+    check("on Windows, with the loopback mapped, the browser card carries the "
+          "cost sentence after its own line (and the literal it hangs off is "
+          "untouched -- the module dict is read, never annotated in place)",
+          len(_added58) > 20 and _LITERAL58 in m58.OUTPUT_HINTS['browser']
+          and m58.output_hint('browser', platform='win32',
+                             audio_mapped=True).startswith(_LITERAL58)
+          and m58.OUTPUT_HINTS['browser'] == _LITERAL58,
+          _added58[:120])
+    check("both numbers in that sentence are read from the places that decide "
+          "them: the measured content rate from its own constant and the frame "
+          "rate from `FPS` -- re-measuring moves the card without anyone "
+          "re-typing prose",
+          str(m58.WINDOWS_LOOPBACK_CONTENT_HZ) in _added58
+          and str(m58.FPS) in _added58
+          and m58.OUTPUTS['webrtc'][0] in _added58,
+          'hz={} fps={} added={}'.format(m58.WINDOWS_LOOPBACK_CONTENT_HZ,
+                                        m58.FPS, _added58[:160]))
+    check("the sentence says which measurement it came from (跨机) and which "
+          "machine it is true of (Windows) -- the scope words are load-bearing, "
+          "because this was measured on one link with one receiver and §11 "
+          "says so",
+          '跨机' in _added58 and 'Windows' in _added58, _added58[:120])
+    check("it offers no lag figure: the starving browser shape has none on this "
+          "link (no pairable peak; the ≈520 ms you could build out of §10's "
+          "penalty is an inference, and §11 forbids publishing it as a "
+          "measurement), so the card may state the picture cost and nothing "
+          "about milliseconds",
+          '毫秒' not in _added58
+          and all(str(one) not in _added58
+                  for one in m58.MEASURED_LAG_MS.values()),
+          _added58[:200])
+    check("macOS with its own system-sound capture keeps its literal line: the "
+          "BlackHole / ScreenCaptureKit taps were never measured to cost the "
+          "picture, and a Windows claim printed on a Mac is a lie in the "
+          "opposite direction",
+          m58.output_hint('browser', platform='darwin',
+                         audio_mapped=True) == _LITERAL58,
+          m58.output_hint('browser', platform='darwin',
+                         audio_mapped=True)[:120])
+    check("no loopback device means no sentence: `audio_mapped` is the read "
+          "itself, not the platform. On a Windows box with nothing to record, "
+          "the shape costs nothing and warning about it would teach the user to "
+          "ignore the card",
+          m58.output_hint('browser', platform='win32',
+                         audio_mapped=False) == _LITERAL58,
+          m58.output_hint('browser', platform='win32',
+                         audio_mapped=False)[:120])
+    _others58 = [k for k in m58.OUTPUTS if k != 'browser']
+    check("the other {} targets keep their own lines under the same Windows+sound "
+          "conditions. The measurement is capture-side, so this is a scope limit "
+          "rather than a claim that they are fine -- but the sentence was "
+          "approved for the browser card, and extending a measured figure to "
+          "targets nobody measured through a receiver is not this change's job"
+          .format(len(_others58)),
+          all(m58.output_hint(k, platform='win32', audio_mapped=True) ==
+              m58.output_hint(k) for k in _others58),
+          str(_others58))
+    check("an unrecognised target still answers with the empty string under the "
+          "new arguments, so a page that grows a target before the plugin does "
+          "renders a blank hint rather than a Windows warning",
+          m58.output_hint('no-such-target') == ''
+          and m58.output_hint('no-such-target', platform='win32',
+                             audio_mapped=True) == '', '')
+    _pref58 = m58.SettingProperty.Mirror_Dlna_Prefill
+    for _want58 in (2, 8):
+        utils.Setting.set(_pref58, _want58)
+        check("the prefill recompute survives the new signature (stored {} 秒): "
+              "`output_hint` is still the one place that folds a user setting "
+              "into a card, and the two arguments are not allowed to turn it "
+              "back into a literal".format(_want58),
+              '{} 秒'.format(_want58) in
+              m58.output_hint('dlna', platform='win32', audio_mapped=True)
+              and str(m58.DLNA_PREFILL_SECONDS) not in
+              m58.output_hint('dlna', platform='win32', audio_mapped=True),
+              m58.output_hint('dlna', platform='win32', audio_mapped=True))
+    utils.Setting.unset(_pref58)
+
+    # -- B: who is actually mapped ------------------------------------------
+    _cache_capture58(_NONE58)
+    _empty58 = m58.system_audio_mapped()
+    _cache_capture58('1:a:0')
+    _mapped58 = m58.system_audio_mapped()
+    _line58 = m58._Capture('屏幕 (无系统声音)', [['-i', 'x']], audio_map=None,
+                           method='ddagrab')
+    m58._capture_cache[('ffmpeg58', 'win32')] = _line58
+    check("`system_audio_mapped` is the one predicate for「声音会被读进流里」: "
+          "no probe cached answers no, a cached capture carrying an audio map "
+          "answers yes, and the same capture with none answers no -- the three "
+          "states the card can be in, each asked once",
+          _empty58 is False and _mapped58 is True
+          and m58.system_audio_mapped() is False,
+          '{} {} {}'.format(_empty58, _mapped58, m58.system_audio_mapped()))
+    check("and「系统声音」卡片's own `capturable` field reads through that same "
+          "predicate -- two answers to one question is the failure mode this "
+          "repo already fixed for the stats overlay and the profile line",
+          m58.ScreenMirrorSetting._audio_state()['capturable']
+          == m58.system_audio_mapped(),
+          str(m58.ScreenMirrorSetting._audio_state()))
+    m58._capture_cache.clear()
+
+    # -- C: the two card surfaces really hand the seam down -----------------
+    import ast as _ast58
+    _src58 = open(os.path.join(REPO, 'macast', 'plugins', 'renderer',
+                              'screen_mirror.py'), encoding='utf-8').read()
+    _tree58 = _ast58.parse(_src58)
+    _fn58 = next((node for node in _ast58.walk(_tree58)
+                  if isinstance(node, _ast58.FunctionDef)
+                  and node.name == 'output_hint'), None)
+    #: The body minus its docstring: the explanation of this very rule is
+    #: allowed to name `sys.platform`, the code that enforces it is not.
+    _lines58 = [one for one in (_fn58.body if _fn58 is not None else [])
+                if not (isinstance(one, _ast58.Expr)
+                        and isinstance(getattr(one, 'value', None),
+                                       _ast58.Constant)
+                        and isinstance(one.value.value, str))]
+    _reads58 = [(one.lineno, one.col_offset) for line in _lines58
+                for one in _ast58.walk(line)
+                if isinstance(one, _ast58.Attribute)
+                and isinstance(one.value, _ast58.Name)
+                and one.value.id == 'sys']
+    check("the function reads nothing off the `sys` module: no `sys.platform`, "
+          "and no `_audio_line`-style `platform = platform or sys.platform` "
+          "default that quietly fills the seam in. The parameter is the whole "
+          "seam, so the sentence cannot follow whichever box executes the code "
+          "(Part 40's lesson, written as a structure rule because A1 can only "
+          "catch the one shape it pins)",
+          _fn58 is not None and not _reads58,
+          '{} sys-reads: {}'.format(len(_reads58), _reads58[:6]))
+    _calls58 = [node for node in _ast58.walk(_tree58)
+                if isinstance(node, _ast58.Call)
+                and isinstance(node.func, _ast58.Name)
+                and node.func.id == 'output_hint']
+    _kw58 = [sorted(one.arg for one in call.keywords) for call in _calls58]
+    check("every call site passes both seams ({} of them: the channel list behind "
+          "the「投屏方式」card, and the state's own option list). A parameter "
+          "computed and never handed down is "
+          "exactly how the max-duration ceiling shipped broken on its first "
+          "day -- Part 57 group B's lesson, applied before it happens again"
+          .format(len(_calls58)),
+          len(_calls58) >= 2
+          and all('platform' in one and 'audio_mapped' in one
+                  for one in _kw58),
+          str(_kw58))
+
+    #: The expression that *builds* the sentence, as syntax. Group A can only
+    #: compare rendered characters, and a hand-typed 1.5 renders identically to
+    #: `hz=WINDOWS_LOOPBACK_CONTENT_HZ` -- so the binding this repo has been
+    #: bitten by twice («提示比代码活得久», the stale 4.5 Mbps) needs a rule
+    #: about the source, not about the string.
+    _cost_assign58 = next(
+        (node for node in _ast58.walk(_tree58)
+         if isinstance(node, _ast58.Assign)
+         and any(getattr(t, 'id', '') == 'WINDOWS_BROWSER_SOUND_COST'
+                 for t in node.targets)), None)
+    _cbody58 = _cost_assign58.value if _cost_assign58 is not None else []
+    check("the browser cost line names its measurement: the expression that "
+          "builds `WINDOWS_BROWSER_SOUND_COST` reads `WINDOWS_LOOPBACK_CONTENT_HZ` "
+          "by name and never re-types the figure it stands for ({} and {} are the "
+          "two numbers the card prints; either one appearing as a literal here is "
+          "a second copy nobody will update when §11 is re-measured)"
+          .format(m58.WINDOWS_LOOPBACK_CONTENT_HZ, m58.FPS),
+          _cost_assign58 is not None
+          and 'WINDOWS_LOOPBACK_CONTENT_HZ' in
+          {one.id for one in _ast58.walk(_cbody58)
+           if isinstance(one, _ast58.Name)}
+          and not [one.value for one in _ast58.walk(_cbody58)
+                   if isinstance(one, _ast58.Constant)
+                   and isinstance(one.value, (int, float))
+                   and one.value in (m58.WINDOWS_LOOPBACK_CONTENT_HZ, m58.FPS)],
+          str(_ast58.dump(_cbody58))[:120] if _cost_assign58 else 'no assignment')
+
+    _cache_capture58('1:a:0')
+    m58.sys.platform = 'win32'
+    #: Two things have to be taken off the table before `console_state()` can be
+    #: driven under a faked platform. `find_ffmpeg()` starts at `shutil.which`,
+    #: and `shutil.which` branches on `sys.platform` before it looks at anything
+    #: -- on this Mac with win32 pinned it reaches a `_winapi` that is None and
+    #: raises (Part 54's recipe, and the only reason the pin needs help here).
+    #: `_kick_searches()` really fans out SSDP and mDNS, and this suite never
+    #: puts the network on the table.
+    _saved58_tools = (m58.find_ffmpeg, m58.start_search,
+                      m58.start_renderer_search)
+    m58.find_ffmpeg = lambda: 'ffmpeg58'
+    m58.start_search = m58.start_renderer_search = lambda: None
+    try:
+        _chan58 = dict((one['key'], one['hint'])
+                       for one in m58.channels_state('browser'))
+        check("the channel list the page renders shows the sentence on the "
+              "browser row and nowhere else, driven by the machine and the "
+              "cached probe rather than by anything the page decides for itself",
+              _added58.strip() in _chan58['browser']
+              and all(_added58.strip() not in v
+                      for k, v in _chan58.items() if k != 'browser'),
+              str(sorted(_chan58)))
+        _cache_capture58(_NONE58)
+        _chan58b = dict((one['key'], one['hint'])
+                        for one in m58.channels_state('browser'))
+        check("and it disappears as soon as the probe says nothing is mapped -- "
+              "on that machine the browser shape is not paying anything, so the "
+              "card goes back to being the plain literal",
+              _added58.strip() not in _chan58b['browser']
+              and _chan58b['browser'] == _LITERAL58, _chan58b['browser'][:120])
+
+        # -- the card the user approved this sentence for -------------------
+        # Everything above asks a function what it would return. This asks the
+        # surface the page actually renders, because the AST rule can only prove
+        # the seams are *passed*, never that they are passed with the machine's
+        # own answer: a call site that handed down a literal 'darwin', or read
+        # the probe before the cache was warm, would still read as green there.
+        _cache_capture58('1:a:0')
+        utils.Setting.set(m58.SettingProperty.Mirror_Output, 'browser')
+        _mv58 = _load("mirror_view58", "mirror_view.py")
+        _st58 = m58.ScreenMirrorSetting().console_state()
+        _opt58 = dict((one['key'], one['hint'])
+                      for one in _st58['output']['options'])
+        check("the「投屏方式」state the page is built from carries the sentence on "
+              "exactly the browser row of both lists it offers (the option table "
+              "and the channel rows), with the pinned machine and the warm probe "
+              "as its only inputs",
+              list(k for k, v in _opt58.items()
+                   if _added58.strip() in v) == ['browser']
+              and _opt58['browser'].startswith(_LITERAL58),
+              str(sorted(_opt58)))
+        _row58 = dict((one[0], one[6]) for one in
+                      _mv58.view_for(_st58)['channels'])
+        check("and the row the markup prints is that same string forwarded, not "
+              "re-derived: `channel_rows` may choose where the hint sits "
+              "(row[6]) but it may not decide what it says, which is the rule "
+              "Part 35 drew between the plugin and the view layer",
+              _row58['browser'] == _opt58['browser']
+              and _added58.strip() in _row58['browser']
+              and all(_added58.strip() not in v
+                      for k, v in _row58.items() if k != 'browser'),
+              str(sorted(_row58)))
+        utils.Setting.unset(m58.SettingProperty.Mirror_Output)
+    finally:
+        m58.sys.platform = _platform58
+        m58.find_ffmpeg, m58.start_search, m58.start_renderer_search = _saved58_tools
+        m58._capture_cache.clear()
+
+    # -- D: the sentence has exactly one author -----------------------------
+    _page58 = open(os.path.join(REPO, 'macast', 'xml', 'setting.html'),
+                   encoding='utf-8').read()
+    _view58 = open(os.path.join(REPO, 'macast', 'mirror_view.py'),
+                   encoding='utf-8').read()
+    check("the page prints the trade-off line it is handed (row[6] of the "
+          "channel table), and the view layer's contribution to that column is "
+          "`row.get('hint')` -- a forward, not a sentence of its own. Which "
+          "machine pays this cost is one judgement made in one place; a second "
+          "copy of it in the display layer is the half no case can execute "
+          "(Part 35's reason for the shared-spelling cases)",
+          '{{ row[6] }}' in _page58 and "row.get('hint') or ''" in _view58
+          and '回环' not in _page58 and '回环' not in _view58,
+          '{} {} {}'.format('回环' in _page58, '回环' in _view58,
+                            "row.get('hint') or ''" in _view58))
+except Exception as _e58:
+    _traceback58.print_exc()
+    check("Part 58 runs", False, "{}: {}".format(type(_e58).__name__, _e58))
+finally:
+    if m58 is not None:
+        m58.sys.platform = _platform58
+    utils.Setting.setting, utils.Setting.setting_path = _saved58[0], _saved58[1]
+    utils.SETTING_DIR = _saved58[2]
+    _shutil.rmtree(_tmp58, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
 # The CI gate, applied (see `ci_gate` above for why the rule is this narrow).
 # --------------------------------------------------------------------------
 if "--ci" in sys.argv:
