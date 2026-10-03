@@ -17143,6 +17143,65 @@ finally:
         print("Part 44 could not load screen_mirror; its checks above are the "
               "ones to read before trusting the rest of this Part")
 
+# -- 网页地址投屏: the help's claims, asked of the three files that decide them
+with open(os.path.join(MACAST, "media_resolve.py"), encoding="utf-8") as _f44:
+    _resolve_src44 = _f44.read()
+with open(os.path.join(MACAST, "media_relay.py"), encoding="utf-8") as _f44:
+    _relay_src44 = _f44.read()
+with open(os.path.join(MACAST, "protocol.py"), encoding="utf-8") as _f44:
+    _proto_src44 = _f44.read()
+check("网页地址投屏: the card the help points at is on the page, and the 状态 "
+      "tab's own line lists it",
+      '<h3 class="cast-title">网页地址投屏</h3>' in _page44
+      and '网页地址投屏' in _help44
+      and '网页地址投屏' in (_intro44.group(1) if _intro44 else ''),
+      'the help says 状态 → 网页地址投屏; the tab line and the card are two '
+      'different sentences and both have to exist')
+check("网页地址投屏: the ceiling the help states on concurrent parses is the "
+      "handler's own",
+      _num44(r'同一时间最多 ([0-9]+) 个解析') == protocol.Handler.RESOLVE_JOBS_MAX,
+      'help=%r RESOLVE_JOBS_MAX=%s' % (
+          _num44(r'同一时间最多 ([0-9]+) 个解析'),
+          protocol.Handler.RESOLVE_JOBS_MAX))
+# "电视永远拿不到源站那个地址" is the load-bearing sentence of the whole feature,
+# and it is only true because the handler hands the renderer a relay URL and
+# nothing else. Read it out of the one line that does the handing.
+check("网页地址投屏: every resolved address really is served from this machine",
+      'self._cast_url(media_relay.media_url(relay)' in _proto_src44
+      and '一律由本机中转供流' in _help44,
+      'the page never sees the origin URL, so the help must say who serves it')
+from macast import media_resolve as _mr44  # noqa: E402
+_plans44 = {_mr44.plan(_mr44.Candidate(url='http://h/a.mp4', origin='page')),
+            _mr44.plan(_mr44.Candidate(url='http://h/a.m3u8', origin='page'))}
+check("网页地址投屏: the two relay shapes the help describes are the two plans "
+      "the code can pick",
+      _plans44 == {'proxy', 'remux'}
+      and '原样转发' in _help44 and '-c copy' in _help44
+      and "c', 'copy" in _relay_src44 and "'-f', 'mp4'" in _relay_src44,
+      'plan() says %s' % sorted(_plans44))
+check("网页地址投屏: the hole the help admits is the sentence the card prints",
+      '需要 JavaScript 才能算出地址的站点' in _help44
+      and '需要 JavaScript 才能算出地址的站点' in _page44,
+      'an admitted limit has to be readable where the user hits it, not only '
+      'in the dialog')
+_saved_find44 = _mr44.find_command
+_mr44.find_command = lambda name: None
+try:
+    _no_ytdlp44 = _mr44.ytdlp_candidates('http://example.invalid/watch')
+finally:
+    _mr44.find_command = _saved_find44
+check("网页地址投屏: with no yt-dlp on the machine the second engine is silent, "
+      "not loud -- and the help says which half is left",
+      _no_ytdlp44 == [] and '这台机器没有装 yt-dlp' in _resolve_src44
+      and '只有页面直链这一路' in _help44,
+      'a missing optional command must not raise; %r' % (_no_ytdlp44,))
+check("网页地址投屏: the progress poll the help promises runs at that rate",
+      _re44.search(r'setInterval\(\(\) => \{\s*if \(document\.hidden\) return;'
+                   r'\s*this\.read_resolve_status\(\);\s*\}, 1000\)',
+                   _page44) is not None
+      and '每秒问一次进度' in _help44,
+      'one question a second, and it stops when the tab is hidden')
+
 # -- the two supervised receivers -------------------------------------------
 for _plug44, _tool44 in (("raop.py", "shairport-sync"),
                          ("airplay_mirror.py", "uxplay")):
@@ -23436,6 +23495,2605 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved58[0], _saved58[1]
     utils.SETTING_DIR = _saved58[2]
     _shutil.rmtree(_tmp58, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Part 59: 网页地址投屏 -- the resolver (`macast/media_resolve.py`) and the
+# relay (`macast/media_relay.py`).
+#
+# Two new core files, and the first net any of it has ever had. Grouped by the
+# layer each fact lives in, the same way Part 56/57 are:
+#   A-H  the resolver's parsers and its two tables. Nothing here touches the
+#        network or a subprocess: each engine is fed a fixture body or a fixture
+#        JSON, because what is under test is *what we make of* an answer, not
+#        the answer.
+#   I    the job the page polls -- counters, the two measurement caps, and the
+#        sentences that explain an empty result. Driven through the module's own
+#        seams, plus one end-to-end run against a real page with fake yt-dlp and
+#        ffprobe on PATH.
+#   J-N  the relay: `parse_range`'s drift table against the plugin's second copy,
+#        `serve_plan` as a callable decision, then real sockets for the HTTP
+#        semantics ("a contract you can only assert by opening a socket is a
+#        contract that has already been broken once here" -- Part 25), then
+#        growth, eviction, TTL and the orphan sweep.
+#   O-P  the handler wiring: validation, the job ceiling, and the one statement
+#        this whole feature rests on -- the device is *never* handed the address
+#        that came out of the page.
+#   Q    the page's text contract: the card renders the backend's answers and
+#        derives none of them.
+# --------------------------------------------------------------------------
+print("\n=== Part 59: 网页地址投屏 -- resolver and relay ===")
+import re as _re59
+import traceback as _traceback59
+import http.server as _httpd59
+from macast import media_resolve as mr59
+from macast import media_relay as mrel59
+
+_tmp59 = _tempfile.mkdtemp(prefix="macast-resolve59-")
+_saved59 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR,
+            mrel59.SETTING_DIR)
+
+
+def _cleanup59():
+    """Leave no listener and no relay behind, even if this Part died half-way.
+
+    The relay's server and store are module globals rather than per-Part objects,
+    so a session started here would still be holding a port and an ffmpeg when
+    the next Part opens its own HTTP -- and the orphan sweep would find our temp
+    files on the *user's* next run. `stop_server` clears the store itself; the
+    explicit clear is for the case where no server was ever started. The fake
+    origin is a third listener this Part opens, and it exists before the first
+    check runs, so it is shut down by name here rather than by a handle each check
+    would have to remember to release.
+    """
+    for name in ('_origin59',):
+        server = globals().get(name)
+        if server is None:
+            continue
+        try:
+            server.shutdown()
+            server.server_close()
+        except Exception:
+            pass
+    try:
+        mrel59.stop_server()
+    except Exception:
+        pass
+    try:
+        mrel59.store.clear()
+    except Exception:
+        pass
+
+try:
+    utils.SETTING_DIR = _tmp59
+    mrel59.SETTING_DIR = _tmp59
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp59, "macast_setting.json")
+
+    PAGE59 = 'http://vid.example/watch/7'
+
+    # -- A: what the standard-library engine can see -----------------------
+    _STATIC59 = '''<!doctype html><title>第三集 · 夏日回响</title>
+      <video poster="poster.jpg" src="/media/ep7.mp4?sign=abc"></video>
+      <video><source src="https://cdn.example/ep7.webm" type="video/webm"></video>
+      <video data-src="//alt.example/ep7.mkv"></video>
+      <embed src="ep7.flv">
+      <link rel="preload" as="video" href="/preload/ep7.mp4">
+      <audio src="https://cdn.example/ep7.m4a"></audio>'''
+    _A59 = mr59.scrape_page(PAGE59, body=_STATIC59)
+    _pairs59 = sorted((c.url, c.label) for c in _A59)
+
+    check("every attribute a real player page hides an address in is read out of "
+          "the static markup, and each candidate says which one produced it "
+          "(`label` is provenance the card shows and `display_title` must never "
+          "mistake for a title)",
+          _pairs59 == [
+              ('http://alt.example/ep7.mkv', 'video:data-src'),
+              ('http://vid.example/media/ep7.mp4?sign=abc', 'video:src'),
+              ('http://vid.example/preload/ep7.mp4', 'preload:href'),
+              ('http://vid.example/watch/ep7.flv', 'embed:src'),
+              ('https://cdn.example/ep7.m4a', 'audio:src'),
+              ('https://cdn.example/ep7.webm', 'source:src'),
+          ], str(_pairs59))
+    check("a protocol-relative address inherits the page's scheme and a "
+          "root-relative one inherits its authority -- a self-hosted site is "
+          "usually behind a path prefix, and urljoin without the page would "
+          "have produced a bare hostname out of nowhere",
+          all(c.url.startswith(('http://', 'https://')) for c in _A59)
+          and 'http://vid.example/media/ep7.mp4?sign=abc' in
+              [c.url for c in _A59]
+          and 'http://alt.example/ep7.mkv' in [c.url for c in _A59],
+          str([c.url for c in _A59]))
+    check("the page's own <title> is carried onto every scraped candidate "
+          "(that phrase, not the file name, is what the television should "
+          "print), and it is clipped rather than allowed to be the whole page",
+          all(c.title == '第三集 · 夏日回响' for c in _A59)
+          and len(mr59.scrape_page(
+              PAGE59, body='<title>' + 'x' * 300 + '</title>'
+              '<video src="/a.mp4"></video>')[0].title) == 120,
+          str([(c.title[:20], len(c.title)) for c in _A59]))
+    _og59 = mr59.scrape_page(PAGE59, body='''
+      <meta property="og:video:secure_url" content="https://cdn.example/og.mp4">
+      <meta name="og:video" content="http://cdn.example/og2.mp4">
+      <meta property="og:video:url" content="/og3.mp4">
+      <meta property="og:video" content="">''')
+    check("og:video in its three spellings, from either `property` or `name`, "
+          "in the order that gives the https one a stable place -- and an empty "
+          "content is a page saying nothing, not a candidate with a blank url",
+          [c.url for c in _og59] == ['https://cdn.example/og.mp4',
+                                     'http://cdn.example/og2.mp4',
+                                     'http://vid.example/og3.mp4'],
+          str([c.url for c in _og59]))
+    check("an address sitting in an inline player config is caught too "
+          "(`file: \"https://….mp4\"`) -- this is the half of the JavaScript "
+          "problem we *can* solve without a browser, and the card's hole "
+          "sentence is scoped to the half we cannot",
+          mr59.scrape_page(PAGE59, body='<script>player({file: '
+                       '"https://cdn.example/config.mp4"})</script>')[0].url
+          == 'https://cdn.example/config.mp4', '')
+    check("a page that builds its address in JavaScript gives this engine "
+          "nothing, and that is the documented hole rather than a crash: an "
+          "empty list is what the card's own sentence is written for",
+          mr59.scrape_page(PAGE59, body='<div id="p"></div>'
+                          '<script>var u=atob("aHR0cHM")+"//x/y"+".mp4";'
+                          'v.src=u</script>') == [], '')
+    check("`blob:`, `data:` and `javascript:` are dropped at the door, not "
+          "admitted as a last resort: without a browser there is nothing to "
+          "resolve a blob against, so offering one is an address that is "
+          "un-fetchable by definition (the divergence from castor marked in the "
+          "module header)",
+          mr59.scrape_page(PAGE59, body='<video src="blob:https://x/y"></video>'
+                           '<video src="data:video/mp4;base64,AAAA"></video>'
+                           '<video src="javascript:void(0)"></video>') == [], '')
+    check("an address that *is* the page we were pointed at is not a find "
+          "(a page linking its own url would be a self-cast loop), and one "
+          "address read through two attributes is listed once",
+          mr59.scrape_page('http://x/a.mp4',
+                           body='<video src="a.mp4"></video>') == []
+          and len(mr59.scrape_page(PAGE59, body='<video src="/v.mp4" '
+                                    'data-src="/v.mp4"></video>')) == 1, '')
+    check("a scraped href with no media suffix is still a candidate: the "
+          "suffix is a claim the *address* makes and plenty of CDNs drop it, "
+          "so it is the probe that decides, not the door. `path_suffix` is "
+          "empty, and that is what the card reads as 容器未知",
+          len(mr59.scrape_page(PAGE59, body='<video src="/watch?id=5">'
+                                   '</video>')) == 1
+          and mr59.Candidate(url='http://x/a.mp4?i=1', origin='page')
+              .path_suffix == '.mp4'
+          and mr59.Candidate(url='http://x/a', origin='page').path_suffix == '',
+          '')
+    check("`absolute_url` refuses to invent an authority for a root-relative "
+          "href when it has no page to borrow one from (a bare '/a.mp4' "
+          "resolving to nothing is honest; resolving to the machine's own "
+          "filesystem is a read of the wrong thing entirely)",
+          mr59.absolute_url('', '/media/a.mp4') is None
+          and mr59.absolute_url(PAGE59, '/media/a.mp4') \
+          == 'http://vid.example/media/a.mp4'
+          and mr59.absolute_url(PAGE59, 'mailto:a@b') is None
+          and mr59.absolute_url(PAGE59, '') is None, '')
+    check("decode_body answers the two ways a Chinese video page actually "
+          "arrives (declared gbk, and gbk without a declaration) and never "
+          "raises on bytes that are neither -- a page we cannot read is a "
+          "page with no candidates, not a traceback in a worker thread",
+          mr59.decode_body('夏日'.encode('gbk'), 'gbk') == '夏日'
+          and mr59.decode_body('夏日'.encode('gbk')) == '夏日'
+          and mr59.decode_body(b'\xff\xfe\x00bad') == '\ufffd\ufffd\x00bad', '')
+
+    # -- B: what the yt-dlp engine says -----------------------------------
+    _YTDLP59 = json.dumps({
+        'title': '夏日回响',
+        'http_headers': {'Referer': PAGE59, 'User-Agent': 'UA-ONE',
+                         'Content-Length': '9'},
+        'formats': [
+            {'format_id': '18', 'ext': 'mp4', 'height': 720,
+             'url': 'https://cdn.example/720.mp4?sig=A',
+             'format_note': 'progressive', 'tbr': 1800,
+             'title': '夏日回响 (1)'},
+            {'format_id': '251', 'ext': 'webm', 'height': 1080,
+             'url': 'https://cdn.example/audio.webm', 'tbr': 160},
+            {'format_id': 'x', 'ext': 'mp4', 'url': 'blob:https://cdn/y'},
+            {'format_id': 'none'},
+        ]})
+    _B59 = mr59.parse_ytdlp_json(_YTDLP59)
+    check("one candidate per rendition yt-dlp can name, and a rendition with no "
+          "fetchable http(s) address (a blob, or no url at all) never becomes "
+          "one -- `blob:` is the shape a *browser* page reports and this module "
+          "has no browser",
+          [c.url for c in _B59] == ['https://cdn.example/720.mp4?sig=A',
+                                    'https://cdn.example/audio.webm'],
+          str([c.url for c in _B59]))
+    check("the entry title beats the format title. yt-dlp labels each format "
+          "\"<video title> (<index>)\" and that index is a row in its own list "
+          "-- handing 「夏日回响 (1)」 to a television is a claim about the page "
+          "the page never made (seen on the fixture: the card read 「第三集 · "
+          "夏日回响 (1)」 and looked like a defect)",
+          [c.title for c in _B59] == ['夏日回响', '夏日回响'],
+          str([c.title for c in _B59]))
+    check("the headers that make the address readable ride along on every "
+          "format that does not carry its own (this is why `-J` and not `-g`: "
+          "`-g` prints an address and throws these away), and the label is "
+          "assembled from the parts that exist",
+          _B59[0].headers.get('referer') == PAGE59
+          and _B59[0].headers.get('user-agent') == 'UA-ONE'
+          and [c.label for c in _B59]
+          == ['mp4 720p progressive 1800 k', 'webm 1080p 160 k'],
+          str([(c.headers, c.label) for c in _B59]))
+    _PL59 = json.dumps({'_type': 'playlist', 'entries': [
+        {'title': 'one', 'formats': [{'url': 'http://h/1a.mp4'}]},
+        {'title': 'four', 'formats': [{'url': 'http://h/4a.mp4'},
+                                      {'url': 'http://h/4b.mp4'},
+                                      {'url': 'http://h/4c.mp4'},
+                                      {'url': 'http://h/4d.mp4'}]},
+        {'title': 'two', 'formats': [{'url': 'http://h/2a.mp4'},
+                                     {'url': 'http://h/2b.mp4'}]},
+        {'title': 'zero', 'formats': []},
+        {'title': 'three', 'formats': [{'url': 'http://h/3a.mp4'},
+                                       {'url': 'http://h/3b.mp4'},
+                                       {'url': 'http://h/3c.mp4'}]}]})
+    _PLC59 = mr59.parse_ytdlp_json(_PL59)
+    check("a playlist-shaped answer is read, its entries ordered by how much "
+          "each one actually offers, and capped at three: a page of several "
+          "videos has one primary title and the rest are trailers, while an "
+          "uncapped ladder is a dozen probes against one host",
+          len(_PLC59) == 9 and _PLC59[0].url == 'http://h/4a.mp4'
+          and not any('1a' in c.url for c in _PLC59),
+          str([c.url for c in _PLC59]))
+    check("unreadable JSON and a top-level list answer with no candidates "
+          "rather than propagating: `ytdlp_candidates` runs on the resolve "
+          "thread, and an exception there is a spinner that never stops",
+          mr59.parse_ytdlp_json('not json') == []
+          and mr59.parse_ytdlp_json('[]') == []
+          and mr59.parse_ytdlp_json('null') == [], '')
+
+    # -- C/D: the two header helpers --------------------------------------
+    _HDR59 = mr59.normalize_headers({'Host': 'cdn.example', 'Referer': PAGE59,
+                                     'Cookie': 'session=secret',
+                                     'Content-Length': '9', 'Accept-Encoding': 'gzip',
+                                     'Authorization': 'Bearer t', 'X-Keep': 'v',
+                                     'Bad': None, 3: 'not a name'})
+    check("what a fetch must send is kept (Cookie and Authorization included -- "
+          "that is the whole reason a protected page resolves at all) and what "
+          "would describe *our own* request is dropped, with the keys lowercased "
+          "so one header cannot arrive twice under two spellings",
+          _HDR59 == {'referer': PAGE59, 'cookie': 'session=secret',
+                     'authorization': 'Bearer t', 'x-keep': 'v'}, str(_HDR59))
+    check("the dropped names are exactly the ones that must never ride along: "
+          "a captured Content-Length on a GET is a malformed request, and the "
+          "rest are hop-by-hop. The list is a set, so a typo here is silent -- "
+          "this case is the only thing that reads it",
+          mr59._UNFORWARDABLE_HEADERS == frozenset((
+              'host', 'content-length', 'content-type', 'connection',
+              'proxy-connection', 'upgrade', 'te', 'trailer',
+              'transfer-encoding', 'accept-encoding'))
+          and mr59.normalize_headers(None) == {}
+          and mr59.normalize_headers(['not', 'a', 'dict']) == {}, str(
+              sorted(mr59._UNFORWARDABLE_HEADERS)))
+    check("ffprobe's `-headers` is CRLF-separated in a stable order (its HTTP "
+          "implementation wants the document form, and an unordered dict would "
+          "make the same candidate produce a different command line each run)",
+          mr59.header_field({'referer': 'r', 'cookie': 'c'})
+          == 'cookie: c\r\nreferer: r' and mr59.header_field(None) == '', '')
+
+    # -- E: the probe's answer -------------------------------------------
+    _PROBE59 = json.dumps({
+        'format': {'format_name': 'mov,mp4,m4a,3gp,3g2,mj2',
+                   'duration': '61.5', 'bit_rate': '4200000'},
+        'streams': [{'codec_type': 'video', 'codec_name': 'h264',
+                     'width': 1280, 'height': 720},
+                    {'codec_type': 'audio', 'codec_name': 'aac'}]})
+    _P59 = mr59.parse_probe_json(_PROBE59)
+    check("one ffprobe run becomes the facts the card prints: container, "
+          "duration, bitrate, both codecs, both dimensions -- and a read that "
+          "got this far *is* a proven reach, which is what `admit` ranks on",
+          (_P59.container, _P59.duration, _P59.bitrate, _P59.width, _P59.height,
+           _P59.video_codec, _P59.audio_codec)
+          == ('mov,mp4,m4a,3gp,3g2,mj2', 61.5, 4200000.0, 1280, 720,
+              'h264', 'aac') and not _P59.is_live, str(_P59))
+    _LIVE59 = mr59.parse_probe_json(json.dumps({
+        'format': {'format_name': 'applehttp,hls'},
+        'streams': [{'codec_type': 'video', 'codec_name': 'h264',
+                     'width': 1920, 'height': 1080, 'bit_rate': '5000000'}]}))
+    check("a live manifest reports no duration, and that is the finding rather "
+          "than a gap: `is_live` is the badge that stops the card promising a "
+          "length for something that has none. The bitrate comes from the video "
+          "stream when the container does not state one",
+          _LIVE59.is_live and _LIVE59.duration == 0.0
+          and _LIVE59.bitrate == 5000000.0, str(_LIVE59))
+    check("a poster published as a video track is not a program: ffprobe calls "
+          "it `codec_type: video`, and the card promising 720p of a still JPEG "
+          "is how an ad slot reads as the feature. The list is castor's, "
+          "verbatim, so it is pinned by length as well as content",
+          len(mr59.STILL_IMAGE_CODECS) == 10
+          and 'mjpeg' in mr59.STILL_IMAGE_CODECS
+          and not mr59.Probe(video_codec='mjpeg', width=1280,
+                             height=720).moving_picture
+          and mr59.Probe(video_codec='h264').moving_picture
+          and not mr59.Probe(video_codec='').moving_picture, '')
+    check("unreadable probe JSON is *unproven*, never a crash and never a "
+          "measurement: a candidate nobody could read stays a last resort, "
+          "because a slow origin must cost the user a worse first choice, not "
+          "no choice",
+          mr59.parse_probe_json('nonsense') is None
+          and mr59.parse_probe_json('"a string"') is None
+          and mr59.Probe().measured is False
+          and mr59.Probe(reach=mr59.REACH_OPENED).measured is True, '')
+    _refused59 = mr59._REFUSED_STATUS
+    check("the four codes that mean 「the origin said no」 are the *only* thing "
+          "that reads as a refusal -- including a 500/503, which is an unhappy "
+          "origin rather than a closed one. This regex used to carry "
+          "`HTTP error \\d|Server returned \\d` alongside them, which made every "
+          "server error a refusal and contradicted the sentence written above "
+          "it; ffprobe's own phrasings always contain the digits, so the codes "
+          "are the whole rule",
+          all(_refused59.search(one) for one in (
+              'http error 404 not found', 'Server returned 403 Forbidden',
+              '401 Unauthorized'))
+          and not any(_refused59.search(one) for one in (
+              'HTTP error 500 Internal Server Error',
+              'Server returned 503 Service Unavailable',
+              'connection timed out', 'certificate verification failed',
+              'Unable to connect to port 4031')), '')
+    check("the same codes gate the relay's own idea of a refusal, and the "
+          "resolver's regex agrees with that tuple on every member of it and on "
+          "nothing else. Two copies of a list is the thing this repo keeps "
+          "getting wrong, so the two are compared by *behaviour* rather than "
+          "both being written down here",
+          all(_refused59.search('Server returned {} Forbidden'.format(code))
+              for code in mrel59.REFUSED_STATUS)
+          and not any(_refused59.search('HTTP error {}'.format(code))
+                      for code in (500, 502, 503, 504, 429, 451, 302)),
+          str(mrel59.REFUSED_STATUS))
+
+    # -- F: finding the two external commands -----------------------------
+    _bin59 = os.path.join(_tmp59, 'bin59')
+    os.makedirs(_bin59, exist_ok=True)
+    _exe59 = _write_fake(_bin59, 'yt-dlp', '#!/bin/sh\necho x\n')
+    _write_fake(_bin59, 'ffprobe.exe', '#!/bin/sh\necho x\n')
+    with open(os.path.join(_bin59, 'not-executable'), 'w') as _h59:
+        _h59.write('#!/bin/sh\n')
+    os.chmod(os.path.join(_bin59, 'not-executable'), 0o644)
+    check("a command is found where the shell would find it and where a "
+          "Finder-launched app cannot look (the PATH a GUI process inherits is "
+          "empty, so a brew-installed yt-dlp reads as missing without the "
+          "extra directories). The three arguments are all seams: the suite "
+          "runs on a Mac and has to be able to ask what a Windows box would "
+          "find, which is Part 40's lesson about a sentence following the "
+          "machine that *executes* it",
+          mr59.find_command('yt-dlp', env_path=_bin59) == _exe59
+          and mr59.find_command('ffprobe', env_path=_bin59,
+                                platform='win32', extra_dirs=[_bin59])
+          == os.path.join(_bin59, 'ffprobe.exe')
+          and mr59.find_command('not-executable', env_path=_bin59) is None
+          and mr59.find_command('nothing-here', env_path='',
+                                extra_dirs=[_tmp59]) is None, '')
+    check("the extra-directory list is the same one the yt-dlp plugin walks, "
+          "for the same reason -- core may not import a plugin, so the list "
+          "lives twice and this is the only thing keeping the two copies "
+          "together",
+          mr59.EXTRA_BIN_DIRS == _load_plugin(
+              'ytdlp_plugin_v59', 'macast_ytdlp.py').EXTRA_BIN_DIRS,
+          str(mr59.EXTRA_BIN_DIRS))
+    # The bit only exists on Windows, so on this Mac the win32 branch would
+    # answer 0 and every assertion about it would be vacuous. Handing the
+    # interpreter the attribute a Windows interpreter has -- for the length of
+    # one call, then putting the interpreter back -- is the only way to ask that
+    # branch what it does. `sys.platform` stays darwin throughout, so nothing
+    # else that reads the flag can be misled: every other reader gates on the
+    # platform before it looks.
+    _HAS_WINDOW_BIT59 = hasattr(subprocess, 'CREATE_NO_WINDOW')
+    _GONE59 = object()
+
+    def _win_flag59(value):
+        """Answer `console_flags('win32')` with the interpreter holding `value`.
+
+        None is "the attribute is not defined at all", which is what a Python
+        before 3.7 looks like. Whatever the module held before is always put
+        back, so a check that raises cannot leave the bit lying around for the
+        rest of the suite.
+        """
+        _was59 = getattr(subprocess, 'CREATE_NO_WINDOW', _GONE59)
+        if value is None:
+            try:
+                del subprocess.CREATE_NO_WINDOW
+            except AttributeError:
+                pass
+        else:
+            subprocess.CREATE_NO_WINDOW = value
+        try:
+            return mr59.console_flags('win32')
+        finally:
+            if _was59 is _GONE59:
+                try:
+                    del subprocess.CREATE_NO_WINDOW
+                except AttributeError:
+                    pass
+            else:
+                subprocess.CREATE_NO_WINDOW = _was59
+
+    check("every helper this module spawns is a console program and the "
+          "packaged .exe is built --noconsole, so the no-window flag is "
+          "mandatory on Windows and 0 everywhere else (Part 41's contract, "
+          "asked through the platform seam rather than off this machine -- the "
+          "bit is handed to the interpreter for these calls, because on a Mac "
+          "the branch would answer 0 and the assertion would test nothing)",
+          _win_flag59(0x08000000) == 0x08000000
+          and _win_flag59(1234) == 1234
+          and mr59.console_flags('darwin') == 0
+          and mr59.console_flags('linux') == 0
+          and mr59.console_flags('freebsd') == 0
+          and hasattr(subprocess, 'CREATE_NO_WINDOW') == _HAS_WINDOW_BIT59, '')
+    check("an interpreter that defines no such attribute leaves the win32 branch "
+          "nothing to add, and it must answer 0 rather than raise: a Python "
+          "before 3.7 still has to be able to spawn its probes, and the whole "
+          "reason the bit is read with a fallback is that it is not portable",
+          _win_flag59(None) == 0
+          and hasattr(subprocess, 'CREATE_NO_WINDOW') == _HAS_WINDOW_BIT59, '')
+
+    # -- G: the admission table ------------------------------------------
+    def _cand59(url, probe=None, headers=None, title='', origin='page'):
+        return mr59.Candidate(url=url, origin=origin, probe=probe,
+                              headers=headers or {}, title=title)
+
+    _rows59 = (
+        (mr59.REASON_REFUSED,
+         _cand59('http://h/a.mp4', mr59.Probe(reach=mr59.REACH_REFUSED)),
+         (False, False)),
+        (mr59.REASON_UNPROVEN, _cand59('http://h/a.mp4', None), (True, True)),
+        (mr59.REASON_UNPROVEN,
+         _cand59('http://h/a.mp4', mr59.Probe(reach=mr59.REACH_UNPROVEN)),
+         (True, True)),
+        (mr59.REASON_AUDIO_ONLY,
+         _cand59('http://h/a.m4a', mr59.Probe(reach=mr59.REACH_OPENED,
+                                             audio_codec='aac', duration=9.0)),
+         (True, False)),
+        (mr59.REASON_NO_PROGRAM,
+         _cand59('http://h/a.mp4', mr59.Probe(reach=mr59.REACH_OPENED,
+                                             video_codec='mjpeg',
+                                             duration=9.0)),
+         (False, False)),
+        (mr59.REASON_HEADER_ONLY,
+         _cand59('http://h/a.mp4', mr59.Probe(reach=mr59.REACH_OPENED,
+                                             container='mp4', video_codec='h264',
+                                             duration=0.0)),
+         (True, True)),
+        (mr59.REASON_CASTABLE,
+         _cand59('http://h/a.mp4', mr59.Probe(reach=mr59.REACH_OPENED,
+                                             container='mp4', video_codec='h264',
+                                             duration=61.5)),
+         (True, False)),
+    )
+    check("each of the table's six verdicts is answered by the row that owns it, "
+          "and each row is fed a candidate that only that row can match: a "
+          "refused address must not be rescued by a later row, and an "
+          "unmeasurable one must not be read as \"no video\". The order *is* "
+          "the contract, so this is one case per row rather than a loop that "
+          "would pass on any order",
+          all(mr59.admit(c) == (keep, last, reason)
+              for reason, c, (keep, last) in _rows59),
+          str([(r, mr59.admit(c)) for r, c, _ in _rows59]))
+    check("sound on its own stays castable and says so out loud: someone "
+          "pasting a podcast page means it, and dropping the only thing on the "
+          "page because it has no picture is the table answering a question "
+          "nobody asked. It is kept but *not* as a last resort, because it is a "
+          "measured answer, not a guess",
+          mr59.admit(_rows59[3][1]) == (True, False, mr59.REASON_AUDIO_ONLY)
+          and mr59.rank([_rows59[3][1]])[0].reason
+          == mr59.REASON_AUDIO_ONLY,
+          str(mr59.admit(_rows59[3][1])))
+    check("castor's `reasonTooShort` row is absent by design and stays absent: "
+          "he casts titles and treats a candidate under five minutes as a "
+          "spliced-in ad; someone pasting a link at Macast may well mean a "
+          "20-second clip, and refusing to cast it would be refusing their "
+          "request. Pinned as the table's length so a ported row cannot creep "
+          "back in",
+          len(mr59.ADMISSION_TABLE) == 6
+          and not any('short' in str(row).lower() for row in mr59.ADMISSION_TABLE),
+          str(len(mr59.ADMISSION_TABLE)))
+    check("exceeds_cap treats a zero height as unknown rather than short, and "
+          "exempts both the manifests and the last resorts: the ceiling is a "
+          "statement about measured pictures, and applying it to something "
+          "nobody could read throws away the only candidate on the page",
+          not mr59.exceeds_cap(_cand59('http://h/a.mp4', mr59.Probe(
+              reach=mr59.REACH_OPENED, height=0)), 720)
+          and not mr59.exceeds_cap(_cand59('http://h/a.m3u8', mr59.Probe(
+              reach=mr59.REACH_OPENED, height=2160)), 720)
+          and mr59.exceeds_cap(_cand59('http://h/x.m3u8', None), 720) is False
+          and mr59.exceeds_cap(_cand59('http://h/a.mp4', mr59.Probe(
+              reach=mr59.REACH_OPENED, height=1080)), 720)
+          and mr59.exceeds_cap(_cand59('http://h/a.mp4', mr59.Probe(
+              reach=mr59.REACH_OPENED, height=1080)), 0) is False, '')
+
+    _720 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264', height=720,
+                      duration=60.0, bitrate=2000000)
+    _1080 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264', height=1080,
+                       duration=60.0, bitrate=5000000)
+    def _ord59(pairs, ceiling=0):
+        # `rank` decides `last_resort` and `reason` itself; asking it to sort a
+        # list we had pre-labelled would test our copy of the table instead of
+        # the one in the module.
+        return [c.url for c in mr59.rank(pairs, ceiling)]
+
+    check("a progressive file outranks a manifest even when the manifest is the "
+          "better picture, and the reason is ours rather than castor's: the "
+          "relay can translate Range requests on a file, so the viewer can seek "
+          "-- which it cannot do on a remuxed stream. castor puts the ladder "
+          "first because a master carries rungs for *its* engine to fall back "
+          "to, and that argument does not exist here",
+          _ord59([_cand59('http://h/a.m3u8', _1080),
+                  _cand59('http://h/b.mp4', _720)])
+          == ['http://h/b.mp4', 'http://h/a.m3u8'], '')
+    check("then, inside one shape: taller, then higher bitrate, then the URL -- "
+          "so a tie has one reproducible answer instead of whichever candidate "
+          "the network happened to finish first",
+          _ord59([_cand59('http://h/z.mp4', _720),
+                  _cand59('http://h/a.mp4', _1080)])
+          == ['http://h/a.mp4', 'http://h/z.mp4']
+          and _ord59([_cand59('http://h/b.mp4', _720),
+                      _cand59('http://h/a.mp4', _720)])
+          == ['http://h/a.mp4', 'http://h/b.mp4'], '')
+    check("an unmeasured candidate is offered last rather than never, and a "
+          "candidate over the user's ceiling is offered after one under it "
+          "rather than deleted: both are the same rule said twice -- the "
+          "judgement is a *sort*, and only a refusal is a deletion",
+          _ord59([_cand59('http://h/unknown.mp4', None),
+                  _cand59('http://h/measured.mp4', _720)])
+          == ['http://h/measured.mp4', 'http://h/unknown.mp4']
+          and _ord59([_cand59('http://h/tall.mp4', _1080),
+                      _cand59('http://h/ok.mp4', _720)], ceiling=720)
+          == ['http://h/ok.mp4', 'http://h/tall.mp4'], '')
+    check("`rank` labels everything it keeps with the row that kept it and "
+          "drops the rest, and it does not touch the ones it drops -- the card "
+          "prints 「判定剔除 N 个」 from that count, so a silent keep is a wrong "
+          "number on the page",
+          all(c.reason and isinstance(c.last_resort, bool)
+              for c in mr59.rank([_cand59('http://h/a.mp4', _720),
+                                  _cand59('http://h/b.mp4', _P59)]))
+          and len(mr59.rank([_cand59(
+              'http://h/no.mp4', mr59.Probe(reach=mr59.REACH_REFUSED))])) == 0,
+          '')
+
+    # -- H: what the card is handed --------------------------------------
+    check("display_title is the page's words, then the file's own name without "
+          "its container suffix, then the address we were pointed at -- and "
+          "never the label. `label` is provenance (`video:src`, `mp4 720p`), "
+          "and handing it to SetAVTransportURI is how a renderer prints \"mp4\" "
+          "where the user expected the name of a film",
+          mr59.display_title(_cand59('http://h/ep7.mp4', title='  夏日回响  '))
+          == '夏日回响'
+          and mr59.display_title(_cand59('http://h/%E7%AC%AC%20%E4%B8%89%E9%9B%86'
+                                         '.mp4')) == '第 三集'
+          and mr59.display_title(_cand59('http://h/a.php?x=1')) == 'a.php'
+          and mr59.display_title(_cand59('http://h/'), 'http://page/7')
+          == 'http://page/7'
+          and len(mr59.display_title(_cand59('http://h/' + 'n' * 300 + '.mp4')))
+          == 120, '')
+    check("the badge word comes from the address when the address states one, "
+          "and from the first name ffprobe offered otherwise: the raw "
+          "`probe.container` for an MP4 is the whole family list "
+          "(`mov,mp4,m4a,3gp,3g2,mj2`), correct in a machine and noise in a "
+          "badge. The list stays on the Probe untouched because the admission "
+          "table asks \"is mp4 anywhere in it\", not \"is it first\"",
+          mr59.container_label(_cand59('http://h/a.mp4?sig=1')) == 'MP4'
+          and mr59.container_label(_cand59('http://h/a.m3u8')) == 'M3U8'
+          and mr59.container_label(_cand59('http://h/a', _P59)) == 'MOV'
+          and mr59.container_label(_cand59('http://h/a')) == ''
+          and _P59.container == 'mov,mp4,m4a,3gp,3g2,mj2', '')
+    check("every address is said to be served from here, in the sentence that "
+          "names *this* address's reason: a manifest because the television "
+          "will not read one, a header demand because the device will not "
+          "carry it, and otherwise because a signed address expires. One "
+          "judgement, printed per candidate rather than as a footnote someone "
+          "skims",
+          '清单' in mr59.relay_reason(_cand59('http://h/a.m3u8'))
+          and 'referer' in mr59.relay_reason(
+              _cand59('http://h/a.mp4', headers={'referer': 'r',
+                                                 'cookie': 'c'}))
+          and '签名' in mr59.relay_reason(_cand59('http://h/a.mp4')), '')
+    check("the header-demand sentence lists the headers by name and in order, "
+          "and `describe` hands the page the names only: a Cookie value "
+          "rendered into the settings page is a credential in a screenshot, and "
+          "the card needs to say *which* headers the relay is paying attention "
+          "to, not what is in them",
+          'cookie、referer' in mr59.relay_reason(
+              _cand59('http://h/a.mp4', headers={'cookie': 'session=secret',
+                                                 'referer': 'r'}))
+          and 'session=secret' not in json.dumps(mr59.describe(
+              _cand59('http://h/a.mp4', headers={'cookie': 'session=secret',
+                                                 'referer': 'r'})),
+              ensure_ascii=False), '')
+    check("`plan` is the two shapes and nothing else, chosen by the address's "
+          "own container: a file the relay can serve by translating Range, or a "
+          "document that names segments and therefore needs one ffmpeg. The "
+          "card, the relay, and the two sentences in the help all read this one "
+          "function",
+          mr59.plan(_cand59('http://h/a.mp4')) == 'proxy'
+          and mr59.plan(_cand59('http://h/a.m3u8')) == 'remux'
+          and mr59.plan(_cand59('http://h/a.mpd')) == 'remux'
+          and mr59.plan(_cand59('http://h/a')) == 'proxy', '')
+    _DESC59 = mr59.describe(_cand59('http://h/a.mp4', _720,
+                                    headers={'referer': 'r'}, title='夏日回响'))
+    check("describe is everything the card prints, with every number read off "
+          "the probe and the bitrate already in kbit: the page computes none of "
+          "it, because these values came from a probe that ran on *this* "
+          "machine and a second copy of that arithmetic in the front end is "
+          "「提示比代码活得久」 again",
+          set(_DESC59) == {'url', 'origin', 'label', 'title', 'container',
+                           'video_codec', 'audio_codec', 'width', 'height',
+                           'duration', 'bitrate', 'measured', 'reach', 'live',
+                           'segmented', 'last_resort', 'reason', 'mode',
+                           'relay', 'headers'}
+          and _DESC59['bitrate'] == 2000 and _DESC59['height'] == 720
+          and _DESC59['container'] == 'MP4' and _DESC59['measured'] is True
+          and _DESC59['mode'] == 'proxy' and _DESC59['live'] is False,
+          str(_DESC59))
+    check("a candidate nobody could measure is still described, and says so "
+          "with reach=unproven and measured=False rather than with zeros the "
+          "card would render as 「0p · 0 秒」: unmeasured and measured-empty are "
+          "two different answers to the user",
+          (lambda d: d['measured'] is False and d['reach'] == 'unproven'
+           and d['bitrate'] == 0)(mr59.describe(_cand59('http://h/a.mp4'))), '')
+
+    # -- I: the job the page polls -------------------------------------------
+    def _patch59(**attrs):
+        """Put stand-ins under `_resolve`'s feet and hand back what to put back.
+
+        The job calls its three helpers as module globals, which is the only
+        reason a test can watch a four-step pipeline without a network. The
+        `old` dict is what makes the patch revertible even when the body of the
+        check raises, because a leaked `scrape_page` would quietly rewrite every
+        later Part's idea of what a page is.
+        """
+        old = {}
+        for name, value in attrs.items():
+            old[name] = getattr(mr59, name)
+            setattr(mr59, name, value)
+        return old
+
+    def _restore59(old):
+        for name, value in old.items():
+            setattr(mr59, name, value)
+
+    _BODY59 = bytes(bytearray((i * 7) % 251 for i in range(2000)))
+    _WITNESS59 = os.path.join(_tmp59, 'origin-headers.json')
+
+    class _Origin59(_httpd59.BaseHTTPRequestHandler):
+        """One origin holding every behaviour a relay has to cope with.
+
+        Four shapes chosen by path, because the answer the relay gives the
+        television differs per shape and none of them can be told apart from our
+        own request: an origin that honours `Range` (the only thing that makes
+        seeking possible), one that declares a length and ignores the header, one
+        that names no length at all, and one that says no. A page and a witness
+        path come with them: the resolver's end-to-end run needs somewhere real
+        to fetch, and "the captured Referer did reach the origin" is the fact the
+        whole feature rests on.
+
+        `protocol_version` is HTTP/1.0 so a close-delimited body means what it
+        says -- the streaming shape is exactly the case that has no length.
+        """
+
+        protocol_version = 'HTTP/1.0'
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def _send(self, status, headers=(), body=b''):
+            self.send_response(status)
+            for name, value in headers:
+                self.send_header(name, value)
+            self.end_headers()
+            if body:
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+
+        def _file(self, path, honours_range):
+            header = self.headers.get('Range')
+            if honours_range and header and header.startswith('bytes='):
+                first, _, last = header[6:].partition('-')
+                start = int(first) if first.isdigit() else 0
+                stop = int(last) if last.isdigit() else len(_BODY59) - 1
+                if start >= len(_BODY59):
+                    self._send(416, [('Content-Range',
+                                      'bytes */{}'.format(len(_BODY59)))])
+                    return
+                stop = min(stop, len(_BODY59) - 1)
+                self._send(206, [('Content-Range', 'bytes {}-{}/{}'.format(
+                    start, stop, len(_BODY59))),
+                    ('Content-Length', str(stop - start + 1)),
+                    ('Accept-Ranges', 'bytes')], _BODY59[start:stop + 1])
+                return
+            if honours_range:
+                self._send(200, [('Content-Length', str(len(_BODY59))),
+                                 ('Accept-Ranges', 'bytes')], _BODY59)
+                return
+            # Declares its size and ignores `Range` -- the shape that must not be
+            # answered with a 206, because the bytes we hand over are the whole
+            # file either way.
+            self._send(200, [('Content-Length', str(len(_BODY59)))], _BODY59)
+
+        def do_GET(self):
+            path = self.path.partition('?')[0]
+            if path == '/watch/7':
+                body = _STATIC59.encode('utf-8')
+                self._send(200, [('Content-Type', 'text/html;charset=utf-8'),
+                                 ('Content-Length', str(len(body)))], body)
+            elif path == '/refused':
+                self._send(403, [('Content-Type', 'text/plain')], b'no')
+            elif path == '/stream/live':
+                self._send(200, [('Content-Type', 'video/mp2t')], _BODY59)
+            elif path == '/witness':
+                with open(_WITNESS59, 'a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(
+                        {k.lower(): v for k, v in self.headers.items()}) + '\n')
+                self._file(path, True)
+            elif path == '/witness/norange':
+                # Same witness, the other shape: a length declared and `Range`
+                # ignored, which is the origin the relay must *not* re-issue a
+                # slice to. Two routes because the two behaviours cannot be
+                # told apart from the address the page handed us.
+                with open(_WITNESS59, 'a', encoding='utf-8') as handle:
+                    handle.write(json.dumps(
+                        {k.lower(): v for k, v in self.headers.items()}) + '\n')
+                self._file(path, False)
+            elif path.startswith('/range/'):
+                self._file(path, True)
+            elif path.startswith('/norange/'):
+                self._file(path, False)
+            else:
+                self._send(404, [('Content-Type', 'text/plain')], b'gone')
+
+    _origin59 = _httpd59.ThreadingHTTPServer(('127.0.0.1', 0), _Origin59)
+    _thread_origin59 = threading.Thread(target=_origin59.serve_forever,
+                                        daemon=True, name='ORIGIN59')
+    _thread_origin59.start()
+    ORIGIN59 = 'http://127.0.0.1:{}'.format(_origin59.server_address[1])
+
+    _jobI59 = mr59.ResolveJob('http://vid.example/watch/7')
+    _snapI59 = _jobI59.status()
+    check("a job that has never been started already answers the shape the page "
+          "polls: queued, zeroed counters, no error, no candidates. The page "
+          "reads this dict before the worker has run a line, so a missing key "
+          "here is a Vue template rendering `undefined` inside a Chinese "
+          "sentence",
+          _jobI59.step == 'queued' and _jobI59.done is False
+          and _jobI59.error == '' and _jobI59.candidates == []
+          and (_jobI59.scraped, _jobI59.from_ytdlp, _jobI59.measured,
+               _jobI59.rejected) == (0, 0, 0, 0)
+          and set(_snapI59) == {'url', 'done', 'step', 'step_label',
+                               'seconds', 'step_seconds', 'scraped',
+                               'from_ytdlp', 'measured', 'rejected', 'error',
+                               'candidates'}
+          and _snapI59['step_label'] == mr59.STEP_LABELS['queued']
+          and _snapI59['url'] == 'http://vid.example/watch/7', str(_snapI59))
+    check("every step has a Chinese label and no label belongs to a step that "
+          "does not exist: a new step without a label would render as an English "
+          "word inside the progress sentence, and an orphan label is a step "
+          "someone renamed without telling the page",
+          set(mr59.STEP_LABELS) == set(mr59.ResolveJob.STEPS) | {'queued', 'done'}
+          and all(any('一' <= ch <= '鿿' for ch in text)
+                  for text in mr59.STEP_LABELS.values()), str(mr59.STEP_LABELS))
+
+    _stepsI59, _countsI59 = [], []
+    _oldI59 = _patch59(
+        scrape_page=lambda url, body=None, opener=None:
+            [_cand59('http://h{}.example/a.mp4'.format(i)) for i in range(4)],
+        ytdlp_candidates=lambda url, binary=None: [],
+        measure=lambda cand, binary=None: (
+            setattr(cand, 'probe', _720), time.sleep(0.05))[0],
+        find_command=lambda name, **kw: '/usr/bin/yt-dlp')
+    try:
+        _jobI59.start()
+        _deadlineI59 = time.time() + 15
+        _snapI59 = {'done': False}
+        while not _snapI59['done'] and time.time() < _deadlineI59:
+            _snapI59 = _jobI59.status()
+            if not _stepsI59 or _stepsI59[-1] != _snapI59['step']:
+                _stepsI59.append(_snapI59['step'])
+            if not _countsI59 or _countsI59[-1] != _snapI59['measured']:
+                _countsI59.append(_snapI59['measured'])
+            time.sleep(0.01)
+        _snapI59 = _jobI59.status()
+    finally:
+        _restore59(_oldI59)
+    _ORDERI59 = ['queued'] + list(mr59.ResolveJob.STEPS) + ['done']
+    check("a page polling twice never sees a counter go backwards, never sees a "
+          "step it has already passed, and sees the run actually stop somewhere "
+          "other than the two ends: the counters and the step name are written "
+          "under the job's own lock, which is the entire reason polling is safe. "
+          "This is a real thread doing the writing while this thread reads, not "
+          "a staged sequence",
+          _snapI59['done'] is True and _snapI59['step'] == 'done'
+          and _snapI59['error'] == '' and len(_snapI59['candidates']) == 4
+          and _snapI59['measured'] == 4 and _snapI59['rejected'] == 0
+          and [_ORDERI59.index(s) for s in _stepsI59] == sorted(
+              _ORDERI59.index(s) for s in _stepsI59)
+          and _countsI59 == sorted(_countsI59)
+          and set(_stepsI59) <= set(_ORDERI59)
+          and 'measure' in _stepsI59, str((_stepsI59, _countsI59)))
+
+    _oldI59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
+                       ytdlp_candidates=lambda url, binary=None: [])
+    try:
+        _emptyI59 = mr59.resolve_now('http://vid.example/watch/7')
+        _noYtdlpI59 = None
+        try:
+            _patchedI59 = _patch59(
+                find_command=lambda name, **kw: None if name == 'yt-dlp'
+                else '/usr/bin/ffprobe')
+            _noYtdlpI59 = mr59.resolve_now('http://vid.example/watch/7')
+        finally:
+            _restore59(_patchedI59)
+    finally:
+        _restore59(_oldI59)
+    check("an empty result says *which* empty result it is, and the machine's "
+          "yt-dlp is the difference between the two sentences: 「页面里没有读到 "
+          "视频地址」 alone tells a user to look for another page, while the "
+          "machine that has no yt-dlp can only ever read what the HTML spells "
+          "out -- and saying so is the only way they learn to install it. Both "
+          "answers come with an empty candidate list, never with a stale one",
+          _emptyI59.error == '页面里没有读到视频地址'
+          and 'yt-dlp' not in _emptyI59.error
+          and _noYtdlpI59.error == ('页面里没有读到视频地址'
+                                    '（这台机器没有装 yt-dlp，'
+                                    '只能抓 HTML 里写明的地址）')
+          and _emptyI59.candidates == [] and _noYtdlpI59.candidates == []
+          and _emptyI59.done and _noYtdlpI59.done,
+          repr((_emptyI59.error, _noYtdlpI59.error)))
+
+    _oldI59 = _patch59(
+        scrape_page=lambda url, body=None, opener=None:
+            [_cand59('http://h1.example/a.mp4'), _cand59('http://h2.example/b.mp4')],
+        ytdlp_candidates=lambda url, binary=None: [],
+        measure=lambda cand, binary=None: setattr(
+            cand, 'probe', mr59.Probe(reach=mr59.REACH_REFUSED,
+                                      error='403')),
+        find_command=lambda name, **kw: '/usr/bin/yt-dlp')
+    try:
+        _refusedI59 = mr59.resolve_now('http://vid.example/watch/7')
+    finally:
+        _restore59(_oldI59)
+    check("when every address on the page is refused, the count is in the "
+          "sentence: 「读到 2 个地址」 proves the page was read and the addresses "
+          "were found, which is a different complaint from 「页面里没有读到视频 "
+          "地址」 and the only clue that separates a dead link from a site that "
+          "objects to us specifically",
+          _refusedI59.error == '读到的 2 个地址没有一个能通过判定（源站拒绝，或没有画面）'
+          and _refusedI59.candidates == [] and _refusedI59.measured == 2,
+          repr((_refusedI59.error, _refusedI59.measured)))
+
+    def _capI59(count, hosts, global_cap=None):
+        """Run a job over `count` candidates spread over `hosts` hosts.
+
+        `global_cap` lifts `MAX_MEASURED` so a test can ask about one of the two
+        budgets without the other answering first -- the two caps bind at
+        overlapping numbers, and a check that cannot tell which one stopped the
+        loop is a check that passes when either is deleted.
+        """
+        attrs = dict(
+            scrape_page=lambda url, body=None, opener=None: [
+                _cand59('http://h{}.example/a{}.mp4'.format(i % hosts, i))
+                for i in range(count)],
+            ytdlp_candidates=lambda url, binary=None: [],
+            measure=lambda cand, binary=None: (
+                setattr(cand, 'probe', _720), callsI59.append(cand.url))[0],
+            find_command=lambda name, **kw: '/usr/bin/yt-dlp')
+        if global_cap is not None:
+            attrs['MAX_MEASURED'] = global_cap
+        old = _patch59(**attrs)
+        try:
+            callsI59 = []
+            job = mr59.resolve_now('http://vid.example/watch/7')
+            return job, len(callsI59)
+        finally:
+            _restore59(old)
+
+    _wideI59, _wideCallsI59 = _capI59(12, 12)
+    check("the whole run spends at most `MAX_MEASURED` ffprobe calls however "
+          "many addresses the page names: each probe is up to 25 s of the user "
+          "watching a progress bar, and a page with forty renditions would make "
+          "the feature unusable. The cap is a break, not a filter, so the "
+          "uncounted ones are still offered as last resorts",
+          _wideCallsI59 == mr59.MAX_MEASURED == 8
+          and _wideI59.measured == mr59.MAX_MEASURED
+          and _wideI59.scraped == 12
+          and len(_wideI59.candidates) > mr59.MAX_MEASURED,
+          '{} calls, {} candidates'.format(_wideCallsI59,
+                                           len(_wideI59.candidates)))
+    _narrowI59, _narrowCallsI59 = _capI59(12, 1, global_cap=100)
+    check("twelve renditions from one CDN answer the probe twelve times the same "
+          "way, so the per-host budget is the one that binds here: five, with "
+          "the global cap lifted out of the way. Without it the user waits "
+          "through seven probes that cannot change the answer",
+          _narrowCallsI59 == mr59.MAX_MEASURED_PER_HOST == 5
+          and _narrowI59.scraped == 12 and _narrowI59.measured == 5,
+          '{} calls'.format(_narrowCallsI59))
+    _splitI59, _splitCallsI59 = _capI59(12, 2, global_cap=100)
+    check("the per-host budget is a `continue`, not a `break`: with two hosts it "
+          "spends five on the first and five on the second rather than quitting "
+          "the page the moment one site is exhausted. A `break` here means four "
+          "renditions on one CDN silence every other address on the page",
+          _splitCallsI59 == 2 * mr59.MAX_MEASURED_PER_HOST
+          and _splitI59.measured == 10 and _splitI59.scraped == 12,
+          '{} calls'.format(_splitCallsI59))
+
+    _seenI59 = []
+    _oldI59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
+                       ytdlp_candidates=lambda url, binary=None: [])
+    try:
+        _finishI59 = mr59.ResolveJob('http://vid.example/watch/7',
+                                     on_finish=lambda job: _seenI59.append(job))
+        _finishI59.run()
+        _boomI59 = mr59.ResolveJob(
+            'http://vid.example/watch/7',
+            on_finish=lambda job: (_ for _ in ()).throw(ValueError('panel')))
+        _boomI59.run()
+        _noneI59 = mr59.ResolveJob('http://vid.example/watch/7')
+        _noneI59.run()
+    finally:
+        _restore59(_oldI59)
+    check("the finish callback is told which job ended and its own crash is "
+          "swallowed: `protocol.py` uses it to log, and a resolver that dies "
+          "because a *notification* raised is a resolver that lost the answer "
+          "the user is waiting for. The crash must not become the job's error "
+          "sentence either -- 「解析出错」 would tell the user the page failed to "
+          "resolve, when the resolve had already finished and said what it "
+          "thought. `on_finish=None` is the other legal shape",
+          len(_seenI59) == 1 and _seenI59[0] is _finishI59
+          and _boomI59.done is True and '解析出错' not in _boomI59.error
+          and _boomI59.error == _finishI59.error
+          and _noneI59.done is True, str((_seenI59, _boomI59.error)))
+
+    _oldI59 = _patch59(
+        scrape_page=lambda url, body=None, opener=None:
+            (_ for _ in ()).throw(ValueError('boom')),
+        ytdlp_candidates=lambda url, binary=None: [],
+        find_command=lambda name, **kw: '/usr/bin/yt-dlp')
+    try:
+        _crashI59 = mr59.resolve_now('http://vid.example/watch/7')
+    finally:
+        _restore59(_oldI59)
+    check("a resolver that raises says so in a sentence and still ends: it names "
+          "the exception type, marks itself done, and leaves the step at 「完成」 "
+          "so the page stops polling rather than spinning on a dead job. Without "
+          "the `finally` the job would sit `done=False` forever and the ceiling "
+          "of four jobs would fill with corpses",
+          _crashI59.error.startswith('解析出错：ValueError: boom')
+          and _crashI59.done is True and _crashI59.step == 'done'
+          and _crashI59.status()['done'] is True
+          and _crashI59.candidates == [], repr(_crashI59.error))
+
+    _BIN59 = os.path.join(_tmp59, 'bin59')
+    _write_fake(_BIN59, 'yt-dlp', '''#!/bin/sh
+cat <<'JSON'
+{"title": "第三集 · 夏日回响", "formats": [
+ {"format_id": "720", "ext": "mp4", "width": 1280, "height": 720,
+  "bitrate": 2500000, "vcodec": "h264", "acodec": "aac",
+  "url": "http://yt.example/ep7-720.mp4",
+  "http_headers": {"Referer": "http://vid.example/watch/7",
+                   "Cookie": "session=secret", "Host": "yt.example",
+                   "Accept-Encoding": "gzip", "User-Agent": "Macast/1"}}]}
+JSON
+''')
+    _write_fake(_BIN59, 'ffprobe', '''#!/bin/sh
+cat <<'JSON'
+{"format": {"format_name": "mp4", "duration": "300.0", "bit_rate": "2000000"},
+ "streams": [{"codec_type": "video", "codec_name": "h264",
+              "width": 1280, "height": 720},
+             {"codec_type": "audio", "codec_name": "aac"}]}
+JSON
+''')
+    _pathI59 = os.environ.get('PATH', '')
+    os.environ['PATH'] = _BIN59 + os.pathsep + _pathI59
+    try:
+        _e2eI59 = mr59.resolve_now(ORIGIN59 + '/watch/7')
+    finally:
+        os.environ['PATH'] = _pathI59
+    _originsI59 = sorted({c.origin for c in _e2eI59.candidates})
+    _ytdlpI59 = [c for c in _e2eI59.candidates if c.origin == 'ytdlp']
+    check("the whole pipeline runs end to end against a page fetched over a real "
+          "socket, with a real `yt-dlp` and a real `ffprobe` on PATH: the two "
+          "engines merge into one list, the counters add up to what the card "
+          "prints (「抓到 6 个」「来自 yt-dlp 1 个」「度量 7 个」「判定剔除 0 个」), "
+          "and nothing is refused. This is the only case in this Part that runs "
+          "the subprocess plumbing -- argv order, JSON shape, and the timeout "
+          "arguments included",
+          _e2eI59.error == '' and _e2eI59.done is True
+          and _e2eI59.scraped == 6 and _e2eI59.from_ytdlp == 1
+          and _e2eI59.measured == 7 and _e2eI59.rejected == 0
+          and len(_e2eI59.candidates) == 7 and _originsI59 == ['page', 'ytdlp'],
+          str((_e2eI59.scraped, _e2eI59.from_ytdlp, _e2eI59.measured,
+               _e2eI59.rejected, _e2eI59.error)))
+    check("the address that came out of yt-dlp arrives at the job with its "
+          "headers *normalised* -- lowercased, and without the ones that describe "
+          "our own request -- because from here they are copied verbatim into the "
+          "relay and thence to the origin. A captured `Host` on a request to a "
+          "different authority is how a CDN signs an address it then refuses",
+          len(_ytdlpI59) == 1
+          and _ytdlpI59[0].headers == {'referer': 'http://vid.example/watch/7',
+                                        'cookie': 'session=secret',
+                                        'user-agent': 'Macast/1'}
+          and _ytdlpI59[0].title == '第三集 · 夏日回响',
+          str(_ytdlpI59[0].headers if _ytdlpI59 else None))
+    check("every candidate in the finished job is a progressive file, so every "
+          "one of them is a proxy the relay can seek inside: the fixture page "
+          "names no manifest, and `plan` answers from the address rather than "
+          "from the probe, so a probe that calls an .m3u4 an mp4 cannot invent a "
+          "转封装 the viewer does not need",
+          all(mr59.plan(c) == 'proxy' for c in _e2eI59.candidates)
+          and not any(c.segmented for c in _e2eI59.candidates)
+          and all(mr59.describe(c)['mode'] == 'proxy'
+                  for c in _e2eI59.candidates), '')
+
+    # -- J: the Range parser, the type table, and the copy it must not drift from
+    _clf59 = _load_plugin("cast_local_file59", "cast_local_file.py")
+    _RANGE_TABLE59 = (
+        None, '', 'bytes=0-0', 'bytes=100-200', 'bytes=100-', 'bytes=-200',
+        'bytes=-0', 'bytes=0-1,5-6', 'bytes=abc', 'bytes=', 'bytes',
+        'items=0-10', 'bytes=500-100', 'bytes=  5 - 9 ', 'bytes=0-9999999999',
+        'bytes=x-', 'bytes=-x', 'BYTES=10-20', ' bytes =10-20',
+    )
+    check("this is the second copy of a Range parser in the repository, and the "
+          "first one is inside a shipped plugin that core may not import. Every "
+          "header in one table is fed to both, and the two answers must be the "
+          "same character for character -- that is the alternative to moving the "
+          "plugin's copy, which would reopen its behaviour for a feature it does "
+          "not need. A drift here means the same player gets a different answer "
+          "depending on which feature it was pointed at",
+          all(mrel59.parse_range(h) == _clf59.parse_range(h)
+              for h in _RANGE_TABLE59),
+          str([(h, mrel59.parse_range(h), _clf59.parse_range(h))
+                for h in _RANGE_TABLE59
+                if mrel59.parse_range(h) != _clf59.parse_range(h)]))
+    check("... and the same table read against the answers themselves, because "
+          "two copies agreeing is not the same as both being right: no header is "
+          "「from the beginning」, junk is ignored rather than answered 416, the "
+          "suffix form keeps its count unpaired (resolving it needs a total, which "
+          "is `serve_plan`'s job), and a reversed range is junk. "
+          "`bytes=` with an empty spec is junk, not 「0 to nothing」",
+          mrel59.parse_range(None) == (0, None)
+          and mrel59.parse_range('') == (0, None)
+          and mrel59.parse_range('bytes=100-200') == (100, 200)
+          and mrel59.parse_range('bytes=100-') == (100, None)
+          and mrel59.parse_range('bytes=-200') == (None, 200)
+          and mrel59.parse_range('bytes=-0') == (None, 0)
+          and mrel59.parse_range('bytes=0-1,5-6') is None
+          and mrel59.parse_range('bytes=abc') is None
+          and mrel59.parse_range('bytes=') is None
+          and mrel59.parse_range('bytes') is None
+          and mrel59.parse_range('items=0-10') is None
+          and mrel59.parse_range('bytes=500-100') is None
+          and mrel59.parse_range('BYTES=10-20') == (10, 20)
+          and mrel59.parse_range(' bytes =10-20') == (10, 20),
+          str([mrel59.parse_range(h) for h in _RANGE_TABLE59]))
+    check("`Content-Range` is read for the *total*, not for the slice: the probe "
+          "asks for one byte and gets `bytes 0-0/2000`, and 2000 is the number "
+          "that decides whether the viewer can seek. `*` (an origin that will "
+          "not say) and a missing header both answer None rather than 0, because "
+          "0 is a length a player would trust",
+          mrel59.total_from_content_range('bytes 0-0/2000') == 2000
+          and mrel59.total_from_content_range('bytes 5-6/ 78 ') == 78
+          and mrel59.total_from_content_range('bytes 0-999/*') is None
+          and mrel59.total_from_content_range(None) is None
+          and mrel59.total_from_content_range('') is None
+          and mrel59.total_from_content_range('bytes 0-0/0') == 0, '')
+    _TYPE59 = mrel59.content_type_for
+    check("the advertised type comes from the source's own facts first: ffprobe "
+          "answers `mov,mp4,m4a,3gp,3g2,mj2` for every MP4, and a badge reading "
+          "that string is why `container_label` exists -- and `Content-Type` is "
+          "the same problem one layer down. A wrong type here is a television "
+          "that refuses to open a stream it would otherwise play, so the exact "
+          "name wins, then the three substring families it also spells, then the "
+          "extension, then the one honest fallback",
+          _TYPE59('http://h/a', mr59.Probe(
+              container='mov,mp4,m4a,3gp,3g2,mj2')) == 'video/mp4'
+          and _TYPE59('http://h/a', mr59.Probe(
+              container='mp4')) == 'video/mp4'
+          and _TYPE59('http://h/a', mr59.Probe(
+              container='matroska,webm')) == 'video/x-matroska'
+          and _TYPE59('http://h/a', mr59.Probe(
+              container='WebM')) == 'video/webm'
+          and _TYPE59('http://h/a', mr59.Probe(
+              container='something_odd_matroska_thing')) == 'video/x-matroska'
+          and _TYPE59('http://h/a', mr59.Probe(
+              container='mp4, mov-ish')) == 'video/mp4'
+          and _TYPE59('http://h/a', mr59.Probe(container='mpegts'))
+          == 'video/mp2t', '')
+    check("... and when the source names a container we have no card for, the "
+          "next witness is the extension: `pango` over a `.ts` address still "
+          "advertises `video/mp2t`, an unknown container over a `.mp4` keeps the "
+          "MP4, and a name we have no type for *and* no extension for "
+          "(`avi`, and `/watch/7`) falls to the one honest answer. "
+          "`application/octet-stream` is a working answer for mpv and a bad one "
+          "for a TV, so it must only appear when nothing better was ever said",
+          _TYPE59('http://h/a', mr59.Probe(
+              container='avi', video_codec='mpeg4')) == mrel59.UNKNOWN_TYPE
+          and _TYPE59('http://h/ep.ts', mr59.Probe(
+              container='pango')) == 'video/mp2t'
+          and _TYPE59('http://h/ep.mp4', mr59.Probe(
+              container='pango')) == 'video/mp4'
+          and _TYPE59('http://h/ep.m3u8', mr59.Probe())
+          == 'application/vnd.apple.mpegurl'
+          and _TYPE59('http://h/ep.mpd', None) == 'application/dash+xml'
+          and _TYPE59('http://h/track.mp3', None) == 'audio/mpeg'
+          and _TYPE59('http://h/watch/7', None) == mrel59.UNKNOWN_TYPE
+          and _TYPE59('http://h/a.mp4', mr59.Probe(
+              container='')) == 'video/mp4', '')
+
+    # -- K: what HTTP to make of one read ---------------------------------
+    def _relay59(**kw):
+        """One relay, as the handler's decision function sees it.
+
+        Built by keyword so a case can state only the two facts that matter to
+        `serve_plan` (`ranges`, `length`) and let the rest be the defaults -- the
+        same pair the probe writes.
+        """
+        kw.setdefault('relay_id', 'relay-k')
+        kw.setdefault('url', 'http://origin.example/ep.mp4')
+        return mrel59.Relay(**kw)
+
+    def _plan59(relay, header):
+        plan = mrel59.serve_plan(relay, header)
+        return (plan.status, plan.start, plan.stop, plan.total, plan.partial,
+                plan.length)
+
+    _SEEK59 = _relay59(ranges=True, length=2000)
+    _PLAN_TABLE59 = (
+        (None, (200, 0, 1999, 2000, False, 2000)),
+        ('', (200, 0, 1999, 2000, False, 2000)),
+        ('bytes=0-0', (206, 0, 0, 2000, True, 1)),
+        ('bytes=500-', (206, 500, 1999, 2000, True, 1500)),
+        ('bytes=900-2000', (206, 900, 1999, 2000, True, 1100)),
+        ('bytes=1999-', (206, 1999, 1999, 2000, True, 1)),
+        ('bytes=-200', (206, 1800, 1999, 2000, True, 200)),
+        ('bytes=0-9999999999', (206, 0, 1999, 2000, True, 2000)),
+        ('bytes=2000-', (416, 2000, None, 2000, False, None)),
+        ('bytes=-0', (416, 2000, None, 2000, False, None)),
+        ('bytes=abc', (200, 0, 1999, 2000, False, 2000)),
+        ('bytes=', (200, 0, 1999, 2000, False, 2000)),
+        ('bytes=500-100', (200, 0, 1999, 2000, False, 2000)),
+        ('bytes=0-1,5-6', (200, 0, 1999, 2000, False, 2000)),
+        ('items=0-10', (200, 0, 1999, 2000, False, 2000)),
+    )
+    _PLAN_BAD59 = [(h, _plan59(_SEEK59, h), want)
+                   for h, want in _PLAN_TABLE59
+                   if _plan59(_SEEK59, h) != want]
+    check("every row of the Range table against a relay that knows it is 2000 "
+          "bytes long and that the origin honours Range: a request with no header "
+          "is a 200 with a length and *no* `Content-Range`, an open-ended or "
+          "over-long slice is clamped to the last real byte, the suffix form is "
+          "resolved against the total, an offset past the end is 416 with no "
+          "length, and every junk header is served the whole file rather than "
+          "refused. This is `cast_local_file`'s red line in a third place, and "
+          "the reason it is a callable rather than a few lines inside the handler "
+          "is that the bug it prevents -- 「whole-file read also answered 206」 -- "
+          "was once shipped in this repository",
+          not _PLAN_BAD59, str(_PLAN_BAD59))
+    check("`partial` is exactly「206」, the advertised length is exactly the slice "
+          "it asks for, a 416 advertises no length at all, and the whole-file "
+          "answers carry the total: four invariants the handler prints straight "
+          "into headers, each of which a renderer reads as a different question. "
+          "Read from the table rather than restated, so a row that drifts cannot "
+          "keep both assertions",
+          all((p.partial is (p.status == 206))
+              and (p.length is None if p.status == 416 else
+                   p.length == (p.total if not p.partial
+                                else p.stop - p.start + 1))
+              for _h, p in [(h, mrel59.serve_plan(_SEEK59, h))
+                            for h, _w in _PLAN_TABLE59]), '')
+
+    _FLAT59 = _relay59(ranges=False, length=2000)
+    _NOSIZE59 = _relay59(ranges=True, length=None)
+    _LIVE59 = _relay59(ranges=False, length=None)
+    check("an origin that declares 40 MB and ignores `Range` still gets a "
+          "`Content-Length` -- that number is what lets a DLNA renderer show a "
+          "duration at all -- but never a 206, because the bytes handed over are "
+          "the whole file either way. Asking for `bytes=500-` from it is answered "
+          "like a plain GET, and the plan's stop is still filled in so the write "
+          "is bounded by the length we advertised rather than by however long the "
+          "origin talks",
+          _plan59(_FLAT59, None) == (200, 0, 1999, 2000, False, 2000)
+          and _plan59(_FLAT59, 'bytes=500-') == (200, 0, 1999, 2000, False, 2000)
+          and _plan59(_FLAT59, 'bytes=0-99') == (200, 0, 1999, 2000, False, 2000)
+          and mrel59.serve_plan(_FLAT59, 'bytes=500-').remaining == 2000, '')
+    check("the two shapes with no length answer the same way and mean different "
+          "things: a Range-capable origin that never said how long it is, and a "
+          "live stream that says nothing. Both are「from byte 0, no end, no "
+          "length」-- an estimate would be a lie the player seeks by, and a 206 "
+          "would promise a range we cannot name. `remaining` is None for both, "
+          "which is the handler's「read until the source ends」",
+          _plan59(_NOSIZE59, 'bytes=1000-') == (200, 0, None, None, False, None)
+          and _plan59(_NOSIZE59, None) == (200, 0, None, None, False, None)
+          and _plan59(_LIVE59, None) == (200, 0, None, None, False, None)
+          and mrel59.serve_plan(_LIVE59, None).remaining is None
+          and mrel59.serve_plan(_SEEK59, 'bytes=500-').remaining == 1500
+          and mrel59.serve_plan(_SEEK59, 'bytes=2000-').remaining is None, '')
+    check("`seekable` is the conjunction the card prints, not either fact alone: "
+          "Range support with no length is not something a viewer can scrub, and "
+          "a length it cannot ask for is worse than no length. `alive` is the "
+          "other question -- a failed relay is still in the store for the length "
+          "of the request that found it",
+          _relay59(ranges=True, length=2000).seekable is True
+          and _relay59(ranges=True, length=None).seekable is False
+          and _relay59(ranges=True, length=0).seekable is False
+          and _relay59(ranges=False, length=2000).seekable is False
+          and _relay59().alive is True
+          and _relay59(state='running').alive is True
+          and _relay59(state='complete').alive is True
+          and _relay59(state='failed').alive is False, '')
+
+    # -- L: the store, its budgets, and the address it publishes ----------
+    class _Proc59:
+        """Enough of a `Popen` for `shutdown()`: poll, kill, wait."""
+
+        def __init__(self, running=True):
+            self.running = running
+            self.killed = False
+            self.waited = 0
+
+        def poll(self):
+            return None if self.running else 0
+
+        def kill(self):
+            self.killed = True
+            self.running = False
+
+        def wait(self, timeout=None):
+            self.waited += 1
+            return 0
+
+    def _temp59(name):
+        path = os.path.join(_tmp59, name)
+        with open(path, 'wb') as handle:
+            handle.write(b'x')
+        return path
+
+    _small59 = mrel59.RelayStore(max_relays=2, ttl=60)
+    _gone59 = _relay59(relay_id='oldest', url='http://o/1')
+    _gone_proc59 = _Proc59()
+    _gone59.proc = _gone_proc59
+    _gone_path59 = _temp59('oldest.mp4')
+    _gone59.path = _gone_path59
+    _gone59.last_seen = time.time() - 2
+    _mid59 = _relay59(relay_id='middle', url='http://o/2')
+    _mid59.last_seen = time.time() - 1
+    _new59 = _relay59(relay_id='newest', url='http://o/3')
+    _new59.last_seen = time.time() + 1
+    _small59.add(_gone59)
+    _small59.add(_mid59)
+    _small59.add(_new59)
+    check("the store is capped and the cap evicts the *least recently watched* "
+          "relay, not the first one registered: a user who reopens an old address "
+          "has just bought it another half hour, and the entry that loses its slot "
+          "is the one nobody has read in longest. Eviction is not forgetting -- "
+          "the relay that left had its encoder killed and its temp file removed, "
+          "because §4.2 is explicit that a killed Macast leaves players behind and "
+          "a killed ffmpeg leaves a growing MP4",
+          sorted(_small59.entries) == ['middle', 'newest']
+          and _gone_proc59.killed is True and _gone_proc59.waited == 1
+          and _gone59.proc is None
+          and _gone59.path == '' and not os.path.exists(_gone_path59)
+          and len(_small59.entries) == _small59.max_relays,
+          str((_small59.entries.keys(), _gone_proc59.killed,
+              _gone_proc59.waited, _gone59.path,
+              os.path.exists(_gone_path59))))
+    _old59 = _relay59(relay_id='idle', url='http://o/4')
+    _idle_path59 = _temp59('idle.mp4')
+    _old59.path = _idle_path59
+    _idle_proc59 = _Proc59()
+    _old59.proc = _idle_proc59
+    _small59.add(_old59)
+    _old59.last_seen = time.time() - 120
+    check("a relay nobody has read for `ttl` is gone the next time somebody asks "
+          "for it, and the answer to that request is 404-with-a-shutdown rather "
+          "than a live stream from an expired session. The id is the only "
+          "credential this path has: the address can be pasted into a chat, and it "
+          "carries the upstream cookies, so it must not outlive the session that "
+          "made it. `peek` is deliberately *not* that door -- the page polls "
+          "status, and a poll that kept the relay alive forever would make the "
+          "TTL unreadable",
+          _small59.get('idle') is None
+          and _idle_proc59.killed is True
+          and _old59.proc is None
+          and not os.path.exists(_idle_path59)
+          and _small59.peek('idle') is None
+          and 'idle' not in _small59.entries,
+          str((_old59.proc, os.path.exists(_idle_path59))))
+    _keep59 = _relay59(relay_id='watched', url='http://o/5')
+    _small59.add(_keep59)
+    _before59 = _keep59.last_seen
+    time.sleep(0.01)
+    _hit59 = _small59.get('watched')
+    _peeked59 = _keep59.last_seen
+    time.sleep(0.01)
+    check("`get` extends the life and `peek` does not -- read as numbers, because "
+          "「the page polling must not keep a relay alive forever」 is only worth "
+          "something if the timestamp actually moves on one path and not the "
+          "other. Half an hour of someone watching a progress bar should not "
+          "become an indefinite reservation of one of eight slots",
+          _hit59 is _keep59 and _keep59.last_seen > _before59
+          and _small59.peek('watched').last_seen == _keep59.last_seen, '')
+    _five59 = mrel59.RelayStore(max_relays=8, ttl=60)
+    _ids59 = ['aaaa', 'aaab', 'zzzz']
+    for _id59 in _ids59:
+        _five59.add(_relay59(relay_id=_id59, url='http://o/6'))
+    _five59.entries['zzzz'].last_seen = 0      # make it the oldest by watch time
+    check("the id is found by comparing it against every id we issued, so the "
+          "answer cannot depend on insertion order or on how much of a guesser's "
+          "prefix was right: three entries, a hit on each, a prefix that must not "
+          "match, an unknown id, and the empty/None shapes that a malformed URL "
+          "arrives as. With eight entries the loop costs nothing and it is the "
+          "difference between「hard to guess」and「not leaky」",
+          all(_five59.peek(i) is not None for i in _ids59)
+          and _five59.peek('aaa') is None
+          and _five59.peek('aaaaa') is None
+          and _five59.peek('') is None
+          and _five59.peek(None) is None, '')
+    _active59 = mrel59.RelayStore(max_relays=8, ttl=60)
+    _a59 = _relay59(relay_id='a', url='http://o/a', title='A')
+    _b59 = _relay59(relay_id='b', url='http://o/b', title='B')
+    _a59.created = time.time() - 5
+    _b59.created = time.time()
+    for _r59 in (_b59, _a59):
+        _active59.add(_r59)
+    _listed59 = _active59.active()
+    _STATUS_KEYS59 = set(_relay59().status())
+    check("`active()` is the account the management page shows: oldest registration "
+          "first, one entry per live relay, and every row is a `status()` dict "
+          "rather than the object -- the page must not be able to reach an ffmpeg "
+          "handle through a JSON document",
+          [r['id'] for r in _listed59] == ['a', 'b']
+          and all(set(r) == _STATUS_KEYS59 for r in _listed59), str(_listed59))
+    check("`new_id` is the credential, so its size and alphabet are the claim: 16 "
+          "bytes of `secrets`, url-safe encoded, unique across a hundred draws. A "
+          "shorter id is a guessable one, and the id is the *only* thing standing "
+          "between a LAN device and someone else's signed CDN address",
+          len({_id59 for _id59 in [mrel59.new_id() for _ in range(100)]}) == 100
+          and all(len(i) >= 20 and _re59.match(r'^[A-Za-z0-9_-]+$', i)
+                  for i in [mrel59.new_id()]), '')
+    _sweep59 = mrel59.RelayStore(max_relays=8, ttl=0.05)
+    _live59b = _relay59(relay_id='swept', url='http://o/7')
+    _swept_proc59 = _Proc59()
+    _live59b.proc = _swept_proc59
+    _sweep59.add(_live59b)
+    _sweep59.start_sweeper(0.02)
+    _sweep59.start_sweeper(0.02)               # second call must not add a thread
+    _thread_count59 = sum(1 for t in threading.enumerate()
+                          if t.name == 'RELAY_SWEEP')
+    _waited59 = _wait_until(lambda: 'swept' not in _sweep59.entries, 5)
+    _sweep59.stop_sweeper()
+    check("an idle relay dies with no request at all: the sweeper is the reason a "
+          "forgotten session is not an ffmpeg writing to a temp file until the app "
+          "restarts. Starting it twice must not start two threads (the module "
+          "calls it from `ensure_server`, which is idempotent), and it must "
+          "actually be the thing that emptied the store, which is why this waits "
+          "for the entry to disappear rather than sampling once",
+          _waited59 and _swept_proc59.killed is True
+          and _live59b.proc is None
+          and _thread_count59 == 1, str((_waited59, _thread_count59)))
+
+    _relay_dir59 = mrel59.relay_dir()
+    _old_orphan59 = os.path.join(_relay_dir59, 'orphan-old.mp4')
+    _fresh_orphan59 = os.path.join(_relay_dir59, 'orphan-new.mp4')
+    _watched59 = os.path.join(_relay_dir59, 'watched-live.mp4')
+    _notours59 = os.path.join(_relay_dir59, 'keepme.txt')
+    for _path59 in (_old_orphan59, _fresh_orphan59, _watched59, _notours59):
+        with open(_path59, 'wb') as handle:
+            handle.write(b'y')
+    _stamp59 = time.time() - 4000
+    os.utime(_old_orphan59, (_stamp59, _stamp59))
+    os.utime(_watched59, (_stamp59, _stamp59))
+    os.utime(_notours59, (_stamp59, _stamp59))
+    _owned59 = _relay59(relay_id='watched-live', url='http://o/8')
+    mrel59.store.add(_owned59)
+    _removed59 = mrel59.sweep_orphans(now=time.time())
+    check("the orphan sweep removes exactly one of four files, and each of the "
+          "three it leaves is left for a different reason: our own extension and "
+          "older than the TTL ⇒ gone; our extension but young ⇒ kept, because a "
+          "session that is running rewrites its file constantly; a name the store "
+          "still holds ⇒ kept *however old* it looks, because a second running "
+          "instance is normal on this LAN and the sweep must not reach into "
+          "somebody's stream; and a file we never write (.txt) ⇒ not ours to "
+          "touch. §4.2 records that a signal-killed Macast skips cleanup, so "
+          "without this the disk fills one crash at a time",
+          _removed59 == [_old_orphan59]
+          and not os.path.exists(_old_orphan59)
+          and os.path.exists(_fresh_orphan59)
+          and os.path.exists(_watched59)
+          and os.path.exists(_notours59), str(_removed59))
+    mrel59.store.drop('watched-live')
+    for _path59 in (_fresh_orphan59, _watched59, _notours59):
+        try:
+            os.remove(_path59)
+        except OSError:
+            pass
+    check("`relay_dir` lives under the setting dir this Part repointed, so the "
+          "sweep and the temp files never touch the user's real configuration "
+          "(§10). The helper also creates it, which is the §4.2 lesson applied "
+          "before the fact: a writer that assumes a directory exists is a failure "
+          "that reads like a codec problem",
+          _relay_dir59 == os.path.join(_tmp59, 'relay')
+          and os.path.isdir(_relay_dir59), _relay_dir59)
+
+    # The address we publish, pinned against the plugin's second copy (§4.8: core
+    # may not import a plugin, so the choice lives twice and drifts unless someone
+    # reads it). One stubbed interface table, four machine states. The stub goes on
+    # each module's own `_reachable_hosts()` seam, not on `discovery`: row 2 asks
+    # for an answer (`192.168.1.5`, the *second* interface) that is only reachable
+    # if the routing table the two copies read is this one, so the expectation is
+    # itself the premise check -- patching something the copies don't consult makes
+    # the row red rather than quietly agreeing.
+    _HOST_TABLE59 = (
+        (['192.168.1.5', '192.168.97.1'], ['192.168.1.5'], '192.168.1.5'),
+        (['192.168.97.1', '192.168.1.5'], ['192.168.1.5'], '192.168.1.5'),
+        (['192.168.97.1', '192.168.139.3'], [], '192.168.97.1'),
+        ([], ['192.168.1.5'], '127.0.0.1'),
+    )
+    _host_pairs59 = []
+    _old_ip59 = utils.Setting.get_advertisable_ip
+    _old_reach59 = mrel59._reachable_hosts
+    _old_reach_clf59 = _clf59._reachable_hosts
+    try:
+        for _addrs59, _reach59, _want59 in _HOST_TABLE59:
+            utils.Setting.get_advertisable_ip = staticmethod(
+                lambda a=_addrs59: list(a))
+            mrel59._reachable_hosts = lambda r=_reach59: list(r)
+            _clf59._reachable_hosts = lambda r=_reach59: list(r)
+            _host_pairs59.append((mrel59.advertise_host(),
+                                  _clf59.advertise_host(), _want59))
+    finally:
+        utils.Setting.get_advertisable_ip = _old_ip59
+        mrel59._reachable_hosts = _old_reach59
+        _clf59._reachable_hosts = _old_reach_clf59
+    check("two copies of「which of my addresses can a phone dial」, one table of "
+          "four machine states, and the two copies must answer identically on "
+          "every row -- including the row where nothing is reachable, where both "
+          "fall back to the first advertisable address, and the row where the "
+          "machine has no address at all, where both say 127.0.0.1. The order of "
+          "the interface list is *not* the order a set yields, which is exactly "
+          "how the VM-bridge address came to be handed to a television once; the "
+          "core's copy is what mDNS publishes, so the URL we hand out is the one "
+          "the device can open",
+          all(a == b == want for a, b, want in _host_pairs59)
+          and len(_host_pairs59) == 4, str(_host_pairs59))
+
+    _host59, _port59 = mrel59.ensure_server()
+    _again59 = mrel59.ensure_server()
+    check("`ensure_server` is idempotent and its port is only ever published "
+          "inside a media URL: a second call returns the same bound port rather "
+          "than opening a second listener on 0.0.0.0. Random rather than fixed is "
+          "the same choice the two sender plugins make -- a fixed port would "
+          "collide with `screen_mirror`'s or `cast_local_file`'s on a machine "
+          "where both are in use",
+          _again59 == (_host59, _port59)
+          and mrel59.server_port() == _port59
+          and _port59 > 0
+          and sum(1 for t in threading.enumerate()
+                  if t.name == 'RELAY_HTTP') == 1, str(_again59))
+    _url_relay59 = _relay59(relay_id='abc123', url='http://o/9',
+                             mode='proxy', title='x')
+    _media_url59 = mrel59.media_url(_url_relay59, host='10.0.0.5')
+    _status_url59 = mrel59.status_url(_url_relay59, host='10.0.0.5')
+    check("the two URLs are the same address with two tails, on the host and port "
+          "we actually have open, and neither carries anything but the id: no "
+          "token parameter (the id *is* the credential), no path from the origin, "
+          "no management token anywhere in sight. The page copies this into a "
+          "chat, so everything it needs to be safe is in its shape",
+          _media_url59 == 'http://10.0.0.5:{}{}abc123/media'.format(
+              _port59, mrel59.RELAY_PREFIX)
+          and _status_url59 == 'http://10.0.0.5:{}{}abc123/status'.format(
+              _port59, mrel59.RELAY_PREFIX)
+          and 'token' not in _media_url59
+          and _media_url59.split('/relay/')[1] == 'abc123/media',
+          str((_media_url59, _status_url59)))
+
+    # -- M/N: the relay over real sockets ---------------------------------
+    def _ask59(path, headers=None, method='GET', port=None):
+        """One request to the relay, answered as (status, headers, body)."""
+        conn = http.client.HTTPConnection('127.0.0.1', port or _port59,
+                                          timeout=25)
+        try:
+            conn.request(method, path, headers=headers or {})
+            response = conn.getresponse()
+            return (response.status,
+                    {k.lower(): v for k, v in response.getheaders()},
+                    response.read())
+        finally:
+            conn.close()
+
+    def _open59(path, headers=None, mode='proxy', probe=True, **kw):
+        """Register one relay against the fixture origin and hand back its id.
+
+        `probe` defaults to True because that is what production does: `open_relay`
+        asks the origin one question before it publishes an address, and a relay
+        that never asked has `ranges=False` -- which is the *other* shape, and the
+        one the "never re-issue a Range it cannot honour" case wants on purpose.
+        """
+        relay = _relay59(relay_id=mrel59.new_id(),
+                         url=ORIGIN59 + path, mode=mode,
+                         headers=dict(headers or {}), **kw)
+        mrel59.store.add(relay)
+        if probe:
+            mrel59.probe_proxy(relay)
+        return relay
+
+    _probe_range59 = _open59('/range/ep.mp4', probe=False)
+    _probe_flat59 = _open59('/norange/ep.mp4', probe=False)
+    _probe_live59 = _open59('/stream/live', probe=False)
+    _probe_dead59 = _open59('/refused', probe=False)
+    mrel59.probe_proxy(_probe_range59)
+    mrel59.probe_proxy(_probe_flat59)
+    mrel59.probe_proxy(_probe_live59)
+    mrel59.probe_proxy(_probe_dead59)
+    check("the probe is the only way to learn whether the viewer can seek, and "
+          "the four origins a resolved address actually comes from answer four "
+          "different questions: one honours `bytes=0-0` (so: ranges, and the "
+          "total read out of `Content-Range`), one declares 2000 bytes and ignores "
+          "the header (a length, and *no* seeking), one says neither (a live "
+          "stream: no length, no seeking, and its own `Content-Type` adopted "
+          "because ours was the placeholder), and one says no -- which must land "
+          "as a failed relay carrying the status it gave us, not as a silent "
+          "empty stream. None of this is guessable from the address, which is why "
+          "it costs one request at hand-off time rather than a user's evening",
+          (_probe_range59.ranges, _probe_range59.length,
+           _probe_range59.state) == (True, 2000, 'open')
+          and (_probe_flat59.ranges, _probe_flat59.length) == (False, 2000)
+          and _probe_flat59.seekable is False
+          and (_probe_live59.ranges, _probe_live59.length) == (False, None)
+          and _probe_live59.content_type == 'video/mp2t'
+          and _probe_dead59.state == 'failed'
+          and _probe_dead59.probe_error == '源站返回 403'
+          and _probe_dead59.status()['error'] == '源站返回 403',
+          str([(_r.ranges, _r.length, _r.state, _r.probe_error)
+               for _r in (_probe_range59, _probe_flat59, _probe_live59,
+                          _probe_dead59)]))
+
+    _whole59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id))
+    _slice59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id),
+                      {'Range': 'bytes=500-999'})
+    _tail59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id),
+                     {'Range': 'bytes=-100'})
+    _past59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id),
+                     {'Range': 'bytes=9000-'})
+    check("the whole-file read is a 200 with a length and no `Content-Range`, and "
+          "a slice is a 206 whose bytes are exactly the bytes asked for -- read "
+          "off a socket, because §4.8 records that this repo shipped "
+          "「whole-file read also answered 206」 once and a unit test could not "
+          "see it. The suffix form resolves against the total, an offset past the "
+          "end is 416 with `bytes */2000` and no body, and every answer advertises "
+          "the Range support the relay actually has",
+          _whole59[0] == 200 and 'content-range' not in _whole59[1]
+          and _whole59[1]['content-length'] == '2000'
+          and _whole59[1]['accept-ranges'] == 'bytes' and _whole59[2] == _BODY59
+          and _slice59[0] == 206
+          and _slice59[1]['content-range'] == 'bytes 500-999/2000'
+          and _slice59[2] == _BODY59[500:1000]
+          and _tail59[0] == 206 and _tail59[2] == _BODY59[-100:]
+          and _past59[0] == 416
+          and _past59[1]['content-range'] == 'bytes */2000' and _past59[2] == b'',
+          str([(_s, _h.get('content-range'), _h.get('accept-ranges'), len(_b))
+               for _s, _h, _b in (_whole59, _slice59, _tail59, _past59)]))
+    _head59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id),
+                     method='HEAD')
+    check("HEAD is answered like GET with the body withheld: a renderer that wants "
+          "to know the length before it commits gets one, and a 206 on a HEAD "
+          "would leave it computing a total from a slice",
+          _head59[0] == 200 and _head59[1]['content-length'] == '2000'
+          and _head59[2] == b''
+          and _head59[1]['accept-ranges'] == 'bytes', str(_head59[:2]))
+
+    _flat_hit59 = _ask59('/relay/{}/media'.format(_probe_flat59.relay_id),
+                         {'Range': 'bytes=500-999'})
+    check("an origin that ignores `Range` is answered a 200 and the whole file "
+          "*even when the viewer asked for a slice*, with `Accept-Ranges: none` "
+          "said out loud. Re-issuing the viewer's range upstream would produce a "
+          "200 whose body is the whole file under a 206 header -- which is how a "
+          "player ends up with a video that seeks to the wrong place and never "
+          "complains",
+          _flat_hit59[0] == 200 and 'content-range' not in _flat_hit59[1]
+          and _flat_hit59[1]['accept-ranges'] == 'none'
+          and _flat_hit59[2] == _BODY59, str(_flat_hit59[:2]))
+    _dead_hit59 = _ask59('/relay/{}/media'.format(_probe_dead59.relay_id))
+    check("a relay whose origin refused the probe answers 502, not an empty 200: "
+          "§4.8's rule that a name registered with no bytes to hand over is "
+          "refused rather than opened, because a lengthless 200 is a spinner a "
+          "television will wait on forever",
+          _dead_hit59[0] == 502 and _dead_hit59[2] == b'not here',
+          str(_dead_hit59[:2]))
+
+    _witness_lines59 = os.path.join(_tmp59, 'origin-headers.json')
+
+    def _witness_said59():
+        """Every request the fixture origin has witnessed, in order."""
+        try:
+            with open(_witness_lines59, encoding='utf-8') as handle:
+                return [json.loads(line) for line in handle if line.strip()]
+        except (OSError, ValueError):
+            return []
+
+    _witness59 = _open59('/witness', headers={'referer': 'http://vid.example/x',
+                                              'cookie': 'sid=42'})
+    # The probe above already spoke to this origin, so the witness is read as a
+    # delta rather than "the last line": a case that read the probe's own request
+    # would go green without ever having asked whether *our* headers travelled.
+    _seen59 = _witness_said59()
+    _witness_get59 = _ask59('/relay/{}/media'.format(_witness59.relay_id),
+                            {'Range': 'bytes=1000-1999'})
+    _new59 = _witness_said59()[len(_seen59):]
+    _said59 = _new59[-1] if _new59 else {}
+    check("this is the fact the whole feature exists for, read from the origin's "
+          "own witness file: the captured `Referer` and `Cookie` reach the source "
+          "(without them a signed address 403s minutes later on a television, "
+          "which reads as a protocol bug), the viewer's slice is re-issued "
+          "upstream as the range the origin can honour, and the header that "
+          "describes *our* request -- `Host` -- is ours, not the page's. Byte for "
+          "byte the slice is what was asked for",
+          len(_new59) == 1
+          and _said59.get('referer') == 'http://vid.example/x'
+          and _said59.get('cookie') == 'sid=42'
+          and _said59.get('range') == 'bytes=1000-1999'
+          and _said59.get('host') == '127.0.0.1:{}'.format(
+              _origin59.server_address[1])
+          and _witness_get59[0] == 206
+          and _witness_get59[2] == _BODY59[1000:2000], str((_new59,
+                                                            _witness_get59[0])))
+
+    # The other shape, witnessed: an origin that declares a length and ignores
+    # `Range`. A relay that asked it for a slice would get an answer in the
+    # origin's own words (a 416, or the whole file under a 200) and hand the
+    # viewer a video that seeks to the wrong place and never complains.
+    _flat_witness59 = _open59('/witness/norange',
+                              headers={'referer': 'http://vid.example/y',
+                                       'cookie': 'sid=7'})
+    _seen_flat59 = _witness_said59()
+    _flat_slice59 = _ask59('/relay/{}/media'.format(
+        _flat_witness59.relay_id), {'Range': 'bytes=500-999'})
+    _new_flat59 = _witness_said59()[len(_seen_flat59):]
+    _said_flat59 = _new_flat59[-1] if _new_flat59 else {}
+    check("the relay never re-issues a `Range` upstream that it cannot honour: a "
+          "non-seeking origin gets a plain GET even when the viewer asked for a "
+          "slice, so the one request per connection is the whole file rather than "
+          "a range the origin would answer in its own words -- and the captured "
+          "headers still ride along on that GET, because the origin is the same "
+          "signed-address site either way",
+          len(_new_flat59) == 1
+          and 'range' not in _said_flat59
+          and _said_flat59.get('referer') == 'http://vid.example/y'
+          and _said_flat59.get('cookie') == 'sid=7'
+          and _flat_witness59.ranges is False
+          and _flat_witness59.length == 2000
+          and _flat_slice59[0] == 200 and _flat_slice59[2] == _BODY59
+          and _flat_slice59[1]['accept-ranges'] == 'none',
+          str((_new_flat59, _flat_slice59[0], len(_flat_slice59[2]))))
+
+    _missing59 = (
+        ('/relay//media', 'an empty id'),
+        ('/relay/nope/media', 'an id we never issued'),
+        ('/relay/nope/status', 'the same for the status document'),
+        ('/relay/{}/other'.format(_probe_range59.relay_id), 'an unknown tail'),
+        ('/relay/{}/media/extra'.format(_probe_range59.relay_id),
+         'a path with one part too many'),
+        ('/watch/7', 'not our address space at all'),
+        ('/', 'the root'),
+    )
+    _missing_verdict59 = [(p, _ask59(p)) for p, _why in _missing59]
+    check("every shape of「not here」is a 404 with the same short body and the "
+          "two headers that stop a browser sniffing it: an empty id, an id from "
+          "another session or another restart, a tail that is neither media nor "
+          "status, a longer path, and two URLs that are not in the relay's "
+          "address space. This port serves one thing; anything else must not be "
+          "told what it got close to",
+          all(st == 404 and body == b'not here'
+              and hdr['cache-control'] == 'no-store'
+              and hdr['x-content-type-options'] == 'nosniff'
+              for _p, (st, hdr, body) in _missing_verdict59)
+          and len(_missing_verdict59) == 7,
+          str([(p, v[0]) for p, v in _missing_verdict59]))
+    _post59 = _ask59('/relay/{}/media'.format(_probe_range59.relay_id),
+                     method='POST')
+    _head_status59 = _ask59('/relay/{}/status'.format(_probe_range59.relay_id),
+                            method='HEAD')
+    check("nothing on this port is a control endpoint: a POST is 405, and the "
+          "status document is a GET-only JSON read so a HEAD on it is 405 too. A "
+          "relay is started by the gated management API and the only thing this "
+          "listener takes is a read",
+          _post59[0] == 405 and _head_status59[0] == 405,
+          str((_post59[0], _head_status59[0])))
+
+    _status59 = _ask59('/relay/{}/status'.format(_probe_range59.relay_id))
+    _body59json59 = json.loads(_status59[2].decode('utf-8'))
+    check("the status document is the same eleven fields `active()` prints, with "
+          "JSON headers on top: the page polls it while a remux is growing, and a "
+          "card that reads a different set of keys than the management table is a "
+          "card that renders `undefined` inside a Chinese sentence. `seekable` is "
+          "the answer to「can I scrub」, and it is derived, not stored -- which is "
+          "why it cannot disagree with the two facts it comes from",
+          _status59[0] == 200
+          and _status59[1]['content-type'].startswith('application/json')
+          and set(_body59json59) == _STATUS_KEYS59
+          and _body59json59['id'] == _probe_range59.relay_id
+          and _body59json59['mode'] == 'proxy'
+          and _body59json59['seekable'] is True
+          and _body59json59['written'] == 2000
+          and _body59json59['error'] == '', str(_body59json59))
+
+    # -- N, second half: the remux shape, the only one that grows -----------
+    _grow59 = _relay59(relay_id='growing', url='http://h/index.m3u8',
+                       mode='remux', state='running', ranges=False,
+                       length=None, content_type='video/mp4')
+    _grow59.path = _temp59('growing.mp4')
+    with open(_grow59.path, 'wb') as seeded:
+        seeded.write(_BODY59[:500])
+    mrel59.store.add(_grow59)
+
+    def _append59():
+        # A second writer growing the file while a reader is already parked
+        # inside it -- which is exactly what a viewer does when it opens a
+        # remux in progress.
+        time.sleep(0.6)
+        with open(_grow59.path, 'ab') as later:
+            later.write(_BODY59[500:1000])
+            later.flush()
+        with _grow59.lock:
+            _grow59.state = 'complete'
+            _grow59.length = 1000
+            _grow59.ranges = True
+
+    _grower59 = threading.Thread(target=_append59, name='GROW59')
+    _grower59.start()
+    _grown59 = _ask59('/relay/growing/media')
+    _grower59.join()
+    check("a viewer that connects ahead of the encoder is *held*, not answered "
+          "short: the file had 500 bytes when the request landed and 1000 by the "
+          "time it grew, and the body has to be those 1000. A short read here is "
+          "an EOF to every player that reads it, and they do not ask again -- "
+          "which is also why the whole file is served with 200 and no "
+          "Content-Length while the length is still unknown",
+          _grown59[0] == 200 and len(_grown59[2]) == 1000
+          and _grown59[2] == _BODY59[:1000]
+          and 'content-length' not in _grown59[1]
+          and _grown59[1]['accept-ranges'] == 'none',
+          'status {} body {} bytes'.format(_grown59[0], len(_grown59[2])))
+
+    class _Proc59w(object):
+        """Enough of a finished `Popen` for `watch_remux` to judge."""
+
+        def __init__(self, code, stderr=''):
+            self._code = code
+            self.stderr = iter([line + '\n' for line in stderr.split('\n')]) \
+                if stderr else None
+
+        def wait(self, timeout=None):
+            return self._code
+
+    def _watch59(code, stderr, nbytes, pre=None):
+        relay = _relay59(relay_id='watch', url='http://h/x.m3u8', mode='remux',
+                         state=pre or 'running')
+        relay.path = _temp59('watch.mp4')
+        os.truncate(relay.path, nbytes)
+        relay.proc = _Proc59w(code, stderr)
+        mrel59.watch_remux(relay)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            with relay.lock:
+                if relay.state in ('complete', 'failed'):
+                    break
+            time.sleep(0.05)
+        return relay
+
+    _ok59 = _watch59(0, '', 4096)
+    check("a clean exit with bytes behind it is what *buys* seeking: state "
+          "`complete`, length the real file size, `ranges` True, and no error "
+          "sentence. Nothing else on this path makes the length honest -- ffmpeg "
+          "decides how long its own output is, so this thread is not a courtesy",
+          _ok59.state == 'complete' and _ok59.length == 4096
+          and _ok59.ranges is True and _ok59.error == '',
+          '{} {} {} {!r}'.format(_ok59.state, _ok59.length, _ok59.ranges,
+                                 _ok59.error))
+    _bad59 = _watch59(1, 'nothing was recorded\nmoov atom not found', 0)
+    check("a non-zero exit says so in ffmpeg's own last words and takes seeking "
+          "away with it: the exact sentence the page shows, with length None and "
+          "ranges False. Offering a seek bar for a file that does not exist is "
+          "worse than a failure that names itself, and the name has to be "
+          "ffmpeg's, not ours -- it is the only thing the user can search for",
+          _bad59.state == 'failed' and _bad59.ranges is False
+          and _bad59.length is None
+          and _bad59.error == '转封装没有产出可用的文件（ffmpeg 退出码 1：'
+                              'moov atom not found）',
+          repr(_bad59.error))
+    _empty59 = _watch59(0, '', 0)
+    check("exit code 0 with an empty file is a failure, not a success: ffmpeg can "
+          "exit happily having been refused everything by the origin. Believing "
+          "the code alone would publish `length = 0` and a player would read that "
+          "as an empty video with a working scrub bar",
+          _empty59.state == 'failed' and _empty59.length is None
+          and _empty59.ranges is False,
+          '{} {!r}'.format(_empty59.state, _empty59.length))
+    _quiet59 = _watch59(0, 'killed on purpose\n', 4096, pre='failed')
+    check("a remux that somebody else already failed stays silent: the watcher "
+          "returns without touching state, length, or the error sentence, because "
+          "the entry was evicted or expired and the user already has an "
+          "explanation. Overwriting it with「退出码 0」would blame ffmpeg for our "
+          "own sweep, and would rewrite a `complete` onto a relay we just killed",
+          _quiet59.state == 'failed' and _quiet59.error == ''
+          and _quiet59.length is None and _quiet59.ranges is False,
+          '{} {!r} {!r}'.format(_quiet59.state, _quiet59.error,
+                                _quiet59.length))
+
+    _noff59 = _relay59(relay_id='no_ffmpeg', url='http://h/x.m3u8',
+                       mode='remux')
+    _old59 = _patch59(find_command=lambda name, **kw: None)
+    try:
+        _noff_ok59 = mrel59.start_remux(_noff59)
+    finally:
+        _restore59(_old59)
+    check("no ffmpeg is a named answer, not a crash and not a silent proxy: "
+          "`start_remux` returns False, marks the relay failed, and says which "
+          "machine state it hit (`这台机器没有 ffmpeg，无法把清单流转封装`), with "
+          "no process and no temp path. A manifest relay on a machine without "
+          "ffmpeg has no other honest outcome -- forwarding the .m3u8 to a TV "
+          "would only lose there instead of here",
+          _noff_ok59 is False and _noff59.state == 'failed'
+          and _noff59.error == '这台机器没有 ffmpeg，无法把清单流转封装'
+          and _noff59.proc is None and _noff59.path == '',
+          '{} {!r} {!r}'.format(_noff59.state, _noff59.error, _noff59.path))
+
+    _ffdir59 = os.path.join(_tmp59, 'ffbin')
+    _fakeff59 = os.path.join(_ffdir59, 'ffmpeg')
+    _write_fake(_ffdir59, 'ffmpeg', r"""#!/bin/sh
+# Fake remuxer. The output path is the LAST argv entry; the argv is recorded
+# there so the caller can be asked what it actually ran, one parameter per line.
+out=$(eval echo \${$#})
+printf '%s\n' "$@" > "$out.argv"
+printf 'ABCDABCDAB' >> "$out"
+sleep 0.6
+printf 'ABCDABCDAB' >> "$out"
+exit 0
+""")
+    _remux59 = _relay59(relay_id='remuxed', url='http://h/index.m3u8',
+                        mode='remux', state='running', ranges=False,
+                        length=None, content_type='video/mp4',
+                        headers={'Referer': 'http://vid.example/'})
+    mrel59.store.add(_remux59)
+    _old59 = _patch59(find_command=lambda name, **kw:
+                      _fakeff59 if name == 'ffmpeg' else None)
+    try:
+        _remux_ok59 = mrel59.start_remux(_remux59)
+    finally:
+        _restore59(_old59)
+    _saw_complete59 = _wait_until(lambda: _remux59.state == 'complete', 20)
+    _remux_body59 = _ask59('/relay/remuxed/media')
+    with open(_remux59.path + '.argv', encoding='utf-8') as _av59:
+        _argv59 = [line.rstrip('\n') for line in _av59]
+    check("a remux started for real produces a file at the path ffmpeg is given "
+          "(the LAST argv entry) and grows into a seekable one: state `complete`, "
+          "length 20, ranges True, and the bytes a viewer reads back are exactly "
+          "those 20 -- including the half that did not exist when this test "
+          "started reading",
+          _remux_ok59 is True and _saw_complete59
+          and os.path.basename(_remux59.path) == 'remuxed.mp4'
+          and _remux59.state == 'complete' and _remux59.length == 20
+          and _remux59.ranges is True
+          and _remux_body59[0] == 200 and _remux_body59[2] == b'ABCDABCDAB' * 2,
+          '{} {} {!r} {} {!r}'.format(_remux_ok59, _remux59.state,
+                                      _remux59.error, _remux59.length,
+                                      _remux_body59[2][:8]))
+    check("the remux argv is a `-c copy` container job and not a re-encode, with "
+          "the protocol whitelist an HLS playlist cannot open without and "
+          "`+faststart` so the index lands where a seek can find it. Re-encoding "
+          "here would be a second renderer nobody asked for; the point is one "
+          "file a device can walk with byte offsets",
+          '-c' in _argv59 and _argv59[_argv59.index('-c') + 1] == 'copy'
+          and '-f' in _argv59 and _argv59[_argv59.index('-f') + 1] == 'mp4'
+          and '+faststart' in ' '.join(_argv59)
+          and '-protocol_whitelist' in _argv59
+          and 'file,http,https,tcp,tls,crypto,httpproxy,data' in _argv59
+          and '-y' in _argv59 and '-loglevel' in _argv59
+          and _argv59[_argv59.index('-i') + 1] == 'http://h/index.m3u8'
+          and _argv59[-1] == _remux59.path
+          and not any(x in ('libx264', 'h264_videotoolbox') for x in _argv59),
+          ' '.join(_argv59))
+    check("the relay's own headers reach ffmpeg on the `-headers` option, in the "
+          "one spelling ffmpeg parses: a manifest behind a Referer check is "
+          "exactly the site class this feature exists for, and dropping the "
+          "headers here would 403 at the segment fetch after we already told the "
+          "user the address was good. The value is `media_resolve.header_field`'s "
+          "own CRLF join rather than a second copy of that format, so the two "
+          "call sites (ffprobe and ffmpeg) cannot drift apart quietly",
+          '-headers' in _argv59
+          and _argv59[_argv59.index('-headers') + 1]
+              == mr59.header_field({'Referer': 'http://vid.example/'})
+          and '\r\n' in mr59.header_field({'A': '1', 'B': '2'}),
+          repr(_argv59[_argv59.index('-headers') + 1]
+               if '-headers' in _argv59 else None))
+    check("the temp file lives in the app's own directory under `relay/`, named "
+          "for the relay id: not a system temp dir somebody's cleaner sweeps on a "
+          "schedule, and not a name the user could have written. `sweep_orphans` "
+          "and the eviction path both find their work by that convention",
+          os.path.dirname(_remux59.path) == mrel59.relay_dir()
+          and _remux59.path == os.path.join(mrel59.relay_dir(),
+                                           'remuxed.mp4'), _remux59.path)
+    # -- O/P: the two POSTs and one GET the page actually calls -------------
+    _host59, _port59 = mrel59.ensure_server()
+    _origin_port59 = _origin59.server_address[1]
+    _good_url59 = ORIGIN59 + '/range/ep.mp4'
+    _dead_url59 = ORIGIN59 + '/refused'
+
+    class _Tgt59(object):
+        """The renderer side: records what was pushed, and can refuse to push."""
+
+        def __init__(self, refuse=False):
+            self.pushed = []
+            self.refuse = refuse
+
+        def cast_uri(self, url, title=''):
+            if self.refuse:
+                raise RuntimeError('no renderer is listening')
+            self.pushed.append((url, title))
+
+    class _H59(protocol.Handler):
+        def __init__(self, target):
+            self.local_dir = _tmp59
+            self._target59 = target
+
+        @property
+        def protocol(self):
+            return self._target59
+
+    _tgt59 = _Tgt59()
+    _tgt_dead59 = _Tgt59(refuse=True)
+    _handler59 = _H59(_tgt59)
+    _handler_no59 = _H59(_tgt_dead59)
+
+    def _job59(url, title):
+        """A finished parse that offers exactly one address."""
+        job = mr59.ResolveJob(url)
+        job.candidates = [mr59.Candidate(url=url, origin='page', label='720p',
+                                         title=title)]
+        job.done = True
+        job.step = 'done'
+        job.scraped = job.measured = 1
+        return job
+
+    _one_job59 = _job59(_good_url59, '第三集 · 夏日回响')
+    _dead_job59 = _job59(_dead_url59, '同样一个标题')
+    _busy59 = mr59.ResolveJob(_good_url59)   # never started: step is still queued
+
+    _req59 = cherrypy.serving.request
+    _sp59 = (_req59.params, getattr(_req59, 'remote', None), _req59.scheme,
+             dict(_req59.headers))
+    _saved_running59 = utils.Setting.is_service_running
+    utils.Setting.is_service_running = staticmethod(lambda: True)
+
+    def _as59(ip='127.0.0.1', token=None, scheme='http'):
+        _req59.headers.clear()
+        for _k, _v in _sp59[3].items():
+            _req59.headers[_k] = _v
+        _req59.params = {'token': token} if token else {}
+        _req59.remote = types.SimpleNamespace(ip=ip)
+        _req59.scheme = scheme
+
+    def _post59(handler, **kw):
+        return json.loads(handler.POST(**kw).decode())
+
+    # The whole section runs under the resolver's three helpers stubbed, because
+    # `resolve-page` does not just register a job -- it starts a real thread that
+    # fetches a page. Without this, every "does the handler answer correctly"
+    # case below would also be a live network test with a live yt-dlp.
+    _oldO59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
+                       ytdlp_candidates=lambda url, binary=None: [],
+                       find_command=lambda name, **kw: '/usr/bin/yt-dlp')
+    # `drop` watched by name: a refusal that claims to have deregistered its
+    # relay has to say *which id* it removed, or the claim is unfalsifiable.
+    _real_drop59 = mrel59.store.drop
+    _dropped59 = []
+
+    def _spied_drop59(relay_id):
+        _dropped59.append(relay_id)
+        return _real_drop59(relay_id)
+
+    mrel59.store.drop = _spied_drop59
+    protocol.Handler._resolve_jobs = {}
+    try:
+        # -- the gates, with witnesses that nothing ran ---------------------
+        _gate_rows59 = {name: gate for name, gate, _m
+                        in protocol.Handler.POST_ROUTES
+                        if name in ('resolve-page', 'cast-resolved')}
+        check("the two writes this card makes are management-gated and not "
+              "code-execution-gated, and that is a real distinction rather than a "
+              "shade of grey: `resolve-page` fetches a page and `cast-resolved` "
+              "opens a relay, neither of which puts a file on disk that gets "
+              "imported. Dropping either to GATE_MANAGEMENT-only from a table that "
+              "knows the difference would let a LAN device without the token start "
+              "a fetch; raising it to GATE_CODE would make the card refuse the "
+              "machine's own settings page",
+              _gate_rows59 == {'resolve-page': protocol.GATE_MANAGEMENT,
+                               'cast-resolved': protocol.GATE_MANAGEMENT},
+              str(_gate_rows59))
+
+        _lan_calls59 = []
+        for _name59 in ('_post_resolve_page', '_post_cast_resolved'):
+            _real59 = getattr(_handler59, _name59)
+
+            def _watch59(_n=_name59, _f=_real59):
+                def _inner(kwargs):
+                    _lan_calls59.append(_n)
+                    return _f(kwargs)
+                return _inner
+            setattr(_handler59, _name59, _watch59())
+        _lan59 = {}
+        for _field59, _value59 in (('resolve-page', 'http://vid.example/watch/7'),
+                                   ('cast-resolved', '1')):
+            _as59(ip='192.168.1.99')
+            try:
+                _lan59[_field59] = _post59(_handler59, **{_field59: _value59})
+            except Exception as exc:
+                _lan59[_field59] = '{}: {}'.format(type(exc).__name__, exc)
+        for _name59 in ('_post_resolve_page', '_post_cast_resolved'):
+            delattr(_handler59, _name59)
+        check("a LAN request without the token does not reach either method: it is "
+              "the management sentence, as a JSON body with code 403 (which is how "
+              "this dispatcher refuses -- it does not raise an HTTPError), and both "
+              "route methods carry a call-counter that stayed at zero. Any device "
+              "on the network could otherwise point this Mac at an address of its "
+              "choosing and start a fetch that carries our cookies",
+              len(_lan59) == 2
+              and all(isinstance(r, dict) and r.get('code') == 403
+                      and 'management API requires local access' in r.get('message',
+                          '') for r in _lan59.values())
+              and _lan_calls59 == [] and len(_tgt59.pushed) == 0,
+              str([_lan59, _lan_calls59]))
+        _lan_status59 = None
+        _as59(ip='192.168.1.99')
+        try:
+            _lan_status59 = json.loads(
+                _handler59.GET('api', query='resolve-status', job='nope').decode())
+        except Exception as exc:
+            _lan_status59 = '{}: {}'.format(type(exc).__name__, exc)
+        check("the poll is gated like everything else that names a job: the answer "
+              "to `query=resolve-status` is a page's URL plus every media address "
+              "it carries, signed, so an unauthenticated LAN read of it is not a "
+              "harmless progress check",
+              isinstance(_lan_status59, dict)
+              and _lan_status59.get('code') == 403, str(_lan_status59))
+        _as59()
+        _own_status59 = json.loads(
+            _handler59.GET('api', query='resolve-status', job='nope').decode())
+        check("the same poll from this machine is answered rather than refused -- "
+              "the card runs a timer on it, and a gate that only ever closes would "
+              "have been tested just as well by the case above",
+              _own_status59['code'] == 1
+              and '没有这个解析任务' in _own_status59['message'],
+              str(_own_status59))
+
+        _as59()
+        _before_shape59 = dict(protocol.Handler._resolve_jobs)
+        _no_url59 = _post59(_handler59, **{'resolve-page': ''})
+        _bare59 = _post59(_handler59, **{'resolve-page': 'example.com/watch/7'})
+        _spaces59 = _post59(_handler59, **{'resolve-page': '   '})
+        check("an empty box and a bare host are refused in their own words, and "
+              "neither reaches the resolver: `example.com/watch/7` handed to yt-dlp "
+              "becomes a *search* for that text and comes back with an answer that "
+              "looks like the site having no video. `resolve-page` with only "
+              "whitespace is the same request as the empty one, because the box is "
+              "what the user typed and the app must not invent a scheme. The "
+              "registry is provably untouched, since a rejected address must not "
+              "leave a job the page will then poll forever",
+              _no_url59['code'] == 1 and _spaces59['code'] == 1
+              and _no_url59['message'] == '请先填写网页地址'
+              and _spaces59['message'] == '请先填写网页地址'
+              and _bare59['code'] == 1
+              and _bare59['message'] == '地址要以 http:// 或 https:// 开头'
+              and protocol.Handler._resolve_jobs == _before_shape59,
+              str([_no_url59, _bare59, _spaces59]))
+
+        _as59()
+        _started59 = _post59(_handler59, **{'resolve-page': _good_url59})
+        _job_id59 = _started59.get('job', '')
+        check("a page address that passes the shape test gets an id, the address "
+              "echoed back, and a job the page can poll: the id is what comes back "
+              "on every later request, so it has to be issued here and be nothing "
+              "else's. Nothing about this answer depends on the parse having "
+              "finished -- that is the whole reason it is a job",
+              _started59['code'] == 0 and len(_job_id59) >= 8
+              and _started59['url'] == _good_url59
+              and _handler59._resolve_job(_job_id59) is not None
+              and _handler59._resolve_job(_job_id59).page_url == _good_url59,
+              str(_started59))
+        _status_unknown59 = _handler59._resolve_status('nonexistent')
+        _status_none59 = _handler59._resolve_status(None)
+        check("a poll for a job that is not here answers in the shape the page "
+              "already reads, with `status: None` and a sentence that names both "
+              "reasons a job goes away (idle past the TTL, or the app restarted) -- "
+              "and it never raises, because this is called from a timer. A page "
+              "that gets an exception here stops polling and the user reads a "
+              "frozen progress bar forever",
+              _status_unknown59['code'] == 1
+              and _status_unknown59['status'] is None
+              and _status_unknown59['job'] == ''
+              and '没有这个解析任务' in _status_unknown59['message']
+              and _status_none59['code'] == 1
+              and _status_none59['status'] is None, str(_status_unknown59))
+        _status_good59 = _handler59._resolve_status(_job_id59)
+        check("the same call for a job that IS here is the job's own twelve "
+              "counters and nothing else: the page draws its progress from these "
+              "and only these, so a key added to `status()` is a key the card can "
+              "read, and a key it reads that is not there renders「undefined」in "
+              "the middle of a Chinese sentence",
+              _status_good59['code'] == 0
+              and _status_good59['job'] == _job_id59
+              and set(_status_good59['status']) == set(mr59.ResolveJob(
+                  'http://x').status()),
+              str(sorted(_status_good59['status'])))
+
+        _full59 = protocol.Handler._resolve_jobs
+        _before_full59 = dict(_full59)
+        try:
+            _full59.clear()
+            _full59.update({'j{}'.format(i): _busy59 for i in range(4)})
+            _as59()
+            _refused59 = _post59(_handler59, **{'resolve-page': _good_url59})
+            _fifth_present59 = [v for v in _full59.values() if v is _busy59]
+            _full59['j0'] = _one_job59          # one of them finishes
+            _as59()
+            _admitted59 = _post59(_handler59, **{'resolve-page': _good_url59})
+        finally:
+            _full59.clear()
+            _full59.update(_before_full59)
+        check("four parses is the ceiling and the fifth is told the number: each "
+              "one is up to 25 s of ffprobe per candidate on a shared machine, and "
+              "an unbounded registry is a page that can be left clicking「解析」"
+              "until the box is busy. The message names RESOLVE_JOBS_MAX rather "
+              "than saying「too many」, because the user's next question is how "
+              "many are allowed",
+              _refused59['code'] == 1
+              and _refused59['message'] == '已经有 4 个解析在跑，请等其中一个结束'
+              and len(_fifth_present59) == 4, str(_refused59))
+        check("the ceiling counts *running* jobs, not registered ones: four slots "
+              "held by finished parses still make room, because a finished job is "
+              "an answer somebody may or may not still be reading, while a running "
+              "one is the answer a page is polling for. Losing the running job to "
+              "make room would leave that page asking for a job that has stopped "
+              "existing mid-sentence",
+              _admitted59['code'] == 0 and len(_admitted59.get('job', '')) >= 8,
+              str(_admitted59))
+        _ttl59 = protocol.Handler._resolve_jobs
+        _old_job59 = mr59.ResolveJob(_good_url59)
+        _old_job59.started = time.time() - protocol.Handler.RESOLVE_JOB_TTL - 5
+        _old_job59.run()
+        _fresh59 = mr59.ResolveJob(_good_url59)
+        try:
+            _ttl59.clear()
+            _ttl59.update({'old': _old_job59, 'fresh': _fresh59})
+            _handler59._prune_resolve_jobs()
+            _after_ttl59 = sorted(_ttl59)
+        finally:
+            _ttl59.clear()
+            _ttl59.update(_before_full59)
+        check("TTL is measured from when a job *started*, and a finished job is "
+              "not exempt: a signed CDN address that was measured in a previous "
+              "session is worse than no address, because the page would offer it "
+              "as if it were fresh. Half an hour is the same budget the relay "
+              "itself lives on, so the two cannot disagree about when a session is "
+              "over",
+              _after_ttl59 == ['fresh'], str(_after_ttl59))
+
+        # A job that is registered but never started: `done` is still False, so "
+        # the refusal must name the step. `queued` is the label a page can see "
+        # before the worker has run a line, which is exactly when a double-click "
+        # on「投屏」happens.
+        protocol.Handler._resolve_jobs['busyjob'] = _busy59
+        _as59()
+        _notdone59 = _post59(_handler59, **{'job': 'busyjob', 'candidate': '0',
+                                            'cast-resolved': '1'})
+        check("casting a job that is still parsing is refused with the step it is "
+              "on, in the words the page already shows for that step:「还在解析中 "
+              "（排队中）」 tells the user which of four waits they are in, while"
+              "「请稍等」 would tell them nothing and invite the double-click that "
+              "starts a second parse. The label is read from STEP_LABELS for the "
+              "job's own step, not typed here, so a renamed step cannot leave the "
+              "two sentences disagreeing",
+              _notdone59['code'] == 1
+              and '还在解析中' in _notdone59['message']
+              and _busy59.done is False
+              and mr59.STEP_LABELS[_busy59.step] in _notdone59['message'],
+              str(_notdone59))
+        _gone_job59 = _post59(_handler59, **{'job': 'nope', 'candidate': '0',
+                                             'cast-resolved': '1'})
+        check("a job id that is not here says the one thing the user can act on: "
+              "解析任务已经不在了，请重新解析. Not「internal error」, and not the "
+              "relay's own 404 -- the address they pasted is fine, the *parse* is "
+              "what expired",
+              _gone_job59['code'] == 1
+              and '重新解析' in _gone_job59['message'], str(_gone_job59))
+        # Two candidates on purpose: with one, a `-1` index and an out-of-range
+        # one are the same request, and the case that catches Python's friendly
+        # negative indexing needs a list where `-1` would have *worked*.
+        _two_job59 = mr59.ResolveJob(_good_url59)
+        _two_job59.candidates = [_one_job59.candidates[0],
+                                 mr59.Candidate(url=ORIGIN59 + '/range/last.mp4',
+                                                origin='page', label='1080p',
+                                                title='最后一个候选')]
+        _two_job59.done = True
+        _two_job59.step = 'done'
+        protocol.Handler._resolve_jobs['two'] = _two_job59
+        _before_idx59 = set(mrel59.store.entries)
+        _bad_index59 = _post59(_handler59, **{'job': 'two', 'candidate': '9',
+                                              'cast-resolved': '1'})
+        _junk_index59 = _post59(_handler59, **{'job': 'two', 'candidate': 'abc',
+                                               'cast-resolved': '1'})
+        _blank_index59 = _post59(_handler59, **{'job': 'two', 'candidate': '',
+                                                'cast-resolved': '1'})
+        _neg_index59 = _post59(_handler59, **{'job': 'two', 'candidate': '-1',
+                                              'cast-resolved': '1'})
+        check("a candidate index outside the list is refused the same way whether "
+              "it is too big, not a number, absent, or negative: 「-1」 is the one "
+              "that would otherwise *succeed* by Python's indexing rules and cast "
+              "the last candidate the user did not choose (here a 1080p row on a "
+              "page that asked for 720p), and a page that posts a row index from a "
+              "filtered list can send exactly that",
+              all(r['code'] == 1 and r['message'] == '没有这个候选项'
+                  for r in (_bad_index59, _junk_index59, _blank_index59,
+                            _neg_index59))
+              and len(_tgt59.pushed) == 0
+              and set(mrel59.store.entries) == _before_idx59,
+              str([_bad_index59, _neg_index59]))
+
+        _before_cast59 = dict(mrel59.store.entries)
+        protocol.Handler._resolve_jobs['castme'] = _one_job59
+        _as59()
+        _cast59 = _post59(_handler59, **{'job': 'castme', 'candidate': '0',
+                                         'cast-resolved': '1'})
+        _pushed59 = _tgt59.pushed
+        _pushed_url59 = _pushed59[0][0] if _pushed59 else ''
+        _relay_ids59 = set(mrel59.store.entries) - set(_before_cast59)
+        check("the address that reaches the renderer is the relay's, never the "
+              "page's: /relay/<id>/media on this machine's own listener, and the "
+              "origin URL the parse produced appears nowhere in what was pushed. "
+              "This is the entire reason the feature has a relay -- the origin "
+              "address is signed, short-lived, and needs our Referer, so a "
+              "television sent to it directly fails in a way the user cannot read "
+              "and we cannot fix. Exactly one relay was added by this call, and "
+              "its id is the one in the URL, in the answer, and in the store",
+              _cast59['code'] == 0 and len(_pushed59) == 1
+              and len(_relay_ids59) == 1
+              and _relay_ids59 == {_cast59['relay']['id']}
+              and '/relay/{}/media'.format(_cast59['relay']['id'])
+                  in _pushed_url59
+              and _good_url59 not in _pushed_url59
+              and all(_good_url59 != url for url, _t in _pushed59)
+              and '127.0.0.1:{}'.format(_origin_port59) not in _pushed_url59,
+              str([_pushed_url59, sorted(_relay_ids59)]))
+        check("the title the renderer is told is the one the card shows, and the "
+              "answer carries the relay's own status plus the sentence explaining "
+              "that mode: the page has to be able to say「can I scrub」 without "
+              "asking the relay a second question, and a note that is a second "
+              "copy of the rule rather than the rule's own words is a note that "
+              "goes stale the day `plan()` changes",
+              _pushed59[0][1] == '第三集 · 夏日回响'
+              and _cast59['relay']['id'] in _pushed_url59
+              and _cast59['relay']['mode'] == 'proxy'
+              and _cast59['relay']['seekable'] is True
+              and _cast59['relay']['length'] == 2000
+              and set(_cast59['relay']) == set(_relay59().status())
+              and _cast59['note'] == mr59.relay_reason(_one_job59.candidates[0]),
+              str(_cast59.get('relay')))
+        _served59 = _ask59('/relay/{}/media'.format(_cast59['relay']['id']),
+                           port=_port59)
+        check("the address we just handed to the renderer really serves the bytes "
+              "on this machine's port, from the fixture origin through the relay: "
+              "a green「投屏成功」that points at a listener returning 404 is the "
+              "worst shape this feature can have, because the user's next evidence "
+              "is a black television",
+          _served59[0] == 200 and len(_served59[2]) == 2000
+          and _served59[2] == _BODY59, str((_served59[0], len(_served59[2]))))
+
+        # Free the slots the earlier groups filled before asking what *this* call
+        # did to the store. `RelayStore.add` holds `RELAY_MAX` by evicting the
+        # least-recently-watched entry, and that eviction does not go through
+        # `store.drop`, so a full store would silently change this check from "the
+        # failed relay is gone" to "something older than eight is gone". The cap and
+        # its eviction rule have their own case above, on a dedicated store.
+        for _leftover59 in sorted(mrel59.store.entries):
+            if _leftover59 != _cast59['relay']['id']:
+                mrel59.store.drop(_leftover59)
+        _before_dead59 = dict(mrel59.store.entries)
+        _dropped59[:] = []
+        protocol.Handler._resolve_jobs['deadcast'] = _dead_job59
+        _as59()
+        _dead_cast59 = _post59(_handler59, **{'job': 'deadcast', 'candidate': '0',
+                                              'cast-resolved': '1'})
+        check("an origin that refuses is answered in its own words and leaves "
+              "nothing registered: the 403 we got from the source becomes the "
+              "message, no second URL is pushed to the renderer. A「投屏失败」with "
+              "no reason would send the user to change the address when the address "
+              "is fine and the *site* said no",
+              _dead_cast59['code'] == 1 and '源站' in _dead_cast59['message']
+              and len(_tgt59.pushed) == 1, str(_dead_cast59))
+        check("and the dead relay is dropped by id rather than sitting in one of "
+              "eight slots until the TTL: the store grew by nothing across that "
+              "call (open_relay always adds, so equality is the proof that drop "
+              "ran), the watcher saw exactly one removal, and peeking that id "
+              "answers None. §4.2's rule about a killed Macast leaving players "
+              "behind runs the same direction here -- a failed session that still "
+              "holds a slot is a bug with a delay attached",
+              set(mrel59.store.entries) == set(_before_dead59)
+              and len(_dropped59) == 1
+              and mrel59.store.peek(_dropped59[0]) is None
+              and _dropped59[0] not in _before_dead59,
+              str([_dropped59, sorted(mrel59.store.entries)]))
+        protocol.Handler._resolve_jobs.pop('deadcast', None)
+
+        _before_no59 = dict(mrel59.store.entries)
+        _dropped59[:] = []
+        _as59()
+        _no_renderer59 = _post59(_handler_no59, **{'job': 'castme',
+                                                   'candidate': '0',
+                                                   'cast-resolved': '1'})
+        check("when the renderer itself refuses, the relay goes with it and the "
+              "renderer's answer is passed through unchanged: `cast failed`, not a "
+              "success with a stray relay still streaming to nobody. The relay this "
+              "call opened is the one named by the drop, and the store is back to "
+              "the set it held before -- every relay registered by a POST has to "
+              "have a reason to still exist by the time the response is written",
+              _no_renderer59['code'] == 1
+              and _no_renderer59['message'] == 'cast failed'
+              and len(_dropped59) == 1
+              and _dropped59[0] not in _before_no59
+              and set(mrel59.store.entries) == set(_before_no59)
+              and len(_tgt_dead59.pushed) == 0,
+              str([_no_renderer59, _dropped59]))
+
+        # ---- Q: the page's text contract ---------------------------------
+        # There is no JavaScript engine in this suite, so the front end is read as
+        # text -- the method Part 35/44/57/58 use for the same reason. What is under
+        # test here is narrower than「卡片好不好看」: every fact this card prints is a
+        # string the backend already produced, so the contract is the *spelling of
+        # the seam*. A key the template reads that `status()` never returned renders
+        # as `undefined` inside a Chinese sentence, and a label or number the page
+        # computed for itself is a second copy of the rule -- the
+        # 「提示比代码活得久」shape from §4.13, one layer further out.
+        _page59 = open(os.path.join(MACAST, 'xml', 'setting.html'),
+                       encoding='utf-8').read()
+        _card_mark59 = '<h3 class="cast-title">网页地址投屏</h3>'
+        _card_start59 = _page59.index(_card_mark59)
+        _card_end59 = _page59.index('<div class="status-card pane-wide">',
+                                    _card_start59)
+        _card59 = _page59[_card_start59:_card_end59]
+        _js_start59 = _page59.index('async resolve_page() {')
+        _js59 = _page59[_js_start59:_page59.index('fmt_duration(s) {', _js_start59)]
+        check("the card is on the page once, ahead of「正在播放」, and it is one input "
+              "plus one candidate list: `page_url`, one 解析 button wired to "
+              "`resolve_page`, exactly one `v-for` over the rows the backend returned, "
+              "one 投屏 button per row. A second copy of either would mean two places "
+              "that can disagree about what was parsed -- and the slices have to be "
+              "the real thing, since every check below reads these two spans",
+              _page59.count(_card_mark59) == 1
+              and len(_card59) > 1500 and len(_js59) > 2000
+              and 'v-model="page_url"' in _card59
+              and _card59.count('@click="resolve_page"') == 1
+              and _card59.count('v-for="(c, i) in resolve.candidates"') == 1
+              and _card59.count('@click="cast_resolved(i)"') == 1,
+              str([_page59.count(_card_mark59), len(_card59), len(_js59)]))
+        _tpl_keys59 = set(_re59.findall(r'\bresolve\.([A-Za-z_][A-Za-z0-9_]*)',
+                                        _card59))
+        _status_keys59 = set(_status_good59['status'])
+        check("every `resolve.<key>` the card reads is a key the status endpoint "
+              "actually returned for this very job, so nothing is invented in the "
+              "browser; and every counter the job carries is printed. The second half "
+              "is what stops the first from being vacuous: `url`、`step`、`step_seconds` "
+              "are deliberately not on the card, but a measurement the page never "
+              "shows is a measurement nobody reads -- and `scraped / from_ytdlp / "
+              "measured / rejected` are the four numbers that let a user tell「这个站"
+              "解不出」from「解出来了但都被判定剔除」",
+              _tpl_keys59 <= _status_keys59
+              and {'done', 'error', 'step_label', 'candidates', 'scraped',
+                   'from_ytdlp', 'measured', 'rejected', 'seconds'} <= _tpl_keys59,
+              str(sorted(_tpl_keys59 - _status_keys59)))
+        _cand_keys59 = set(_re59.findall(r'\bc\.([A-Za-z_][A-Za-z0-9_]*)', _card59))
+        _desc_keys59 = set(mr59.describe(_one_job59.candidates[0]))
+        check("the same question asked of a candidate row: every `c.<key>` is one "
+              "`describe()` put into the JSON the page got back, and the row shows "
+              "exactly the facts a user compares before clicking -- title, address, "
+              "size, duration-or-live, container, which engine produced it, the two "
+              "codec names behind the silent-picture warning below, and the "
+              "backend's own relay sentence. The card renders that sentence verbatim "
+              "(`{{ c.relay }}`) rather than paraphrasing it, because the reason an "
+              "address is proxied is a rule in `relay_reason()`, not a caption",
+              _cand_keys59 <= _desc_keys59
+              and {'title', 'url', 'width', 'height', 'live', 'duration',
+                   'container', 'origin', 'relay', 'mode',
+                   'video_codec', 'audio_codec'} == _cand_keys59
+              and '{{ c.relay }}' in _card59,
+              str([sorted(_cand_keys59 - _desc_keys59), sorted(_cand_keys59)]))
+        # Found on a real site, 2026-10-03: bilibili's DASH ladder hands back a
+        # picture-only row and a sound-only row as two separate addresses, so the
+        # tallest candidate on the page is one the television plays *without any
+        # audio*. The relay cannot fix that (there is nothing second to merge with),
+        # and §4.8's rule for a shape whose cost is invisible in the symptom is that
+        # the price gets printed next to the control, not in a manual.
+        _silent59 = _re59.search(
+            r'<el-tag v-if="(c\.video_codec && !c\.audio_codec)"[^>]*>'
+            r'([^<]*)</el-tag>', _card59)
+        _silent_probe59 = mr59.Candidate(
+            url=ORIGIN59 + '/video-only.m4s', origin='ytdlp')
+        _silent_probe59.probe = mr59.Probe(video_codec='av1', audio_codec='')
+        _with_sound59 = mr59.Candidate(url=ORIGIN59 + '/both.mp4', origin='ytdlp')
+        _with_sound59.probe = mr59.Probe(video_codec='h264', audio_codec='aac')
+        check("the silent-picture warning is keyed on the two codec names the probe "
+              "actually reported, and says which half is missing. Both operands have "
+              "to be there: `!c.audio_codec` alone would flag a pure-audio row (which "
+              "is an *audio cast*, said out loud by `relay_reason`) as a broken video, "
+              "and `c.video_codec` alone would flag the normal case. The two shapes "
+              "are asked of `describe()`, so the keys this tag reads are keys the "
+              "backend really returns for them",
+              _silent59 is not None and '音轨' in _silent59.group(2)
+              and _silent59.group(1) == 'c.video_codec && !c.audio_codec'
+              and mr59.describe(_silent_probe59)['video_codec'] == 'av1'
+              and mr59.describe(_silent_probe59)['audio_codec'] == ''
+              and mr59.describe(_with_sound59)['audio_codec'] == 'aac',
+              str([_silent59.group(0)[:120] if _silent59 else 'no such tag',
+                   mr59.describe(_silent_probe59)['video_codec'],
+                   mr59.describe(_silent_probe59)['audio_codec'],
+                   mr59.describe(_with_sound59)['audio_codec']]))
+        _mode_tests59 = _re59.findall(r"c\.mode\s*===\s*'([a-z]+)'", _card59)
+        _mode_line59 = _re59.search(
+            r"\{\{\s*c\.mode === 'remux' \? '([^']*)' : '([^']*)'\s*\}\}", _card59)
+        _prog59 = mr59.Candidate(url=ORIGIN59 + '/range/last.mp4', origin='page')
+        _seg59 = mr59.Candidate(url='https://example.test/hls/index.m3u8',
+                                origin='page')
+        check("the one sentence the page builds for itself is keyed on exactly the two "
+              "values `plan()` can return, and the branch a viewer reads is the branch "
+              "this candidate's suffix selects: a `.mp4` is proxied and gets the Range "
+              "condition, a `.m3u8` is remuxed and gets「拖动要用完才准」. That half "
+              "sentence is load-bearing -- the remux path writes a temp file that only "
+              "grows (§4.8: no length, no seek ahead of the write), so a card that "
+              "promised a draggable stream on an HLS page would be the exact lie this "
+              "design was supposed to prevent",
+              _mode_tests59 == ['remux']
+              and mr59.plan(_prog59) == 'proxy' and mr59.plan(_seg59) == 'remux'
+              and _mode_line59 is not None
+              and '转封装' in _mode_line59.group(1)
+              and 'Range' in _mode_line59.group(2)
+              and _mode_line59.group(1) != _mode_line59.group(2),
+              str([_mode_tests59, _mode_line59 and _mode_line59.groups()]))
+        check("no `v-html` in the card and none in the resolve JS. The row title is "
+              "the page's `<meta property=og:title>`, and the address came out of the "
+              "same HTML. §4.10 states this rule for log text for the same reason it "
+              "applies here: one cast of a page with a crafted title would otherwise "
+              "run script the moment the user opened the settings page to look at "
+              "what they just parsed",
+              'v-html' not in _card59 and 'v-html' not in _js59,
+              str([_card59.count('v-html'), _js59.count('v-html')]))
+        _none_gate59 = _re59.search(
+            r'<div v-else-if="resolve\.done" class="resolve-none">', _card59)
+        check("the empty result names the coverage hole, and only once the job is "
+              "actually finished: `v-else-if=\"resolve.done\"` rather than a bare "
+              "`v-else` (which would print「这个页面里没有能投出来的视频地址」while the "
+              "parse is still running), and the sentence says the true thing -- pages "
+              "that compute their address in JavaScript are not solvable by two "
+              "parsers, and the fix costs a browser process per page. Phase B is a "
+              "decision, not a bug the user should be left to debug",
+              _none_gate59 is not None
+              and _card59.count('v-else-if="resolve.done"') == 1
+              and 'JavaScript' in _card59 and 'Chrome' in _card59,
+              str(_none_gate59))
+        _pct_start59 = _page59.index('resolve_percent() {')
+        _pct59 = _page59[_pct_start59:_page59.index('net_options() {', _pct_start59)]
+        _pairs59 = _re59.findall(
+            r'(\w+): (\d+)', _re59.search(r'const order = \{([^}]*)\}',
+                                          _pct59).group(1))
+        _divisor59 = _re59.search(r'/ (\d+) \* 100', _pct59)
+        check("the progress bar is the step table rather than a guess at one: the "
+              "names in `resolve_percent`'s order object are `queued` followed by "
+              "`ResolveJob.STEPS` in that order with the values 0..n, and the number "
+              "it divides by is that same length. A fifth step added to the job "
+              "without touching the page would otherwise sit at the same percentage "
+              "as the step before it, which reads as a hung parse. And the card holds "
+              "no Chinese step name of its own -- it prints `resolve.step_label`, the "
+              "backend's word for what it is doing right now",
+              [k for k, _v in _pairs59] == ['queued'] + list(mr59.ResolveJob.STEPS)
+              and [int(v) for _k, v in _pairs59] == list(range(len(_pairs59)))
+              and _divisor59 is not None
+              and int(_divisor59.group(1)) == len(_pairs59)
+              and 'resolve.step_label' in _card59
+              and not any(_label in _card59 + _pct59 for _label in
+                          ('排队中', '抓取页面', 'yt-dlp 解析页面', '度量候选地址',
+                           '排序')),
+              str([_pairs59, _divisor59 and _divisor59.group(1)]))
+        _rows59 = {row[0]: row for row in protocol.Handler.POST_ROUTES
+                   if row[0] in ('resolve-page', 'cast-resolved')}
+        _posted59 = set(_re59.findall(r"fd\.append\('([a-z-]+)'", _js59))
+        check("the three names this card speaks are the names the backend listens "
+              "for: `resolve-page` and `cast-resolved` are rows in "
+              "`Handler.POST_ROUTES` on the management gate, so Part 51's "
+              "route-by-route loop covers them and a button posting a field nobody "
+              "registered gets the「不认识这个字段」answer instead of a fake success; "
+              "`job` and `candidate` are helper fields beside the route; and the "
+              "polling GET asks for `query=resolve-status`, which group O already "
+              "proved is management-gated on a real request",
+              sorted(_rows59) == ['cast-resolved', 'resolve-page']
+              and all(row[1] == protocol.GATE_MANAGEMENT
+                      for row in _rows59.values())
+              and _posted59 == {'resolve-page', 'cast-resolved', 'job', 'candidate'}
+              and all(name in protocol.Handler.POST_HELPER_PARAMS
+                      for name in ('job', 'candidate'))
+              and 'query=resolve-status' in _js59,
+              str([sorted(_rows59), sorted(_posted59)]))
+        _reads59 = set(_re59.findall(r'\bdata\.([A-Za-z_][A-Za-z0-9_]*)', _js59))
+        _answers59 = (set(_started59) | set(_status_good59) | set(_cast59))
+        check("and the keys the page reads back out of those answers are keys these "
+              "three handlers actually returned for the requests this Part really "
+              "made: `code`, `message`, `job`, `status`, `note`. `note` is the "
+              "relay's own reason sentence, handed back by the cast POST rather than "
+              "assembled from the row -- group P pins it equal to "
+              "`relay_reason(candidate)`, and a page that re-derived it would be a "
+              "second copy of that rule wearing a caption",
+              _reads59 == {'code', 'message', 'job', 'status', 'note'}
+              and _reads59 <= _answers59
+              and 'note' in _cast59
+              and _cast59['note'] == mr59.relay_reason(_one_job59.candidates[0]),
+              str(sorted(_reads59)))
+        _poll_start59 = _js59.index('async read_resolve_status()')
+        _poll59 = _js59[_poll_start59:_js59.index('start_resolve_poll()',
+                                                  _poll_start59)]
+        check("the poll stops when it has nothing left to ask: the `code !== 0` branch "
+              "calls `stop_resolve_poll()` and puts the backend's sentence in "
+              "`resolve_error` (a job has a TTL and can be evicted by four newer "
+              "parses -- group O), and the success branch stops on "
+              "`data.status.done`, not on a counter the page counts for itself. A "
+              "progress bar still polling a dead job is a user reading a frozen"
+              "「度量候选地址…」for half an hour",
+              _re59.search(r'if \(data\.code !== 0\) \{[^}]*stop_resolve_poll',
+                           _poll59, _re59.S) is not None
+              and 'if (data.status.done)' in _poll59
+              and 'this.resolve = data.status;' in _poll59,
+              _poll59[:160])
+        check("the row being cast is the row that goes quiet: `:disabled=\""
+              "casting === i\"` keyed on the same loop index the click passes, and the "
+              "POST sends that index as `candidate` rather than the address. Group P "
+              "made the index a security question -- an out-of-range, junk, empty, or "
+              "negative index must not cast some other row -- so the page has to be "
+              "the thing that shows the index it sends belongs to the row the user "
+              "pointed at, and it must not send one at all when the row vanished",
+              ':disabled="casting === i"' in _card59
+              and "fd.append('candidate', index);" in _js59
+              and 'let cand = this.resolve.candidates[index];' in _js59
+              and 'if (!cand) return;' in _js59,
+              str(_card59.count('casting === i')))
+        check("the card states the relay in its own hint, in the same words the "
+              "handler enforces: the pasted thing is a page address, not a video "
+              "address, and the television never receives the origin's signed, "
+              "short-lived, header-requiring URL. That sentence is what keeps a failed "
+              "cast from being read as「地址填错了」, and it is the reason the feature "
+              "has a relay at all -- so it belongs on the card, not only in this file",
+              '粘贴<b>网页</b>地址（不是视频地址）' in _card59
+              and '电视永远拿不到源站' in _card59
+              and '会过期' in _card59,
+              _card59[:120])
+    finally:
+        _restore59(_oldO59)
+        mrel59.store.drop = _real_drop59
+        utils.Setting.is_service_running = _saved_running59
+        _req59.params, _req59.remote, _req59.scheme, _ = _sp59
+        _req59.headers.clear()
+        for _k, _v in _sp59[3].items():
+            _req59.headers[_k] = _v
+        protocol.Handler._resolve_jobs = {}
+
+    mrel59.stop_server()
+except Exception as _e59:
+    _traceback59.print_exc()
+    check("Part 59 runs", False, "{}: {}".format(type(_e59).__name__, _e59))
+finally:
+    _cleanup59()
+    utils.Setting.setting, utils.Setting.setting_path = (_saved59[0],
+                                                         _saved59[1])
+    utils.SETTING_DIR = _saved59[2]
+    mrel59.SETTING_DIR = _saved59[3]
+    _shutil.rmtree(_tmp59, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

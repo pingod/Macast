@@ -17,6 +17,7 @@ import importlib
 
 from .utils import SettingProperty, SETTING_DIR, notify_error, format_class_name
 from . import logsplit
+from . import media_relay
 from . import plugin_repo
 # This fork is distributed from pingod/Macast; the "check for updates" feature
 # must query that repo, not the upstream xfangfang/Macast.
@@ -1339,6 +1340,14 @@ class Macast(App):
         """This function is called every time the DLNA service is stopped.
         """
         logger.info("service_stop")
+        # 网页地址投屏's relay dies with the service. Not cosmetic: a remux of a
+        # live HLS playlist is an ffmpeg that never finishes and a temp file that
+        # never stops growing, so "the app quit" must not leave it writing to the
+        # user's disk forever. Runs on SERVICE_THREAD and touches no AppKit.
+        try:
+            media_relay.stop_server()
+        except Exception:
+            logger.warning("relay shutdown failed", exc_info=True)
         self.update_service_status()
 
     def update_service_ip(self):

@@ -114,6 +114,27 @@
             border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
         }
         .cast-box .hint { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+        /* 网页地址投屏：候选列表是**每行一块**而不是表格 —— 一行要同时说标题、
+           分辨率/时长、容器、以及"这条为什么要由 Macast 中转"，四段文字宽度不一，
+           排进 <td> 只会在窄屏上把最后一列挤成一个竖条。 */
+        .resolve-steps { margin-top: 10px; }
+        .resolve-line { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline;
+            font-size: 12px; color: var(--text-soft); margin: 8px 0; }
+        .resolve-counts { font-size: 11px; opacity: .85; }
+        .resolve-cands { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+        .resolve-cand {
+            border: 1px solid var(--border); border-radius: 8px;
+            padding: 10px 12px; background: var(--bg);
+            display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-start;
+        }
+        .resolve-cand > .resolve-main { flex: 1 1 260px; min-width: 0; }
+        .resolve-ttl { font-size: 13px; color: var(--text); word-break: break-word; }
+        .resolve-sub { font-size: 11px; color: var(--text-soft); word-break: break-all;
+            font-family: monospace; margin-top: 2px; }
+        .resolve-facts { display: flex; flex-wrap: wrap; gap: 4px; }
+        .resolve-relay { flex: 1 1 220px; min-width: 0; font-size: 11px;
+            color: var(--text-soft); line-height: 1.5; }
+        .resolve-none { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
         /* 日志面板：整份日志线性增长（实测 ~27KB/分钟），所以只渲染末尾若干行，
            并且用 <pre> 纯文本而不是 v-html（日志里含发送端提供的标题/URL）。 */
         .log-bar {
@@ -755,6 +776,76 @@
                     </div>
                 </div>
 
+                <div class="cast-box pane-wide">
+                    <h3 class="cast-title">网页地址投屏</h3>
+                    <div class="hint" style="margin-top:0;margin-bottom:10px;">
+                        粘贴<b>网页</b>地址（不是视频地址）：Macast 先把页面里写明的直链抓出来，
+                        再叫 yt-dlp 把同一个页面解一遍，两份结果合成一个候选列表；选一条就投给
+                        当前渲染器。解出来的地址一律由本机中转供流 —— 电视永远拿不到源站那个带签名、
+                        会过期、还要求请求头的地址，而那正是「搜得到地址却播不起来」的成因。
+                    </div>
+                    <div class="install-row" style="margin:0;">
+                        <el-input v-model="page_url" size="small" class="install-url" clearable
+                                  placeholder="https://example.com/watch/12345"
+                                  @keyup.enter.native="resolve_page"></el-input>
+                        <el-button size="small" type="primary" icon="el-icon-search"
+                                   :loading="resolving" @click="resolve_page">解析</el-button>
+                    </div>
+
+                    <div v-if="resolve_error" class="hint">{{ resolve_error }}</div>
+
+                    <div v-if="resolve" class="resolve-steps">
+                        <el-progress v-if="!resolve.done" :percentage="resolve_percent"
+                                     :stroke-width="6"></el-progress>
+                        <div class="resolve-line">
+                            <span v-if="!resolve.done">{{ resolve.step_label }}…</span>
+                            <span v-else-if="resolve.error">{{ resolve.error }}</span>
+                            <span v-else>解析完成</span>
+                            <span class="resolve-counts">
+                                页面里读到 {{ resolve.scraped }} 个 ·
+                                yt-dlp 解出 {{ resolve.from_ytdlp }} 个 ·
+                                已探测 {{ resolve.measured }} 个 ·
+                                判定剔除 {{ resolve.rejected }} 个 ·
+                                {{ resolve.seconds }} 秒
+                            </span>
+                        </div>
+                        <div v-if="resolve.candidates.length" class="resolve-cands">
+                            <div v-for="(c, i) in resolve.candidates" :key="i" class="resolve-cand">
+                                <div class="resolve-main">
+                                    <div class="resolve-ttl">{{ c.title }}</div>
+                                    <div class="resolve-sub">{{ c.url }}</div>
+                                </div>
+                                <div class="resolve-facts">
+                                    <el-tag size="mini" effect="plain">
+                                        {{ c.width ? (c.width + '×' + c.height) : (c.height ? c.height + 'p' : '分辨率未知') }}
+                                    </el-tag>
+                                    <el-tag size="mini" effect="plain">
+                                        {{ c.live ? '直播流' : fmt_duration(c.duration) }}
+                                    </el-tag>
+                                    <el-tag size="mini" effect="plain">{{ c.container || '容器未知' }}</el-tag>
+                                    <el-tag v-if="c.video_codec && !c.audio_codec" size="mini" type="warning"
+                                            effect="plain">这条没有音轨</el-tag>
+                                    <el-tag v-if="c.origin === 'ytdlp'" size="mini" type="info"
+                                            effect="plain">yt-dlp</el-tag>
+                                </div>
+                                <div class="resolve-relay">
+                                    <div>{{ c.relay }}</div>
+                                    <div>{{ c.mode === 'remux' ? '转封装后供流，拖动要用完才准' : '原样转发；源站支持 Range 时才能拖动' }}</div>
+                                </div>
+                                <el-button size="mini" type="primary" plain
+                                           icon="el-icon-video-play"
+                                           :disabled="casting === i"
+                                           @click="cast_resolved(i)">投屏</el-button>
+                            </div>
+                        </div>
+                        <div v-else-if="resolve.done" class="resolve-none">
+                            这个页面里没有能投出来的视频地址。需要 JavaScript 才能算出地址的站点
+                            （部分播放器页面）这一版解不了：那要在这台机器上真开一个浏览器，
+                            代价是每个页面都得多养一个 Chrome 进程。
+                        </div>
+                    </div>
+                </div>
+
                 <div class="status-card pane-wide">
                     <h3>正在播放</h3>
                     <div class="now-playing">
@@ -1348,7 +1439,7 @@
                 </ol>
                 <p>这个设置页一共七个标签，各自管一件事：</p>
                 <ul>
-                    <li><strong>状态</strong> —— 正在播什么、谁在订阅、网卡选哪块、把本机文件投出去、网页投屏入口。</li>
+                    <li><strong>状态</strong> —— 正在播什么、谁在订阅、网卡选哪块、把本机文件投出去、网页投屏入口、网页地址投屏。</li>
                     <li><strong>电脑投屏</strong> —— 反方向的：把这台电脑的屏幕推给电视或浏览器。</li>
                     <li><strong>插件</strong> —— 启用/停用/安装卸载渲染器与协议插件。</li>
                     <li><strong>模块设置</strong> —— 每个配置键写明属于哪个模块，可直接改值。</li>
@@ -1421,6 +1512,33 @@
                         <code>127.0.0.1</code>，不设防就等于随便哪个网页都能指使这台电脑开始播片。</li>
                     <li>同一个令牌也是<strong>整套管理 API</strong> 的钥匙。这条地址会被复制、转发、
                         贴进群，所以别把它发给别人。</li>
+                </ul>
+
+                <h2 id="h-resolve">网页地址投屏（粘贴网页，投它里面的视频）</h2>
+                <p><strong>状态 → 网页地址投屏</strong>吃的是<strong>网页</strong>地址：Macast 先把页面里
+                    写明的直链（<code>&lt;video src&gt;</code> / <code>&lt;source&gt;</code> /
+                    <code>og:video</code>）抓出来，再叫 <code>yt-dlp</code> 把同一个页面解一遍，
+                    两份结果合成一个候选列表；点「投屏」的那一条会交给<strong>当前渲染器</strong>
+                    （mpv、Chromecast 中继、DLNA 都算，菜单栏切了哪个就投给哪个）。</p>
+                <ul>
+                    <li><strong>解出来的地址一律由本机中转供流</strong>，电视永远拿不到源站那个地址。
+                        这不是多此一举：那些地址多数带签名、会过期，还要求 <code>Referer</code> 或
+                        <code>Cookie</code> —— 交给电视就等于「明明搜到了地址却播不起来」。中转会把
+                        这些请求头由 Macast 自己补上。</li>
+                    <li><strong>两种中转，按地址的形状选</strong>：一条渐进式文件（mp4/mkv/音频）
+                        是原样转发，几乎不吃 CPU，源站支持 <code>Range</code> 时电视才能拖动；
+                        HLS / DASH 这类分片地址没有「一个文件」可读，于是用 ffmpeg <code>-c copy</code>
+                        转封装成一个正在长大的 MP4 —— 不重编码，画质不变，但<strong>拖动要用完才准</strong>，
+                        这一点候选列表里每一行都写在自己那句话上。</li>
+                    <li><strong>需要 JavaScript 才能算出地址的站点解不出来</strong>，这一条是设计而不是坏掉：
+                        这一路只有「抓页面 + yt-dlp」两台引擎，为了那几个站点在应用里养一个 Chrome 进程
+                        不值得。解不出来时列表会明说「这个页面里没有能投出来的视频地址」，
+                        而不是给一个播不出来的地址。</li>
+                    <li><strong>本机没有 <code>yt-dlp</code> 时只有页面直链这一路</strong>（命令按 PATH
+                        和常见安装目录找，找到才用）。自建的小站往往页面里就写着直链，所以这一路常常够用；
+                        要覆盖上千站点就把 <code>yt-dlp</code> 装上。</li>
+                    <li>解析跑在后台线程，页面每秒问一次进度；同一时间最多 4 个解析在跑，
+                        排满了会直接告诉你等其中一个结束，而不是悄悄排队。</li>
                 </ul>
 
                 <h2 id="h-plugin">插件</h2>
@@ -1787,6 +1905,16 @@
             // 网页投屏入口：token + 端口由 /api?query=cast-info 下发
             cast_info: {token: '', port: 0},
 
+            // 网页地址投屏。解析跑在后台线程（真实站点实测 12-19 秒），所以页面
+            // 只轮询 `query=resolve-status`，绝不在一次请求里等它。
+            page_url: '',
+            resolve_job: '',
+            resolve: null,
+            resolving: false,
+            resolve_error: '',
+            casting: -1,
+            resolve_timer: 0,
+
 
             //setting
             textarea: '',
@@ -1886,6 +2014,7 @@
                 this.status_interval = 0;
             }
             this.mirror_stop_poll();
+            this.stop_resolve_poll();
         },
         activated() {
 
@@ -1942,6 +2071,23 @@
                 let sample = encodeURIComponent('https://example.com/movie.mp4');
                 let token = this.cast_info.token || '<token>';
                 return `curl -s "${this.cast_endpoint}?url=${sample}&token=${token}"`;
+            },
+            resolve_percent() {
+                // 四个步骤一格，`queued` 和 `done` 各占半格之外。解析没有可测的
+                // 总时长（同一个站点的第二次可能快十倍），所以进度条表达的是
+                // 「现在在做哪一步」，不是「还剩几秒」——后者会是一个编出来的数。
+                const order = {queued: 0, scrape: 1, ytdlp: 2, measure: 3, rank: 4};
+                let r = this.resolve;
+                if (!r) return 0;
+                if (r.done) return 100;
+                let base = (order[r.step] === undefined ? 1 : order[r.step]);
+                if (r.step === 'measure') {
+                    // 探测是四步里唯一自带计数的（`measured` / 池子里的个数），
+                    // 所以那一格可以按比例走，别的格子只能整格亮着。
+                    let pool = (r.scraped || 0) + (r.from_ytdlp || 0);
+                    if (pool > 0) base += Math.min(0.9, (r.measured || 0) / pool);
+                }
+                return Math.max(4, Math.min(96, Math.round(base / 5 * 100)));
             },
             net_options() {
                 // One row per interface: a NIC can hold several IPv4 addresses,
@@ -2479,6 +2625,124 @@
                     this.$message.error('重投失败，请确认 Macast 正在运行');
                 });
             },
+            async resolve_page() {
+                let url = (this.page_url || '').trim();
+                if (!url) {
+                    this.resolve_error = '请先填写网页地址';
+                    return;
+                }
+                // `query=resolve-status` 和管理门控的其他 GET 一样要凭据，所以按镜像
+                // 控制台同一手法先把令牌取回来（本机本来就有；从别的设备打开设置页时
+                // 拿不到，那 POST 那一侧会自己给出门禁那句解释）。
+                await this.management_token();
+                this.resolve_error = '';
+                this.resolve = null;
+                this.casting = -1;
+                this.resolving = true;
+                let fd = new window.FormData();
+                fd.append('resolve-page', url);
+                this.$http.post('/api', fd).then(res => {
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        this.resolving = false;
+                        this.resolve_error = data.message || '解析失败';
+                        return;
+                    }
+                    this.resolve_job = data.job;
+                    this.read_resolve_status();
+                    this.start_resolve_poll();
+                }).catch(err => {
+                    console.log(err);
+                    this.resolving = false;
+                    this.resolve_error = '解析请求失败，请确认 Macast 正在运行';
+                });
+            },
+            async read_resolve_status() {
+                if (!this.resolve_job) return;
+                let url = '/api?query=resolve-status&job=' + encodeURIComponent(this.resolve_job);
+                if (this.cast_info.token) {
+                    url += '&token=' + encodeURIComponent(this.cast_info.token);
+                }
+                try {
+                    let res = await this.$http.get(url);
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        // 任务有 TTL，也可能会被后来的解析挤掉：这一格必须停下来并把
+                        // 原因说成一句话，否则进度条会永远停在最后已知的那一步。
+                        this.stop_resolve_poll();
+                        this.resolving = false;
+                        this.resolve_error = data.message || '解析任务已经不在了';
+                        return;
+                    }
+                    this.resolve = data.status;
+                    if (data.status.done) {
+                        this.stop_resolve_poll();
+                        this.resolving = false;
+                    }
+                } catch (err) {
+                    console.log(err);
+                    this.stop_resolve_poll();
+                    this.resolving = false;
+                    this.resolve_error = '读取解析进度失败，请确认 Macast 正在运行';
+                }
+            },
+            start_resolve_poll() {
+                this.stop_resolve_poll();
+                this.resolve_timer = setInterval(() => {
+                    if (document.hidden) return;
+                    this.read_resolve_status();
+                }, 1000);
+            },
+            stop_resolve_poll() {
+                if (this.resolve_timer) {
+                    clearInterval(this.resolve_timer);
+                    this.resolve_timer = 0;
+                }
+            },
+            resume_resolve_poll() {
+                // 切走停表、切回来重新问，但只在确实还有一次解析没结束时。
+                if (this.resolve_job && this.resolving && !this.resolve_timer) {
+                    this.start_resolve_poll();
+                }
+            },
+            cast_resolved(index) {
+                if (!this.resolve) return;
+                let cand = this.resolve.candidates[index];
+                if (!cand) return;
+                this.casting = index;
+                let fd = new window.FormData();
+                fd.append('cast-resolved', '1');
+                fd.append('job', this.resolve_job);
+                fd.append('candidate', index);
+                this.$http.post('/api', fd).then(res => {
+                    this.casting = -1;
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        this.$message.error(data.message || '投屏失败');
+                        return;
+                    }
+                    // note 是"这条为什么要由 Macast 中转"那句话：用户要看到的是
+                    // 投出去的地址不是源站那个，而不是一个光秃秃的"成功"。换行在
+                    // $notify 里不会渲染（它写的是 textContent），所以用分隔符。
+                    this.$notify({title: '已开始投屏',
+                                  message: cand.title + ' · ' + (data.note || ''),
+                                  duration: 5000});
+                    this.load_status();
+                }).catch(err => {
+                    this.casting = -1;
+                    console.log(err);
+                    this.$message.error('投屏失败，请确认 Macast 正在运行');
+                });
+            },
+            fmt_duration(s) {
+                if (!s || s <= 0) return '时长未知';
+                let total = Math.round(s);
+                let h = Math.floor(total / 3600);
+                let m = Math.floor((total % 3600) / 60);
+                let sec = total % 60;
+                let p = n => (n < 10 ? '0' + n : '' + n);
+                return h ? (h + ':' + p(m) + ':' + p(sec)) : (m + ':' + p(sec));
+            },
             clear_history() {
                 this.$confirm('确定清空播放历史？', '提示', {type: 'warning'})
                     .then(() => {
@@ -2537,6 +2801,7 @@
                     this.log_timer = 0;
                 }
                 if (tab.name !== '13') this.mirror_stop_poll();
+                if (tab.name !== '10') this.stop_resolve_poll();
                 this.switch_page(tab.name)
             },
             async switch_page(page_name) {
@@ -2567,6 +2832,7 @@
                         this.load_status();
                         this.load_interfaces();
                         this.load_cast_info();
+                        this.resume_resolve_poll();
                         break;
                     case '11':
                         this.set_history(page_name);

@@ -24,6 +24,8 @@ from . import plugin_repo
 from . import logsplit
 from . import mirror_view
 from . import module_settings
+from . import media_relay
+from . import media_resolve
 
 logger = logging.getLogger("Protocol")
 logger.setLevel(logging.INFO)
@@ -1799,7 +1801,7 @@ class Handler:
             # Sensitive management queries: block unless local or token-bearing.
             if query in ('status', 'log', 'log-download', 'log-modules',
                          'launch-param', 'interfaces', 'subscribers',
-                         'module-settings', 'cast-info') \
+                         'module-settings', 'cast-info', 'resolve-status') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1883,6 +1885,13 @@ class Handler:
                     'token': api_token(),
                     'port': Setting.get_port(),
                 }
+            elif query == 'resolve-status':
+                # The page's parse-progress read. Gated with the other sensitive
+                # queries because it echoes the address being resolved and the
+                # names of what was found on the page -- and because the job id
+                # is the only thing standing between `cast-resolved` and anyone
+                # on the LAN picking a candidate.
+                res = self._resolve_status(kwargs.get('job'))
             elif query == 'status':
                 res = self.get_status()
             elif query == 'subscribers':
@@ -1986,6 +1995,14 @@ class Handler:
         ('install-plugin', GATE_CODE, '_post_install_plugin'),
         ('set-subtitle-show', GATE_MANAGEMENT, '_post_set_subtitle_show'),
         ('cast-uri', GATE_MANAGEMENT, '_post_cast_uri'),
+        # 网页地址投屏: parse a page, then cast what was found through the relay.
+        # Management-gated, not code-gated: neither action runs anything we were
+        # handed -- `resolve-page` spawns yt-dlp/ffprobe with fixed argv and the
+        # URL only ever reaches those as an argument, and `cast-resolved` pushes
+        # an address this machine produced. Same authority as `cast-uri`, which
+        # already hands an arbitrary URL to the player.
+        ('resolve-page', GATE_MANAGEMENT, '_post_resolve_page'),
+        ('cast-resolved', GATE_MANAGEMENT, '_post_cast_resolved'),
         ('clear-play-history', GATE_MANAGEMENT, '_post_clear_play_history'),
         ('clear-log', GATE_MANAGEMENT, '_post_clear_log'),
         ('set-module-setting', GATE_CODE, '_post_set_module_setting'),
@@ -2003,7 +2020,7 @@ class Handler:
     #: is kept from quietly arriving at a dispatcher that never heard of it.
     POST_HELPER_PARAMS = ('token', 'key', 'value', 'remove', 'module',
                           'cast-title', 'mirror-args', 'plugin-key',
-                          'plugin-url', 'plugin-type')
+                          'plugin-url', 'plugin-type', 'candidate', 'job')
 
     #: Parameters that mutate state, derived from the table: everything posted
     #: has to be at least management-gated, so this is the whole list.
@@ -2324,6 +2341,136 @@ class Handler:
 
     def _post_cast_uri(self, kwargs):
         return self._cast_url(kwargs.get('cast-uri'), kwargs.get('cast-title', ''))
+
+    # -- cast a web page address (网页地址投屏) ------------------------------
+    #
+    # Two POSTs and one GET around `macast/media_resolve.py` (a page address ->
+    # media addresses) and `macast/media_relay.py` (a media address -> the bytes a
+    # device can actually fetch). The registry below is only "which parse job
+    # answers to which id": both modules are HTTP-blind and know nothing about
+    # this class, which is what lets the suite test the parse tables and the relay
+    # semantics without a running app.
+    #
+    # The parse runs on a thread and the page polls `query=resolve-status`,
+    # because extraction measured 12-19 s on a real site (castor's own numbers,
+    # reproduced here) -- a request that long would look like a hang, and a
+    # half-minute spinner teaches the user nothing about which step is stuck.
+
+    #: How many page parses may be in flight, and how long a finished one stays
+    #: pickable. The id is the only credential `cast-resolved` has besides the
+    #: management gate, and a stale job whose candidates were measured ten minutes
+    #: ago offers the user a signed address that has since expired.
+    RESOLVE_JOBS_MAX = 4
+    RESOLVE_JOB_TTL = 30 * 60
+
+    # Shared across Handler instances on purpose: `Handler` is subclassed by the
+    # NVA protocol's handler, and two instances must not mean two candidate lists
+    # for the same page. Mutated under `_resolve_lock`, read under it too -- no
+    # request handler iterates this dict across network I/O, so the `event_subscribes`
+    # copy-on-write rule (§4.2) does not apply here.
+    _resolve_jobs = {}
+    _resolve_lock = threading.Lock()
+
+    def _resolve_page(self, page_url):
+        """Start one background parse of a page address and hand back its id."""
+        url = (page_url or '').strip()
+        if not url:
+            return {'code': 1, 'message': '请先填写网页地址'}
+        if not re.match(r'^https?://', url, re.I):
+            # Bare "example.com/video" would reach yt-dlp as a relative reference
+            # and come back as a search page for that text -- a wrong answer that
+            # looks like the site having no video.
+            return {'code': 1, 'message': '地址要以 http:// 或 https:// 开头'}
+        job = media_resolve.ResolveJob(url)
+        job_id = secrets.token_urlsafe(9)
+        with self._resolve_lock:
+            if not self._prune_resolve_jobs():
+                return {'code': 1,
+                        'message': '已经有 {} 个解析在跑，请等其中一个结束'.format(
+                            self.RESOLVE_JOBS_MAX)}
+            self._resolve_jobs[job_id] = job
+        job.start()
+        logger.info('resolving page: %s', url)
+        return {'code': 0, 'message': 'success', 'job': job_id, 'url': url}
+
+    def _prune_resolve_jobs(self):
+        """Free a slot, or say that every one is still working. Lock held."""
+        deadline = time.time() - self.RESOLVE_JOB_TTL
+        for job_id in list(self._resolve_jobs):
+            if self._resolve_jobs[job_id].started < deadline:
+                self._resolve_jobs.pop(job_id)
+        if len(self._resolve_jobs) < self.RESOLVE_JOBS_MAX:
+            return True
+        # Over the line only counts as full when every slot is still running: a
+        # finished job is replaceable, a running one is the answer some page is
+        # polling for.
+        for job_id in list(self._resolve_jobs):
+            if self._resolve_jobs[job_id].done:
+                self._resolve_jobs.pop(job_id)
+                return True
+        return False
+
+    def _resolve_job(self, job_id):
+        with self._resolve_lock:
+            return self._resolve_jobs.get(job_id or '')
+
+    def _resolve_status(self, job_id):
+        """The dict for `query=resolve-status`; None-safe, the page polls it."""
+        job = self._resolve_job(job_id)
+        if job is None:
+            return {'code': 1,
+                    'message': '没有这个解析任务（超时或已重启）',
+                    'job': '',
+                    'status': None}
+        return {'code': 0, 'message': 'success', 'job': job_id,
+                'status': job.status()}
+
+    def _post_resolve_page(self, kwargs):
+        return self._resolve_page(kwargs.get('resolve-page'))
+
+    def _post_cast_resolved(self, kwargs):
+        """Relay one resolved candidate and hand its address to the renderer.
+
+        The device is *never* given the address that came out of the page: that
+        is the whole reason this feature has a relay. `cast_uri` then treats it
+        like any other URL push, so whichever renderer is current gets it -- mpv
+        on this machine, the Chromecast bridge, or the DLNA stream.
+        """
+        job = self._resolve_job(kwargs.get('job', ''))
+        if job is None:
+            return {'code': 1, 'message': '解析任务已经不在了，请重新解析'}
+        if not job.done:
+            return {'code': 1,
+                    'message': '还在解析中（{}），请等它完成'.format(
+                        media_resolve.STEP_LABELS.get(job.step, job.step))}
+        try:
+            index = int(kwargs.get('candidate', ''))
+        except (TypeError, ValueError):
+            return {'code': 1, 'message': '没有这个候选项'}
+        candidates = list(job.candidates)
+        if not 0 <= index < len(candidates):
+            return {'code': 1, 'message': '没有这个候选项'}
+        candidate = candidates[index]
+        title = media_resolve.display_title(candidate, job.page_url)
+        try:
+            relay = media_relay.open_relay(candidate, title=title)
+        except Exception as exc:
+            logger.error('relay start failed for %s: %s', candidate.url, exc)
+            return {'code': 1, 'message': '中转启动失败：{}'.format(exc)}
+        if not relay.alive:
+            # The origin said no, or there is no ffmpeg to remux with. Say which,
+            # and do not leave the dead registration behind for the TTL to find.
+            reason = relay.error or relay.probe_error or '源站拒绝了这条地址'
+            media_relay.store.drop(relay.relay_id)
+            return {'code': 1, 'message': reason}
+        result = self._cast_url(media_relay.media_url(relay), title)
+        if result.get('code') != 0:
+            media_relay.store.drop(relay.relay_id)
+            return result
+        result['relay'] = relay.status()
+        result['note'] = media_resolve.relay_reason(candidate)
+        result['message'] = 'success'
+        return result
 
     def _post_clear_play_history(self, kwargs):
         try:
