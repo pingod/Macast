@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.24</macast.version>
+# <macast.version>0.25</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。0.25 起「低延迟」这两个字后面跟着数字：WebRTC 这一路的屏幕到屏幕延迟第一次量出来了——本机同一套闪光测量（一个按墙钟时刻涂黑涂白的无边框窗口，配观看页自己每帧的亮度采样，同一台机器同一个时钟，两个时刻之差就是整条链路）给出 369 毫秒，同一趟里浏览器（MSE）那一页是 492 毫秒；两个数都偏保守，因为参考时刻取在 AppKit 把窗口推给显示器之前，最多多算一帧，而测量时旁边一直开着一个小窗在闪，因为 macOS 的采集是按变化给的：静止桌面上采集交出来的每一帧都被钉成 1/24 秒的间隔，媒体时钟只有墙钟的约 0.4 倍，读出来的每个延迟都会虚高。设置页两张卡片与帮助弹层现在都写这两个数，并写明它们和 mse_latency_probe 报的 838 毫秒量的不是同一段（那支读的是播放器缓冲边缘）；这个数字只有一处（MEASURED_LAG_MS），卡片、帮助与用例读的是同一份。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -146,7 +146,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.24'
+PLUGIN_VERSION = '0.25'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -11541,6 +11541,34 @@ def _drain_stderr(proc, tail):
 #: is the same number on the core's side, and the regression suite pins the two.
 CONSOLE_VERSION = 4
 
+#: Screen-to-screen lag, measured on one Mac on 2026-10-03 with a flash
+#: instrument: a borderless window paints black/white at recorded wall-clock
+#: instants and the viewer page samples its own picture's luminance per frame.
+#: Same machine, same epoch, so the difference between the two clocks *is* the
+#: whole pipeline -- capture, encode, wire, player, compositor.
+#:
+#: Both numbers live in one dict because 「低延迟」 is a comparison, not a
+#: property: the WebRTC line means nothing on its own, and means something when
+#: the same instrument, on the same session conditions, says what the other
+#: browser target costs. Conditions held fixed: VideoToolbox, avfoundation
+#: capture, one display, a fresh session. Two caveats a reader needs:
+#:   * a small flashing window is kept live beside the measured one, because
+#:     macOS screen capture is change-gated -- on a static desktop every
+#:     delivered frame is stamped 1/24 s apart no matter when it happened, so
+#:     the media clock runs at roughly 0.4x wall and everything read off it
+#:     inflates (this instrument reported 800-1500 ms for `browser` before that
+#:     was understood);
+#:   * the reference instant is taken inside the paint callback, before AppKit
+#:     pushes the window to the display, so every figure is biased **high** by
+#:     at most one capture frame.
+#: The `browser` shape also ages: the same instrument read 800-1500 ms on a
+#: page twenty minutes into one session, and the page presented only 7 of 17
+#: flashes. These are fresh-session numbers. They are not the
+#: `mse_latency_probe.py` figures -- that probe quotes the player's buffer edge
+#: (838 ms for this shape), which is a different segment of the same chain, so
+#: the two numbers must never be presented as alternatives to each other.
+MEASURED_LAG_MS = {'browser': 492, 'webrtc': 369}
+
 #: One line of trade-off language per target: the cards in the page have room to
 #: say what choosing this costs, which a menu label never did.
 #:
@@ -11549,6 +11577,8 @@ CONSOLE_VERSION = 4
 #: Mbps」outlived its own cause by a whole release once, when the keystream
 #: moved to the operating system, and a hint that names a limit the code no
 #: longer has sends the user looking for a setting that does not exist.
+#: The other two carry `MEASURED_LAG_MS`, formatted at import from the same
+#: table the help page and the regression suite are pinned against.
 #: The `dlna` line is the *default-state* text: `output_hint` recomputes it with
 #: the stored prefill, because a dict literal is evaluated at import and reading
 #: a setting at import would persist it on a machine that never opened the page.
@@ -11564,9 +11594,14 @@ OUTPUT_HINTS = {
     'dlna': ('给没有 Google 栈的老电视 · 「伪装成文件」会先攒约 {} 秒画面再交给它，'
              '所以一开始就有秒级延迟；默认的「直播流」不预填').format(
         DLNA_PREFILL_SECONDS),
-    'browser': '局域网内任意浏览器打开一个网址即可，无需安装',
-    'webrtc': ('浏览器直连（WebRTC / SRTP）：没有播放器这一层缓冲，为最低延迟设计 · '
-               '此通道无声音 · 需要可选依赖 aiortc 与 av（未安装时开始会给出安装命令）'),
+    'browser': ('局域网内任意浏览器打开一个网址即可，无需安装 · '
+                '本机实测屏幕到屏幕约 {browser} 毫秒（偏保守，误差最多一帧）'
+                ).format(**MEASURED_LAG_MS),
+    'webrtc': ('浏览器直连（WebRTC / SRTP）：没有播放器这一层缓冲 · '
+               '此通道无声音 · 需要可选依赖 aiortc 与 av（未安装时开始会给出安装命令） · '
+               '本机实测屏幕到屏幕约 {webrtc} 毫秒（偏保守，误差最多一帧），'
+               '同一套测量里上面那条浏览器（MSE）通道是 {browser} 毫秒'
+               ).format(**MEASURED_LAG_MS),
 }
 
 #: The sentence the DLNA prefill control has to carry. Not in OUTPUT_HINTS

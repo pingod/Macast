@@ -17104,6 +17104,33 @@ try:
           'at %d fps one frame is %r: help=%s hint=%s' % (
               m44.FPS, _cad44, _cad44 in _help44,
               _cad44 in m44.LIVE_EDGE_HINT))
+    # 「低延迟」 is a comparison, not a property, so the page quotes both halves
+    # of the pair the flash instrument measured on one machine -- and each figure
+    # is asked twice, once of the help and once of the table the plugin measured
+    # it into (§4.13's rule: every number in that dialog is answered by the code
+    # that decides it). The label survives only as long as the number behind it
+    # does; drop the constant and these two go red with it.
+    _web44 = [b for b in _bullets44 if 'WebRTC' in b]
+    _mse44 = [b for b in _bullets44
+              if 'WebRTC' not in b and '分片节奏' in b]
+    check("the screen-to-screen figures the help quotes are the plugin's own "
+          "measured pair",
+          len(_web44) == 1 and len(_mse44) == 1
+          and str(m44.MEASURED_LAG_MS['webrtc']) in _web44[0]
+          and str(m44.MEASURED_LAG_MS['browser']) in _web44[0]
+          and str(m44.MEASURED_LAG_MS['browser']) in _mse44[0]
+          and str(m44.MEASURED_LAG_MS['webrtc']) not in _mse44[0]
+          and '缓冲边缘' in _mse44[0],
+          'measured=%s web=%r mse=%r' % (m44.MEASURED_LAG_MS, _web44, _mse44))
+    check("and the two cards the user picks from carry the same two numbers",
+          all(str(v) in m44.OUTPUT_HINTS[k]
+              for k, v in m44.MEASURED_LAG_MS.items())
+          and m44.OUTPUT_HINTS['webrtc'].count(
+              str(m44.MEASURED_LAG_MS['browser'])) == 1
+          and str(m44.MEASURED_LAG_MS['webrtc']) not in
+              m44.OUTPUT_HINTS['browser'],
+          'webrtc=%r browser=%r' % (m44.OUTPUT_HINTS['webrtc'],
+                                    m44.OUTPUT_HINTS['browser']))
     with open(m44.__file__, encoding="utf-8") as _f44:
         _mirror_src44 = _f44.read()
     check("Wayland is a stated limit in both places, or in neither",

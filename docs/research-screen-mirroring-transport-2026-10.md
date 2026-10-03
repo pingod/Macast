@@ -44,6 +44,7 @@ LAN = same subnet, wired or good 5 GHz, screen capture (no camera/USB term).
 | **LL-CMAF / LL-DASH (chunked)** | HTTP/1.1 chunked or HTTP/2 | ≈ **chunk duration** once mid-segment start is allowed (1 s chunks → ~3 s total in the Fraunhofer worked example) | segment/chunk duration + player target latency | Strong: Fraunhofer video-dev; W3C/ISO ATO signalling |
 | **LL-HLS** | HTTP | **2–5 s** (200 ms parts, 1 s segments) | part duration + playlist reload | Moderate: 100ms.live, cloudinary |
 | **fMP4 + MSE (`browser`, today)** | HTTP, ring buffer | **measured on this machine, real capture: 1194 ms as shipped** (`frag_keyframe -g 12`, park 1.0 s); **591 ms** with `frag_every_frame` + park 0.15 s. Of that, only ~100–330 ms is the player's park — ~500–870 ms is upstream (capture + encode + pipe) | was assumed to be `SourceBuffer.appendBuffer` cadence; **the measurement says the dominant term is upstream of the player** | **Measured** (2026-10-02, `scripts/mse_latency_probe.py`, headless Chromium 151 + real avfoundation capture, 12 s windows). Spec-strength unchanged: W3C still says cadence is implementation-defined, so this is a Chromium fact, not a standard one |
+| **`webrtc` (Macast's aiortc pass-through shape)** | SRTP/UDP on the LAN, page-side `RTCPeerConnection` | **measured screen-to-screen on this machine: 369 ms p50**, against **492 ms** for the `browser` shape on the *same* instrument under the same session conditions (§10). The sub-50 ms transport figures above are not what ships: capture and encode are inside this number | capture + encode + the receiver's jitter buffer | **Measured** (2026-10-03, flash instrument: a borderless window painting black/white at recorded wall-clock instants, paired against the page's own per-frame luminance sampler. One Mac, VideoToolbox, avfoundation, fresh session; biased **high** by at most one capture frame) |
 | **Progressive MPEG-TS over HTTP (`cast`, today)** | HTTP pull by Chromecast | **not measured anywhere public** — Google's live-receiver docs were unreachable both via WebFetch and curl | Cast receiver buffering | **Unverified** |
 | **Classic HLS/DASH** | HTTP | 10–30 s (HLS 30–60 s) | segment count × duration | Strong, multiple |
 | **RTSP** | RTP/TCP or UDP | **~2 s** (single anecdote, MediaMTX discussion #1691) | server + player buffering | Weak (n=1) |
@@ -120,7 +121,7 @@ Two secondary findings fall out of the same table:
 * **The park is inert at a fine cadence.** `every12` at park 1.0 vs 0.5 differs by 9 ms (838 / 829) and `gop2` by 7 ms, both inside noise, with **0 seeks** in every fine-cadence cell. The park only fires when `behind` exceeds it, and a 500 ms cadence swings `behind` across a 500 ms threshold constantly — that is the 205-seek / 3.4 s-stalled storm in `prod @ 0.5`. So `LIVE_EDGE_SECONDS` stops being a latency control and becomes only a recovery distance: **the default does not need to move**, and tightening it buys nothing. What *does* need to move is `LIVE_EDGE_MIN_SECONDS = 0.5`, whose stated justification ("分片节奏本来就是 0.5 秒，1.0 秒留了两个分片余量") is a claim about a fragment interval that this change makes 41.7 ms.
 * **`prod @ 1.0` does not storm** (0 seeks, 3 stalls) where `prod @ 0.5` does (205 seeks). The earlier matrix, which only ran parks 0.5 and 0.3, therefore showed the shipping shape at its worst and never at its default. Any before/after quoted from it overstated the win by ~100 ms of lag and understated the shipping stall count by 20×.
 
-The probe never touches `Setting` and never writes a config dir — the subprocess it uses to ask the product for its argv stubs `appdirs.user_config_dir` to a temp dir before `import macast` (AGENTS.md §4.9). It is the tool of record for this shape. Two lists live in two places and are not the same list: its docstring carries **eight findings about the instrument and the synthetic matrix** (finding 8 there is the drift described above, with the token-level detail), while this section carries the four that only real capture could produce. Its docstring also carries the pitfalls that produced them (`BufferedReader.read(n)` batches until it has n bytes — use `read1`, or the granularity reads 166.7 ms regardless; spawning the encoder before the browser puts launch backlog into the measurement; `b''.join(chunks)` per send is O(n²) and makes the *sender* the bottleneck, which is how two variants came to report an identical 41.7 ms).
+The probe never touches `Setting` and never writes a config dir — the subprocess it uses to ask the product for its argv stubs `appdirs.user_config_dir` to a temp dir before `import macast` (AGENTS.md §4.9). It is the tool of record for this shape's **buffer edge**; §10's flash instrument is the tool of record for what a person actually sees on screen, and the two are different segments of one chain — 838 ms and 492 ms are both true of the same shape and must never be quoted as alternatives. Two lists live in two places and are not the same list: its docstring carries **eight findings about the instrument and the synthetic matrix** (finding 8 there is the drift described above, with the token-level detail), while this section carries the four that only real capture could produce. Its docstring also carries the pitfalls that produced them (`BufferedReader.read(n)` batches until it has n bytes — use `read1`, or the granularity reads 166.7 ms regardless; spawning the encoder before the browser puts launch backlog into the measurement; `b''.join(chunks)` per send is O(n²) and makes the *sender* the bottleneck, which is how two variants came to report an identical 41.7 ms).
 
 ---
 
@@ -306,7 +307,20 @@ This gives a second WebRTC route with **no Python SRTP at all** on the sender si
 
 **End-to-end acceptance (real browser, two rounds — software x264 and VideoToolbox):** all gates PASS: negotiated `video/H264 pt=99`; decoded 24 fps, presented 23–25 fps; the probe's own rVFC counter and the page's Q counter as mutual witnesses; canvas grab non-uniform (a real picture, not black); `/browser/stats` agreeing cell-for-cell with the page; viewers back to 0 after the browser closes; screenshots at 520 / 1000 / 1680 px, 2×. The probe (`scripts/webrtc_page_probe.py`) drives the cached chrome-headless-shell through a minimal stdlib CDP client — `--timeout` is a load cap (it dumps at 0.302 s) and no CLI flag can click the stats button.
 
-**Still unverified (same class as §7):** all of it was same-machine loops through the loopback interface. Cross-machine Wi-Fi, Safari and phones are untested; the receiver-side jitter buffer under real wireless conditions is unmeasured, so "the lowest-latency shape we ship" is currently a structural claim (no player buffering layer + a 0.5 s queue), not an end-to-end number like the browser shape's 838 ms.
+**What has since been measured (2026-10-03, §10):** screen-to-screen lag for the
+`webrtc` shape, on the same machine, against the `browser` shape with one instrument —
+**369 ms vs 492 ms p50**. So "the lowest-latency shape we ship" is no longer only a
+structural claim (no player buffering layer + a 0.5 s queue); it is a comparison the
+same flash probe made on one session's two shapes. The number is biased **high** by at
+most one capture frame and is a **fresh-session** number — see §10 for both.
+
+**Still unverified (same class as §7):** everything above is still a same-machine loop
+through the loopback interface. Cross-machine Wi-Fi, Safari and phones are untested;
+the receiver-side jitter buffer under real wireless conditions is unmeasured, so the
+369 ms is this Mac talking to a browser on itself — the figure for "Windows captures,
+the Mac watches" (§7) has not been re-taken with this instrument. And the number is not
+interchangeable with the `mse_latency_probe.py` 838 ms for the browser shape: that probe
+reads the player's buffer edge, a different segment of the same chain (§10).
 
 ---
 
@@ -457,8 +471,10 @@ Decoder probing uses `avcodec_receive_frame_flags(ctx, frame, AV_CODEC_RECEIVE_F
 
 > **2026-10-03 update:** some of what follows has since been measured on a real
 > Windows → Mac link — see **§9**, which also records one claim of *mine* that the
-> re-measurement falsified. Items closed there say so; the cross-machine lag number
-> for `webrtc`, Safari/phone, true wireless and real TV firmware are still open.
+> re-measurement falsified. Items closed there say so. Since **§10** the `webrtc`
+> end-to-end number exists *on one Mac with a browser on itself* (369 ms against the
+> `browser` shape's 492 ms); what remains open is the same measurement **across
+> machines**, plus Safari/phone, true wireless and real TV firmware.
 
 **Cast Streaming (Q1)**
 - **No real-Chromecast test report from any hand-rolled sender** (omacast, 1PhoneMirror, go-cast, gcast) — so the probability that Macast's `caststream` is accepted by real firmware is unknown.
@@ -592,11 +608,89 @@ would be right for one picture size and silently wrong for the rest.
 - **No end-to-end lag number for the `webrtc` shape across machines.** The cross-machine
   session proved the picture moves (decoded frames, canvas non-uniformity, viewer counts
   agreeing with the sender); it did not reproduce the `mse_latency_probe.py` measurement
-  shape on that link, so §1's "<50 ms" row is still third-party, not ours.
+  shape on that link, so §1's "<50 ms" row is still third-party, not ours. **A same-machine
+  screen-to-screen number now exists (§10: 369 ms against the `browser` shape's 492 ms on
+  one instrument)** — the open half is exactly the words "across machines": the flash
+  instrument has never been run with the source on .68.
 - **Safari, phone browsers, and true wireless remain unverified** for every shape — the
   viewer in all of this was Chromium on the Mac over cable.
 - **No real Chromecast / no real old-TV firmware** was ever in these runs (this LAN has
   neither), so `caststream` and the five DLNA tiers are still self-consistency proofs only.
-- The `browser` shape's **838 ms p50** (§1) was measured on the Mac talking to itself.
-  The Windows source is materially faster per frame (0.21 cores) but that is CPU headroom,
-  not a lag measurement on that link.
+- The `browser` shape's **838 ms p50** (§1) was measured on the Mac talking to itself, and
+  it is a *different segment* than §10's 492 ms: `mse_latency_probe.py` reads the player's
+  `buffered.end` edge, the flash instrument reads what the compositor paints. Neither is
+  wrong; quoting one against the other is. The Windows source is materially faster per
+  frame (0.21 cores) but that is CPU headroom, not a lag measurement on that link.
+
+---
+
+## 10. Follow-up (2026-10-03) — an absolute screen-to-screen number for `webrtc`
+
+**Why a new instrument at all.** `scripts/mse_latency_probe.py` reads `buffered.end`
+from an MSE source, and the `webrtc` shape has no MSE buffer — it is a MediaStream
+track handed straight to the `<video>` element. The probe is therefore structurally
+unable to target it, and the decision this measurement was commissioned to settle
+was written as a comparison ("keep 「低延迟」 only if this shape can be shown to beat
+the browser shape's number"). A comparison needs one instrument measuring both sides.
+
+**Design.** A borderless `NSWindow` at `NSFloatingWindowLevel` paints solid black and
+white at scheduled instants recorded with `time.time()` (a 520×520 pt rect at 90,120 on
+the 2560×1440 display, one lead-in flash then alternation every ~451 ms). Into the
+**production** viewer page — the same HTML the user gets, not a harness page — is
+injected a sampler on `requestVideoFrameCallback` that `drawImage`s the video and takes
+the mean luminance of the rect where the flash window lands in the picture, stamped with
+`Date.now()`. rVFC is the only per-*presented*-frame clock; `requestAnimationFrame`
+ticks on the compositor's own schedule and would measure the wrong thing. Both clocks
+are on one machine and one epoch, so their difference *is* the pipeline: capture, encode,
+wire, player, compositor. The black/white threshold comes from the run's own low and high
+(a desktop is not black), and pairing is a **cross-correlation peak** — slide a constant
+offset from 120 to 1500 ms in 1 ms steps, count the scheduled flips that have an observed
+transition within ±40 ms of it; the peak offset is the lag and the count is how much of
+the run agrees with it (16/16 in both shipping readings). Positional and greedy pairing
+were tried first and produced −4896 ms and a confident, false 934 ms.
+
+**The numbers** (one Mac, VideoToolbox `avc1.64002a`, avfoundation capture in
+「屏幕 (无系统声音)」, one display, 1280×720, fresh session, viewer reached over the
+Mac's own LAN address rather than loopback):
+
+| shape | p50 | min–max | agreement |
+|---|---|---|---|
+| `webrtc` | **369 ms** | 327–396 | 16/16 |
+| `browser` (fMP4 + MSE) | **492 ms** | 465–509 | 16/16 (peak at 470) |
+
+Secondary readings, same instrument: a second fresh `browser` session at 463 ms, and
+`webrtc` at 325 ms when the capture path was ScreenCaptureKit instead of avfoundation.
+`webrtc` wins under every reading, so the label stays and the numbers are attached to
+it — one constant (`MEASURED_LAG_MS` in the plugin) feeding both the cards the user
+picks from and the help bullets, with Part 44 asking each number twice.
+
+**What the same run says about the receiver jitter buffer** — §3.5's open item, for the
+cabled same-machine case only: `framesReceived` 305 = `framesDecoded` 305,
+`framesDropped` 0, `nackCount` 0, `packetsLost` 0, rtt 1 ms, and
+`jitterBufferDelay / jitterBufferEmittedCount` ≈ **3.5 ms**. So on this link the jitter
+buffer is not a term worth arguing about; under real wireless it remains unmeasured.
+
+**Three caveats the reader of these numbers has to carry:**
+
+1. **Biased high** by at most one capture frame (~42 ms at 24 fps): the reference
+   instant is taken inside the paint callback, before AppKit pushes the window to the
+   display. The direction is known, so the comparison is safe even though the absolute
+   figure is a ceiling.
+2. **macOS screen capture is change-gated.** On a static desktop every delivered frame
+   is stamped 1/24 s apart no matter when it actually happened, so the media clock runs
+   at roughly **0.4× wall** and everything read off it inflates. Before that was
+   understood, the *same* instrument reported **806 / 1497 ms** for `browser` and the
+   page presented only **7 of 17** flashes. The fix is to keep a busy, flashing window
+   live beside the one being measured, which is what both shipping runs did.
+3. **These are fresh-session numbers.** The `browser` shape ages — the 800–1500 ms
+   reading above was a page twenty minutes into one session. And they are **not**
+   interchangeable with §1's `mse_latency_probe.py` **838 ms**, which quotes the
+   player's buffer edge, a different segment of the same chain. The help page now names
+   which number measures what, and a test requires that qualifier to stay.
+
+**Still open here:** the same instrument across machines (source on .68, viewer on the
+Mac) — §9's cross-machine run proved the picture moves without reproducing this
+measurement shape; plus Safari, phones, true wireless and real TV firmware. The probe
+itself was a throwaway spike (`/tmp/webrtc-lag/measure.py`, not committed); if the
+cross-machine figure is the next question, the recipe above is what to promote into
+`scripts/`.
