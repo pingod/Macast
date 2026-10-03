@@ -537,6 +537,13 @@ class MacastPluginManager:
         target = os.path.join(target_dir, filename)
         if os.path.abspath(source_path) != os.path.abspath(target):
             shutil.copyfile(source_path, target)
+        # CPython re-lists a package directory only when its st_mtime *changes*,
+        # so on a filesystem whose timestamps are coarser than the few
+        # microseconds between that copy and the import below, the file we just
+        # written is invisible to the import system and a perfectly good plugin
+        # is refused. This is exactly how the v0.18.0 CI run died on the Linux
+        # runner: 'No module named renderer.incoming'.
+        importlib.invalidate_caches()
         self.refresh()
         key = "{}:{}".format(plugin_type, filename[:-3])
         plugin = self.plugin_by_key(key)

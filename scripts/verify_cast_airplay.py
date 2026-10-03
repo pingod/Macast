@@ -2437,6 +2437,65 @@ try:
           _rejects(lambda: mgr2.install_url("https://example.com/p.zip",
                                             "renderer")))
 
+    # --- install onto a filesystem whose timestamps are coarse ---------------
+    # CPython's FileFinder re-lists a package directory only when that
+    # directory's st_mtime *changes*. On a machine whose timestamp granularity
+    # is wider than the few microseconds between install_file()'s copy and the
+    # import it triggers, the file that was just written is invisible to the
+    # import system and a perfectly good plugin is refused. That is not a
+    # hypothetical: the v0.18.0 CI run on the Linux runner died exactly there
+    # (the swallowed error was `No module named 'renderer.incoming'`), while
+    # every Mac and every container we can run locally stayed green because
+    # their mtimes are fine-grained. The suite cannot make the runner coarse, so
+    # it pins the mtime importlib reads into one day-wide bucket and asks both
+    # halves of the contract: the raw import must really go blind (otherwise
+    # this case asserts nothing), and install_file() must still load the plugin
+    # because it calls importlib.invalidate_caches().
+    import importlib._bootstrap_external as _be11
+    _real_path_stat11 = _be11._path_stat
+    _TICK11 = 86400.0
+
+    class _CoarseStat11(object):
+        def __init__(self, inner):
+            self._inner = inner
+            self.st_mtime = inner.st_mtime - (inner.st_mtime % _TICK11)
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+    _be11._path_stat = lambda path: _CoarseStat11(_real_path_stat11(path))
+    try:
+        # Fill the listing for the plugin directory while it is pinned...
+        _write("early11.py", RENDERER_PLUGIN.replace("Hotplug", "Early"))
+        importlib.import_module("renderer.early11")
+        # ...then add a file to that directory and ask the import system for it.
+        _write("late11.py", RENDERER_PLUGIN.replace("Hotplug", "Late"))
+        blind = None
+        try:
+            importlib.import_module("renderer.late11")
+        except ModuleNotFoundError as exc:
+            blind = str(exc)
+        check("a coarse-clock directory hides a file the import system has "
+              "not seen", blind == "No module named 'renderer.late11'",
+              str(blind))
+
+        final_src = os.path.join(_tmp_root, "final11.py")
+        with open(final_src, "w", encoding="utf-8") as f:
+            f.write(RENDERER_PLUGIN.replace("Hotplug", "Final"))
+        late_plugin = None
+        install_err = None
+        try:
+            late_plugin = mgr2.install_file(final_src, "renderer", "final11.py")
+        except Exception as exc:  # noqa: BLE001 -- the message is the finding
+            install_err = "{}: {}".format(type(exc).__name__, exc)
+        check("install loads a plugin the import system had not seen yet",
+              late_plugin is not None and
+              late_plugin.title == "Final Player" and
+              os.path.exists(os.path.join(_tmp_root, "renderer", "final11.py")),
+              str(install_err or getattr(late_plugin, "key", None)))
+    finally:
+        _be11._path_stat = _real_path_stat11
+
     # --- install_url obeys the mirror switch --------------------------------
     # Only the URL handed to requests.get is under test: the download and the
     # install itself are covered elsewhere, so both get stubbed.
@@ -2487,7 +2546,8 @@ finally:
               "({}); the test used its own temp config, so nothing was "
               "changed by the run itself.".format(e))
     for _mod in ("renderer", "protocol", "renderer.hotplay", "renderer.incoming",
-                 "protocol.hotproto", "protocol.incoming_proto"):
+                 "protocol.hotproto", "protocol.incoming_proto",
+                 "renderer.early11", "renderer.late11", "renderer.final11"):
         sys.modules.pop(_mod, None)
     sys.path[:] = _saved_syspath
     _shutil.rmtree(_tmp_root, ignore_errors=True)
@@ -24315,7 +24375,8 @@ try:
           and 'measure' in _stepsI59, str((_stepsI59, _countsI59)))
 
     _oldI59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
-                       ytdlp_candidates=lambda url, binary=None: [])
+                       ytdlp_candidates=lambda url, binary=None: [],
+                       find_command=lambda name, **kw: '/usr/bin/yt-dlp')
     try:
         _emptyI59 = mr59.resolve_now('http://vid.example/watch/7')
         _noYtdlpI59 = None
