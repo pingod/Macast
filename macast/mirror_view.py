@@ -35,14 +35,17 @@ touch is a bug, not a spare row** (see `sections_for`).
 #: console: the preview is PNG-only (no `fmt`), and the snapshot endpoint no
 #: longer takes a format at all. v4 adds the 统计信息 card (`stats.diag`, the
 #: search trace) so a delay can be read off numbers instead of guessed at.
-VIEW_VERSION = 4
+#: v5 adds the WebRTC 依赖 card: those two packages left every default artefact,
+#: so the page needs a place to say "this machine cannot run that target yet"
+#: and a button that changes the answer.
+VIEW_VERSION = 5
 
 #: Every panel this module can ask for, in layout order. Not a preference list:
 #: `sections_for` returns a subset of this, and the page renders in the order it
 #: is given, so the ordering decision stays here.
-SECTION_ORDER = ('channels', 'devices', 'requirements', 'shape', 'profiles',
-                 'quality', 'capture', 'audio', 'viewer', 'preview',
-                 'diagnostics', 'activity')
+SECTION_ORDER = ('channels', 'devices', 'requirements', 'extras', 'shape',
+                 'profiles', 'quality', 'capture', 'audio', 'viewer',
+                 'preview', 'diagnostics', 'activity')
 
 #: Card names to fall back to when the app answers without a catalog -- which is
 #: what it does while the app is still starting, or with a plugin that failed to
@@ -92,6 +95,13 @@ def sections_for(state):
         sections.append('devices')
     if state.get('requirements'):
         sections.append('requirements')
+    extras = state.get('extras') or {}
+    # 「WebRTC 依赖」is the bundle this machine can fetch, or already has. A card
+    # with a button that can only fail is the same lie as an unmovable knob, so
+    # an ABI with no published asset stays off the page -- and `installed` keeps
+    # it on one, because 「移除」 has to be reachable from somewhere.
+    if extras.get('installed') or extras.get('supported'):
+        sections.append('extras')
     if kind == 'dlna':
         # Shape before profile: the shape decides whether the renderer is
         # handed a live stream or an endless file at all, and the profile only
@@ -469,6 +479,13 @@ def view_for(state):
         'quality': {'labels': pills, 'note': note},
         'diagnostics': diagnostics_rows(state),
         'diagnostics_text': diagnostics_text(state),
+        # Both step lists use the same mark function on purpose: 「跳过」has to read
+        # as a state of its own on the WebRTC bundle card too, and the way that
+        # got fixed for the audio installer was a rule about step machines, not
+        # about audio.
         'step_marks': [audio_step_mark(step)
                        for step in (state.get('audio') or {}).get('steps') or []],
+        'extras_step_marks': [audio_step_mark(step)
+                              for step in (state.get('extras') or {})
+                              .get('steps') or []],
     }

@@ -541,6 +541,8 @@ If `aiortc` is adopted for a `webrtc` shape, Macast's constraints (from `AGENTS.
 
 **As shipped (2026-10-02):** see §3.5 for the corrections — the 7–8 names were *not* all hand-listed (`aiortc`'s own dependency graph is followed by both packagers), `av` must go in py2app `packages` (delocated wheel), `cffi` was the one undiscoverable name, and no `-profile:v baseline` was needed on the pass-through path.
 
+**Reversed on 2026-10-04 (v0.20.0):** none of that packaging advice applies to a default artefact any more. P9 moved `aiortc` / `av` (and `cryptography` / `pylibsrtp` / `cffi`) out of all four platform builds and into a per-ABI optional extras zip installed from the settings page; the packaging constraints above (delocated `av` in py2app `packages`, `cffi` as the name no scanner sees) now describe **how that zip is built**, and are restated in `AGENTS.md` §4.15. The two measurements in §3.5 stay valid as then-shipped.
+
 ---
 
 ## 9. Follow-up (2026-10-03) — the first real Windows → Mac measurement

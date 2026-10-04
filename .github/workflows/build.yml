@@ -42,6 +42,20 @@
 #     assets for v0.7.15 through v0.8.10 while Actions was full), so a
 #     published release has no remaining reader.
 #   - `retention-days: 2` stays as the backstop if the sweep job fails.
+#
+# The WebRTC mirror target is optional. Its engine (`aiortc` and `av`, plus the
+# SRTP/cffi chain they pull in) is tens of megabytes of wheels most users never
+# need, so **no default artefact carries it** -- each platform job instead runs
+# the script `scripts/build_webrtc_extras.py`, which installs those packages
+# into a throwaway tree with `--target`, writes a manifest describing the exact
+# ABI it built for, and zips it as `Macast-WebRTC-extras-*.zip`. That glob rides
+# the *existing* upload step's `path:` list rather than getting a step of its own
+# -- a fifth upload would put this back under the quota the note above paid for.
+# The app fetches the asset from its own Release when the user asks for the
+# fifth target (设置页「电脑投屏」→「一键安装 WebRTC 依赖」).
+# The build step is NOT gated, unlike the upload: a plain push to main is the
+# only chance this script gets to fail somewhere other than release night.
+#
 # Why this is worth two mechanisms: one four-platform run is ~170 MB and the
 # free plan caps Actions storage at 500 MB, so *three* builds inside the
 # retention window wedge every later upload with
@@ -161,12 +175,13 @@ jobs:
           # entries are the screen-mirror plugin's fast capture path (lazy
           # imports, silently absent from the bundle if the build env lacks
           # them -- see the pyobjc comment in requirements/darwin.txt).
-          # `aiortc`/`av` are the WebRTC mirror target's engine, same story:
-          # imported lazily by screen_mirror.py, absent from the bundle unless
-          # the build environment carries them.
+          # `aiortc`/`av` are deliberately NOT here: the WebRTC mirror target is
+          # an optional bundle the app installs on demand (see the header and
+          # scripts/build_webrtc_extras.py), so a .app that never carried them
+          # is the expected shape, not a regression.
           pip install 'rumps' 'py2app>=0.28' 'cherrypy>=18,<19' \
                       'lxml' 'netifaces' 'appdirs' 'pyperclip' \
-                      'requests' 'pillow' 'zeroconf' 'aiortc' 'av' \
+                      'requests' 'pillow' 'zeroconf' \
                       'pyobjc-framework-Cocoa' \
                       'pyobjc-framework-ScreenCaptureKit' \
                       'pyobjc-framework-CoreMedia'
@@ -272,6 +287,18 @@ jobs:
           zip -r -y "../Macast-MacOS-arm64-v${VERSION}.zip" Macast.app
           cd ..
 
+      - name: Build the optional WebRTC extras
+        # Not gated: this is the only place the builder script gets exercised
+        # before release night, and a main push is the cheapest time to find out
+        # it broke. The script names the zip after this machine's exact ABI
+        # (os / arch / Python tag), so the app can ask for one and know what it
+        # is getting -- see macast/plugin_repo.py and the extras layer in
+        # macast/plugins/renderer/screen_mirror.py.
+        run: |
+          python scripts/build_webrtc_extras.py \
+            --version "${{ steps.version.outputs.version }}"
+          ls -l Macast-WebRTC-extras-*.zip
+
       - name: Upload artefact
         # See the header: only upload when this run's release job will consume
         # it. A push to main builds everything and stores nothing.
@@ -281,7 +308,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
-          path: Macast-MacOS-arm64-*.zip
+          # The extras zip rides this step instead of getting one of its own --
+          # a fifth upload would put the quota in §4.3 back under the release.
+          path: |
+            Macast-MacOS-arm64-*.zip
+            Macast-WebRTC-extras-*.zip
           if-no-files-found: error
           retention-days: 2
 
@@ -314,15 +345,16 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # `aiortc`+`av` are the WebRTC mirror target's engine, imported
-          # lazily by screen_mirror.py -- nothing here fails without them, the
-          # target just refuses at runtime in a binary whose user has no pip.
-          # The hidden imports below carry them plus `cffi`: pylibsrtp's
-          # `_binding.abi3.so` asks for `_cffi_backend` from a binary at load
-          # time, which the analyzer cannot see (hooks-contrib's hook-av.py
-          # handles av's own lib layout; the cffi chain needs naming).
+          # `aiortc`/`av` are deliberately NOT installed here: the WebRTC
+          # mirror target ships as an optional extras zip (see the header), so
+          # a frozen binary that lacks them is the expected shape and the
+          # target just refuses until the user installs the bundle. The hidden
+          # imports below accordingly name none of the five (they used to carry
+          # these two plus `cffi`, because pylibsrtp's `_binding.abi3.so` asks
+          # for `_cffi_backend` from a binary at load time -- a chain the extras
+          # zip now carries itself).
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf aiortc av
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Compile .po -> .mo
         run: |
@@ -340,9 +372,6 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
-            --hidden-import=aiortc \
-            --hidden-import=av \
-            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
@@ -390,6 +419,16 @@ jobs:
           tar czf "../Macast-Linux-x86_64-v${VERSION}.tar.gz" *
           cd ..
 
+      - name: Build the optional WebRTC extras
+        # See the header. The script installs `aiortc`/`av` into a throwaway
+        # tree with `pip --target`, so this job needs neither of them installed
+        # for the binary -- which is exactly why the pip list above dropped
+        # them, and why the zip has to be built by a script and not by hand.
+        run: |
+          python scripts/build_webrtc_extras.py \
+            --version "${{ steps.version.outputs.version }}"
+          ls -l Macast-WebRTC-extras-*.zip
+
       - name: Upload artefact
         if: |
           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
@@ -397,7 +436,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
-          path: Macast-Linux-x86_64-*.tar.gz
+          path: |
+            Macast-Linux-x86_64-*.tar.gz
+            Macast-WebRTC-extras-*.zip
           if-no-files-found: error
           retention-days: 2
 
@@ -423,15 +464,16 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          # `aiortc`+`av` are the WebRTC mirror target's engine, imported
-          # lazily by screen_mirror.py -- nothing here fails without them, the
-          # target just refuses at runtime in a binary whose user has no pip.
-          # The hidden imports below carry them plus `cffi`: pylibsrtp's
-          # `_binding.abi3.so` asks for `_cffi_backend` from a binary at load
-          # time, which the analyzer cannot see (hooks-contrib's hook-av.py
-          # handles av's own lib layout; the cffi chain needs naming).
+          # `aiortc`/`av` are deliberately NOT installed here: the WebRTC
+          # mirror target ships as an optional extras zip (see the header), so
+          # a frozen binary that lacks them is the expected shape and the
+          # target just refuses until the user installs the bundle. The hidden
+          # imports below accordingly name none of the five (they used to carry
+          # these two plus `cffi`, because pylibsrtp's `_binding.abi3.so` asks
+          # for `_cffi_backend` from a binary at load time -- a chain the extras
+          # zip now carries itself).
           pip install pyinstaller 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf aiortc av
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Compile .po -> .mo
         run: |
@@ -449,9 +491,6 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
-            --hidden-import=aiortc \
-            --hidden-import=av \
-            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
@@ -499,6 +538,12 @@ jobs:
           tar czf "../Macast-Linux-arm64-v${VERSION}.tar.gz" *
           cd ..
 
+      - name: Build the optional WebRTC extras
+        run: |
+          python scripts/build_webrtc_extras.py \
+            --version "${{ steps.version.outputs.version }}"
+          ls -l Macast-WebRTC-extras-*.zip
+
       - name: Upload artefact
         if: |
           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
@@ -506,7 +551,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: linux-arm64
-          path: Macast-Linux-arm64-*.tar.gz
+          path: |
+            Macast-Linux-arm64-*.tar.gz
+            Macast-WebRTC-extras-*.zip
           if-no-files-found: error
           retention-days: 2
 
@@ -531,13 +578,15 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          # `aiortc`+`av` are the WebRTC mirror target's engine; same story as
-          # the Linux jobs -- lazy imports in screen_mirror.py, and a frozen
-          # .exe has no pip for its user. `cffi` is named with them for the
-          # same reason: pylibsrtp's extension needs `_cffi_backend` at load
-          # time, invisible to the analyzer.
+          # `aiortc`/`av` are deliberately NOT installed here, same as the
+          # Linux jobs: the WebRTC mirror target ships as an optional extras
+          # zip (see the header), so a frozen .exe that lacks them is the
+          # expected shape, the target refuses, and the settings page offers to
+          # fetch the bundle. `cffi` left with them -- pylibsrtp's extension
+          # needs `_cffi_backend` at load time, and that chain now lives inside
+          # the extras zip rather than inside this binary.
           pip install pyinstaller pystray 'cherrypy>=18,<19' lxml netifaces \
-                              appdirs pyperclip requests pillow zeroconf aiortc av
+                              appdirs pyperclip requests pillow zeroconf
 
       - name: Install static gettext (msgfmt)
         # Windows runners don't ship gettext; the GitHub release of the
@@ -582,9 +631,6 @@ jobs:
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
-            --hidden-import=aiortc \
-            --hidden-import=av \
-            --hidden-import=cffi \
             --hidden-import=cheroot.ssl.builtin \
             --hidden-import=netifaces \
             --hidden-import=appdirs \
@@ -631,6 +677,13 @@ jobs:
           7z a "../Macast-Windows-x86_64-v${VERSION}.zip" *
           cd ..
 
+      - name: Build the optional WebRTC extras
+        shell: bash
+        run: |
+          python scripts/build_webrtc_extras.py \
+            --version "${{ steps.version.outputs.version }}"
+          ls -l Macast-WebRTC-extras-*.zip
+
       - name: Upload artefact
         if: |
           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
@@ -638,7 +691,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
-          path: Macast-Windows-x86_64-*.zip
+          path: |
+            Macast-Windows-x86_64-*.zip
+            Macast-WebRTC-extras-*.zip
           if-no-files-found: error
           retention-days: 2
 
@@ -722,6 +777,14 @@ jobs:
             - `Macast-Linux-x86_64-v${{ steps.version.outputs.version }}.tar.gz` — Linux x86_64
             - `Macast-Linux-arm64-v${{ steps.version.outputs.version }}.tar.gz` — Linux aarch64
             - `Macast-Windows-x86_64-v${{ steps.version.outputs.version }}.zip` — Windows x86_64
+
+            Optional, for 电脑投屏's WebRTC target (`aiortc`/`av` are deliberately
+            not inside the artefacts above). One zip per platform/Python ABI is
+            published next to them, named
+            `Macast-WebRTC-extras-<os>-<arch>-<python>-v<version>.zip`; the app
+            fetches the matching one from the settings page
+            （电脑投屏 → 一键安装 WebRTC 依赖）, so there is no reason to download
+            it by hand.
           draft: false
           prerelease: false
           generate_release_notes: true

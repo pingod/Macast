@@ -433,10 +433,23 @@ DLNA/Chromecast 投屏推过来时会**让位**并转投该 URL（Bridge 行为�
 3. **这条通道没有声音**（标签里写着）：RTP 里只装视频。要声音用 §1.4 的浏览器目标
    或 §1.1 的 Chromecast。
 
-**要装两个可选依赖**：`aiortc` 与 `av`。本仓库打包的产物已经带着它们；从源码跑时，
-在**运行 Macast 的那个 Python** 里执行 `pip install aiortc av`（这两个包也点名在
-`requirements/common.txt` 里），装完回到「投屏方式」重选本目标即可 —— **失败不会被缓存，
-不需要重启 Macast**。没装就点「开始镜像」会当场失败，失败信息就是这行 pip。
+**要装两个可选依赖**：`aiortc` 与 `av`。**自 v0.20.0 起它们不在默认产物里**
+（`av` 一个包就四十多 MB，而这一条通道是少数人用的），所以分两种机器：
+
+- **打包安装的 Macast**（`.app` / `.exe` / Linux 二进制）：设置页「电脑投屏」→
+  「WebRTC 依赖」卡 → 点「一键安装 WebRTC 依赖」。本机从 GitHub Release 的
+  **本平台资产**（`Macast-WebRTC-extras-<系统>-<架构>-<python>-v<版本>.zip`）下载到
+  配置目录下的 `webrtc_extras/<os>-<arch>-<python>/`，逐步校验清单与每个文件的 sha256，
+  进度条就跑在这张卡上（镜像 tab 本来就在每秒轮 `mirror-state`，所以**没有第二个页面**）。
+  同张卡上有「移除 WebRTC 依赖」，移除是 `mv` 到配置目录的 `.trash/`，可回滚。
+- **从源码跑的 Macast**：在**运行 Macast 的那个 Python** 里执行 `pip install aiortc av`
+  （这两个包仍点名在 `requirements/common.txt` 与 `requirements/darwin.txt` 里，
+  那里现在的意思只是"从源码跑的那一路 + CI runner 要 import 得起"）。
+
+两种都**不需要重启 Macast**，装完回到「投屏方式」重选本目标即可 —— 判定成功与失败
+都不缓存。没装就点「开始镜像」会当场失败，失败信息就是上面那两行之一。
+**边界**：这个资产要 CI 发布一次才拉得到，而 v0.20.0 之前**从没发布过任何一个 extras 包** ——
+所以这一路的"真点一次按钮、真装上、真投起来"仍未在真机上走过（见 §7 的验证台账）。
 
 - **不需要 ICE / STUN 服务器**：局域网里交换的就是 host candidate 本身；信令走 Macast
   自己的 HTTP（页面、换 offer、交 answer 三扇门），每扇**只认本次会话的 token** ——

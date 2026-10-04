@@ -13,12 +13,16 @@ zeroconf
 # The screen-mirror plugin's WebRTC output shape. screen_mirror imports both
 # lazily, inside a function, and the import is the feature probe: on a machine
 # without them every other mirror target still works and this one refuses with
-# the pip line. They are declared anyway (and shipped in every packaged build,
-# see build.yml) because a .app or a onefile binary has no pip for its user --
-# if the bundlers do not carry these, the target is a promise no download can
-# keep. `av` is also one of aiortc's own dependencies, but the plugin imports
-# it directly (it builds the pre-encoded packets aiortc sends), so it is named
-# here directly -- the cheroot rule above.
+# the two ways to get it. Since P9 these are a SOURCE-RUN declaration only --
+# the packaged builds deliberately leave them out again (see build.yml and
+# scripts/setup_py2app.py), because `av` alone is forty-some MB behind a target
+# a minority uses, and a packaged machine now fetches them from a Release asset
+# by pressing 「一键安装 WebRTC 依赖」 on the mirror page. What this file still
+# buys is the runner that executes the suite: `verify_cast_airplay.py --ci` in
+# GitHub's Linux job imports the real aiortc (Part 56/C), and it would be a
+# silent skip if the declaration went away. `av` is also one of aiortc's own
+# dependencies, but the plugin imports it directly (it builds the pre-encoded
+# packets aiortc sends), so it is named here directly -- the cheroot rule above.
 aiortc
 av
 git+https://github.com/xfangfang/pystray.git

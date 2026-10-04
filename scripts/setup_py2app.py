@@ -472,18 +472,24 @@ OPTIONS = {
     # directory has to exist on disk as a package rather than as scattered
     # entries inside the zip.
     #
-    # `av` joins them for a third variation on the same theme: its PyPI wheel
-    # is a delocated bundle -- `av/_core.abi3.so` links FFmpeg as
-    # `@loader_path/.dylibs/*.dylib`, a *hidden* subdirectory whose contents
-    # have to travel with the extension exactly where they are. A verbatim
-    # copy keeps every `@loader_path` resolution intact; letting modulegraph
-    # scatter the modules and macholib relocate the dylibs is the bet that
-    # produces an .app that builds and then cannot import (the zeroconf
-    # failure mode, hosted by a 44 MB wheel). The screen-mirror plugin reaches
-    # for it lazily (`import av` inside `_webrtc_modules`), which is why it has
-    # to be named here at all.
-    'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr',
-                 'av'],
+    # `av` and `aiortc` are deliberately NOT here (P9). The WebRTC mirror
+    # target's whole chain -- `aiortc`, `av`, and the SRTP/crypto/cffi runtime
+    # under them -- is tens of megabytes that most users never open, so no
+    # default artefact carries it: the platform jobs publish it as an extras zip
+    # and the settings page installs it on demand.
+    #
+    # The reasoning that used to justify the `packages` entry still justifies
+    # the shape of that zip. `av`'s PyPI wheel is a delocated bundle --
+    # `av/_core.abi3.so` links FFmpeg as `@loader_path/.dylibs/*.dylib`, a
+    # *hidden* subdirectory whose contents have to travel with the extension
+    # exactly where they are. A verbatim tree copy keeps every `@loader_path`
+    # resolution intact; letting modulegraph scatter the modules and macholib
+    # relocate the dylibs is the bet that produces an .app that builds and then
+    # cannot import (the zeroconf failure mode, hosted by a 44 MB wheel).
+    # `scripts/build_webrtc_extras.py` therefore installs with `pip --target`
+    # and zips the resulting directory as it stands -- the same verbatim copy,
+    # by the same argument, one layer further out.
+    'packages': ['rumps', 'macast', 'macast_renderer', 'zeroconf', 'ifaddr'],
     'iconfile': os.path.join(PROJECT_ROOT, 'macast', 'assets', 'icon.icns'),
     'arch': TARGET_ARCH,
     'strip': True,
@@ -511,22 +517,23 @@ OPTIONS = {
                  # rather than left to modulegraph. Both must also be in the
                  # build environment -- see requirements/darwin.txt.
                  'ScreenCaptureKit', 'CoreMedia',
-                 # The WebRTC output shape's server, same story one level down:
-                 # a function-body import in screen_mirror.py, named here so
-                 # the bundle keeps it. Its H.264 companion `av` is not here --
-                 # it is a whole-directory package (see `packages`), and
-                 # spelling it in both places would ship two copies.
-                 'aiortc',
-                 # `cffi` is the one dependency that nothing imports *in
-                 # Python*: pylibsrtp's `_binding.abi3.so` is a cffi API-mode
-                 # extension and asks for `_cffi_backend` at dlopen time --
-                 # invisible to modulegraph, which is how the first build of
-                 # this bundle produced an .app whose WebRTC negotiation died
-                 # with "ModuleNotFoundError: No module named '_cffi_backend'".
-                 # Naming `cffi` is enough: `cffi.api` does the actual
-                 # `import _cffi_backend`, so the extension rides in with the
-                 # package.
-                 'cffi',
+                 # The WebRTC output shape's whole chain is deliberately absent
+                 # (P9): `aiortc`, `av` and the SRTP/crypto/cffi runtime they
+                 # pull in are tens of megabytes of wheels that only the fifth
+                 # mirror target needs, so each platform publishes them as one
+                 # extras zip and the settings page installs it on demand.
+                 # Two former entries are worth the reason they were here,
+                 # because the same argument now applies to the extras zip
+                 # instead of to this bundle: `cffi` is the one dependency that
+                 # nothing imports *in Python* -- pylibsrtp's `_binding.abi3.so`
+                 # is a cffi API-mode extension that asks for `_cffi_backend` at
+                 # dlopen time, invisible to modulegraph, which is how the first
+                 # build of this bundle died mid-negotiation. Any scanner that
+                 # cannot see a function-body import or a dlopen-time name is
+                 # blind in exactly the same way here, which is why
+                 # `scripts/build_webrtc_extras.py` installs with `pip --target`
+                 # and zips the directory as it stands rather than walking
+                 # imports at all.
                  # All first-party plugins are shipped in the application. The
                  # loader discovers them from os.listdir, so py2app cannot
                  # infer these imports on its own.

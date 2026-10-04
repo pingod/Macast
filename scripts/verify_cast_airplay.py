@@ -7682,7 +7682,12 @@ done
               # 「投屏形状」sits between them: live stream or endless file is a
               # bigger decision than which container carries it, and it is the
               # one setting a modern television gets wrong by default.
-              [s for s in _sections23 if s != 'requirements'][:4]
+              # The two cards that are dropped are not decisions about the
+              # mirror -- they are what this machine still needs (another
+              # plugin's requirement board, and WebRTC's optional bundle), and
+              # where *those* sit is pinned by its own case below and Part 60/D.
+              [s for s in _sections23
+               if s not in ('requirements', 'extras')][:4]
               == ['channels', 'devices', 'shape', 'profiles'], str(_sections23))
         # The board is the app's, not this plugin's: whatever an *other* plugin
         # said it needs is on it, and the window shows that instead of keeping
@@ -10179,11 +10184,12 @@ done
         _notify25.clear()
         _taps25['reported'] = 'NO_MEDIA_PRESENT'
         check("a takeover is re-pushed, and the re-push keeps the position",
-              _wait_until(lambda: _verbs25().count('SetAVTransportURI') == 2,
-                          timeout=20)
+              _wait_until(lambda: _verbs25().count('SetAVTransportURI') == 2
+                          and _caster25b.position == 42.0, timeout=20)
               and all('<Target>0:00:42</Target>' in b
                       for a, b, _c in _taps25['calls'] if a == 'Seek')
-              and _caster25b.position == 42.0, str(_verbs25()))
+              and _caster25b.position == 42.0,
+              '%s position=%r' % (_verbs25(), _caster25b.position))
         check("after MAX_REPUSH takeovers we stop fighting and say so",
               _wait_until(lambda: any('电视被别的设备占用' in str(n)
                                       for n in _notify25), timeout=30)
@@ -12547,8 +12553,18 @@ try:
     _ci30 = set()
     for _tok in _re30.findall(r"['\"]([^'\"]+)['\"]", ''.join(_pip_words)):
         _ci30.add(_norm30(_re30.split(r'[<>=!~\s]', _tok, 1)[0].split('[', 1)[0]))
-    _absent = sorted(_darwin30 - _ci30)
-    check("the macOS CI job installs everything requirements/darwin.txt names",
+    # ... minus the extras the packaged builds deliberately do *not* carry: the
+    # WebRTC target's packages travel as a release asset the app fetches on
+    # demand, so they stay declared (a source run needs them, and the import
+    # allowlist above reads that declaration) while no job pip-installs them.
+    # The subtraction is keyed off the one tuple that says so, and Part 60/A
+    # holds that tuple to its exact two names -- otherwise "put it in
+    # EXTRAS_PACKAGES" would be a way to make this check stop asking.
+    _extras30 = {_norm30(n) for n in macast_mod.plugin_repo.EXTRAS_PACKAGES}
+    _absent = sorted(_darwin30 - _ci30 - _extras30)
+    check("the macOS CI job installs everything requirements/darwin.txt names "
+          "(except the WebRTC extras the artefacts hand to the in-app "
+          "installer)",
           not _absent, "missing from build.yml: %s" % _absent)
 
     with open(os.path.join(MACAST, "utils.py"), encoding="utf-8") as fh:
@@ -18471,9 +18487,13 @@ try:
                   <= set(protocol.Handler._MANAGEMENT_PARAMS),
                   str(set(protocol.Handler._CODE_EXECUTION_PARAMS)
                       - set(protocol.Handler._MANAGEMENT_PARAMS)))
-            check("and the three measured paths are all in it",
-                  {'install-plugin', 'save-launch-param',
-                   'set-module-setting'} == set(protocol.Handler._CODE_EXECUTION_PARAMS),
+            check("and the five measured paths are all in it -- three that had "
+                  "to be closed by R1, plus the WebRTC bundle that downloads an "
+                  "archive, unpacks it under the config directory and imports "
+                  "what came out (Part 60/D)",
+                  {'install-plugin', 'save-launch-param', 'set-module-setting',
+                   'install-webrtc-extras', 'uninstall-webrtc-extras'}
+                  == set(protocol.Handler._CODE_EXECUTION_PARAMS),
                   str(protocol.Handler._CODE_EXECUTION_PARAMS))
 
             _as()   # loopback, no Origin: the shape that used to be trusted
@@ -18492,6 +18512,12 @@ try:
             _res = _post48(**{'set-module-setting': '1', 'key': 'PlayerSize',
                               'value': '1'})
             check("and so is writing a plugin's key (自动化钩子 lives here)",
+                  _res.get('code') == 403, str(_res))
+            _res = _post48(**{'install-webrtc-extras': '1'})
+            check("and so is fetching the optional WebRTC bundle -- the field is "
+                  "in the gate's list, which is all this Part is about. Part 60/D "
+                  "is what says the gate is the *right* one for it, and what the "
+                  "action does when the plugin behind it is missing",
                   _res.get('code') == 403, str(_res))
             _up48 = types.SimpleNamespace(file=_io48.BytesIO(b'print(1)'),
                                           filename='evil.py')
@@ -19282,9 +19308,11 @@ try:
                       if not callable(getattr(protocol.Handler, m, None))]
         check("every route names a method the handler has",
               not _missing51, str(_missing51))
-        check("the gate that runs code is still exactly the three measured paths",
+        check("the gate that runs code is still exactly the five measured paths "
+              "(three from R1, two for the WebRTC bundle -- Part 60/D)",
               set(protocol.Handler._CODE_EXECUTION_PARAMS)
-              == {'install-plugin', 'save-launch-param', 'set-module-setting'},
+              == {'install-plugin', 'save-launch-param', 'set-module-setting',
+                  'install-webrtc-extras', 'uninstall-webrtc-extras'},
               str(protocol.Handler._CODE_EXECUTION_PARAMS))
         check("and both legacy lists are derived from the table, not retyped",
               protocol.Handler._MANAGEMENT_PARAMS == tuple(_names51)
@@ -22711,38 +22739,138 @@ try:
                                           _out56['clients']))
 
     # -- D. the packaging contract --------------------------------------------
-
+    #
+    # This section used to prove the opposite: that `av`, `aiortc` and `cffi`
+    # were *inside* every default artefact. P9 moved the whole chain out -- the
+    # four platforms publish one extras zip each and the settings page offers it
+    # -- so what has to be true now is that the subtraction is *complete*. Every
+    # site that used to name these five packages is a site where one can be
+    # added back by accident, and §4.3's `.app` that shipped without `zeroconf`
+    # is the record of what "mostly removed" costs.
+    _five56 = ('aiortc', 'av', 'cffi', 'cryptography', 'pylibsrtp')
+    _five56s = set(_five56)
     _p2app56 = open(os.path.join(REPO, 'scripts', 'setup_py2app.py'),
                     encoding='utf-8').read()
-    _pkg56 = [m56x.group(1) for m56x in _re56.finditer(
-        r"'packages'\s*:\s*\[(.*?)\]", _p2app56, _re56.S)]
-    check("Part 56/D: py2app copies the `av` package whole -- its wheel "
-          "links FFmpeg as @loader_path dylibs under a hidden .dylibs "
-          "directory that has to travel with it",
-          any("'av'" in _body56x for _body56x in _pkg56),
-          str([b.replace('\n', ' ')[:60] for b in _pkg56]))
-    _inc56 = [m56x.group(1) for m56x in _re56.finditer(
-        r"'includes'\s*:\s*\[(.*?)\]", _p2app56, _re56.S)]
-    check("Part 56/D: and names `aiortc` and `cffi` in includes -- cffi is "
-          "the dependency nothing imports in Python (pylibsrtp asks for "
-          "_cffi_backend at dlopen time)",
-          any("'aiortc'" in _body56x and "'cffi'" in _body56x
-              for _body56x in _inc56),
-          str([b.replace('\n', ' ')[:60] for b in _inc56]))
+    # Read the two option lists off the syntax tree, not off the text. The first
+    # version of this scan matched `'packages': [...]` with a regex and then
+    # pulled `'…'` pairs out of the captured body -- but this file's comments are
+    # full of apostrophes ("the WebRTC output shape's `_binding.abi3.so`"), which
+    # mis-pairs the quotes so the real names end up inside garbage spans. It
+    # reported "none of the five" while being blind to any of them: a mutant that
+    # put `'aiortc', 'av', 'cffi'` back into `includes` went 0 red. (§4.2's
+    # family -- the test's own reader is an implementation too.)
+    _named56 = set()
+    _p2app_tree56 = _ast56.parse(_p2app56)
+    for _node56 in _ast56.walk(_p2app_tree56):
+        if not isinstance(_node56, _ast56.Dict):
+            continue
+        for _key56, _val56 in zip(_node56.keys, _node56.values):
+            if (isinstance(_key56, _ast56.Constant)
+                    and _key56.value in ('packages', 'includes')
+                    and isinstance(_val56, (_ast56.List, _ast56.Tuple))):
+                _named56.update(_el56.value for _el56 in _val56.elts
+                                if isinstance(_el56, _ast56.Constant)
+                                and isinstance(_el56.value, str))
+    check("Part 56/D: py2app names none of the five -- neither `av` in "
+          "`packages` nor `aiortc`/`cffi` in `includes`. The reason each was "
+          "there still stands (@loader_path dylibs; a dependency nothing "
+          "imports in Python), which is why the removal has to be checked "
+          "rather than assumed: this is the file where a leftover is cheapest "
+          "to leave in",
+          not [n for n in _five56 if n in _named56],
+          str(sorted(n for n in _five56 if n in _named56)))
     _yml56 = open(os.path.join(REPO, '.github', 'workflows', 'build.yml'),
                   encoding='utf-8').read()
     _hid56 = {name: len(_re56.findall(r'--hidden-import={}\b'.format(name),
                                       _yml56))
-              for name in ('aiortc', 'av', 'cffi')}
-    check("Part 56/D: every PyInstaller job (linux x86_64, linux arm64, "
-          "windows) carries the three hidden imports -- the plugin's "
-          "imports live in a function body, so modulegraph cannot see them",
-          _hid56 == {'aiortc': 3, 'av': 3, 'cffi': 3}, str(_hid56))
+              for name in _five56}
+    check("Part 56/D: none of the three PyInstaller jobs carries them as a "
+          "hidden import either", not any(_hid56.values()), str(_hid56))
+    _pip_words56 = []
+    _gathering56 = False
+    for _line56 in _yml56.splitlines(True):
+        if _gathering56:
+            _pip_words56.append(_line56)
+            _gathering56 = _line56.rstrip().endswith('\\')
+        elif 'pip install' in _line56:
+            _pip_words56.append(_line56.split('pip install', 1)[1])
+            _gathering56 = _line56.rstrip().endswith('\\')
+    _piped56 = set()
+    for _tok56 in _re56.findall(r"['\"]([^'\"]+)['\"]", ''.join(_pip_words56)):
+        _piped56.add(_re56.split(r'[<>=!~\s]', _tok56, 1)[0].split('[', 1)[0])
+    check("Part 56/D: and no pip list in build.yml installs them -- the jobs "
+          "build the extras zip through scripts/build_webrtc_extras.py, whose "
+          "own pip call lives in that script and not in the workflow, so this "
+          "scan sees nothing of theirs",
+          not sorted(_five56s & _piped56), str(sorted(_five56s & _piped56)))
+
+    # The other half of the deal: the bundles exist, they are built for every
+    # platform, and they reach the Release without re-opening the quota hole
+    # Part 46 closed (§4.3: four upload steps, gated, nothing more).
+    _builder56 = os.path.join(REPO, 'scripts', 'build_webrtc_extras.py')
+    check("Part 56/D: scripts/build_webrtc_extras.py exists -- the extras tree "
+          "is produced by one script the four jobs call, not by four hand-copied "
+          "pip lines that can drift from each other",
+          os.path.isfile(_builder56), _builder56)
+    # Match the *invocation*, not the filename: the workflow header explains
+    # this script in prose, and counting mentions would make honest
+    # documentation read as a fifth job calling it.
+    _runs56 = len(_re56.findall(r'python scripts/build_webrtc_extras\.py',
+                                _yml56))
+    check("Part 56/D: build.yml runs it once per platform job (4)",
+          _runs56 == 4, "found %d" % _runs56)
+    _upl56 = _re56.findall(r'uses: actions/upload-artifact[^\n]*', _yml56)
+    check("Part 56/D: there are still exactly four upload steps -- adding the "
+          "extras as a fifth would put the Actions storage quota back under the "
+          "release job, which is the failure §4.3 already paid for once",
+          len(_upl56) == 4, str(len(_upl56)))
+    # A step's `path:` is a block list in the workflow (`path: |` then indented
+    # globs), so a one-line regex would find nothing and the case would read as
+    # "the extras never reach the Release" while the YAML is fine. Ask the step
+    # bodies instead: cut on each upload action, look inside what follows it.
+    _steps56 = _yml56.split('uses: actions/upload-artifact')[1:]
+    _zip56 = [s for s in _steps56 if 'Macast-WebRTC-extras-*.zip' in s]
+    check("Part 56/D: the extras zip rides each existing upload step's `path` "
+          "glob instead of getting a step of its own (4)",
+          len(_steps56) == 4 and len(_zip56) == 4,
+          "%d steps, %d with the glob" % (len(_steps56), len(_zip56)))
+
+    # One owner for the manifest shape, or the builder and the installer drift
+    # the moment either side is edited -- and the drift is invisible until a
+    # user's download is refused for a field name nobody wrote.
+    _builder_src56 = open(_builder56, encoding='utf-8').read()
+    _const56 = set()
+    for _node56x in _ast56.walk(_ast56.parse(_builder_src56)):
+        if isinstance(_node56x, _ast56.Constant) and isinstance(_node56x.value,
+                                                                str):
+            _const56.add(_node56x.value)
+    check("Part 56/D: the builder re-lists none of the names it is supposed to "
+          "read -- no package name, manifest field or file-entry field appears "
+          "as a string constant of its own, so a new field has to be added in "
+          "screen_mirror.py and nowhere else. The file-entry half is the one "
+          "that hurts: a builder that writes `digest` while the installer "
+          "asks for `sha256` produces a bundle every machine refuses",
+          not sorted(_five56s & _const56)
+          and not set(m56.EXTRAS_MANIFEST_FIELDS) & _const56
+          and not set(m56.EXTRAS_FILE_FIELDS) & _const56,
+          str(sorted(_five56s & _const56))[:80])
+    check("Part 56/D: and it does read both tables by name",
+          'EXTRAS_PACKAGES' in _builder_src56
+          and 'EXTRAS_MANIFEST_FIELDS' in _builder_src56
+          and 'EXTRAS_FILE_FIELDS' in _builder_src56, '')
+    check("Part 56/D: EXTRAS_PACKAGES is exactly the two declared pip names -- "
+          "Part 30 subtracts this tuple from the 'the macOS CI job installs "
+          "everything darwin.txt names' check, so a third name smuggled in here "
+          "would be a package no default artefact ever installs again",
+          macast_mod.plugin_repo.EXTRAS_PACKAGES == ('aiortc', 'av'),
+          str(macast_mod.plugin_repo.EXTRAS_PACKAGES))
     for _req56 in ('common.txt', 'darwin.txt'):
         _req_text56 = open(os.path.join(REPO, 'requirements', _req56),
                            encoding='utf-8').read()
-        check("Part 56/D: requirements/{} names both packages -- aiortc "
-              "and av are what this target is gated on".format(_req56),
+        check("Part 56/D: requirements/{} names both packages -- the "
+              "declaration stays even though no artefact bundles them, because "
+              "a run from source still needs them and Part 30's import "
+              "allowlist reads this file".format(_req56),
               _re56.search(r'^\s*aiortc\s*$', _req_text56,
                            _re56.M) is not None
               and _re56.search(r'^\s*av\s*$', _req_text56,
@@ -27439,6 +27567,846 @@ finally:
     mrel59.SETTING_DIR = _saved59[3]
     protocol.SETTING_DIR = _saved59[4]
     _shutil.rmtree(_tmp59, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Part 60: the WebRTC extras leave the default artefact and land on demand
+#
+# P9 (`docs/Casting-Suite-Plan.md` §6.7): `av` alone is ~44 MB of a 119 MB .app,
+# and the five packages the browser WebRTC target is gated on are nobody
+# else's download. They now travel as one release asset per platform and the
+# settings page fetches the one that matches the machine asking.
+#
+# That trades a bundle for a download, so what is under test here is the seam:
+# the address rule has one owner (A); the manifest is a judgement, not a label
+# (B); and the chain that turns a zip into an *importable* tree really runs --
+# with the venv's own aiortc hidden behind a meta_path shade, so "unavailable
+# → available" is an observation rather than an assumption (C). Fetching
+# importable code is the most dangerous POST this app has, so it sits behind
+# the code-execution gate and is deliberately *not* a console action (D).
+# §10: every byte lands under a temp SETTING_DIR; the user's own config is
+# never on this path.
+# --------------------------------------------------------------------------
+print("\n=== Part 60: webrtc extras on demand ===")
+_tmp60 = _tempfile.mkdtemp(prefix='macast-extras60-')
+_saved60 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+_saved60_syspath = list(sys.path)
+m60 = None
+_server60 = None
+_shade60 = None
+_finder_slot60 = None
+_addr60 = []
+_saved60_modules = {}
+_saved60_urls = macast_mod.plugin_repo.extras_urls
+try:
+    import io as _io60
+    import json as _json60
+    import zipfile as _zip60
+    import hashlib as _hash60
+    import http.server as _http60
+
+    utils.SETTING_DIR = _tmp60
+    utils.Setting.setting = {}
+    utils.Setting.setting_path = os.path.join(_tmp60, 'macast_setting.json')
+    m60 = _load_plugin('screen_mirror_plugin_v60', 'screen_mirror.py')
+
+    #: `av`/`aiortc` are installed in the venv this suite runs against (Part 56
+    #: drives a real peer with them). Everything in section C has to be about
+    #: *our* tree, so imports of these names are refused unless our landing
+    #: directory is `sys.path[0]` -- the shade is what makes "not installed yet"
+    #: a state this machine can actually enter, with the real wheels present.
+    _SHADE_NAMES60 = ('aiortc', 'av', 'cffi', 'cryptography', 'pylibsrtp')
+
+    class _Shade60(object):
+        def find_spec(self, name, path=None, target=None):
+            if name.split('.')[0] in _SHADE_NAMES60:
+                if not (sys.path and sys.path[0] == _landing60[0]):
+                    raise ImportError('Part 60 hides %s outside the landing dir'
+                                      % name)
+            return None
+
+        def find_module(self, name, path=None):
+            return None
+
+    _landing60 = ['']
+
+    def _purge60():
+        for _n60, _mod60 in list(sys.modules.items()):
+            _f60 = getattr(_mod60, '__file__', None)
+            under_us = (_landing60[0] and _f60
+                        and os.path.abspath(_f60).startswith(
+                            _landing60[0] + os.sep))
+            if _n60.split('.')[0] in _SHADE_NAMES60 or under_us:
+                sys.modules.pop(_n60, None)
+
+    _saved60_modules = dict((n, sys.modules.get(n)) for n in _SHADE_NAMES60)
+    _finder_slot60 = _Shade60()
+    sys.meta_path.insert(0, _finder_slot60)
+
+    # -- A. one owner for the address ----------------------------------------
+
+    _repo60 = macast_mod.plugin_repo
+    check("Part 60/A: EXTRAS_PACKAGES is exactly the two declared pip names -- "
+          "Part 30 subtracts this very tuple from 'the macOS CI job installs "
+          "everything darwin.txt names', so a third name added here would be a "
+          "package no default artefact installs and no test asks about",
+          _repo60.EXTRAS_PACKAGES == ('aiortc', 'av'),
+          str(_repo60.EXTRAS_PACKAGES))
+    _tpl60 = _repo60.EXTRAS_ASSET
+    check("Part 60/A: the asset name template has four holes and the builder "
+          "and the installer both fill them from one call -- os, arch and "
+          "python tag are not decoration, the wheels inside differ on all "
+          "three (§6.7: manifest 那三个字段不是元数据而是判据)",
+          _tpl60.count('{}') == 4 and _tpl60.endswith('.zip'), _tpl60)
+    _name60 = _repo60.extras_asset_name('macos', 'arm64', 'cp312', '0.99.0')
+    check("Part 60/A: and every argument survives into the name, in order",
+          all(part in _name60 for part in ('macos', 'arm64', 'cp312',
+                                           '0.99.0'))
+          and _name60.index('macos') < _name60.index('arm64')
+          < _name60.index('cp312') < _name60.index('0.99.0'), _name60)
+    _repo60.set_mirror_enabled(False)
+    _plain60 = _repo60.extras_urls(_name60, '0.99.0')
+    check("Part 60/A: with the domestic mirror off there is exactly one "
+          "address and it is GitHub's own release download",
+          len(_plain60) == 1 and _plain60[0].startswith('https://github.com/')
+          and _plain60[0].endswith(_name60) and 'ghproxy' not in _plain60[0],
+          str(_plain60))
+    _repo60.set_mirror_enabled(True)
+    _mir60 = _repo60.extras_urls(_name60, '0.99.0')
+    check("Part 60/A: with it on the mirror goes first but the direct address "
+          "stays as the fallback -- a dead proxy must not be fatal, and this "
+          "is the same order `index_urls` keeps for the same reason",
+          len(_mir60) == 2 and _mir60[0].startswith('https://ghproxy.net/')
+          and _mir60[1] == _plain60[0], str(_mir60))
+    _repo60.set_mirror_enabled(False)
+    _desc60 = _repo60.describe()['extras']
+    check("Part 60/A: `plugin-info` hands the page the naming rule instead of "
+          "the page copying it -- same reason `describe` hands out the index "
+          "urls (§4.6: 地址只有一处，页面不写死)",
+          _desc60 == {'packages': list(_repo60.EXTRAS_PACKAGES),
+                      'asset': _repo60.EXTRAS_ASSET}, str(_desc60))
+
+    # -- B. the manifest is a judgement --------------------------------------
+
+    _abi60 = m60.extras_abi()
+    check("Part 60/B: the three ABI keys are answered for this machine, and "
+          "the python tag is derived from the running interpreter rather than "
+          "written down (it is how the asset gets its name and how a cp311 "
+          "bundle is refused on a cp312 install)",
+          set(_abi60) == {'os', 'arch', 'python'}
+          and _abi60['python'] == 'cp%d%d' % sys.version_info[:2]
+          and _abi60['os'] in ('macos', 'windows', 'linux'), str(_abi60))
+    check("Part 60/B: the ABI answers the machine it is *told* about, not the "
+          "machine running the code -- the same §4.8/Part 40 seam that kept "
+          "「该去哪个系统面板」 from varying with the runner. A Linux CI box "
+          "asking about win32 must hear Windows back",
+          m60.extras_abi(platform='darwin', machine='arm64') == {
+              'os': 'macos', 'arch': 'arm64', 'python': _abi60['python']}
+          and m60.extras_abi(platform='win32', machine='AMD64')['os'] == 'windows'
+          and m60.extras_abi(platform='win32',
+                             machine='AMD64')['arch'] == 'x86_64'
+          and m60.extras_abi(platform='linux',
+                             machine='aarch64')['arch'] == 'arm64',
+          str(m60.extras_abi(platform='win32', machine='AMD64')))
+    check("Part 60/B: an unknown platform answers with no bundle rather than "
+          "guessing an address that cannot exist -- the card then says this "
+          "machine has no extras to install",
+          m60.extras_abi(platform='sunos', machine='sparc')['os'] == ''
+          and m60.extras_asset_name(
+              m60.extras_abi(platform='sunos', machine='sparc')) == '',
+          str(m60.extras_abi(platform='sunos', machine='sparc')))
+
+    def _manifest60(**over):
+        _given60 = over.pop('files', None)
+        _m60x = {'python': _abi60['python'], 'platform': _abi60['os'],
+                 'machine': _abi60['arch'],
+                 'macast_version': utils.Setting.get_version(),
+                 'files': _given60 if _given60 is not None else []}
+        _m60x.update(over)
+        return _m60x
+
+    _ok60, _ref60 = m60.check_manifest(_manifest60(
+        files=[{'path': 'aiortc/__init__.py', 'sha256': 'x' * 64,
+                'bytes': 2}]))
+    check("Part 60/B: a manifest that agrees with the machine is accepted",
+          _ok60 and _ref60 == '', str(_ref60))
+    # 清单字段名与 ABI 键名不同名（platform <-> os、machine <-> arch），所以这一问
+    # 必须自己把「这台机器自己的值」按字段名摆好；直接 abi.get(key) 会在讲平台的拒绝里
+    # 要求出现版本号 —— 那是断言在替实现编一个它没有说过的句子。
+    _own60 = {'python': _abi60['python'], 'platform': _abi60['os'],
+              'machine': _abi60['arch'],
+              'macast_version': utils.Setting.get_version()}
+    for _key60 in m60.EXTRAS_MANIFEST_FIELDS:
+        if _key60 == 'files':
+            continue
+        _bad60, _why60 = m60.check_manifest(_manifest60(
+            files=[{'path': 'a.py', 'sha256': 'x' * 64, 'bytes': 1}],
+            **{_key60: 'notthismachine'}))
+        check("Part 60/B: a %s mismatch refuses, and the refusal names BOTH "
+              "values -- 'this bundle is not for your machine' with only one "
+              "half of the comparison is a sentence the user cannot act on"
+              % _key60,
+              not _bad60 and 'notthismachine' in _why60
+              and str(_own60[_key60]) in _why60,
+              str(_why60)[:160])
+    # The `version=` seam, and it has exactly one legitimate user: the builder
+    # that stamps a zip for release v<x> while running in a process that has no
+    # startup version to read (`Setting.version` is set by Macast.py, and
+    # scripts/build_webrtc_extras.py never imports that). Without this assertion
+    # the parameter is a claim in a docstring: accepted a bundle for a version
+    # this process has never heard of, refused the same bundle when unasked.
+    _stamped60 = _manifest60(macast_version='9.9.9-not-this-process',
+                             files=[{'path': 'aiortc/__init__.py',
+                                     'sha256': 'x' * 64, 'bytes': 2}])
+    _blind60 = m60.check_manifest(_stamped60)
+    _told60 = m60.check_manifest(_stamped60, version='9.9.9-not-this-process')
+    check("Part 60/B: the version seam answers only when it is told -- a "
+          "bundle stamped for a release this process does not know is refused "
+          "by default, naming both sides, and accepted when the caller says "
+          "which release it is checking for",
+          not _blind60[0]
+          and '9.9.9-not-this-process' in _blind60[1]
+          and str(_own60['macast_version']) in _blind60[1]
+          and _told60[0] and _told60[1] == '',
+          '%r / %r' % (_blind60, _told60))
+    for _miss60 in m60.EXTRAS_MANIFEST_FIELDS:
+        _partial60 = _manifest60(
+            files=[{'path': 'a.py', 'sha256': 'x' * 64, 'bytes': 1}])
+        _partial60.pop(_miss60)
+        try:
+            _r60 = m60.check_manifest(_partial60)
+            _crashed60 = None
+        except Exception as _e60:
+            _r60 = (False, '')
+            _crashed60 = _e60
+        check("Part 60/B: a manifest missing `%s` is refused, not crashed -- "
+              "the field's own name has to be in the answer, and a KeyError "
+              "here would reach the user as '安装失败' with nothing to read"
+              % _miss60,
+              _crashed60 is None and not _r60[0] and _miss60 in _r60[1],
+              str(_r60[1])[:120] if _crashed60 is None
+              else '%s: %s' % (type(_crashed60).__name__, _crashed60))
+    check("Part 60/B: an empty `files` list is refused -- a zip that lists "
+          "nothing to verify is a zip we would be unpacking on trust",
+          not m60.check_manifest(_manifest60(files=[]))[0], '')
+    check("Part 60/B: a file entry missing sha256 or bytes is refused, because "
+          "the verify step's whole job is to compare those two",
+          not m60.check_manifest(_manifest60(
+              files=[{'path': 'a.py', 'bytes': 1}]))[0]
+          and not m60.check_manifest(_manifest60(
+              files=[{'path': 'a.py', 'sha256': 'x' * 64}]))[0], '')
+    for _evil60 in ('/etc/passwd', '..', '../escape.py', 'a/../../b',
+                    'C:/Windows/x'):
+        check("Part 60/B: a zip-slip path is refused (`%s`) -- the tree lands "
+              "under the user's config directory and is then put on `sys.path`, "
+              "so one absolute or climbing member is a write outside the "
+              "directory we own" % _evil60,
+              not m60.check_manifest(_manifest60(
+                  files=[{'path': _evil60, 'sha256': 'x' * 64,
+                          'bytes': 1}]))[0], _evil60)
+    check("Part 60/B: a Windows-flavoured separator is not a path we will "
+          "create -- members are written with os separators and the manifest "
+          "must say the same",
+          not m60.check_manifest(_manifest60(
+              files=[{'path': 'aiortc\\__init__.py', 'sha256': 'x' * 64,
+                      'bytes': 1}]))[0], '')
+
+    # -- C. the chain that lands a tree --------------------------------------
+
+    _tree60 = {
+        'aiortc/__init__.py': b'MediaStreamTrack = object\n'
+                             b'VERSION = "fake-for-part-60"\n',
+        'aiortc/mediastreams.py': b'class MediaStreamError(Exception):\n'
+                                  b'    pass\n',
+        'av/__init__.py': b'codec = "fake-for-part-60"\n',
+        'av/.dylibs/libavcodec.62.so': b'\x7fELF\x00\x01binary-not-text',
+    }
+
+    def _files60(tree):
+        return [{'path': _p60,
+                 'sha256': _hash60.sha256(tree[_p60]).hexdigest(),
+                 'bytes': len(tree[_p60])} for _p60 in sorted(tree)]
+
+    def _zip60_bytes(manifest, tree):
+        _buf60 = _io60.BytesIO()
+        with _zip60.ZipFile(_buf60, 'w') as _zf60:
+            for _p60, _b60 in tree.items():
+                _zf60.writestr(_p60, _b60)
+            _zf60.writestr('manifest.json',
+                           _json60.dumps(manifest).encode('utf-8'))
+        return _buf60.getvalue()
+
+    class _ZipHandler60(_http60.BaseHTTPRequestHandler):
+        payload = b''
+
+        def do_GET(self):
+            _body60 = type(self).payload
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Length', str(len(_body60)))
+            self.end_headers()
+            self.wfile.write(_body60)
+
+        def log_message(self, *args):
+            pass
+
+    _serve60 = _ZipHandler60                 # the base the plugin fetches from
+
+    def _serve_zip60(payload):
+        # One handler class per payload: a shared class would mean every server
+        # still standing answers with the *latest* bytes, so an earlier
+        # assertion would quietly be about a different zip.
+        _hand60 = type('_ZipHandler60_once', (_serve60,), {'payload': payload})
+        _srv60 = _http60.ThreadingHTTPServer(('127.0.0.1', 0), _hand60)
+        _thread60_srv = __import__('threading').Thread(
+            target=_srv60.serve_forever, daemon=True)
+        _thread60_srv.start()
+        _addr60.append(_srv60)
+        return 'http://127.0.0.1:%d/extras.zip' % _srv60.server_address[1]
+
+    _abi_key60 = '%s-%s-%s' % (_abi60['os'], _abi60['arch'], _abi60['python'])
+    _landing60[0] = os.path.join(_tmp60, m60.EXTRAS_DIR_NAME, _abi_key60)
+    check("Part 60/C: the landing directory is named by ABI -- two builds of "
+          "the same Macast on one machine must not share a tree, and a bundle "
+          "for the wrong interpreter can be refused without deleting the "
+          "right one's files",
+          m60.extras_dir(_abi60) == _landing60[0]
+          and _abi_key60 in m60.extras_dir(), m60.extras_dir())
+
+    _urls60_real = _repo60.extras_urls
+    _prog60 = m60._SetupProgress(steps=m60.EXTRAS_STEPS)
+    _url60 = _serve_zip60(_zip60_bytes(_manifest60(files=_files60(_tree60)),
+                                       _tree60))
+    _repo60.extras_urls = lambda name, version: [_url60]
+    _purge60()
+    _before60 = m60._webrtc_modules()
+    check("Part 60/C: before the bundle lands, the probe really does say "
+          "'unavailable' on a machine that has the wheels installed -- the "
+          "shade above hides them, and this is the half of the claim no other "
+          "part of this suite can make",
+          _before60 is None and m60._WEBRTC_IMPORT_ERROR is not None,
+          str(m60._WEBRTC_IMPORT_ERROR)[:80])
+    _ok60, _msg60 = m60.install_webrtc_extras(progress=_prog60)
+    _snap60 = _prog60.snapshot()
+    check("Part 60/C: install_webrtc_extras() returns success and every step "
+          "of its own step machine finished -- download, verify, unpack, land, "
+          "probe are the five this feature is made of (§6.7), and 'skipped' "
+          "stays out of the denominator like the audio rig's",
+          _ok60 and len(_snap60['steps']) == len(m60.EXTRAS_STEPS)
+          and all(s['state'] == 'done' for s in _snap60['steps'])
+          and all(s['id'] in ('download', 'verify', 'unpack', 'land', 'probe')
+                  for s in _snap60['steps']),
+          str(_snap60['steps'])[:200] if not _ok60 else str(_msg60)[:120])
+    check("Part 60/C: the tree is on disk under the ABI directory, including "
+          "the native-looking file -- `av/.dylibs` has to travel byte-for-byte "
+          "because every link inside the wheel is an @loader_path one (§4.3's "
+          "'能构建、起不来')",
+          all(os.path.isfile(os.path.join(_landing60[0], _p60))
+              and open(os.path.join(_landing60[0], _p60), 'rb').read()
+              == _tree60[_p60] for _p60 in _tree60),
+          str([(p, os.path.isfile(os.path.join(_landing60[0], p)))
+               for p in _tree60]))
+    check("Part 60/C: the landing directory is at the *front* of `sys.path` -- "
+          "appending would let an interpreter that already has aiortc keep "
+          "using its own copy and read the install as a no-op",
+          sys.path[0] == _landing60[0], str(sys.path[:3]))
+    _purge60()
+    _after60 = m60._webrtc_modules()
+    check("Part 60/C: and the probe flips to 'available', loading OUR "
+          "modules -- `aiortc.__file__` inside the landing directory is the "
+          "only evidence that what just happened was the bundle rather than "
+          "the venv next door",
+          _after60 is not None
+          and os.path.abspath(sys.modules['aiortc'].__file__).startswith(
+              _landing60[0] + os.sep),
+          str(getattr(sys.modules.get('aiortc'), '__file__', ''))[:120])
+    check("Part 60/C: `extras_state()` agrees with the probe -- the card's two "
+          "answers must come from one reading, or a user sees 'installed' next "
+          "to 'unavailable' (§4.8: 两处答案不一致比没有数字更糟)",
+          set(m60.extras_state()) >= {'supported', 'ready', 'installed',
+                                      'asset', 'version', 'steps'}
+          and m60.extras_state()['ready'] is (_after60 is not None)
+          and m60.extras_state()['installed'] is True
+          and m60.extras_state()['asset']
+          == _repo60.extras_asset_name(_abi60['os'], _abi60['arch'],
+                                       _abi60['python'],
+                                       utils.Setting.get_version()),
+          str({k: v for k, v in m60.extras_state().items()
+               if k != 'steps'})[:200])
+
+    # The two witnesses have to be able to disagree, and the card has to say
+    # which one it is answering. `ready` is the probe, `installed` is the
+    # manifest on disk, and a bundle that landed but does not import (missing
+    # system library, wrong arch) is exactly that shape -- the install refused
+    # to call itself done while leaving the files in place.
+    _path_had60 = list(sys.path)
+    sys.path.remove(_landing60[0])
+    _purge60()
+    importlib.invalidate_caches()
+    m60._forget_webrtc_modules()
+    _state60b = m60.extras_state()
+    check("Part 60/C: a bundle that is on disk but does not import answers "
+          "'installed' next to 'not ready' -- this is the card's answer for the "
+          "state the install's own '已经装上，但导入仍然失败' refusal leaves "
+          "behind, and the probe has to answer it *now* rather than keep the "
+          "success it cached before the tree went bad",
+          _state60b['installed'] is True and _state60b['ready'] is False,
+          str({k: _state60b[k] for k in ('installed', 'ready')}) + ' / '
+          + str(m60._WEBRTC_IMPORT_ERROR)[:120])
+    sys.path[:] = _path_had60
+    _purge60()
+    importlib.invalidate_caches()
+    _recovered60 = m60._webrtc_modules()
+    _state60c = m60.extras_state()
+    check("Part 60/C: and putting the tree back on `sys.path` lets the probe "
+          "import it again, so the card's `ready` flips back -- without this the "
+          "case above would be measuring a fixture it broke for good, not a "
+          "disagreement the card reports and then repairs",
+          _recovered60 is not None and _state60c['ready'] is True
+          and _state60c['installed'] is True,
+          str({k: _state60c[k] for k in ('installed', 'ready')}) + ' / '
+          + str(m60._WEBRTC_IMPORT_ERROR)[:120])
+
+    # Re-installing replaces rather than merges: a stale file the new bundle
+    # does not contain must not survive next to the fresh ones.
+    _extra_file60 = os.path.join(_landing60[0], 'aiortc', 'stale.py')
+    with open(_extra_file60, 'wb') as _fh60:
+        _fh60.write(b'STALE = True\n')
+    # The land step's forget-before-the-move has exactly one observable
+    # consequence, and `__file__` cannot see it: the replacement lands at the
+    # *same* path, so the stale module's path string still reads as "ours".
+    # Stamping the loaded objects is what makes "did this install import the
+    # bundle it just wrote, or keep serving the copy that moved to `.trash`"
+    # answerable.
+    _marker60 = '_macast_loaded_before_reinstall_60'
+    for _name60 in m60._EXTRAS_MODULE_ROOTS:
+        if _name60 in sys.modules:
+            setattr(sys.modules[_name60], _marker60, True)
+    _stamped60 = [_name60 for _name60 in m60._EXTRAS_MODULE_ROOTS
+                  if getattr(sys.modules.get(_name60), _marker60, None)]
+    _ok60b, _msg60b = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: installing again replaces the tree instead of merging "
+          "into it -- a leftover `.py` from an older bundle is importable code "
+          "that no manifest vouches for",
+          _ok60b and not os.path.exists(_extra_file60)
+          and all(os.path.isfile(os.path.join(_landing60[0], _p60))
+                  for _p60 in _tree60), str(_msg60b)[:120])
+    check("Part 60/C: and a re-install forgets the modules that were loaded "
+          "from the tree it replaced -- the replacement lands at the *same* "
+          "path, so `__file__` cannot tell the two trees apart, while a module "
+          "object still carrying the stamp is the copy that moved to `.trash`. "
+          "The forget also has to happen *before* the move: on Windows a live "
+          "`.pyd` in the old tree is a file in use",
+          _ok60b and _stamped60 == list(m60._EXTRAS_MODULE_ROOTS)
+          and all(not hasattr(sys.modules.get(_name60), _marker60)
+                  for _name60 in _stamped60
+                  if _name60 in sys.modules)
+          and all(_name60 in sys.modules for _name60 in _stamped60),
+          'stamped=%r still carrying it: %r' % (
+              _stamped60, [n for n in _stamped60
+                           if getattr(sys.modules.get(n), _marker60, None)]))
+    _trash60 = os.path.join(_tmp60, '.trash')
+    check("Part 60/C: and the replaced tree went to `.trash/<stamp>/`, not "
+          "deleted -- the same reversibility §10 asks of every destructive "
+          "move in this repo (macast.py's plugin uninstall does exactly this)",
+          os.path.isdir(_trash60)
+          and any(os.path.isfile(os.path.join(_root60, 'aiortc', 'stale.py'))
+                  for _root60, _dirs60, _files60x
+                  in os.walk(_trash60)),
+          str(os.listdir(_trash60))[:120] if os.path.isdir(_trash60)
+          else 'no .trash')
+
+    _ok60c, _msg60c = m60.uninstall_webrtc_extras()
+    check("Part 60/C: uninstall moves the tree out (still recoverable), drops "
+          "it from `sys.path`, and purges the modules loaded from it -- a "
+          "removed directory that `sys.modules` still serves would keep the "
+          "target claiming to work",
+          _ok60c and not os.path.isdir(_landing60[0])
+          and _landing60[0] not in sys.path
+          and not any(getattr(_mv60, '__file__', '') and
+                      os.path.abspath(_mv60.__file__).startswith(
+                          _landing60[0] + os.sep)
+                      for _mv60 in sys.modules.values() if _mv60),
+          str(_msg60c)[:120])
+    _purge60()
+    check("Part 60/C: and the probe goes back to 'unavailable' on its own -- "
+          "this is the property that makes 'install it and come back, no "
+          "restart' true rather than a promise in a hint string (§4.8: the "
+          "failure is deliberately not cached)",
+          m60._webrtc_modules() is None, '')
+    _os_walk_trash60 = [n for n in os.listdir(os.path.join(_tmp60, '.trash'))]
+    check("Part 60/C: the uninstalled tree is still on disk under `.trash` -- "
+          "'removed' and 'gone' are different claims and only the first one is "
+          "what this feature promises",
+          any(os.path.isdir(os.path.join(_tmp60, '.trash', _n60,
+                                        m60.EXTRAS_DIR_NAME))
+              or os.path.isdir(os.path.join(_tmp60, '.trash', _n60))
+              for _n60 in _os_walk_trash60), str(_os_walk_trash60)[:120])
+
+    # Refusals, on the same real chain.
+    _srv_bad60 = _serve_zip60(_zip60_bytes(_manifest60(
+        files=_files60(_tree60), python='cp00'), _tree60))
+    _repo60.extras_urls = lambda name, version: [_srv_bad60]
+    _purge60()
+    _ok60d, _why60d = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: a bundle for another interpreter is refused by the real "
+          "chain, and the refusal is the two-sided sentence from B rather than "
+          "a generic failure",
+          not _ok60d and 'cp00' in _why60d
+          and _abi60['python'] in _why60d, str(_why60d)[:160])
+    check("Part 60/C: a refused install leaves nothing behind -- no directory "
+          "on `sys.path`, no half tree in the ABI slot",
+          not os.path.isdir(_landing60[0]) and _landing60[0] not in sys.path,
+          str(sys.path[:2]))
+    _slip_tree60 = dict(_tree60)
+    _slip_tree60['../escape60.txt'] = b'OUTSIDE\n'
+    _srv_slip60 = _serve_zip60(_zip60_bytes(_manifest60(
+        files=_files60(_slip_tree60)), _slip_tree60))
+    _repo60.extras_urls = lambda name, version: [_srv_slip60]
+    _ok60e, _why60e = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: and a zip whose manifest carries a climbing path is "
+          "refused before anything is written -- the check happens in the "
+          "verify step, so the unpack step never sees it",
+          not _ok60e and os.path.isfile(os.path.join(
+              _tmp60, 'escape60.txt')) is False, str(_why60e)[:120])
+    _half60 = dict(_tree60)
+    _half60.pop('av/.dylibs/libavcodec.62.so')
+    _srv_half60 = _serve_zip60(_zip60_bytes(
+        _manifest60(files=_files60(_tree60)), _half60))
+    _repo60.extras_urls = lambda name, version: [_srv_half60]
+    _ok60f, _why60f = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: a zip that is missing a file the manifest lists is "
+          "refused -- that is the half-tree case, and the answer has to name "
+          "the member",
+          not _ok60f and 'libavcodec.62.so' in _why60f, str(_why60f)[:160])
+    _tampered60 = dict(_tree60)
+    _tampered60['aiortc/__init__.py'] = b'MediaStreamTrack = object\n# tampered\n'
+    _srv_tamper60 = _serve_zip60(_zip60_bytes(
+        _manifest60(files=_files60(_tree60)), _tampered60))
+    _repo60.extras_urls = lambda name, version: [_srv_tamper60]
+    _ok60g, _why60g = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: and a member that does not hash to its manifest is "
+          "refused -- the sha256 table is the only thing standing between a "
+          "proxy that serves something else and code on `sys.path`",
+          not _ok60g and 'aiortc/__init__.py' in _why60g, str(_why60g)[:160])
+    _surprise60 = dict(_tree60)
+    _surprise60['aiortc/unlisted60.py'] = b'UNLISTED = True\n'
+    _srv_sur60 = _serve_zip60(_zip60_bytes(_manifest60(
+        files=_files60(_tree60)), _surprise60))
+    _repo60.extras_urls = lambda name, version: [_srv_sur60]
+    _ok60h, _why60h = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    check("Part 60/C: and a member the manifest does NOT list is refused too "
+          "-- the comparison runs both ways, because 'every file I unpack is "
+          "in the table' is the sentence that keeps an unreviewed module "
+          "importable",
+          not _ok60h and 'unlisted60.py' in _why60h, str(_why60h)[:160])
+    # -- C2. the answers live on the card, in both directions ----------------
+    # Found by the browser pass (2026-10-04): pressing 「移除」 answered with
+    # 「原来的文件在 .trash/…」 in a toast that flashes past, while the card kept
+    # showing the *install's* ladder. `finish()` used to write only `done`/`ok`,
+    # so the field the page renders was the last step's label -- for install
+    # success too. §4.8 同一条: 这句话必须活在页面上而不只是一次性通知.
+    # These cases read the card, never the POST body alone, because the POST is
+    # the easy half: it is what the handler returns, and it was already right.
+
+    _repo60.extras_urls = lambda name, version: [_url60]
+    _purge60()
+    _kick60c2, _kick60c2msg = m60.start_extras_install()
+    _done60c2 = _wait_until(lambda: not m60._EXTRAS_BUSY.is_set(), 20.0, 0.05)
+    _card60c2 = m60.extras_state()
+    check("Part 60/C2: the install button's own thread lands the tree, and the "
+          "card is left holding the answer rather than the last step's label -- "
+          "this is the path the page actually drives (`start_extras_install`, "
+          "not `install_webrtc_extras`), so the progress object it publishes is "
+          "the one `extras_state()` reads back",
+          _kick60c2 and _done60c2
+          and _card60c2['message'].startswith('已安装 WebRTC 依赖')
+          and _card60c2['running'] is False and _card60c2['ok'] is True
+          and _card60c2['installed'] is True and _card60c2['ready'] is True,
+          '%r %r' % (_kick60c2msg, _card60c2['message'])[:160])
+    _ladder60c2 = [s['id'] for s in _card60c2['steps']]
+    check("Part 60/C2: and a fresh card shows the install's five steps -- read "
+          "before the removal, so the next case can prove the refusal leaves it "
+          "alone rather than asserting against a ladder that was never drawn",
+          _ladder60c2 == [s[0] for s in m60.EXTRAS_STEPS]
+          and all(s['state'] == 'done' for s in _card60c2['steps']),
+          str(_card60c2['steps'])[:200])
+
+    _setting60c2 = m60.ScreenMirrorSetting()
+    m60._EXTRAS_BUSY.set()          # an install is mid-flight in its land step
+    try:
+        _busy60c2 = _setting60c2.extras_uninstall()
+        _busy60c2card = m60.extras_state()
+        check("Part 60/C2: a removal that races an in-flight install is refused "
+              "with a reason and touches nothing -- the land step is not atomic, "
+              "and moving the tree out from under it leaves the ABI slot holding "
+              "what the card just promised to take away. `start_extras_install` "
+              "sets this same flag for exactly that window, which is why the "
+              "case sets it rather than pretending to arrange one",
+              _busy60c2['code'] == 1 and '等它跑完' in _busy60c2['message']
+              and os.path.isdir(_landing60[0])
+              and all(os.path.isfile(os.path.join(_landing60[0], _p60c2))
+                      for _p60c2 in _tree60)
+              and _busy60c2card['message'] == _card60c2['message']
+              and [s['id'] for s in _busy60c2card['steps']] == _ladder60c2,
+              str(_busy60c2)[:160])
+    finally:
+        m60._EXTRAS_BUSY.clear()
+
+    _gone60c2 = _setting60c2.extras_uninstall()
+    _card60c2b = m60.extras_state()
+    check("Part 60/C2: the removal's answer is ON THE CARD -- the POST's message "
+          "and `extras_state()['message']` are the same string, it starts with "
+          "the verb the button promised, and it names the new location, so a "
+          "user who missed the toast still learns where their files went",
+          _gone60c2['code'] == 0 and _gone60c2['message'] == _card60c2b['message']
+          and _card60c2b['message'].startswith('已移除 WebRTC 依赖')
+          and ('.trash' + os.sep) in _card60c2b['message']
+          and _abi_key60 in _card60c2b['message'],
+          'card=%r post=%r' % (_card60c2b['message'][:120],
+                               _gone60c2['message'][:120]))
+    check("Part 60/C2: and it draws its own two steps -- trash, unload -- not the "
+          "install's download/verify/unpack/land/probe ladder. Sharing "
+          "EXTRAS_STEPS would put a forty-megabyte download bar over a local "
+          "move, which is the same '两处答案不一致比没有数字更糟' read from the "
+          "other side",
+          [s['id'] for s in _card60c2b['steps']]
+          == [s[0] for s in m60.EXTRAS_REMOVE_STEPS]
+          and all(s['state'] == 'done' for s in _card60c2b['steps'])
+          and set(s['id'] for s in _card60c2b['steps']).isdisjoint(
+              ('download', 'verify', 'unpack', 'land', 'probe'))
+          and _card60c2b['running'] is False and _card60c2b['done'] is True
+          and _card60c2b['ok'] is True,
+          str(_card60c2b['steps'])[:200])
+    check("Part 60/C2: the card stops claiming the bundle -- `installed` is the "
+          "manifest, and the manifest travelled with the tree, so both "
+          "witnesses now answer 'no' together and the probe is unavailable on "
+          "its own again (the shade, not a cached failure, is what keeps this "
+          "machine honest)",
+          _card60c2b['installed'] is False and _card60c2b['ready'] is False
+          and m60._webrtc_modules() is None,
+          str({k: _card60c2b[k] for k in ('installed', 'ready')})[:120])
+
+    _twice60c2 = _setting60c2.extras_uninstall()
+    _card60c2c = m60.extras_state()
+    check("Part 60/C2: asking twice says 'nothing to remove' instead of "
+          "inventing a second move, the card carries that same sentence, and the "
+          "ladder admits where it stopped -- one fail plus a step it never "
+          "reached, not a green run that moved nothing. The step label is in "
+          "front because 'which step refused' is the part a user acts on",
+          _twice60c2['code'] == 1 and '无需移除' in _twice60c2['message']
+          and _twice60c2['message'] in _card60c2c['message']
+          and [s['state'] for s in _card60c2c['steps']] == ['fail', 'pending']
+          and _card60c2c['ok'] is False and _card60c2c['running'] is False,
+          'post=%r card=%r steps=%r' % (_twice60c2['message'][:90],
+                                        _card60c2c['message'][:90],
+                                        [s['state'] for s in
+                                         _card60c2c['steps']]))
+
+    # The other half of the empty slot: a bundle that came from `pip` is not
+    # ours to move. The shade makes the real origin unreadable here, so the
+    # read is stubbed -- the refusal sentence, not the finder, is what this
+    # case owns (§4.8: 别拿「记录」当「安装状态」 is the same two-witness rule).
+    _origin60c2 = m60._extras_module_origin
+    _fake_site60c2 = os.path.join('site-packages', 'aiortc')
+    m60._extras_module_origin = lambda: _fake_site60c2
+    try:
+        _pip60c2 = _setting60c2.extras_uninstall()
+    finally:
+        m60._extras_module_origin = _origin60c2
+    check("Part 60/C2: and when the loaded modules are not ours, the refusal "
+          "says whose they are and how to remove them -- '本机没有装' would send "
+          "the user back to the button that just refused, while the pip sentence "
+          "ends the conversation",
+          _pip60c2['code'] == 1 and _fake_site60c2 in _pip60c2['message']
+          and 'pip uninstall aiortc av' in _pip60c2['message']
+          and '无需移除' not in _pip60c2['message']
+          and not os.path.isdir(_landing60[0]),
+          str(_pip60c2)[:160])
+
+    # The two progress objects are documented as "same surface", and this round
+    # is the proof that the sentence needs a test: `finish()` grew a second
+    # argument for the card's answer, and the only thing standing between that
+    # and a `TypeError` was knowing that `_NullProgress` exists -- which the
+    # bare-call path in section C exercises one line above. The surface asked
+    # about is derived from the code that drives it, not from a list: every
+    # `progress.<verb>(` inside the install, the removal, and the refusal
+    # helper has to exist on both twins with the same signature.
+    _driver60c2 = set()
+    import re as _re60c2
+    for _fn60c2 in (m60.install_webrtc_extras, m60.uninstall_webrtc_extras,
+                    m60._extras_refuse):
+        _driver60c2.update(_re60c2.findall(r'progress\.(\w+)\(',
+                                           _inspect47.getsource(_fn60c2)))
+
+    def _sig60c2(cls, name):
+        method = getattr(cls, name, None)
+        return None if method is None else str(_inspect47.signature(method))
+
+    _surface60c2 = dict((n, (_sig60c2(m60._SetupProgress, n),
+                             _sig60c2(m60._NullProgress, n)))
+                        for n in sorted(_driver60c2))
+    check("Part 60/C2: the page-less twin keeps the surface the extras chain "
+          "actually drives -- %r, read out of the three functions that use it, "
+          "exist on both `_SetupProgress` and `_NullProgress` with identical "
+          "signatures, so a caller that hands either one cannot fail on an "
+          "argument list it never read" % (sorted(_driver60c2),),
+          len(_driver60c2) >= 5
+          and all(real is not None and null is not None
+                  and real == null for real, null in _surface60c2.values()),
+          str(_surface60c2)[:200])
+
+    _repo60.extras_urls = _urls60_real
+    _purge60()
+
+    # -- D. the gate, the console surface, and the page ----------------------
+
+    check("Part 60/D: both extras endpoints are in the POST table with the "
+          "code-execution gate -- this action downloads a zip and puts it on "
+          "`sys.path`, which is §4.7b's definition of 落代码, so loopback "
+          "does not count and the weaker `mirror-action` gate is not an option",
+          gate_of('install-webrtc-extras') == protocol.GATE_CODE
+          and gate_of('uninstall-webrtc-extras') == protocol.GATE_CODE,
+          '%r %r' % (gate_of('install-webrtc-extras'),
+                     gate_of('uninstall-webrtc-extras')))
+    check("Part 60/D: and they are in the derived code-execution list, which "
+          "is what makes the token check run at all (Part 51 keeps that list "
+          "equal to the table by construction)",
+          'install-webrtc-extras' in protocol.Handler._CODE_EXECUTION_PARAMS
+          and 'uninstall-webrtc-extras'
+          in protocol.Handler._CODE_EXECUTION_PARAMS,
+          str(protocol.Handler._CODE_EXECUTION_PARAMS))
+    check("Part 60/D: neither is a mirror console action -- the console surface "
+          "is the one gated by `mirror-action`'s own page token, and a second "
+          "route to the same code would mean the weaker gate reaches the "
+          "dangerous action",
+          'install-webrtc-extras' not in m60.ScreenMirrorSetting.CONSOLE_ACTIONS
+          and 'uninstall-webrtc-extras'
+          not in m60.ScreenMirrorSetting.CONSOLE_ACTIONS,
+          str(m60.ScreenMirrorSetting.CONSOLE_ACTIONS))
+    _setting60 = m60.ScreenMirrorSetting()
+    _refused60 = _setting60.console_action('install-webrtc-extras', {})
+    check("Part 60/D: and asking the console surface for it is refused rather "
+          "than silently run -- 'unknown action' is the correct answer here "
+          "even though the app knows that verb",
+          _refused60.get('code') == 1, str(_refused60)[:120])
+
+    _html60 = open(os.path.join(MACAST, 'xml', 'setting.html'),
+                   encoding='utf-8').read()
+    check("Part 60/D: the page posts both fields, so Part 51's page↔table "
+          "alignment has something to line up -- and it goes through the "
+          "management-token helper, because the field it posts is a "
+          "code-execution one",
+          "append('install-webrtc-extras'" in _html60
+          and "append('uninstall-webrtc-extras'" in _html60
+          and _html60.count('require_management_token') >= 6,
+          '%d %d' % (_html60.count("append('install-webrtc-extras'"),
+                    _html60.count("append('uninstall-webrtc-extras'")))
+    check("Part 60/D: and the page hard-codes nothing about where the bundle "
+          "comes from -- no asset name, no release URL, no package list. The "
+          "rule lives in plugin_repo and reaches the page through "
+          "`query=plugin-info` (§4.6)",
+          'Macast-WebRTC-extras' not in _html60
+          and 'releases/download' not in _html60
+          and 'ghproxy.net' not in _html60, '')
+    check("Part 60/D: the hint that a source-run machine gets still names the "
+          "pip line (Part 56/A asks for it) AND names the button a packaged "
+          "machine presses -- two kinds of reader, one sentence",
+          'pip install aiortc av' in m60.WEBRTC_INSTALL_HINT
+          and m60.EXTRAS_INSTALL_LABEL in m60.WEBRTC_INSTALL_HINT,
+          m60.WEBRTC_INSTALL_HINT[:120])
+    # §4.13: every number and every ability in the help popover has to be asked
+    # twice, once from the page and once from the code that decides it. This one
+    # is an ability -- "what do I do when this target says it needs two
+    # packages" -- and the answer changed in P9: it used to be "read a pip line
+    # off the mirror card", now it is a button. Bound to the label constant, so
+    # renaming the button moves the help sentence or turns this red.
+    _help60 = _html60[_html60.find('浏览器 · WebRTC'):]
+    _help60 = _help60[:_help60.find('</li>')]
+    check("Part 60/D: and the help popover says the same thing the card does -- "
+          "the WebRTC bullet names the button by its label AND the pip line, "
+          "and promises no restart (it is true: the probe caches nothing)",
+          m60.EXTRAS_INSTALL_LABEL in _help60
+          and 'pip install aiortc av' in _help60
+          and '重启' in _help60
+          and len(_help60) > 0,
+          _help60[:120])
+    _view60 = _load('mirror_view', 'mirror_view.py')
+    check("Part 60/D: 'extras' is a card the mirror page knows how to place, "
+          "and it only appears when the backend answered with one -- a card "
+          "for a bundle this machine cannot fetch is the same lie as an "
+          "unmovable knob (§4.8)",
+          'extras' in _view60.SECTION_ORDER
+          and 'extras' not in _view60.sections_for(
+              {'mirror': False, 'extras': None})
+          and 'extras' in _view60.sections_for(
+              {'mirror': False, 'extras': m60.extras_state()}),
+          str(_view60.sections_for({'mirror': False, 'extras': None})))
+    # The slot is the claim: this card belongs with the other one that answers
+    # "what does this machine still need", not in the middle of the decisions
+    # about what to mirror. Part 23 pins the decision cards' own order, so the
+    # two together say the layout is deliberate -- and the page's markup order
+    # has to say it too, because `sections_for` only names the cards while the
+    # template is what puts them on the screen in a row.
+    _page_slot60 = [_html60.find("sec === '%s'" % _name60)
+                    for _name60 in ('requirements', 'extras', 'shape')]
+
+    def _card_slot60(_wanted60):
+        """Where the backend's order puts a card, or None when it has no slot.
+
+        A missing name has to make this case answer "no" and leave the rest of
+        the Part alone: `tuple.index` raises, and `check()` does not catch, so
+        one crash here hides every case after it (Part 59 learned that the hard
+        way -- same shape, `IndexError` swallowing 53 cases).
+        """
+        _names60 = tuple(_view60.SECTION_ORDER)
+        return _names60.index(_wanted60) if _wanted60 in _names60 else None
+
+    _backend_slot60 = [_card_slot60(_name60)
+                       for _name60 in ('requirements', 'extras', 'shape')]
+    check("Part 60/D: and both sides of the layout put it in the same slot -- "
+          "behind the requirement board, ahead of 「投屏形状」",
+          all(p is not None for p in _backend_slot60)
+          and len(set(_backend_slot60)) == len(_backend_slot60)
+          and _backend_slot60 == sorted(_backend_slot60)
+          and -1 not in _page_slot60
+          and _page_slot60 == sorted(_page_slot60),
+          str(_view60.SECTION_ORDER) + ' / ' + str(_page_slot60))
+except Exception as _e60:
+    import traceback as _traceback60
+    _traceback60.print_exc()
+    check("Part 60 runs", False, "{}: {}".format(type(_e60).__name__, _e60))
+finally:
+    macast_mod.plugin_repo.extras_urls = _saved60_urls
+    try:
+        macast_mod.plugin_repo.set_mirror_enabled(False)
+    except Exception:
+        pass
+    if _finder_slot60 in sys.meta_path:
+        sys.meta_path.remove(_finder_slot60)
+    sys.path[:] = _saved60_syspath
+    for _n60, _mv60 in _saved60_modules.items():
+        if _mv60 is not None:
+            sys.modules[_n60] = _mv60
+        else:
+            sys.modules.pop(_n60, None)
+    for _srv60 in _addr60:
+        try:
+            _srv60.shutdown()
+            _srv60.server_close()
+        except Exception:
+            pass
+    utils.Setting.setting, utils.Setting.setting_path = (_saved60[0],
+                                                          _saved60[1])
+    utils.SETTING_DIR = _saved60[2]
+    _shutil.rmtree(_tmp60, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 

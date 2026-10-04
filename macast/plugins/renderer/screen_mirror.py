@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.26</macast.version>
+# <macast.version>0.27</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。0.25 起「低延迟」这两个字后面跟着数字：WebRTC 这一路的屏幕到屏幕延迟第一次量出来了——本机同一套闪光测量（一个按墙钟时刻涂黑涂白的无边框窗口，配观看页自己每帧的亮度采样，同一台机器同一个时钟，两个时刻之差就是整条链路）给出 369 毫秒，同一趟里浏览器（MSE）那一页是 492 毫秒；两个数都偏保守，因为参考时刻取在 AppKit 把窗口推给显示器之前，最多多算一帧，而测量时旁边一直开着一个小窗在闪，因为 macOS 的采集是按变化给的：静止桌面上采集交出来的每一帧都被钉成 1/24 秒的间隔，媒体时钟只有墙钟的约 0.4 倍，读出来的每个延迟都会虚高。设置页两张卡片与帮助弹层现在都写这两个数，并写明它们和 mse_latency_probe 报的 838 毫秒量的不是同一段（那支读的是播放器缓冲边缘）；这个数字只有一处（MEASURED_LAG_MS），卡片、帮助与用例读的是同一份。0.26 起把 Windows 上这一档的代价写在「投屏方式」卡的浏览器那一行上：把系统声音的回环设备读进输出会把画面门住，跨机实测画面每秒只变化约 1.5 次，而同一台机器同一条链路上 WebRTC 那一路的解码与上屏实测都是 24 帧每秒；这句话只在被描述的机器是 Windows 且采集探测真的把声音映射进流时出现，两个数字读自有测量的常量而不是抄进散文，也不写毫秒——跨机的 browser 延迟没有可信读数，编一个数字比不写更糟。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。0.25 起「低延迟」这两个字后面跟着数字：WebRTC 这一路的屏幕到屏幕延迟第一次量出来了——本机同一套闪光测量（一个按墙钟时刻涂黑涂白的无边框窗口，配观看页自己每帧的亮度采样，同一台机器同一个时钟，两个时刻之差就是整条链路）给出 369 毫秒，同一趟里浏览器（MSE）那一页是 492 毫秒；两个数都偏保守，因为参考时刻取在 AppKit 把窗口推给显示器之前，最多多算一帧，而测量时旁边一直开着一个小窗在闪，因为 macOS 的采集是按变化给的：静止桌面上采集交出来的每一帧都被钉成 1/24 秒的间隔，媒体时钟只有墙钟的约 0.4 倍，读出来的每个延迟都会虚高。设置页两张卡片与帮助弹层现在都写这两个数，并写明它们和 mse_latency_probe 报的 838 毫秒量的不是同一段（那支读的是播放器缓冲边缘）；这个数字只有一处（MEASURED_LAG_MS），卡片、帮助与用例读的是同一份。0.26 起把 Windows 上这一档的代价写在「投屏方式」卡的浏览器那一行上：把系统声音的回环设备读进输出会把画面门住，跨机实测画面每秒只变化约 1.5 次，而同一台机器同一条链路上 WebRTC 那一路的解码与上屏实测都是 24 帧每秒；这句话只在被描述的机器是 Windows 且采集探测真的把声音映射进流时出现，两个数字读自有测量的常量而不是抄进散文，也不写毫秒——跨机的 browser 延迟没有可信读数，编一个数字比不写更糟。0.27 起 aiortc 与 av（连带它们拖进来的 cryptography / pylibsrtp / cffi）不再随四个平台的默认产物发布：要用 WebRTC 那一档的时候，设置页「电脑投屏」的「WebRTC 依赖」卡按一个按钮，从本项目的发布页取对应平台的那一条依赖包，解到配置目录里按这台机器的解释器分键的那个目录，并从那里导入——所以选完这一档不需要重启 Macast，那句话是被测出来的性质而不是承诺。这张卡上有两个见证者，而且它们故意要能不一致：「已落盘」问那份清单文件在不在，「已可用」问刚才这一次是不是真的导入成功了；包躺在盘上却 import 不起来（缺系统库、架构不对）是真实存在的一种状态，把安装说成成功而画面仍然黑着才是谎话。移除把那棵树挪进配置目录的 .trash 而不是删掉；如果那个目录不是我们种的而 aiortc 仍然导入得起来，它会拒绝并念出那个包真正的来路，让你用 pip 去卸它。这一档仍然没有真电视与跨机验证过，而「一键安装」也还没在打包产物上按过一次。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -106,6 +106,8 @@
 
 import asyncio
 import ctypes
+import hashlib
+import importlib
 import json
 import locale
 import logging
@@ -120,8 +122,10 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import zipfile
 import urllib.request
 from collections import deque
 from enum import Enum
@@ -131,7 +135,7 @@ from queue import Queue, Empty, Full
 
 import cherrypy
 
-from macast import Setting, gui, notice
+from macast import Setting, gui, notice, plugin_repo, utils
 from macast.renderer import Renderer, RendererSetting
 from macast.protocol_cast import (encode_cast_message, parse_cast_message,
                                   DEFAULT_MEDIA_APP_ID, NS_CONNECTION,
@@ -146,7 +150,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.26'
+PLUGIN_VERSION = '0.27'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -4334,7 +4338,7 @@ class _NullProgress(object):
     def fail(self, step_id, note=''):
         pass
 
-    def finish(self, ok):
+    def finish(self, ok, message=None):
         pass
 
     def snapshot(self):
@@ -4429,10 +4433,20 @@ class _SetupProgress(object):
             total += frac
         return total / count if count else 0.0
 
-    def finish(self, ok):
+    def finish(self, ok, message=None):
+        """Close the run, and -- when there is one -- make the *answer* the
+        sentence the page reads.
+
+        Without that second argument the card is left showing the last step's
+        label (「确认 aiortc 与 av 导入成功」) while the real news
+        (「已移除…，原来的文件在 .trash/…」) lives only in a toast that
+        flashes past. §4.8 同一条: 这句话必须活在页面上而不只是一次性通知.
+        """
         with self._lock:
             self.done = True
             self.ok = bool(ok)
+            if message:
+                self.message = message
 
     def snapshot(self):
         with self._lock:
@@ -9623,46 +9637,661 @@ def unicode_text(value):
 # below is shaped around paying it without letting it spread: nothing at
 # module scope imports aiortc, and the failure stays recoverable.
 
-#: A successful `import aiortc; import av` -- cached forever. The matching
-#: failure is deliberately *not* cached: the printed fix is a `pip install`,
-#: and a user who runs it should not have to restart Macast to be believed.
+#: The last successful `import aiortc; import av`, kept as a *record* for
+#: readers and for the suite. The probe itself never short-circuits on it: the
+#: matching failure is not cached, and neither can the win be, because the two
+#: halves of this feature are "install it, come back, no restart" and "remove
+#: it, come back, it is really gone". A cached yes would outlive the uninstall
+#: and turn the card into a promise nobody kept. Re-running the import of an
+#: already-loaded package is a `sys.modules` lookup, so this costs nothing.
 _WEBRTC_MODULES = None
 _WEBRTC_IMPORT_ERROR = None
+#: The last failure text we put in the log. `extras_state()` re-probes on every
+#: poll of the mirror card, so without this the same ImportError would be
+#: written about once a second forever -- §4.2's "重试把日志刷爆" in a new place.
+_WEBRTC_LOGGED_ERROR = None
 #: The viewer track class, built once from the real aiortc base class.
 _WEBRTC_VIEWER_CLASS = None
 
+# -- the extras bundle, and the one button that fetches it -------------------
+#
+# `av` alone is forty-some MB of the .app, and the five packages behind the
+# WebRTC target are nobody else's download, so they left the default artefact
+# (P9, `docs/Casting-Suite-Plan.md` §6.7). What is left here is the seam: one
+# address rule (in `plugin_repo`, so the mirror switch and the index share it),
+# one manifest shape (here, so the builder and the installer cannot disagree),
+# and one chain that turns a zip into an *importable* tree.
+#
+# That chain is the most dangerous thing this app can be asked to do -- it puts
+# code on `sys.path` -- so it is gated as code execution (§4.7b: 落代码的只认
+# 令牌, loopback 不算), it verifies every member against a sha256 before
+# unpacking anything, it refuses members the manifest does not list, and every
+# removal goes to `.trash` the way a plugin uninstall does (§10).
+
+#: Where the tree lands, and what vouches for it. The directory is named by ABI
+#: so two Macast builds on one machine never share it, and so a bundle written
+#: for another interpreter can be refused without touching the good one's files.
+EXTRAS_DIR_NAME = 'webrtc_extras'
+EXTRAS_MANIFEST_NAME = 'manifest.json'
+#: The manifest's fields, in the order the builder writes them. `platform` and
+#: `machine` are the asset's two halves of "your machine"; they are *not* the
+#: ABI dict's keys, which is why `check_manifest` names both sides of a mismatch
+#: rather than echoing one word back.
+EXTRAS_MANIFEST_FIELDS = ('python', 'platform', 'machine', 'macast_version',
+                          'files')
+#: Per-file entry fields. One owner for this tuple is the whole defence against
+#: a builder that writes `digest` while the installer asks for `sha256`.
+EXTRAS_FILE_FIELDS = ('path', 'sha256', 'bytes')
+#: The five things that happen between a click and a working target. Same step
+#: machine as the BlackHole assisted install, same rules: a done step refuses
+#: re-entry, so the bar never runs backwards.
+EXTRAS_STEPS = (('download', '下载依赖包'),
+                ('verify', '校验清单与 sha256'),
+                ('unpack', '解包'),
+                ('land', '挂到模块搜索路径'),
+                ('probe', '确认 aiortc 与 av 导入成功'))
+#: Removal has its own two steps because those are the two things that happen.
+#: Sharing EXTRAS_STEPS would draw a download/verify/unpack ladder over a move.
+EXTRAS_REMOVE_STEPS = (('trash', '移到废纸篓'),
+                       ('unload', '从模块搜索路径收掉'))
+#: Asset-name vocabulary. These are the strings in the release asset's name, so
+#: changing one is a release-artifact change, not a refactor.
+EXTRAS_OS_KEYS = {'darwin': 'macos', 'win32': 'windows', 'linux': 'linux'}
+EXTRAS_ARCH_ALIASES = {'arm64': 'arm64', 'aarch64': 'arm64',
+                       'x86_64': 'x86_64', 'amd64': 'x86_64'}
+EXTRAS_INSTALL_LABEL = '一键安装 WebRTC 依赖'
+EXTRAS_UNINSTALL_LABEL = '移除 WebRTC 依赖'
+#: Top-level modules to purge when the bundle is removed or replaced. Anything
+#: else loaded from under our directory is found by path, not by name.
+_EXTRAS_MODULE_ROOTS = ('aiortc', 'av')
+_EXTRAS_BUSY = threading.Event()
+_EXTRAS_LOCK = threading.Lock()
+_EXTRAS_PROGRESS = None
+
 WEBRTC_INSTALL_HINT = (
-    '这条通道需要两个可选依赖：aiortc 与 av。请在运行 Macast 的那个 Python 里执行 '
-    '「pip install aiortc av」，然后回到这里重新选择本目标即可（失败不会被缓存，'
-    '不需要重启 Macast）。')
+    '这条通道需要两个可选依赖：aiortc 与 av。它们不再打进安装包（`av` 一个包就是'
+    '四十多 MB，而这一条通道是少数人用的），所以从这里分两种机器：打包安装的 Macast '
+    '点下面的「' + EXTRAS_INSTALL_LABEL + '」，本机从源码跑的请在运行 '
+    'Macast 的那个 Python 里执行「pip install aiortc av」。之后回到这里重新选择本目标'
+    '即可（失败不会被缓存，不需要重启 Macast）。')
 
 
 def _webrtc_modules():
     """(aiortc, av), or None while the optional packages are unavailable.
 
     Lazy on purpose, twice over. At module scope a `pip` library would take
-    the whole plugin down on any machine and any packed artefact that never
-    installs it -- packaged builds now carry both (see the py2app `packages`
-    and PyInstaller hidden-import entries), but a run from source on a
-    machine without the pip line must keep every other mirror target
+    the whole plugin down on any machine that never installed it -- which,
+    since P9, is every packaged machine until the user asks for it -- and a run
+    from source without the pip line must keep every other mirror target
     working. And inside this function the import is the *feature probe*:
     "is this target usable" is answered by actually loading the packages,
-    the same way `has_hardware_encoder` answers by asking ffmpeg rather
-    than by trusting a table.
+    the same way `has_hardware_encoder` answers by asking ffmpeg rather than by
+    trusting a table.
     """
-    global _WEBRTC_MODULES, _WEBRTC_IMPORT_ERROR
-    if _WEBRTC_MODULES is not None:
-        return _WEBRTC_MODULES
+    global _WEBRTC_MODULES, _WEBRTC_IMPORT_ERROR, _WEBRTC_LOGGED_ERROR
     try:
         import aiortc
         import av
     except Exception as exc:            # ImportError, or a broken wheel
         _WEBRTC_IMPORT_ERROR = exc
-        logger.info('the WebRTC packages are not importable: %s', exc)
+        text = '%s: %s' % (type(exc).__name__, exc)
+        if text != _WEBRTC_LOGGED_ERROR:
+            _WEBRTC_LOGGED_ERROR = text
+            logger.info('the WebRTC packages are not importable: %s', exc)
         return None
     _WEBRTC_MODULES = (aiortc, av)
     _WEBRTC_IMPORT_ERROR = None
+    _WEBRTC_LOGGED_ERROR = None
     return _WEBRTC_MODULES
+
+
+def _machine_name():
+    """`platform.machine()` behind a name the ABI seam can shadow around."""
+    return platform.machine()
+
+
+def extras_abi(platform=None, machine=None):
+    """{'os', 'arch', 'python'} for a machine -- answers when told nothing.
+
+    The two arguments are the §4.8/Part 40 seam: the card asks "is there a
+    bundle for *this kind of machine*", and that must not be decided by which
+    runner happens to execute the code. The python tag is deliberately *not*
+    overridable -- it is what the running interpreter can load, not a claim
+    about some other one.
+    """
+    if platform is None:
+        platform = sys.platform
+    if machine is None:
+        machine = _machine_name()
+    return {'os': EXTRAS_OS_KEYS.get(platform, ''),
+            'arch': EXTRAS_ARCH_ALIASES.get(machine.lower(),
+                                            machine.lower()),
+            'python': 'cp%d%d' % sys.version_info[:2]}
+
+
+def extras_asset_name(abi=None, version=None):
+    """The one release asset for this ABI -- '' when there is no such thing.
+
+    Empty is an answer, not a crash: a machine outside the four platforms we
+    publish for should read "no bundle here" on the card, not an address that
+    cannot exist.
+
+    `version` is the §4.8/Part 40 seam for the builder: it is called there with
+    the version CI is publishing under, because `Setting.get_version()` is a
+    value `Macast.py` sets at startup and a build script never starts one. The
+    app leaves it alone and gets the running version.
+    """
+    if abi is None:
+        abi = extras_abi()
+    if not abi['os']:
+        return ''
+    if version is None:
+        version = Setting.get_version()
+    return plugin_repo.extras_asset_name(abi['os'], abi['arch'], abi['python'],
+                                         version)
+
+
+def extras_dir(abi=None):
+    """Where this ABI's tree lands, under the config directory."""
+    if abi is None:
+        abi = extras_abi()
+    return os.path.join(utils.SETTING_DIR, EXTRAS_DIR_NAME,
+                        '%s-%s-%s' % (abi['os'], abi['arch'], abi['python']))
+
+
+def extras_manifest(abi, version, entries):
+    """The one writer of the manifest's shape, for the builder to call.
+
+    The builder's job is to walk a tree and hash it; which fields exist and in
+    what order is decided here, in the same file as the reader that refuses a
+    missing one. Otherwise the two drift the first time either side is edited,
+    and the failure is a bundle every machine turns down.
+    """
+    return {'python': abi['python'], 'platform': abi['os'],
+            'machine': abi['arch'], 'macast_version': version,
+            'files': list(entries)}
+
+
+def _extras_member_ok(path):
+    """True for a relative member that stays inside the directory we own.
+
+    `:` is checked because a Windows drive prefix survives a POSIX run's
+    `splitdrive` as ordinary text -- and this table is read by both platforms.
+    """
+    if not path or '\\' in path or ':' in path or path.startswith('/'):
+        return False
+    for part in path.split('/'):
+        if part in ('', '.', '..'):
+            return False
+    return True
+
+
+def check_manifest(manifest, abi=None, version=None):
+    """(ok, refusal) -- is this bundle for this machine, and is it verifiable?
+
+    Ordered on purpose. A manifest missing a field is answered with that
+    field's name (a KeyError here would reach the user as "安装失败" with
+    nothing to read), and a field that disagrees is answered with *both* values,
+    because "this bundle is not for your machine" with only half the comparison
+    is not a sentence anyone can act on.
+
+    The digests are not validated -- an entry whose sha256 is nonsense fails
+    when it is compared against a real file, which is the same answer and one
+    less place to be wrong about what a hex string is.
+
+    `version` is the same seam `extras_asset_name` takes, for the same reason:
+    the build script self-checks the zip it just wrote, and the process writing
+    it has no startup version to read.
+    """
+    if abi is None:
+        abi = extras_abi()
+    own = {'python': abi['python'], 'platform': abi['os'],
+           'machine': abi['arch'],
+           'macast_version': Setting.get_version() if version is None
+                              else version}
+    for field in EXTRAS_MANIFEST_FIELDS:
+        if field not in manifest:
+            return False, ('依赖包清单缺少「%s」字段，无法判断这份包是给谁的。'
+                           % field)
+    for field in ('python', 'platform', 'machine', 'macast_version'):
+        value = manifest[field]
+        if value != own[field]:
+            return False, ('这份依赖包是给 %s=%s 的，这台机器是 %s=%s。'
+                           % (field, value, field, own[field]))
+    entries = manifest['files']
+    if not entries:
+        return False, '依赖包清单里一个文件都没有，无法校验任何字节。'
+    for entry in entries:
+        for field in EXTRAS_FILE_FIELDS:
+            if field not in entry:
+                return False, ('依赖包清单里有文件缺少「%s」字段，无法校验。'
+                               % field)
+        if not _extras_member_ok(entry['path']):
+            return False, ('依赖包清单里有一个不安全的文件路径：%s。'
+                           % entry['path'])
+    return True, ''
+
+
+def _extras_tmpdir():
+    """A scratch directory under the config directory, not in /tmp.
+
+    Same reason the transcode writes its files next to the settings: the temp
+    directory we are handed may be on another volume, may be noexec, and may
+    not be where a user looks for "what did this app write".
+    """
+    return tempfile.mkdtemp(prefix='webrtc-extras-tmp-',
+                            dir=utils.SETTING_DIR)
+
+
+def _fetch_extras_zip(url, dest_path, on_bytes=None):
+    """Download one candidate address to `dest_path`. Returns True on success."""
+    try:
+        import requests
+    except ImportError:
+        logger.info('requests is not importable; the extras cannot be fetched')
+        return False
+    try:
+        response = requests.get(url, stream=True, timeout=60,
+                                headers={'User-Agent': PKG_USER_AGENT})
+    except Exception as exc:
+        logger.info('the extras download failed (%s): %s', url, exc)
+        return False
+    got = 0
+    try:
+        if response.status_code != 200:
+            logger.info('the extras download answered %s: %s',
+                        response.status_code, url)
+            return False
+        with open(dest_path, 'wb') as handle:
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                got += len(chunk)
+                if on_bytes is not None:
+                    on_bytes(got)
+    except Exception as exc:
+        logger.info('the extras download broke midway: %s', exc)
+        return False
+    finally:
+        response.close()
+    return got > 0
+
+
+def _verify_extras_zip(zip_path, abi=None, version=None):
+    """(manifest, refusal) -- read the table, then hold the zip to it.
+
+    Three questions, all before anything is unpacked: does the manifest describe
+    this machine, does every listed member exist and hash to what it claims, and
+    does the zip contain nothing that is not listed. The last one is the
+    half of the check that a builder with a bug (or a proxy with an idea)
+    gets caught by -- "every file I put on `sys.path` is in the table".
+    """
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            names = set(archive.namelist())
+            if EXTRAS_MANIFEST_NAME not in names:
+                return None, '下载的依赖包里没有找到 %s。' % EXTRAS_MANIFEST_NAME
+            manifest = json.loads(
+                archive.read(EXTRAS_MANIFEST_NAME).decode('utf-8'))
+    except zipfile.BadZipFile:
+        return None, '下载的依赖包不是一个有效的 zip。'
+    except Exception as exc:
+        return None, '下载的依赖包读不出清单：%s' % exc
+    if not isinstance(manifest, dict):
+        return None, '下载的依赖包清单不是一个对象。'
+    ok, refusal = check_manifest(manifest, abi, version)
+    if not ok:
+        return None, refusal
+    entries = {entry['path']: entry for entry in manifest['files']}
+    present = names - {EXTRAS_MANIFEST_NAME}
+    for path in sorted(entries):
+        if path not in present:
+            return None, '依赖包里缺少清单上的文件：%s' % path
+    for path in sorted(present - set(entries)):
+        return None, '依赖包里有一个清单没有列出的文件：%s' % path
+    with zipfile.ZipFile(zip_path) as archive:
+        for path in sorted(entries):
+            data = archive.read(path)
+            entry = entries[path]
+            if len(data) != entry['bytes']:
+                return None, ('依赖包里的 %s 是 %d 字节，清单说是 %d 字节。'
+                              % (path, len(data), entry['bytes']))
+            if hashlib.sha256(data).hexdigest() != entry['sha256']:
+                return None, '依赖包里的 %s 与清单的 sha256 不一致。' % path
+    return manifest, ''
+
+
+def _unpack_extras_zip(zip_path, manifest, dest):
+    """Write exactly the listed members under `dest`. Returns the file count.
+
+    The manifest is written by the caller, not from the zip: what lands next to
+    the tree must be the copy we verified, not a second read of the archive.
+    """
+    count = 0
+    with zipfile.ZipFile(zip_path) as archive:
+        for entry in manifest['files']:
+            path = os.path.join(dest, *entry['path'].split('/'))
+            parent = os.path.dirname(path)
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent)
+            with open(path, 'wb') as handle:
+                handle.write(archive.read(entry['path']))
+            count += 1
+    return count
+
+
+def _trash_extras_tree(path):
+    """Move a whole tree into `.trash/<stamp>/` -- reversible, like plugins."""
+    if not os.path.isdir(path):
+        return None
+    stamp = time.strftime('%Y%m%d-%H%M%S')
+    base = os.path.join(utils.SETTING_DIR, '.trash', stamp)
+    target = os.path.join(base, os.path.basename(path))
+    suffix = 0
+    while os.path.exists(target):
+        suffix += 1
+        target = os.path.join(base, '%s-%d' % (os.path.basename(path),
+                                               suffix))
+    try:
+        os.makedirs(base)
+    except OSError:
+        if not os.path.isdir(base):
+            raise
+    shutil.move(path, target)
+    return target
+
+
+def _extras_module_origin():
+    """Where `aiortc` would be imported from right now, or '' if nowhere."""
+    modules = _webrtc_modules()
+    if modules is None:
+        return ''
+    return os.path.abspath(getattr(modules[0], '__file__', '') or '')
+
+
+def _forget_webrtc_modules(under=''):
+    """Drop every module loaded from our tree, and the record of the last good pair.
+
+    `sys.path` changes do nothing to a package `sys.modules` already serves, so
+    without this a removal would keep the target claiming to work -- and the
+    cache would be the reason. `invalidate_caches()` is the other half: the
+    directory may have just appeared or vanished, and `FileFinder` only
+    re-lists on an mtime change (§4.2's "刚写进目录的那个 .py").
+    """
+    global _WEBRTC_MODULES, _WEBRTC_IMPORT_ERROR, _WEBRTC_VIEWER_CLASS
+    _WEBRTC_MODULES = None
+    _WEBRTC_IMPORT_ERROR = None
+    _WEBRTC_VIEWER_CLASS = None
+    prefix = (under + os.sep) if under else ''
+    for name in list(sys.modules):
+        module = sys.modules.get(name)
+        if name.split('.')[0] in _EXTRAS_MODULE_ROOTS:
+            sys.modules.pop(name, None)
+            continue
+        path = getattr(module, '__file__', None)
+        if prefix and path and os.path.abspath(path).startswith(prefix):
+            sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+
+
+def _extras_landing(landing):
+    """Put the tree on `sys.path` at the front, once, and remember where."""
+    while landing in sys.path:
+        sys.path.remove(landing)
+    sys.path.insert(0, landing)
+    importlib.invalidate_caches()
+
+
+def install_webrtc_extras(progress=None):
+    """(ok, message): fetch the bundle for this ABI and make it importable.
+
+    Every refusal is paid for in the verify step, before a byte is written
+    outside the scratch directory -- a half tree in the ABI slot is worse than
+    no tree, because the card would then say "installed" about something that
+    does not import. The probe is the one failure that *keeps* what it landed:
+    if the import still fails, the answer the user needs is the real
+    ImportError (a missing system library, an architecture mismatch), not a
+    silently empty directory.
+    """
+    if progress is None:
+        progress = _NullProgress()
+    tmp = None
+    at = 'download'
+    try:
+        abi = extras_abi()
+        name = extras_asset_name(abi)
+        if not name:
+            return _extras_refuse(
+                progress, at, None,
+                '这台机器（%s/%s）没有对应的依赖包。'
+                % (sys.platform, _machine_name()))
+        version = Setting.get_version()
+        progress.enter(at, name)
+        tmp = _extras_tmpdir()
+        zip_path = os.path.join(tmp, name)
+        urls = plugin_repo.extras_urls(name, version)
+        fetched = False
+        last_error = ''
+        for url in urls:
+
+            def _on_bytes(got):
+                progress.sub(at, None, '已下载 %.1f MB' % (got / 1048576.0))
+
+            if _fetch_extras_zip(url, zip_path, _on_bytes):
+                fetched = True
+                break
+            last_error = url
+        if not fetched:
+            return _extras_refuse(
+                progress, at, tmp,
+                '依赖包没下载下来（%s）。检查一下网络，或者在设置页开启国内镜像。'
+                % last_error)
+        progress.leave(at, name)
+
+        at = 'verify'
+        progress.enter(at)
+        manifest, refusal = _verify_extras_zip(zip_path, abi)
+        if manifest is None:
+            return _extras_refuse(progress, at, tmp, refusal)
+        progress.leave(at, '%d 个文件' % len(manifest['files']))
+
+        at = 'unpack'
+        progress.enter(at)
+        staging = os.path.join(tmp, 'tree')
+        os.makedirs(staging)
+        count = _unpack_extras_zip(zip_path, manifest, staging)
+        progress.leave(at, '%d 个文件' % count)
+
+        at = 'land'
+        progress.enter(at)
+        landing = extras_dir(abi)
+        parent = os.path.dirname(landing)
+        if not os.path.isdir(parent):
+            os.makedirs(parent)
+        # Whatever is loaded from the old tree has to be forgotten *before* it
+        # moves: on Windows a live `.pyd` in there is a file in use, and a
+        # locked move would fail the step we are standing in.
+        while landing in sys.path:
+            sys.path.remove(landing)
+        _forget_webrtc_modules(landing)
+        displaced = _trash_extras_tree(landing)
+        shutil.move(staging, landing)
+        with open(os.path.join(landing, EXTRAS_MANIFEST_NAME), 'wb') as handle:
+            handle.write(json.dumps(manifest).encode('utf-8'))
+        _extras_landing(landing)
+        progress.leave(at, landing)
+
+        at = 'probe'
+        progress.enter(at)
+        if _webrtc_modules() is None:
+            why = _WEBRTC_IMPORT_ERROR
+            return _extras_refuse(
+                progress, at, tmp,
+                '依赖包已经装上，但导入仍然失败：%s。这通常是缺系统库或架构不对，'
+                '目录在 %s' % (why, landing))
+        progress.leave(at)
+        message = '已安装 WebRTC 依赖（%d 个文件）' % count
+        if displaced:
+            message += '，旧的一份已移入废纸篓目录'
+        progress.finish(True, message)
+        _shutil_rmtree(tmp)
+        return True, message
+    except Exception as exc:
+        logger.exception('the WebRTC extras install broke')
+        return _extras_refuse(progress, at, tmp,
+                              '安装失败：%s: %s' % (type(exc).__name__, exc))
+
+
+def uninstall_webrtc_extras(progress=None):
+    """(ok, message): take our tree out of the way, recoverably.
+
+    A bundle that came from `pip` is not ours to move -- refusing with the pip
+    sentence is the difference between a user undoing the right thing and a
+    user leaving a half-removed environment behind.
+    """
+    if progress is None:
+        progress = _NullProgress()
+    abi = extras_abi()
+    landing = extras_dir(abi)
+    at = 'trash'
+    progress.enter(at, landing)
+    if not os.path.isdir(landing):
+        origin = _extras_module_origin()
+        why = (('这一路依赖不是「电脑投屏」装的，它在 %s。'
+                '请用「pip uninstall aiortc av」卸载。' % origin) if origin else
+               '本机没有用这个按钮安装过 WebRTC 依赖，无需移除。')
+        progress.fail(at, why)
+        progress.finish(False)
+        return False, why
+    try:
+        moved = _trash_extras_tree(landing)
+    except OSError as exc:
+        why = '移除失败：%s' % exc
+        progress.fail(at, why)
+        progress.finish(False)
+        return False, why
+    progress.leave(at, moved)
+    at = 'unload'
+    progress.enter(at)
+    while landing in sys.path:
+        sys.path.remove(landing)
+    _forget_webrtc_modules(landing)
+    progress.leave(at)
+    message = '已移除 WebRTC 依赖（原来的文件在 %s）' % moved
+    logger.info('the WebRTC extras tree moved to %s', moved)
+    progress.finish(True, message)
+    return True, message
+
+
+def extras_state():
+    """Everything the mirror card says about the bundle, from one reading.
+
+    `ready` is the probe and `installed` is the manifest on disk; both answer
+    *now*, which is why the probe cannot cache a success. The step list is the
+    install's own progress -- it rides this same polling rather than a second
+    localhost page, because unlike the audio installer this one is a single
+    short download the mirror card is already standing next to.
+    """
+    abi = extras_abi()
+    asset = extras_asset_name(abi)
+    ready = _webrtc_modules() is not None
+    landing = extras_dir(abi)
+    installed = bool(asset) and os.path.isfile(
+        os.path.join(landing, EXTRAS_MANIFEST_NAME))
+    with _EXTRAS_LOCK:
+        progress = _EXTRAS_PROGRESS
+    snap = progress.snapshot() if progress is not None else {
+        'pct': 0.0, 'message': '', 'done': True, 'ok': None, 'steps': []}
+    return {'supported': bool(asset), 'ready': bool(ready),
+            'installed': bool(installed), 'asset': asset,
+            'version': Setting.get_version(), 'packages': list(
+                plugin_repo.EXTRAS_PACKAGES),
+            'label': EXTRAS_INSTALL_LABEL,
+            'uninstall_label': EXTRAS_UNINSTALL_LABEL,
+            'hint': WEBRTC_INSTALL_HINT, 'directory': landing,
+            'running': bool(progress is not None and not snap['done']),
+            'steps': snap['steps'], 'pct': snap['pct'], 'message': snap['message'],
+            'done': snap['done'], 'ok': snap['ok']}
+
+
+def start_extras_uninstall():
+    """Move our tree aside and answer with the same machine the install uses.
+
+    Two reasons this is not a bare call to `uninstall_webrtc_extras()`: the
+    sentence naming `.trash` has to outlive the toast (§4.8: 一次性通知闪过就没了),
+    and a removal that raced an in-flight install's land step would leave the
+    ABI slot holding a tree the card just promised to take away. A local move is
+    quick enough to run inside the POST, so the ladder and the answer arrive
+    together.
+    """
+    global _EXTRAS_PROGRESS
+    with _EXTRAS_LOCK:
+        if _EXTRAS_BUSY.is_set():
+            return False, '已经在安装或移除 WebRTC 依赖，等它跑完再看结果。'
+        _EXTRAS_BUSY.set()
+        progress = _EXTRAS_PROGRESS = _SetupProgress(steps=EXTRAS_REMOVE_STEPS)
+    try:
+        ok, message = uninstall_webrtc_extras(progress=progress)
+    except Exception as exc:            # uninstall_ has its own handler
+        ok = False
+        message = '移除失败：%s: %s' % (type(exc).__name__, exc)
+        logger.exception('the WebRTC extras removal broke')
+    finally:
+        with _EXTRAS_LOCK:
+            _EXTRAS_BUSY.clear()
+    logger.info('the WebRTC extras removal answered %s: %s', ok, message)
+    return ok, message
+
+
+def start_extras_install():
+    """Kick off the install on a daemon thread and answer at once.
+
+    The POST must not hold a CherryPy worker through a forty-megabyte download
+    (the same rule that keeps discovery off the UI thread); the page polls
+    `mirror-state` for the steps already.
+    """
+    global _EXTRAS_PROGRESS
+    with _EXTRAS_LOCK:
+        if _EXTRAS_BUSY.is_set():
+            return False, '已经在安装了，等它跑完再看结果。'
+        _EXTRAS_BUSY.set()
+        progress = _EXTRAS_PROGRESS = _SetupProgress(steps=EXTRAS_STEPS)
+    thread = threading.Thread(target=_run_extras_install, args=(progress,),
+                              name='MacastExtrasInstall', daemon=True)
+    thread.start()
+    return True, '开始下载 WebRTC 依赖，进度在这一张卡上。'
+
+
+def _run_extras_install(progress):
+    try:
+        ok, message = install_webrtc_extras(progress=progress)
+    except Exception as exc:            # install_ has its own handler
+        ok = False
+        message = '安装失败：%s: %s' % (type(exc).__name__, exc)
+        logger.exception('the WebRTC extras thread broke')
+    with _EXTRAS_LOCK:
+        _EXTRAS_BUSY.clear()
+    logger.info('the WebRTC extras install answered %s: %s', ok, message)
+    #: The card reports this too, but a forty-megabyte download outruns an open
+    #: settings page -- and a silent failure is how the audio installer used to
+    #: read as "nothing happened".
+    notify(message)
+    return ok, message
+
+
+def _extras_refuse(progress, step, tmp, why):
+    """Fail one step, clean the scratch directory, and hand the sentence back."""
+    progress.fail(step, why)
+    progress.finish(False)
+    _shutil_rmtree(tmp)
+    logger.info('the WebRTC extras install refused at %s: %s', step, why)
+    return False, why
+
+
+def _shutil_rmtree(path):
+    if path and os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _make_viewer_class():
@@ -11547,7 +12176,7 @@ def _drain_stderr(proc, tail):
 #: Bumped when the state/action contract changes; a page from another generation
 #: says so in its banner instead of quietly missing buttons. `mirror_view.VIEW_VERSION`
 #: is the same number on the core's side, and the regression suite pins the two.
-CONSOLE_VERSION = 4
+CONSOLE_VERSION = 5
 
 #: Screen-to-screen lag, measured on one Mac on 2026-10-03 with a flash
 #: instrument: a borderless window paints black/white at recorded wall-clock
@@ -12165,6 +12794,11 @@ class ScreenMirrorSetting(RendererSetting):
             'stats': renderer.stats() if renderer is not None else {},
             'recent': recent_messages(),
             'requirements': notice.requirements(),
+            #: The optional WebRTC bundle's whole answer: whether this machine
+            #: has a build to download, whether the probe can import it right
+            #: now, and the install's own step list. One reading, because the
+            #: card must not say「已安装」next to「不可用」.
+            'extras': extras_state(),
             'output': {
                 'kind': kind,
                 'options': [{'key': key,
@@ -12715,6 +13349,28 @@ class ScreenMirrorSetting(RendererSetting):
     def _do_audio_restore(self, args):
         restore_system_audio(lambda message: notify(message, sound=False))
         return {'code': 0, 'message': '正在恢复原声音输出'}
+
+    # -- the optional WebRTC bundle -------------------------------------------
+
+    def extras_install(self):
+        """POST `install-webrtc-extras`: start the download and answer at once.
+
+        Not a `CONSOLE_ACTIONS` member on purpose -- that surface is reached by
+        `mirror-action`, whose gate is the weaker page token, and this lands
+        importable code (§4.7b: 落代码的只认令牌).
+        """
+        ok, message = start_extras_install()
+        return {'code': 0 if ok else 1, 'message': message}
+
+    def extras_uninstall(self):
+        """POST `uninstall-webrtc-extras`: move our tree to `.trash`, on the card.
+
+        Goes through the step machine rather than calling `uninstall_webrtc_extras`
+        directly, so the answer stays on the page after the toast is gone and so a
+        removal cannot slip in beside an in-flight land step.
+        """
+        ok, message = start_extras_uninstall()
+        return {'code': 0 if ok else 1, 'message': message}
 
     # -- menu-era callbacks kept for the two rows the menu still has ------------
 

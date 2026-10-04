@@ -45,7 +45,9 @@ runs cleanly on Python 3.12.
 bash scripts/build_macos_arm.sh
 ```
 
-This produces `dist/Macast.app` (≈ 36 MB) containing:
+This produces `dist/Macast.app` (size: see "Bundle size" below — it has moved
+several times and the honest number is the one you measure off *your* build)
+containing:
 
 - `Contents/MacOS/Macast` — py2app launcher (arm64)
 - `Contents/Resources/i18n/` — translations (compiled from `.po` at build time)
@@ -88,6 +90,10 @@ that links outside `/usr/lib` + `/System/Library` + `@rpath`/`@loader_path`/
 
 ### Bundle size
 
+The table below is the shape of a bundle **without** the WebRTC chain — i.e. what
+`dist/Macast.app` should look like again from v0.20.0, and what it looked like
+before v0.22 added that target:
+
 | Item | Size | Notes |
 | --- | --- | --- |
 | `Contents/Frameworks/` | 11 MB | libpython + OpenSSL (`libcrypto` 4.3 MB, `libssl` 0.8 MB) |
@@ -95,6 +101,21 @@ that links outside `/usr/lib` + `/System/Library` + `@rpath`/`@loader_path`/
 | `lib-dynload/` | 17 MB | 7.9 MB of that is `lxml/etree.so` |
 | `macast/` + `cherrypy/` + `rumps/` | 4 MB | app code, settings-page assets, cherrypy |
 | **total** | **≈ 36 MB** | |
+
+Two measured numbers so nobody has to re-derive what the chain cost:
+
+- **119 MB** — the installed v0.19.0-era `.app` (`du -sh /Applications/Macast.app`,
+  2026-10-04), which carried `av` / `aiortc` / `cryptography` / `pylibsrtp` / `cffi`.
+- **101 MB** — a local pre-P9 build of the same era (`du -sh dist/Macast.app`,
+  built 2026-10-02), of which **`Contents/Resources/lib/python3.12/av` alone is 42 MB**
+  (its `.dylibs` are a whole FFmpeg). The rest of the chain is small: ~1.3 MB of
+  zip entries (`aiortc` 0.4, `cryptography` 0.5, `aioice` 0.1, `OpenSSL` 0.2,
+  `google_crc32c` 0.1, `pylibsrtp`/`cffi`/`pyee` ≈ 0) plus `cffi/` 876 K and
+  `_cffi_backend.so` 196 K on disk.
+
+So P9's payoff is roughly **45 MB per artefact**, and it is arithmetic on those two
+numbers, not a fresh measurement: **the first v0.20.0 build has to be measured before
+this table claims a new total.** (CI publishes it; `gh run download` or the Release zip.)
 
 The largest single remaining item is `lxml` (≈ 8 MB). `macast/protocol.py` uses
 it for SOAP/`description.xml` construction; swapping those 23 call sites for
@@ -143,7 +164,7 @@ du -sh dist/Macast.app                       # → ~39M
 
 `macast/plugins/**` is imported **by name at runtime**, never by a static
 `import` statement, so no dependency scanner can see it. `packages: ['macast']`
-copies the directory, and `hiddenimports` names each module so modulegraph
+copies the directory, and `includes` names each module so modulegraph
 cannot drop it — but a green build still proves nothing, so check the bundle:
 
 ```bash
@@ -200,6 +221,23 @@ Two things this surface needs that no import will check either:
 The window this section used to describe (`macast/mirror_console.py`, a Tk process
 launched from the menu) is deleted; Part 35 asserts that no build file, workflow or
 app module still names it.
+
+## What is deliberately *not* in the artefact
+
+Absence here is a design decision, not a missing dependency — grep the bundle and
+you will find nothing, and that is the correct answer:
+
+- **`aiortc`, `av`, `cryptography`, `pylibsrtp`, `cffi`** (the whole WebRTC mirror
+  target chain). Since v0.20.0 they ship as a separate, per-ABI **extras zip**
+  published beside the four platform artefacts
+  (`Macast-WebRTC-extras-<os>-<arch>-<python>-v<version>.zip`, built by
+  `scripts/build_webrtc_extras.py`) and installed on demand from the settings page.
+  Grepping a bundle for `aiortc` and getting `0` therefore proves nothing is broken
+  — the same trap as "the Linux artefact has no `pystray`" (see `AGENTS.md` §4.3).
+  `av` was the reason: one delocated FFmpeg wheel, tens of MB, for a target most
+  users never select. Details in `AGENTS.md` §4.15.
+- **macOS Intel**: `build.yml` stopped building it (`f8b3a15`); use
+  `MACAST_ARCH=x86_64 scripts/setup_py2app.py` locally if you need one.
 
 ## Why py2app and not PyInstaller
 

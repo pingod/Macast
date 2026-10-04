@@ -2083,6 +2083,14 @@ class Handler:
         ('mirror-action', GATE_TOKEN, '_post_mirror_action'),
         ('save-launch-param', GATE_CODE, '_post_save_launch_param'),
         ('install-plugin', GATE_CODE, '_post_install_plugin'),
+        # The optional WebRTC bundle behind 电脑投屏's fifth target. `GATE_CODE`
+        # rather than `mirror-action`'s page token: this one downloads an archive,
+        # unpacks it under the config directory, puts it at the front of
+        # `sys.path` and then *imports* it. That is the shape §4.7b refuses
+        # loopback-trust for -- even though the bytes come from our own release
+        # asset and not from a URL the request handed us.
+        ('install-webrtc-extras', GATE_CODE, '_post_install_webrtc_extras'),
+        ('uninstall-webrtc-extras', GATE_CODE, '_post_uninstall_webrtc_extras'),
         ('set-subtitle-show', GATE_MANAGEMENT, '_post_set_subtitle_show'),
         ('cast-uri', GATE_MANAGEMENT, '_post_cast_uri'),
         # 网页地址投屏: parse a page, then cast what was found through the relay.
@@ -2134,7 +2142,14 @@ class Handler:
     #:  * `set-module-setting` writes a plugin's own keys, and 自动化钩子's keys
     #:    (`Hook_On_Cast` & co.) are handed to `subprocess(shell=True)` the next
     #:    time anything is cast -- so writing one *is* running it, given a cast
-    #:    the same drive-by can also trigger.
+    #:    the same drive-by can also trigger;
+    #:  * `install-webrtc-extras` / `uninstall-webrtc-extras` fetch an archive,
+    #:    unpack it under the config directory, put it at the front of `sys.path`
+    #:    and import it. The bytes are ours (a release asset, address built by
+    #:    `plugin_repo`, sha256-checked against the manifest inside) -- but the
+    #:    *shape* is `install-plugin`'s, and this is the family where loopback
+    #:    proves nothing (§4.7b: DNS rebinding serves the attacker's origin from
+    #:    127.0.0.1 itself).
     _CODE_EXECUTION_PARAMS = tuple(name for name, gate, _ in POST_ROUTES
                                    if gate == GATE_CODE)
 
@@ -2431,6 +2446,39 @@ class Handler:
             'install',
             url=kwargs.get('plugin-url') or payload.get('url', ''),
             type=kwargs.get('plugin-type') or payload.get('type', 'renderer'))
+
+    # -- the optional WebRTC bundle (电脑投屏's fifth target) ------------------
+    #
+    # Same shape as the mirror console: the core asks the plugin to do the thing
+    # and carries the sentence back. What the bundle *is* -- which release asset
+    # matches this machine, where it lands, whether `aiortc` imports afterwards --
+    # lives in `screen_mirror.py`, and `plugin_repo.py` owns the addresses
+    # (§4.6: 地址只有一处).
+
+    def _extras_action(self, method, verb):
+        setting = self._mirror_setting()
+        if setting is None:
+            return self._mirror_unavailable()
+        action = getattr(setting, method, None)
+        if not callable(action):
+            # A copy in the user plugin directory shadows the bundled one, so
+            # "the app is new enough" is not the same question as
+            # "this renderer module is".
+            return {'code': 1,
+                    'message': '本机生效的 Screen Mirror 插件还不支持{}：如果用户插件目录'
+                               '里有一份旧的 screen_mirror.py，先把它移走再重启 Macast'
+                               .format(verb)}
+        try:
+            return action()
+        except Exception as e:
+            logger.error('%s failed: %s' % (method, e))
+            return {'code': 1, 'message': '{}失败：{}'.format(verb, e)}
+
+    def _post_install_webrtc_extras(self, kwargs):
+        return self._extras_action('extras_install', '安装 WebRTC 依赖')
+
+    def _post_uninstall_webrtc_extras(self, kwargs):
+        return self._extras_action('extras_uninstall', '移除 WebRTC 依赖')
 
     def _post_set_subtitle_show(self, kwargs):
         show = str(kwargs.get('set-subtitle-show')).lower() in (

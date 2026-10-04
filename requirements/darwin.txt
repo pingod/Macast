@@ -37,10 +37,15 @@ pyobjc-framework-CoreMedia
 zeroconf
 # The screen-mirror plugin's WebRTC output shape (「浏览器 · WebRTC」). Both are
 # imported lazily inside screen_mirror.py -- a machine without them keeps every
-# other mirror target and this one refuses with the pip line -- but a *shipped*
-# .app has no pip, so a missing entry here means the target can never work in a
-# downloaded build. That is the same rule as the ScreenCaptureKit pair above,
-# with less graceful degradation behind it. requirements/common.txt names them
-# too; this file is the source of truth the macOS build and the CI job read.
+# other mirror target and this one refuses with the two ways to get it. Since P9
+# this file names them for SOURCE RUNS ONLY: the macOS job does not pip-install
+# them and setup_py2app.py does not carry them, because `av` alone is forty-some
+# MB behind a target a minority uses. A downloaded .app gets them by pressing
+# 「一键安装 WebRTC 依赖」 on the 电脑投屏 page, which fetches the matching
+# Macast-WebRTC-extras-*.zip release asset (see the header of build.yml and
+# macast/plugin_repo.py). This file is still the source of truth the macOS build
+# and the CI job read for everything else -- which is why the entry stays: it is
+# what puts aiortc under the plugin import allowlist (Part 30) and lets a
+# from-source run exercise the target at all.
 aiortc
 av

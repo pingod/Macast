@@ -113,4 +113,58 @@ def index_urls():
 def describe():
     """The plugin-repository half of the ``plugin-info`` API response."""
     return {'repo_url': mirror_url(REPO_URL), 'index_urls': index_urls(),
-            'mirror_enabled': mirror_enabled()}
+            'mirror_enabled': mirror_enabled(),
+            'extras': extras_describe()}
+
+
+# ---------------------------------------------------------------------------
+# WebRTC extras (``Macast-WebRTC-extras-*.zip`` release assets)
+# ---------------------------------------------------------------------------
+
+#: The two declared packages whose import gates the WebRTC mirror target. The
+#: extras asset carries these plus what they pull in (av, cryptography,
+#: pylibsrtp, cffi and ``_cffi_backend``), but nothing here needs to enumerate
+#: those: this tuple is what ``requirements/*.txt`` declares, and the build
+#: step installs exactly it.
+EXTRAS_PACKAGES = ('aiortc', 'av')
+
+#: The asset name template. os/arch/python-tag are not decoration -- the wheels
+#: inside differ on all three, and the installer refuses a bundle whose
+#: manifest disagrees with the machine reading it.
+EXTRAS_ASSET = 'Macast-WebRTC-extras-{}-{}-{}-v{}.zip'
+
+
+def extras_asset_name(os_key, arch, python_tag, version):
+    """The one asset name for one ABI on one released version."""
+    return EXTRAS_ASSET.format(os_key, arch, python_tag, version)
+
+
+def extras_urls(name, version):
+    """Ordered candidates for one extras asset, honouring the mirror switch.
+
+    Release assets download from ``github.com`` (which redirects to
+    ``objects.githubusercontent.com``), so the domestic mirror is the same
+    prefix the other GitHub hosts get. Mirror mode puts the mirror first but
+    keeps the direct URL as a fallback -- a dead proxy should not be fatal --
+    and, like ``index_urls``, the list is de-duplicated because the canonical
+    entry collapses onto the mirrored one when the switch rewrites it.
+    """
+    url = 'https://github.com/{}/releases/download/v{}/{}'.format(
+        REPO, version, name)
+    urls = [url] if not mirror_enabled() else [to_mirror_url(url), url]
+    out = []
+    for candidate in urls:
+        if candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def extras_describe():
+    """What the settings page needs to fetch an extras asset itself.
+
+    The page does not build these strings: it asks, so the asset naming rule
+    has exactly one owner in Python and can be tested from Python (the same
+    reason ``describe`` hands the index URLs out).
+    """
+    return {'packages': list(EXTRAS_PACKAGES), 'asset': EXTRAS_ASSET}
+

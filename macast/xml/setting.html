@@ -1196,6 +1196,47 @@
                             </div>
                         </div>
 
+                        <div class="status-card" v-if="sec === 'extras'" key="extras">
+                            <h3>WebRTC 依赖</h3>
+                            <div class="hint">{{ mirror_state.extras.hint }}</div>
+                            <div class="mirror-line" style="margin-top:8px;">
+                                <el-tag size="mini" type="success" v-if="mirror_state.extras.ready">
+                                    这台机器已经可用
+                                </el-tag>
+                                <el-tag size="mini" type="warning" v-else-if="mirror_state.extras.installed">
+                                    依赖包已落盘，现在还导入不了
+                                </el-tag>
+                                <el-tag size="mini" type="info" v-else-if="!mirror_state.extras.supported">
+                                    这台机器没有对应的依赖包
+                                </el-tag>
+                                <el-button size="mini" type="primary"
+                                           v-if="!mirror_state.extras.ready && mirror_state.extras.supported"
+                                           :loading="mirror_state.extras.running"
+                                           @click="extras_install()">{{ mirror_state.extras.label }}</el-button>
+                                <el-button size="mini" v-if="mirror_state.extras.installed"
+                                           :disabled="mirror_state.extras.running"
+                                           @click="extras_uninstall()">{{ mirror_state.extras.uninstall_label }}</el-button>
+                            </div>
+                            <!-- 进度与「一键设置系统声音」那张卡读同一套标记规则：
+                                 「跳过」是一个状态而不是「没做」，进度条绝不回退。 -->
+                            <div class="mirror-steps" v-if="mirror_state.extras.steps.length">
+                                <div class="mirror-step" v-for="(st, i) in mirror_state.extras.steps" :key="st.id">
+                                    <span class="ms-mark" :class="'lv-' + (mirror_view.extras_step_marks[i] || ['', 'muted'])[1]">
+                                        {{ (mirror_view.extras_step_marks[i] || ['?'])[0] }}
+                                    </span>
+                                    <span class="ms-label">{{ st.label }}</span>
+                                    <span class="hint" v-if="st.note">{{ st.note }}</span>
+                                </div>
+                            </div>
+                            <div class="hint" v-if="mirror_state.extras.message" style="margin-top:6px;">
+                                {{ mirror_state.extras.message }}
+                            </div>
+                            <div class="hint" v-if="mirror_state.extras.supported" style="margin-top:6px;">
+                                包名与落点：{{ mirror_state.extras.asset }} →
+                                <code>{{ mirror_state.extras.directory }}</code>
+                            </div>
+                        </div>
+
                         <div class="status-card" v-if="sec === 'shape'" key="shape">
                             <h3>投屏形状</h3>
                             <div class="mirror-pills">
@@ -1746,7 +1787,10 @@
                         上面那条浏览器（MSE）通道约 492 毫秒（两个数都偏保守，误差最多一帧；
                         条件是同一台 Mac、VideoToolbox 编码、avfoundation 采集、同一次会话）；
                         代价是<strong>这条通道没有声音</strong>，并且需要两个可选依赖
-                        （aiortc 与 av）——没装时点「开始镜像」会给出安装命令。</li>
+                        （aiortc 与 av）——它们不再打进安装包，所以这里分两种机器：打包安装的
+                        点「电脑投屏」页里那张「WebRTC 依赖」卡上的<strong>「一键安装 WebRTC 依赖」</strong>，
+                        从源码跑的在运行 Macast 的那个 Python 里 <code>pip install aiortc av</code>。
+                        两种都<strong>不需要重启 Macast</strong>，装完回到这里重新选一次本目标即可。</li>
                 </ul>
                 <p>三条会让镜像「开了却看不到画面」的前提：</p>
                 <ol>
@@ -2733,6 +2777,45 @@
                     return this.mirror_run('set-dlna-target', {control: d[0], name: d[3]});
                 }
                 return this.mirror_run('set-target', {target: d[0], name: d[3]});
+            },
+            // -- WebRTC 依赖（extras 包）---------------------------------------
+            //
+            // 这两个按钮**不走** `mirror_run`：那条路的字段是 `mirror-action`，门是
+            // 页面自己那枚令牌，而它动作的对象是「已经在机器上的东西」。这里要装的是
+            // 一路可被 import 的新代码，所以按 §4.7b 的判据走 `GATE_CODE` —— 本机也要
+            // 管理令牌，取不到就不发请求。装哪个包、从哪个地址拿，全部由后端回答
+            // （§4.6：地址只有一处），页面里一个地址字面量都不写。
+            async extras_install() {
+                let fd = new window.FormData();
+                fd.append('install-webrtc-extras', '1');
+                return this.extras_post(fd);
+            },
+            async extras_uninstall() {
+                let fd = new window.FormData();
+                fd.append('uninstall-webrtc-extras', '1');
+                return this.extras_post(fd);
+            },
+            async extras_post(fd) {
+                if (!await this.require_management_token(fd)) return false;
+                try {
+                    let res = await this.$http.post('/api', fd);
+                    let data = res.data || {};
+                    if (data.code === 403) {
+                        this.$message.error('令牌不对或已失效：刷新本页面再试');
+                    } else if (data.code !== 0) {
+                        this.$message.error(data.message || '操作失败');
+                    } else {
+                        this.$message.success(data.message || '已开始');
+                    }
+                } catch (err) {
+                    console.log('extras post failed:', err);
+                    this.mirror_offline = true;
+                    this.$message.error('操作失败：连不上 Macast');
+                }
+                // 和别的动作一样：POST 完再读一次，不做乐观更新。进度、按钮文案、
+                // 「这台机器到底装没装」都来自那一次读取，而不是这条答复。
+                await this.load_mirror();
+                return true;
             },
             mirror_start_poll() {
                 this.mirror_stop_poll();
