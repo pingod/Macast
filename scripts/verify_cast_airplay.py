@@ -22804,6 +22804,49 @@ try:
           "scan sees nothing of theirs",
           not sorted(_five56s & _piped56), str(sorted(_five56s & _piped56)))
 
+    # P9's subtraction took out one more file than anybody named: the CPython
+    # stable-ABI forwarder. Every cp3xx Windows wheel's `.pyd` links
+    # `python3.dll` (PEP 384), and CPython loads that forwarder *itself* before
+    # any extension module, so a onefile build that stopped bundling it can
+    # never import the extras tree its own settings page just installed. This
+    # was measured, not inferred (`gh api .../actions/runs/<v0.18>/<v0.20>` TOC
+    # on the shipped exes: `python3.dll` present, then zero hits) and confirmed
+    # on the user's Windows box, where the landed tree fails with Win32 126
+    # (`ERROR_MOD_NOT_FOUND`). Two strings in the workflow are the whole fix,
+    # and a workflow edit is exactly where a `--add-binary` line goes missing
+    # while every job still builds green -- so both are pinned here.
+    _win56 = _yml56.split('name: Locate the CPython stable-ABI forwarder', 1)
+    check("Part 56/D: the Windows job ships the forwarder the extras' .pyd "
+          "files link -- one located file added at the archive root, which is "
+          "where CPython looks first (`LoadLibrary` from beside `python312.dll` "
+          "== the `_MEIPASS` root in a onefile). Payload-side copies would be "
+          "12 files and 840 KB for the same answer",
+          len(_win56) == 2
+          and len(_re56.findall(r'--add-binary "\$PY3DLL;\."', _yml56)) == 1
+          and 'echo "PY3DLL=$PY3DLL" >> "$GITHUB_ENV"' in _yml56,
+          'locate=%s add-binary=%d env=%s' % (
+              len(_win56) == 2,
+              len(_re56.findall(r'--add-binary "\$PY3DLL;\."', _yml56)),
+              'PY3DLL=$PY3DLL" >> "$GITHUB_ENV' in _yml56))
+    # The locating step answers "does this interpreter have the file"; only the
+    # step *after* the build answers "did it end up in the artefact", and that
+    # is the one this project has needed before: both broken releases built
+    # green (§4.3). So the body is asked for all three of its parts -- the
+    # reader, the name it looks for, and the refusal.
+    _ver56 = _yml56.split('name: Verify the forwarder actually shipped', 1)
+    check("Part 56/D: and a step after the build opens the finished archive and "
+          "refuses the artefact when the entry is not in it -- because 'it "
+          "builds' was never the thing at issue",
+          len(_ver56) == 2
+          and 'CArchiveReader' in _ver56[1]
+          and 'python3.dll' in _ver56[1]
+          and 'sys.exit(1)' in _ver56[1].split('- name:', 1)[0],
+          'verify=%s reader=%s refuses=%s' % (
+              len(_ver56) == 2,
+              'CArchiveReader' in _ver56[1],
+              'sys.exit(1)' in (_ver56[1].split('- name:', 1)[0]
+                                if len(_ver56) == 2 else '')))
+
     # The other half of the deal: the bundles exist, they are built for every
     # platform, and they reach the Release without re-opening the quota hole
     # Part 46 closed (§4.3: four upload steps, gated, nothing more).
@@ -27940,6 +27983,16 @@ try:
     # manifest on disk, and a bundle that landed but does not import (missing
     # system library, wrong arch) is exactly that shape -- the install refused
     # to call itself done while leaving the files in place.
+    #
+    # Read the latch before changing this block. `_webrtc_modules()` now calls
+    # `_restore_extras_path()` first, and that restore runs once per process;
+    # by here the C section has already probed, so the latch is up and taking
+    # the tree off `sys.path` is enough to make the probe answer "no". Do that
+    # same removal in a *fresh* process and the restore puts it back and the
+    # probe answers "yes" -- which is right (C2b tests it), because a tree that
+    # is on disk with a manifest is a tree Macast should be using. So this case
+    # is a within-one-session disagreement, not a restart, and it goes red in a
+    # confusing way if anyone moves it above the first probe.
     _path_had60 = list(sys.path)
     sys.path.remove(_landing60[0])
     _purge60()
@@ -28107,6 +28160,180 @@ try:
           "in the table' is the sentence that keeps an unreviewed module "
           "importable",
           not _ok60h and 'unlisted60.py' in _why60h, str(_why60h)[:160])
+
+    # -- C3. the bar measures the bytes, and a dead stream says so -----------
+    # Two things v0.20.0 shipped wrong, both found by watching the card rather
+    # than by reading the code: the download step's fraction was computed and
+    # thrown away (`sub(step, None, ...)`, which `_SetupProgress.overall()`
+    # settles at 0.15 of one step in five = a 3% bar for the whole of a
+    # twenty-six megabyte bundle), and a stream that stopped short of its own
+    # `Content-Length` returned success because `got > 0` -- so the next line a
+    # user read was a sha256 complaint about a file we had truncated ourselves.
+    # The slot is empty entering this section (the last case refused before
+    # landing anything), which is what lets the failure cases below say "nothing
+    # landed" and mean it.
+    _bar60c3 = m60._SetupProgress(steps=m60.EXTRAS_STEPS)
+    _bar60c3.enter('download', 'Macast-WebRTC-extras.zip')
+    _frozen60c3 = _bar60c3.snapshot()['pct']
+    _bar60c3.sub('download', 0.5, '已下载 13.4 MB / 26.9 MB')
+    _moving60c3 = _bar60c3.snapshot()['pct']
+    check("Part 60/C3: the frozen bar is the number it was -- a running step "
+          "with no fraction is 0.15, one step out of %d, which reads as 3%% for "
+          "the entire download -- and a real fraction puts it above that"
+          % len(m60.EXTRAS_STEPS),
+          abs(_frozen60c3 - 0.15 / len(m60.EXTRAS_STEPS)) < 1e-9
+          and abs(_frozen60c3 - 0.03) < 1e-9 and _moving60c3 > _frozen60c3,
+          'frozen=%r moving=%r' % (_frozen60c3, _moving60c3))
+
+    # A payload with real mass: `iter_content(chunk_size=65536)` has to hand
+    # over several chunks before the fraction can be non-decreasing and reach
+    # 1.0, and the zip is written stored, so the bytes here are the bytes there.
+    _pad60c3 = dict(_tree60)
+    _pad60c3['av/.dylibs/libavcodec.62.so'] = b'\x7fELF' + b'p' * (300 * 1024)
+    _bytes60c3 = []
+
+    class _Spy60(m60._SetupProgress):
+        def sub(self, step_id, frac, note=None):
+            if step_id == 'download':
+                _bytes60c3.append((frac, note))
+            m60._SetupProgress.sub(self, step_id, frac, note)
+
+    _url60c3 = _serve_zip60(_zip60_bytes(
+        _manifest60(files=_files60(_pad60c3)), _pad60c3))
+    _repo60.extras_urls = lambda name, version: [_url60c3]
+    _purge60()
+    _ok60c3, _why60c3 = m60.install_webrtc_extras(
+        progress=_Spy60(steps=m60.EXTRAS_STEPS))
+    _fracs60c3 = [f for f, _n in _bytes60c3 if f is not None]
+    check("Part 60/C3: the download feeds the bar it is standing on -- the "
+          "fractions the worker reported arrive in order, end at the whole "
+          "file, and every one of them carries the MB figure the card prints "
+          "(the suite asks the progress object the install was handed, not the "
+          "HTTP layer, because the card reads this one)",
+          _ok60c3 and len(_fracs60c3) >= 2
+          and all(b >= a for a, b in zip(_fracs60c3, _fracs60c3[1:]))
+          and abs(_fracs60c3[-1] - 1.0) < 1e-9
+          and all(('已下载' in n and ' / ' in n) for _f, n in _bytes60c3),
+          'fracs=%r notes=%r ok=%r %r' % (_fracs60c3[:4],
+                                          [n for _f, n in _bytes60c3[:2]],
+                                          _ok60c3, str(_why60c3)[:80]))
+
+    # An absent `Content-Length` is the other half of the contract: slower bar,
+    # not a failure. The handler answers HTTP/1.0 close-delimited with no
+    # length header, so `total` is 0 and there is nothing to divide by.
+    class _NoLenHandler60(_ZipHandler60):
+        protocol_version = 'HTTP/1.0'
+
+        def do_GET(self):
+            _body60 = type(self).payload
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.end_headers()
+            self.wfile.write(_body60)
+
+    def _serve_zip60_nolen(payload):
+        _hand60 = type('_NoLenHandler60_once', (_NoLenHandler60,),
+                       {'payload': payload})
+        _srv60 = _http60.ThreadingHTTPServer(('127.0.0.1', 0), _hand60)
+        __import__('threading').Thread(target=_srv60.serve_forever,
+                                       daemon=True).start()
+        _addr60.append(_srv60)
+        return 'http://127.0.0.1:%d/extras.zip' % _srv60.server_address[1]
+
+    del _bytes60c3[:]
+    _url60c3b = _serve_zip60_nolen(_zip60_bytes(
+        _manifest60(files=_files60(_pad60c3)), _pad60c3))
+    _repo60.extras_urls = lambda name, version: [_url60c3b]
+    _prog60c3b = _Spy60(steps=m60.EXTRAS_STEPS)
+    _ok60c3b, _why60c3b = m60.install_webrtc_extras(progress=_prog60c3b)
+    check("Part 60/C3: and a server that will not say the size is not a "
+          "failure -- the download still lands, the fractions are all None "
+          "instead of invented, and the note drops the total rather than "
+          "printing `/ 0.0 MB`",
+          _ok60c3b and len(_bytes60c3) >= 2
+          and all(f is None for f, _n in _bytes60c3)
+          and all('已下载' in n and ' / ' not in n for _f, n in _bytes60c3)
+          and _prog60c3b.snapshot()['steps'][0]['state'] == 'done',
+          'notes=%r ok=%r %r' % ([n for _f, n in _bytes60c3[:2]], _ok60c3b,
+                                 str(_why60c3b)[:80]))
+
+    # Clear the slot so the two failure cases below can be about nothing.
+    m60.uninstall_webrtc_extras()
+    _purge60()
+
+    class _TruncHandler60(_ZipHandler60):
+        protocol_version = 'HTTP/1.0'
+        keep = 0.4
+
+        def do_GET(self):
+            _body60 = type(self).payload
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/zip')
+            self.send_header('Content-Length', str(len(_body60)))
+            self.end_headers()
+            try:
+                self.wfile.write(_body60[:int(len(_body60) * self.keep)])
+                self.wfile.flush()
+            except Exception:
+                pass
+
+    _TruncHandler60.payload = _zip60_bytes(
+        _manifest60(files=_files60(_pad60c3)), _pad60c3)
+    _srv60c3c = _http60.ThreadingHTTPServer(('127.0.0.1', 0), _TruncHandler60)
+    __import__('threading').Thread(target=_srv60c3c.serve_forever,
+                                   daemon=True).start()
+    _addr60.append(_srv60c3c)
+    _url60c3c = 'http://127.0.0.1:%d/extras.zip' % _srv60c3c.server_address[1]
+    _repo60.extras_urls = lambda name, version: [_url60c3c]
+    _prog60c3c = m60._SetupProgress(steps=m60.EXTRAS_STEPS)
+    _ok60c3c, _why60c3c = m60.install_webrtc_extras(progress=_prog60c3c)
+    check("Part 60/C3: a stream that stops short of its own Content-Length is "
+          "a refusal, not a partial file on the path -- it names how far it "
+          "got, that the retry starts over from nothing, quotes the address it "
+          "tried, and leaves the ABI slot empty with the ladder stopped on the "
+          "download step",
+          not _ok60c3c and '断了' in _why60c3c and '整份重来' in _why60c3c
+          and _url60c3c in _why60c3c and '依赖包没下载下来' in _why60c3c
+          and not os.path.isdir(_landing60[0])
+          and [s['state'] for s in _prog60c3c.snapshot()['steps']]
+              == ['fail', 'pending', 'pending', 'pending', 'pending'],
+          str(_why60c3c)[:200])
+
+    # The branch no server in the suite can produce: fewer bytes than promised
+    # and *nothing raised*. Real `requests` turns that shape into an
+    # `IncompleteRead`, which is why the answer comes from the helper with
+    # `requests.get` pointed at a body that simply ends -- patched on the
+    # module attribute and restored in `finally`, never a fake `requests` in
+    # `sys.modules` (§4.2: an import the suite fabricates is an import the
+    # product never does).
+    class _QuietShort60(object):
+        status_code = 200
+        headers = {'Content-Length': str(5 * 65536)}
+
+        def iter_content(self, chunk_size=65536):
+            for _ in range(2):
+                yield b'x' * 65536
+
+        def close(self):
+            pass
+
+    _req60c3 = __import__('requests')
+    _real_get60c3 = _req60c3.get
+    _req60c3.get = lambda *a, **k: _QuietShort60()
+    try:
+        _ok60c3d, _why60c3d = m60._fetch_extras_zip(
+            'http://127.0.0.1:1/extras.zip',
+            os.path.join(_tmp60, 'quiet60c3.zip'))
+    finally:
+        _req60c3.get = _real_get60c3
+    check("Part 60/C3: and a body that ends without raising is still refused "
+          "-- the helper answers with both numbers, because '没下载下来' cannot "
+          "be compared against the size the Release page promised, and 0.125 MB "
+          "of 0.3125 MB is the shape that used to read as a success",
+          _ok60c3d is False and '下到 0.1 MB 就断了' in _why60c3d
+          and '整份是 0.3 MB' in _why60c3d and '重试会整份重来' in _why60c3d,
+          str(_why60c3d)[:160])
+
     # -- C2. the answers live on the card, in both directions ----------------
     # Found by the browser pass (2026-10-04): pressing 「移除」 answered with
     # 「原来的文件在 .trash/…」 in a toast that flashes past, while the card kept
@@ -28262,6 +28489,84 @@ try:
           and all(real is not None and null is not None
                   and real == null for real, null in _surface60c2.values()),
           str(_surface60c2)[:200])
+
+    # -- C2b. the restart, which is the state the feature shipped without ----
+    # `_extras_landing()` was the only writer of `sys.path`, and only the
+    # install's own land step ever called it -- so the landing was a promise
+    # about the rest of *one session*. `installed` is read from `manifest.json`
+    # on disk, so the first card a restarted Macast paints says 已安装 next to
+    # a probe that answers `No module named 'aiortc'`, and the only recovery it
+    # offers is another twenty-six megabyte download for a tree that is already
+    # there. Measured on `.68` with the v0.20.0 `.exe`: 1083 files in the ABI
+    # slot, `ready` false, `installed` true. A real subprocess cannot show this
+    # to the suite (the shade above lives in this process), so the restart is
+    # simulated by resetting exactly the two pieces of state a restart resets.
+    _repo60.extras_urls = lambda name, version: [_url60]
+    _purge60()
+    _ok60c2d, _why60c2d = m60.install_webrtc_extras(
+        progress=m60._SetupProgress(steps=m60.EXTRAS_STEPS))
+    m60._EXTRAS_PATH_RESTORED = False
+    m60._forget_webrtc_modules(_landing60[0])
+    while _landing60[0] in sys.path:
+        sys.path.remove(_landing60[0])
+    _purge60()
+    importlib.invalidate_caches()
+    _card60c2d = m60.extras_state()
+    check("Part 60/C2: a restarted Macast re-attaches the tree it already has "
+          "-- `installed` and `ready` answer 是 together again, the landing "
+          "directory is back at `sys.path[0]`, and the answer came from the "
+          "card's own read (no install button was pressed in this simulation)",
+          _ok60c2d and _card60c2d['installed'] is True
+          and _card60c2d['ready'] is True
+          and bool(sys.path) and sys.path[0] == _landing60[0],
+          str({k: _card60c2d[k] for k in ('installed', 'ready', 'supported')})
+          + ' / ' + str(_why60c2d)[:80])
+
+    # One attempt per process, not one per probe: the card polls
+    # `extras_state()` about once a second, and a machine with nothing
+    # installed would otherwise stat the config directory forever.
+    _dir_calls60c2 = []
+    _dir60c2 = m60.extras_dir
+    m60.extras_dir = lambda *a, **k: (_dir_calls60c2.append(1),
+                                      _landing60[0])[1]
+    m60._EXTRAS_PATH_RESTORED = False
+    try:
+        _probe60c2e = m60._webrtc_modules()
+        _probe60c2f = m60._webrtc_modules()
+        _probe60c2g = m60._webrtc_modules()
+    finally:
+        m60.extras_dir = _dir60c2
+    check("Part 60/C2: and the re-attach asks once per process -- three probes "
+          "in a row reach the directory exactly once, while all three still "
+          "answer with the loaded pair, because a latch that made the answer "
+          "stale would be the caching this feature refuses to do",
+          len(_dir_calls60c2) == 1 and _probe60c2e is not None
+          and _probe60c2f is not None and _probe60c2g is not None,
+          'dir calls=%d first=%r third=%r' % (len(_dir_calls60c2),
+                                              bool(_probe60c2e),
+                                              bool(_probe60c2g)))
+
+    # After a removal the tree has travelled to `.trash`, so the restore must
+    # stay out of the way -- it is keyed on the manifest, the same reader the
+    # card uses, and not on "some directory is sitting there".
+    _rm60c2 = _setting60c2.extras_uninstall()
+    m60._EXTRAS_PATH_RESTORED = False
+    _purge60()
+    importlib.invalidate_caches()
+    _probe60c2h = m60._webrtc_modules()
+    _card60c2h = m60.extras_state()
+    check("Part 60/C2: and nothing is re-attached after a removal -- the slot "
+          "is empty, so the probe answers None, the path is not put back, and "
+          "the card answers 否 to both questions rather than reviving a tree "
+          "the user just told Macast to take away",
+          _rm60c2['code'] == 0 and _probe60c2h is None
+          and _landing60[0] not in sys.path
+          and _card60c2h['installed'] is False
+          and _card60c2h['ready'] is False,
+          'code=%r path_in_sys.path=%r card=%r' % (
+              _rm60c2['code'], _landing60[0] in sys.path,
+              str({k: _card60c2h[k] for k in ('installed', 'ready')})[:80]))
+    m60._EXTRAS_PATH_RESTORED = True
 
     _repo60.extras_urls = _urls60_real
     _purge60()

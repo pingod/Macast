@@ -1790,7 +1790,9 @@
                         （aiortc 与 av）——它们不再打进安装包，所以这里分两种机器：打包安装的
                         点「电脑投屏」页里那张「WebRTC 依赖」卡上的<strong>「一键安装 WebRTC 依赖」</strong>，
                         从源码跑的在运行 Macast 的那个 Python 里 <code>pip install aiortc av</code>。
-                        两种都<strong>不需要重启 Macast</strong>，装完回到这里重新选一次本目标即可。</li>
+                        两种都<strong>不需要重启 Macast</strong>，装完回到这里重新选一次本目标即可；
+                        <strong>重启之后也算数</strong>——那棵已经落盘的树会在下一次特征探测时被挂回
+                        模块搜索路径，所以「已安装」和「现在导入得了」不会一个说真一个说假。</li>
                 </ul>
                 <p>三条会让镜像「开了却看不到画面」的前提：</p>
                 <ol>

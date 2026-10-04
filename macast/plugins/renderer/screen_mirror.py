@@ -5,11 +5,11 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.27</macast.version>
+# <macast.version>0.28</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
-# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。0.25 起「低延迟」这两个字后面跟着数字：WebRTC 这一路的屏幕到屏幕延迟第一次量出来了——本机同一套闪光测量（一个按墙钟时刻涂黑涂白的无边框窗口，配观看页自己每帧的亮度采样，同一台机器同一个时钟，两个时刻之差就是整条链路）给出 369 毫秒，同一趟里浏览器（MSE）那一页是 492 毫秒；两个数都偏保守，因为参考时刻取在 AppKit 把窗口推给显示器之前，最多多算一帧，而测量时旁边一直开着一个小窗在闪，因为 macOS 的采集是按变化给的：静止桌面上采集交出来的每一帧都被钉成 1/24 秒的间隔，媒体时钟只有墙钟的约 0.4 倍，读出来的每个延迟都会虚高。设置页两张卡片与帮助弹层现在都写这两个数，并写明它们和 mse_latency_probe 报的 838 毫秒量的不是同一段（那支读的是播放器缓冲边缘）；这个数字只有一处（MEASURED_LAG_MS），卡片、帮助与用例读的是同一份。0.26 起把 Windows 上这一档的代价写在「投屏方式」卡的浏览器那一行上：把系统声音的回环设备读进输出会把画面门住，跨机实测画面每秒只变化约 1.5 次，而同一台机器同一条链路上 WebRTC 那一路的解码与上屏实测都是 24 帧每秒；这句话只在被描述的机器是 Windows 且采集探测真的把声音映射进流时出现，两个数字读自有测量的常量而不是抄进散文，也不写毫秒——跨机的 browser 延迟没有可信读数，编一个数字比不写更糟。0.27 起 aiortc 与 av（连带它们拖进来的 cryptography / pylibsrtp / cffi）不再随四个平台的默认产物发布：要用 WebRTC 那一档的时候，设置页「电脑投屏」的「WebRTC 依赖」卡按一个按钮，从本项目的发布页取对应平台的那一条依赖包，解到配置目录里按这台机器的解释器分键的那个目录，并从那里导入——所以选完这一档不需要重启 Macast，那句话是被测出来的性质而不是承诺。这张卡上有两个见证者，而且它们故意要能不一致：「已落盘」问那份清单文件在不在，「已可用」问刚才这一次是不是真的导入成功了；包躺在盘上却 import 不起来（缺系统库、架构不对）是真实存在的一种状态，把安装说成成功而画面仍然黑着才是谎话。移除把那棵树挪进配置目录的 .trash 而不是删掉；如果那个目录不是我们种的而 aiortc 仍然导入得起来，它会拒绝并念出那个包真正的来路，让你用 pip 去卸它。这一档仍然没有真电视与跨机验证过，而「一键安装」也还没在打包产物上按过一次。</macast.desc>
+# <macast.desc>把这台 Mac / PC / 桌面镜像到局域网里的 Chromecast（两条通道：兼容的 MPEG-TS LOAD，或一条实验性的低延迟 Cast Streaming 通道——它讲 Chrome 自己的镜像协议，设备拒绝就回落到 LOAD）、一台老 DLNA 电视（五种兼容档位，电视上不用装任何东西）、或局域网里任意浏览器（打开一个网址即可，无需 App）。ffmpeg 负责采集与编码（Windows 走 ddagrab/gdigrab、Linux 走 x11grab；macOS 13 及以上由 ScreenCaptureKit 直接采进管道、老系统走 avfoundation），由本机持续吐出实时流：Chromecast 上用 MPEG-TS LOAD，浏览器里用内置网页播放分片 MP4，DLNA 电视则用一条故意永不结束的 MPEG-PS / MPEG-TS / MKV「文件」经 SOAP 推给它去拉。系统声音在存在采集口时一并带上：macOS 有一键辅助安装（官方 BlackHole 安装包，校验 sha256，并自动建好多输出聚合设备），Linux 用 PulseAudio 的 monitor，Windows 用 dshow 的「立体声混音 / Stereo Mix」回环设备（开启时）；Windows 下会报出这个设备名，没有则说清楚开哪扇门，而不是谎称只有画面。首帧预算自 0.14 起按平台区分：gdigrab 得先打开桌面才能开 dshow 输入，所以给 macOS 定的 3 秒预算曾把「声音设备已协商好立体声」的采集判死，而 Windows 那一路被指去了 macOS 的麦克风面板。还可选：哪块屏幕、要不要指针、四档画质、VideoToolbox 硬件编码（默认 auto，编码探测有答复才用硬件），以及电视掉出 PLAYING 时重新推送的 DLNA 看门狗。0.17 起看门狗能按自己的建议行动：电视拒绝的实时会话会自己走完五档兼容档位，每级重启一次、每轮最多四次，绝不在「伪装成文件」的形状里（那里该改的是形状不是容器），也绝不写进你的设置——下次手动启动仍从你选的档位开始。默认档位现在也跟着形状走，因为两者测得不一样：MPEG-TS + H.264 在实时流上稳定约 1.9 秒、MPEG-PS 约 5.1 秒，所以实时镜像默认 ts-h264，只有文件形状还默认 DVD 时代的 ps-pal。这些数字现在就列在设置页每个档位旁，并写明测量范围。自 0.11 起整个控制面都在 Macast 浏览器设置页的「电脑投屏」tab；自 0.12 起菜单栏不再有镜像行，只剩通知，停止走 tab、「停止接受投屏」或换渲染器——三条路汇到同一个 teardown。慢观众丢的包现在落在容器边界（整片 MP4 分片、整包 188 字节 TS），队列按画面的面积秒数预算而非字节，控制台会说明系统声音到底有没有真正进采集口，而不只说存在采集口。自 0.13 起本进程读不到的音频口不再让镜像报废：一帧都不回的采集会去掉它重试，降级成功与最终失败都会点名权限那扇门和要做的重启。0.18 起这一路的延迟预算整个重算过：低延迟通道的加密改走操作系统自带的 AES（macOS CommonCrypto、Windows bcrypt、Linux libcrypto，纯 Python 只作最后兜底，启动时跑一次已知答案自检），本机实测从 1.35 MB/s 提到 5367 MB/s，所以那条通道的码率上限从 4.5 Mbps 提到 8 Mbps（拿不到系统 AES 才降级回 4.5，菜单会写明是哪一种）；在途窗口不再按帧数算而按时长算（约 66 毫秒起、不超过协议自己承诺的目标延迟的三分之一），因为原来的 12 帧在 24 fps 下是 500 毫秒的排队、是 200 毫秒预算的 7.6 倍；编码器对齐了 Google 参考发送端的三处（+low_delay、slice 线程、半秒 VBV 而不是一秒）；VideoToolbox 那一路现在按 1.5 倍线速要码率，因为它实测比 -b:v 少给三成，而画质并不因此更好。另外两个过去写死的数字变成了你能调的旋钮：DLNA「伪装成文件」的预填秒数（1–8，默认 4，那个数字就是这条目标看得见的延迟）和浏览器播放页的落后上限（0.5–5，默认 1.0，原来是 3）。0.19 起浏览器这一路的分片改成每帧一片（原来是每 0.5 秒一片），本机实测（VideoToolbox）端到端延迟从 1305 毫秒降到 838 毫秒——买下延迟的是分片节奏，不是那个旋钮，所以它现在的角色是防漂移而不是调延迟；迟到的观看端拿到的积压会从最近的关键帧开始重播，不够一格的零头宁可丢掉也不给您花屏。低延迟通道的这些改动依然没有真电视验证过，本机局域网里没有 Chromecast。0.20 起 Windows 的画面采集换成 Desktop Duplication（ddagrab）：原先 gdigrab 抓的是整块虚拟桌面，多显示器时那里可能是个奇数高度，而奇数高度让编码器直接零字节退出——原画档在那种机器上什么都投不出来；现在每块屏幕按自己的尺寸采，Windows 的屏幕选择器也随之上线；ddagrab 在运行时被桌面拒绝会自动回落到 gdigrab，且本次运行内不再重试它。0.21 起 macOS 的画面采集优先走 ScreenCaptureKit：13 及以上系统用它把屏幕与系统声音一起原生采进来，不再需要安装 BlackHole 或任何东西，本机实测从启动到首帧比 avfoundation 快约 450 毫秒；如果 ScreenCaptureKit 一直没送来系统音频，本次镜像会先去掉声音继续（页面会立刻写明原因和「重启 Macast 再试」，之后的镜像连开始通知也会带上这句），而且本次运行里之后的镜像也会先跳过声音。老系统或这套框架不可用时自动回落到原来的 avfoundation 路径（Mac 的一键设置仍为那条路保留）。0.22 起多出第五种目标：WebRTC（浏览器 · 低延迟 · 此通道无声音）——页面里开一个真正的 RTCPeerConnection，编码器吐出的 H.264 NAL 零重编码原样装进 RTP 送过去（这条形状的 NAL 就是交给接收方打包的，不是容器）；它需要可选的 aiortc 与 av 依赖（没装时选中它会当场给出 pip 配方而不是静默失败），信令走本机 HTTP（一次换取 offer、一次交回 answer），观看地址与会话凭据和浏览器形状一样按会话临时。0.23 起三处按实测改正。浏览器这一路的发送队列不再按字节封顶，而是按容器自己的单位算（分片 MP4 数分片、Matroska 数簇），因为改成每帧一片之后，0.75 秒的预算在旧的字节上限里只装得下 8 片 = 0.11 秒，也就是说约 28% 的字节是我们自己丢的；设置页与观看页浮层现在都直说队列排了多久（多少秒、多少块），迟到的观看端「等不到可重播的起点」也从一件无声的事变成会点名的计数器（重播等关键帧 N 次）。告诉浏览器要解码什么不再靠猜：H.264 的 profile 是从编码器交出来的 avcC 现场读的，观看页、统计浮层与设置页三处读的是同一个答案，兜底那个字符串只在读不出时才出现。Windows 上「硬件编码」现在指的是 NVENC，而且判决方式跟着平台变：Mac 问的是 ffmpeg 的编码器清单，Windows 是真编 0.5 秒测试帧，因为清单里有不等于驱动能用；同一条真实采集上 NVENC 吃 0.21 个核而 x264 吃 0.44 个，并且它把码率落在档位承诺的那个数字上（不像 VideoToolbox 少给三成，所以那 1.5 倍补偿只给 VideoToolbox）。这一轮第一次做了跨机器实测：Windows 192.168.1.68 采集、Mac 上真浏览器观看，browser 与 webrtc 两种形状都跑通，页面读数与发送端逐格一致（此前所有延迟数字量的都是 Mac 投给自己）。0.24 起投给电视的那两路（Chromecast 兼容通道与 DLNA）多了「投屏最大时长」：三档 12 / 24 / 48 小时，默认 12，而且故意没有「不限」这一档——这一页的默认值从来没人去动，"没人动就等于不设限"正是这个旋钮要结束的状态。到点是主动停止并弹一条点名这个开关的通知，而不是悄悄把画面截掉；同一个数只问一次，ffmpeg 的 -t 与「伪装成文件」那对长度/时长都由它算出来，而且这个上限只许缩短那一对、不许拉长。我们的计时器和 ffmpeg 自己的 -t 谁先到是时序问题（预填与 LOAD 往返有时让 -t 抢先），两条入口因此都认这次是计划内的结束，generation 判定让晚到的那个闭嘴，用户只听到一次。浏览器页、低延迟通道与 WebRTC 不受它约束，那三路是直播边缘的消费端：截断它们省不下任何编码开销，代价却是切掉一个正在讲话的人——所以「画质」卡上也不给它们出现这组按钮，一个调不动东西的控件是句谎话。低延迟通道与真电视这一半依然没有验证过，本机局域网里没有 Chromecast。0.25 起「低延迟」这两个字后面跟着数字：WebRTC 这一路的屏幕到屏幕延迟第一次量出来了——本机同一套闪光测量（一个按墙钟时刻涂黑涂白的无边框窗口，配观看页自己每帧的亮度采样，同一台机器同一个时钟，两个时刻之差就是整条链路）给出 369 毫秒，同一趟里浏览器（MSE）那一页是 492 毫秒；两个数都偏保守，因为参考时刻取在 AppKit 把窗口推给显示器之前，最多多算一帧，而测量时旁边一直开着一个小窗在闪，因为 macOS 的采集是按变化给的：静止桌面上采集交出来的每一帧都被钉成 1/24 秒的间隔，媒体时钟只有墙钟的约 0.4 倍，读出来的每个延迟都会虚高。设置页两张卡片与帮助弹层现在都写这两个数，并写明它们和 mse_latency_probe 报的 838 毫秒量的不是同一段（那支读的是播放器缓冲边缘）；这个数字只有一处（MEASURED_LAG_MS），卡片、帮助与用例读的是同一份。0.26 起把 Windows 上这一档的代价写在「投屏方式」卡的浏览器那一行上：把系统声音的回环设备读进输出会把画面门住，跨机实测画面每秒只变化约 1.5 次，而同一台机器同一条链路上 WebRTC 那一路的解码与上屏实测都是 24 帧每秒；这句话只在被描述的机器是 Windows 且采集探测真的把声音映射进流时出现，两个数字读自有测量的常量而不是抄进散文，也不写毫秒——跨机的 browser 延迟没有可信读数，编一个数字比不写更糟。0.27 起 aiortc 与 av（连带它们拖进来的 cryptography / pylibsrtp / cffi）不再随四个平台的默认产物发布：要用 WebRTC 那一档的时候，设置页「电脑投屏」的「WebRTC 依赖」卡按一个按钮，从本项目的发布页取对应平台的那一条依赖包，解到配置目录里按这台机器的解释器分键的那个目录，并从那里导入——所以选完这一档不需要重启 Macast，那句话是被测出来的性质而不是承诺。这张卡上有两个见证者，而且它们故意要能不一致：「已落盘」问那份清单文件在不在，「已可用」问刚才这一次是不是真的导入成功了；包躺在盘上却 import 不起来（缺系统库、架构不对）是真实存在的一种状态，把安装说成成功而画面仍然黑着才是谎话。移除把那棵树挪进配置目录的 .trash 而不是删掉；如果那个目录不是我们种的而 aiortc 仍然导入得起来，它会拒绝并念出那个包真正的来路，让你用 pip 去卸它。这一档仍然没有真电视与跨机验证过。「一键安装」已经在打包产物上按过了，而那一次按暴露了两个出厂缺陷，0.28 修的就是它们：一是重启之后那棵已经落盘的树不再被挂回搜索路径，于是卡片说「已安装」而导入说「没有这个模块」，唯一的补救是再下二十六兆；现在每一次特征探测都先把我们那个目录挂回去（每个进程一次，不是每秒一次）。二是下载进度：原来那一条阶梯只会答「正在下载」，进度条钉在 3% 不动，而一条中途断掉的流会被当成一份成功——现在它按真的字节数走（源站不给长度就只报已下载多少 MB，不编一个分母），断流则明确说「下到 X MB 就断了（整份是 Y MB），重试会整份重来」，并把失败的那次落点目录清空。另一件事修在打包侧而不是这里：Windows 的默认产物从 0.27 起不再携带 CPython 的稳定 ABI 转发库，而那棵树里每一个 .pyd 都链接它，所以应用内装好的依赖在真机上加载失败——构建现在把这一个文件放回去，并在构建完成后打开产物清单核对它真的在里面。</macast.desc>
 #
 # Why: Macast is a receiver -- everything it plays was pushed to it. This
 # plugin turns it around for one case: cast what is on this Mac's display,
@@ -150,7 +150,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.27'
+PLUGIN_VERSION = '0.28'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -9652,6 +9652,11 @@ _WEBRTC_IMPORT_ERROR = None
 _WEBRTC_LOGGED_ERROR = None
 #: The viewer track class, built once from the real aiortc base class.
 _WEBRTC_VIEWER_CLASS = None
+#: Whether this process has already tried to re-attach a landed extras tree.
+#: One attempt per process, not one per probe: the card polls the probe about
+#: once a second, and a machine with nothing installed would otherwise stat the
+#: config directory forever. See `_restore_extras_path`.
+_EXTRAS_PATH_RESTORED = False
 
 # -- the extras bundle, and the one button that fetches it -------------------
 #
@@ -9727,8 +9732,16 @@ def _webrtc_modules():
     "is this target usable" is answered by actually loading the packages,
     the same way `has_hardware_encoder` answers by asking ffmpeg rather than by
     trusting a table.
+
+    The restore call underneath it is what makes the promise in the comment
+    above `_WEBRTC_MODULES` ("install it, come back, no restart") survive the
+    next launch: `extras_state()` reports `installed` from a file on disk, so
+    without it a restarted Macast says 已安装 while the probe says
+    `No module named 'aiortc'`, and the only recovery the card offers is
+    another twenty-six megabyte download for a tree that is already here.
     """
     global _WEBRTC_MODULES, _WEBRTC_IMPORT_ERROR, _WEBRTC_LOGGED_ERROR
+    _restore_extras_path()
     try:
         import aiortc
         import av
@@ -9884,24 +9897,38 @@ def _extras_tmpdir():
 
 
 def _fetch_extras_zip(url, dest_path, on_bytes=None):
-    """Download one candidate address to `dest_path`. Returns True on success."""
+    """Download one candidate address to `dest_path`. (ok, refusal).
+
+    `on_bytes(received, total)` is the card's progress feed. `total` comes from
+    the response's own `Content-Length` and may be 0 -- an absent header is a
+    slower bar, not a failure. The number is why this returns a sentence
+    instead of a bool: a stream that stops early used to look like a success
+    here (`got > 0`), and the user's next line was a sha256 complaint about a
+    file we truncated ourselves.
+    """
     try:
         import requests
     except ImportError:
         logger.info('requests is not importable; the extras cannot be fetched')
-        return False
+        return False, '这个 Macast 没有带 requests'
     try:
         response = requests.get(url, stream=True, timeout=60,
                                 headers={'User-Agent': PKG_USER_AGENT})
     except Exception as exc:
         logger.info('the extras download failed (%s): %s', url, exc)
-        return False
+        return False, '%s: %s' % (type(exc).__name__, exc)
     got = 0
+    total = 0
+    why = ''
     try:
         if response.status_code != 200:
             logger.info('the extras download answered %s: %s',
                         response.status_code, url)
-            return False
+            return False, '依赖包那边回了 %s' % response.status_code
+        try:
+            total = int(response.headers.get('Content-Length') or 0)
+        except (TypeError, ValueError):
+            total = 0
         with open(dest_path, 'wb') as handle:
             for chunk in response.iter_content(chunk_size=65536):
                 if not chunk:
@@ -9909,13 +9936,23 @@ def _fetch_extras_zip(url, dest_path, on_bytes=None):
                 handle.write(chunk)
                 got += len(chunk)
                 if on_bytes is not None:
-                    on_bytes(got)
+                    on_bytes(got, total)
     except Exception as exc:
         logger.info('the extras download broke midway: %s', exc)
-        return False
+        why = '%s: %s' % (type(exc).__name__, exc)
     finally:
         response.close()
-    return got > 0
+    if why:
+        return False, '下到 %.1f MB 就断了（%s），重试会整份重来' % (
+            got / 1048576.0, why)
+    if not got:
+        return False, '一个字节都没给'
+    if total and got != total:
+        # A body shorter than the header advertised is a dead stream that
+        # raised nothing -- say which one, and that the retry starts over.
+        return False, ('下到 %.1f MB 就断了（整份是 %.1f MB），重试会整份重来'
+                       % (got / 1048576.0, total / 1048576.0))
+    return True, ''
 
 
 def _verify_extras_zip(zip_path, abi=None, version=None):
@@ -10043,6 +10080,47 @@ def _extras_landing(landing):
     importlib.invalidate_caches()
 
 
+def _extras_installed(landing):
+    """True when this ABI's slot holds a bundle we vouched for.
+
+    One reader for that question, because two would drift: the card's
+    `installed` and the restore below must never disagree about whether a tree
+    is ours to put back on `sys.path`.
+    """
+    return os.path.isfile(os.path.join(landing, EXTRAS_MANIFEST_NAME))
+
+
+def _restore_extras_path():
+    """Re-attach a previously installed tree, the first time anything asks.
+
+    `_extras_landing` was the only writer of `sys.path`, and the only thing that
+    ever called it was the install's land step -- one process, once. So the
+    landing was a promise about the *rest of this session*: press the button,
+    the WebRTC target works, restart Macast, and the tree in
+    `<config>/webrtc_extras/<abi>` is orphaned. The card then reads 已安装 with
+    `ready` false, which is the exact lie §4.8 was written to end, and the only
+    button next to it re-downloads twenty-six megabytes to do a `sys.path`
+    insert.
+
+    Asking from inside the probe is what makes the two answers agree: `ready` is
+    defined by this import, so the restore happens before the question is
+    answered, on the install path, on the card's poll, and on the next
+    `Output=webrtc` start. One attempt per process, and only when the manifest
+    is there -- after an uninstall the tree has moved to `.trash`, so there is
+    nothing to re-attach and this stays out of the way.
+    """
+    global _EXTRAS_PATH_RESTORED
+    if _EXTRAS_PATH_RESTORED:
+        return
+    _EXTRAS_PATH_RESTORED = True
+    try:
+        landing = extras_dir()
+        if os.path.isdir(landing) and _extras_installed(landing):
+            _extras_landing(landing)
+    except Exception as exc:            # a config dir we cannot read is not a crash
+        logger.info('the WebRTC extras tree could not be re-attached: %s', exc)
+
+
 def install_webrtc_extras(progress=None):
     """(ok, message): fetch the bundle for this ABI and make it importable.
 
@@ -10075,17 +10153,27 @@ def install_webrtc_extras(progress=None):
         last_error = ''
         for url in urls:
 
-            def _on_bytes(got):
-                progress.sub(at, None, '已下载 %.1f MB' % (got / 1048576.0))
+            def _on_bytes(got, total):
+                # `sub(step, None, …)` leaves the step at its opening guess --
+                # 0.15 of one step out of five, which reads as 3% forever. That
+                # was this bar for the whole download of a twenty-six megabyte
+                # bundle: the bytes were arriving, the fraction was thrown away.
+                note = '已下载 %.1f MB' % (got / 1048576.0)
+                frac = None
+                if total:
+                    note += ' / %.1f MB' % (total / 1048576.0)
+                    frac = min(1.0, got / float(total))
+                progress.sub(at, frac, note)
 
-            if _fetch_extras_zip(url, zip_path, _on_bytes):
+            ok, why = _fetch_extras_zip(url, zip_path, _on_bytes)
+            if ok:
                 fetched = True
                 break
-            last_error = url
+            last_error = '%s（%s）' % (why, url)
         if not fetched:
             return _extras_refuse(
                 progress, at, tmp,
-                '依赖包没下载下来（%s）。检查一下网络，或者在设置页开启国内镜像。'
+                '依赖包没下载下来：%s。检查一下网络，或者在设置页开启国内镜像。'
                 % last_error)
         progress.leave(at, name)
 
@@ -10197,8 +10285,7 @@ def extras_state():
     asset = extras_asset_name(abi)
     ready = _webrtc_modules() is not None
     landing = extras_dir(abi)
-    installed = bool(asset) and os.path.isfile(
-        os.path.join(landing, EXTRAS_MANIFEST_NAME))
+    installed = bool(asset) and _extras_installed(landing)
     with _EXTRAS_LOCK:
         progress = _EXTRAS_PROGRESS
     snap = progress.snapshot() if progress is not None else {

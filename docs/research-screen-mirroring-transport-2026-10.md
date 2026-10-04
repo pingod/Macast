@@ -865,8 +865,10 @@ created deleted (only `DOpusRT_RunStd_{…}`, not ours, remains), 0 surviving in
 verified. `D:\Downloads\lag` and the settings backup taken before the first change
 (`macast-cfg-backup-20261003-132130`, sha `f05a7098…`, 6115 B) are still listed by `dir /b`, but
 `type` on the backup now returns rc 1 / 0 bytes — **it could not be read back**, so the one
-thing still owed to that machine is a comparison of its current `Api_Token`
-(`winlatprobe00001`, which looks like a probe-era value written into his real settings) against
+thing still owed to that machine is a comparison of its current `Api_Token` (a value that looks
+like it was written into his real settings during the probe era; it is deliberately not
+transcribed here — read it on that machine's settings page, and build any command that needs it
+from the file rather than from this document) against
 that backup, and a restore if it differs. Nothing further was touched there.
 
 **Provenance of the numbers in this section.** The instrument and its scorers were a throwaway

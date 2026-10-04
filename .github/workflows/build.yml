@@ -619,6 +619,28 @@ jobs:
           rm -rf bin/doc bin/installer bin/*.bat bin/mpv.com mpv.7z
           ls -la bin/
 
+      - name: Locate the CPython stable-ABI forwarder
+        shell: bash
+        run: |
+          # Every cp3xx Windows wheel's `.pyd` links `python3.dll` (PEP 384), not
+          # `python312.dll`, and CPython loads that forwarder itself before any
+          # extension module -- from beside `python312.dll`, from the app dir, or
+          # from `<prefix>\DLLs` (`Python/dynload_win.c`). PyInstaller only packs
+          # a DLL something in its graph needs, so once P9 took `aiortc`/`av` out
+          # of this binary the forwarder left with them: the v0.18 TOC has
+          # `python3.dll`, the v0.20 TOC has zero, and an extras tree landed by
+          # the settings page then fails its `.pyd` loads with Win32 126. This
+          # step puts the one file back; it is not optional, so it fails here
+          # rather than shipping the same broken artefact a third time.
+          PY3DLL=$(python -c "import os,sys;print(os.path.join(os.path.dirname(sys.executable),'python3.dll'))")
+          if [ ! -f "$PY3DLL" ]; then
+            echo "python3.dll is not beside the interpreter ($PY3DLL)."
+            echo "This Windows job must ship the forwarder the extras' .pyd files link."
+            exit 1
+          fi
+          echo "PY3DLL=$PY3DLL" >> "$GITHUB_ENV"
+          ls -l "$PY3DLL"
+
       - name: Build with PyInstaller
         shell: bash
         run: |
@@ -628,6 +650,7 @@ jobs:
             --add-data "macast/plugins;macast/plugins" \
             --add-data "macast/xml;macast/xml" \
             --add-binary "bin;bin" \
+            --add-binary "$PY3DLL;." \
             --collect-all cherrypy \
             --collect-all lxml \
             --collect-all zeroconf \
@@ -653,6 +676,30 @@ jobs:
             --hidden-import=macast.plugins.renderer.pi_fm \
             --hidden-import=macast.plugins.protocol.nirvana \
             Macast.py
+
+      - name: Verify the forwarder actually shipped
+        shell: bash
+        run: |
+          # The step above only proves we *asked* PyInstaller to include it. AGENTS
+          # §4.3 is explicit that CI green does not mean the artefact works, and
+          # this artefact is the one that got shipped broken twice: v0.20 built
+          # green and its archive held no `python3.dll`, so every `.pyd` in a
+          # settings-page-installed extras tree failed to load on the user's
+          # machine. So ask the built binary itself, and fail here if it says no.
+          python - <<'PY'
+          import os
+          import sys
+          from PyInstaller.archive.readers import CArchiveReader
+
+          path = os.path.join("dist", "macast.exe")
+          names = dict(CArchiveReader(path).toc)
+          hit = [n for n in names if os.path.basename(n).lower() == "python3.dll"]
+          if not hit:
+              print("dist/macast.exe holds no python3.dll (%d entries)." % len(names))
+              print("The extras' .pyd files link it and will fail with Win32 126.")
+              sys.exit(1)
+          print("python3.dll is in the artefact: %s" % ", ".join(sorted(hit)))
+          PY
 
       - name: Resolve version
         id: version
