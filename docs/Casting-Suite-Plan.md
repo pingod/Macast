@@ -499,7 +499,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | P7 控制面搬到网页 | ✅ 已交付（**打桩 + 真实例浏览器 + 真产物**；投屏链路本身仍未碰过真电视） | 已提交 `224d6d6`：删除 `macast/mirror_console.py`（1931 行）与 `macast/config_window.py`（229 行），新增 `macast/mirror_view.py`（252 行），`screen_mirror` 0.10 → 0.11（净 -341 行），`macast/xml/setting.html` +436 行（新增「电脑投屏」页签），`Macast.py` / `macast/gui.py` / `macast/macast.py` 一起瘦身，Part 35 整段重写为 115 条 | **1187/1187**、`pyflakes` 干净；A/B 两轮（删端点那一行 → 1186；删"镜像中预览让位"六行 → Part 35 三条红）；真实例 + 真浏览器抓到**三条**打桩抓不到的缺陷；产物 `bash scripts/build_macos_arm.sh` 真启动并验过页签在不在。细节与那三条缺陷见下面的 §6.4 |
 | P8 网页地址投屏（**本规划之外的一条功能，2026-10-03 由用户直接提出**） | ✅ 已交付（**真站解析验过一次；真电视一台都没碰过**） | 单个 `feat+release` 提交，带 tag `v0.18.0`（应用版本两处 0.17.0 → 0.18.0）：新增 `macast/media_resolve.py`（解析层，纯 stdlib）+ `macast/media_relay.py`（中转层）+ `macast/protocol.py` 两个 POST（`resolve-page` / `cast-resolved`，都是 `GATE_MANAGEMENT`）与一个 GET（`query=resolve-status`）+ `macast/xml/setting.html`「状态」tab 的新卡片与帮助段 + **Part 59（132 条）**与 Part 44 里把帮助那几句绑回三个文件的用例 + 文档（`docs/Casting-Suite.md` §2b、AGENTS §3/§4.14/§6/§9、本文 §5/§6） | 见下面的 §6.5 —— 取证（castor 精读 + bilibili 真站）、七个定点变异体 1/1/1/3/1/2/2、以及一次**测试自己**的崩（`check()` 的 detail 传成 `None` ⇒ Part 59 后半 8 条根本没跑） |
 | P8.1 网页地址投屏第二轮（**同一张卡片上的四件事，2026-10-04 由用户提出并逐项拍板**） | ✅ 代码 + 用例 + 文档已交付（**三件验证仍欠着**：merge 的真站复验、设备下拉与 cookie 那块的三档真浏览器验收、投给一台真电视） | 单个 `feat+release` 提交，带 tag `v0.19.0`（应用版本两处 0.18.0 → 0.19.0）：① `screen_mirror` 的 `MENU_HIDDEN` —— 菜单栏 Renderers 组里不再有「电脑投屏」那一行（控制面在 P7 就搬进网页了，见 §6.4；已持久化成 `Macast_Renderer = Screen Mirror` 的安装仍然按名字命中，`set_media_url` 的 Bridge 让位照旧）；② `plan()` 新增第三种判决 `merge` + `pair_tracks()`（DASH 的画面行配上声音行，第二条输入**带自己的请求头**）；③ `visible()` 把"度量过、是活动画面、既没有声音也没有可配的声音地址"的行**收起**并在旁边报出条数（**先合并、后过滤**是用户钉的顺序，反过来 bilibili 那张卡片是空的）；④ `looks_like_url` / `extract_share_urls`（整段分享文案）、`engine_note()`（引擎拒绝原话第一行 + `needs_cookies` 词表）、cookie jar（`resolve_cookies.txt`，0600，只在门控内读写，页面只报条数）、`_cast_targets()` + `cast_local_file.target_push`（设备下拉，第一项永远是本机）+ `macast/xml/setting.html` 同一张卡片新增的两块 + **Part 59 132→174 条**（新 R 段）+ Part 36 的 13 条菜单栏用例 + 文档（`docs/Casting-Suite.md` §2b/§5/§6、AGENTS §2/§3/§4.14/§6/§9、本文 §5/§6.5/§6.6） | 见下面的 §6.6 —— 十七个定点变异体（v0.18 七个 1/1/1/3/1/2/2 + v0.19 十个 1/3/1/4/1/1/2/7/2/2），两轮"0 红"的自我修正（`_local_target()` 的名字写死那一版第一版用例是**自证**的），以及**写文档时抓到的一条真 bug**（cookie jar 把 `#HttpOnly_` 那一行读成注释） |
-| P9 包体瘦身（**WebRTC 的五个可选包移出默认产物**，2026-10-04 由用户提出并选定形状） | ✅ 代码 + 用例 + 构建脚本已交付，随 **v0.20.0**（**两处真机验收仍欠着**：Mac 的打包 `.app` 里按一次按钮；`.68` 装一次并重跑跨机 WebRTC —— 后者要用户点头。**CI 还没发布过任何一个 extras 资产**，所以"别人拉得到吗"这一问本轮只能答到"仓库是公开的、匿名 Range 请求拿得到字节"这一层。**页面那一半今天走过了**（临时实例 + `meta_path` 藏包，28 项判定、三档截图），它逼出一条产品缺陷：卡片在成功收尾时显示的仍是**最后一步的标签**，真正的新闻只活在一次性通知里 —— 现已由 `_SetupProgress.finish(ok, message)` 把答案写进卡片，移除另起一条自己的两步机，回归用例 **Part 60/C2（9 条）**只问卡片不问函数返回值） | 单个 `feat+release` 提交（应用版本两处 0.19.0 → 0.20.0）：新增 `scripts/build_webrtc_extras.py`（四平台各打一个 extras zip：`manifest.json` 在根，zip 内**只有清单列出的那些文件**、没有目录条目）；`.github/workflows/build.yml` 四个平台 job 各加一次 extras 构建与一个 Release 资产上传，三个 PyInstaller job 的 pip 列表与 `--hidden-import` 摘掉 `aiortc` / `av` / `cryptography` / `pylibsrtp` / `cffi`；`scripts/setup_py2app.py` 的 `packages` / `includes` 同步摘掉，`av` 那条"整目录拷贝才让 `@loader_path` 原样解析"的说明改写成"现在随 extras zip 走"；`macast/plugin_repo.py` 的 `EXTRAS_PACKAGES` / `extras_asset_name()`（**四个孔**：os、arch、cpython tag、版本）/ `extras_urls()`（镜像在前、直链兜底、去重）/ `extras_describe()`；`screen_mirror` 的应用内安装器（`extras_abi` / `extras_asset_name` / `extras_dir` / `extras_manifest` / `check_manifest` / `install_webrtc_extras` / `uninstall_webrtc_extras` / `extras_state` / `start_extras_install`，五步 download → verify → unpack → land → probe，落点 `SETTING_DIR/webrtc_extras/<os>-<arch>-<pytag>`，`sys.path` **插到最前面**而不是追加）；`protocol.py` 两条 `POST_ROUTES`（`install-webrtc-extras` / `uninstall-webrtc-extras`，门 `GATE_CODE` —— 它落的是**能被 import 的代码**，所以本机不算数，见 AGENTS §4.7b）；`mirror_view.py` 的 `extras` 卡与 `extras_step_marks`（`VIEW_VERSION` = 5）；`macast/xml/setting.html` 的「WebRTC 依赖」卡与两个按钮 + **Part 60（A / B / C / C2 / D 五段，65 条）**与 Part 56/D 四条断言翻面 | 见下面的 §6.7 —— 全套 **2305/2311**（红的 6 条是 Part 34 的来源台账，本克隆缺 fork 点对象，见 AGENTS §4.12）；同一份代码在 Linux 容器里 `--ci` **2304/2310 通过**，红集同样是那 6 条（总数差 1 是**构成**差：Part 19 的 8443 在这台 Mac 上被用户实例占着、Part 37 有一段按声音路由表参数化，见 AGENTS §2），`pyflakes` 干净；构建脚本真跑过一次，产物 `Macast-WebRTC-extras-macos-arm64-cp312-v0.20.0.zip` = **26,884,928 字节**，它自己的清单自检要求 `macast_version` 由调用方告知（`version=` 那道接缝，Part 60/B 两条用例分别问"没被告知时拒绝、且把两边值都念出来"与"被告知时接受"）。**同一天翻掉的一条设计前提**：§6.7 原本写着「私有仓库 ⇒ 那个按钮在别人机器上注定 404」，实测**仓库是公开的**（四条匿名探针，外加对 v0.19.0 资产的匿名 `Range: bytes=0-1023` 拿到 **206 / 1024 字节**），所以那一半代价不存在，卡片上也刻意没有为它写道歉文案 |
+| P9 包体瘦身（**WebRTC 的五个可选包移出默认产物**，2026-10-04 由用户提出并选定形状） | ✅ 代码 + 用例 + 构建脚本已交付，随 **v0.20.0**（**两处真机验收仍欠着**：Mac 的打包 `.app` 里按一次按钮；`.68` 装一次并重跑跨机 WebRTC —— 后者要用户点头。**CI 已经把四条 extras 资产发出来了**（v0.20.0 的 Release 共 8 个资产：4 个平台产物 + 4 条 extras zip，各自带 digest；macos 那条 26,884,399 字节），而"别人拉得到吗"这一问今天答到了**整份字节**那一层：镜像前缀那条地址跑满 26,884,399 字节、`shasum -a 256` 与 Release 自己的 digest 逐字一致（直链在这台机器上 0 字节），随后**那份已发布的包**在打包形状仿真实例里走完五步安装并双 PASS（见本节末「一次成功的安装」）。**页面那一半今天走过了**（临时实例 + `meta_path` 藏包，28 项判定、三档截图），它逼出一条产品缺陷：卡片在成功收尾时显示的仍是**最后一步的标签**，真正的新闻只活在一次性通知里 —— 现已由 `_SetupProgress.finish(ok, message)` 把答案写进卡片，移除另起一条自己的两步机，回归用例 **Part 60/C2（9 条）**只问卡片不问函数返回值） | 单个 `feat+release` 提交（应用版本两处 0.19.0 → 0.20.0）：新增 `scripts/build_webrtc_extras.py`（四平台各打一个 extras zip：`manifest.json` 在根，zip 内**只有清单列出的那些文件**、没有目录条目）；`.github/workflows/build.yml` 四个平台 job 各加一次 extras 构建与一个 Release 资产上传，三个 PyInstaller job 的 pip 列表与 `--hidden-import` 摘掉 `aiortc` / `av` / `cryptography` / `pylibsrtp` / `cffi`；`scripts/setup_py2app.py` 的 `packages` / `includes` 同步摘掉，`av` 那条"整目录拷贝才让 `@loader_path` 原样解析"的说明改写成"现在随 extras zip 走"；`macast/plugin_repo.py` 的 `EXTRAS_PACKAGES` / `extras_asset_name()`（**四个孔**：os、arch、cpython tag、版本）/ `extras_urls()`（镜像在前、直链兜底、去重）/ `extras_describe()`；`screen_mirror` 的应用内安装器（`extras_abi` / `extras_asset_name` / `extras_dir` / `extras_manifest` / `check_manifest` / `install_webrtc_extras` / `uninstall_webrtc_extras` / `extras_state` / `start_extras_install`，五步 download → verify → unpack → land → probe，落点 `SETTING_DIR/webrtc_extras/<os>-<arch>-<pytag>`，`sys.path` **插到最前面**而不是追加）；`protocol.py` 两条 `POST_ROUTES`（`install-webrtc-extras` / `uninstall-webrtc-extras`，门 `GATE_CODE` —— 它落的是**能被 import 的代码**，所以本机不算数，见 AGENTS §4.7b）；`mirror_view.py` 的 `extras` 卡与 `extras_step_marks`（`VIEW_VERSION` = 5）；`macast/xml/setting.html` 的「WebRTC 依赖」卡与两个按钮 + **Part 60（A / B / C / C2 / D 五段，65 条）**与 Part 56/D 四条断言翻面 | 见下面的 §6.7 —— 全套 **2305/2311**（红的 6 条是 Part 34 的来源台账，本克隆缺 fork 点对象，见 AGENTS §4.12）；同一份代码在 Linux 容器里 `--ci` **2304/2310 通过**，红集同样是那 6 条（总数差 1 是**构成**差：Part 19 的 8443 在这台 Mac 上被用户实例占着、Part 37 有一段按声音路由表参数化，见 AGENTS §2），`pyflakes` 干净；构建脚本真跑过一次，产物 `Macast-WebRTC-extras-macos-arm64-cp312-v0.20.0.zip` = **26,884,928 字节**，它自己的清单自检要求 `macast_version` 由调用方告知（`version=` 那道接缝，Part 60/B 两条用例分别问"没被告知时拒绝、且把两边值都念出来"与"被告知时接受"）。**同一天翻掉的一条设计前提**：§6.7 原本写着「私有仓库 ⇒ 那个按钮在别人机器上注定 404」，实测**仓库是公开的**（四条匿名探针，外加对 v0.19.0 资产的匿名 `Range: bytes=0-1023` 拿到 **206 / 1024 字节**），所以那一半代价不存在，卡片上也刻意没有为它写道歉文案 |
 
 ### 6.1 P6 第四批明细（commit `839b208`，已推送）：端到端冒烟 + "保持私有"决定的落地
 
@@ -1055,28 +1055,57 @@ WebRTC 依赖」，源码用户在运行 Macast 的那个 Python 里执行 `pip 
   里那些"索引对别人是坏的 / 官方只承诺手动安装 / `INDEX_PRIVATE` 是预期信号"的句子，
   前提同样已经变了 —— 本轮把它们改成**按今天测到的状态**说，历史数字（9 条固定链接里 5 条还 200、
   4 条已 404）保留为当时的实测。
-- **国内镜像对 Release 资产仍没有验过**：资产下载走 `github.com` → `objects.githubusercontent.com`
-  重定向，而 §4.6 那三个 host 前缀规则是从索引与 raw 量出来的。`extras_urls()` 因此**把直链留在
-  镜像后面兜底**（一个死掉的代理不该是致命的），但"ghproxy 代理 `github.com` 的 release 下载到底
-  行不行"这句话在本轮**仍然是转述不是实测** —— 卡片与这里都别把它写成已验证。
-- **真机验收两处**：这台 Mac 的打包 `.app` 装一次并真开一路 WebRTC 镜像；`.68` 的打包 `.exe`
-  装一次并重跑 §4.8 那组跨机数 —— **动那台机器要先征求用户同意**。这两处要等 CI 真把四个 extras
-  资产发出来才有东西可装，所以它们的正确状态是**欠着**，不是"过了"。
+- **国内镜像代理 Release 资产：这一句本轮从转述变成了实测**（2026-10-04 本机）。原判据是"资产下载
+  走 `github.com` → `objects.githubusercontent.com` 重定向，而 §4.6 那三个 host 前缀规则是从索引与
+  raw 量出来的"。今天同一份资产两条路都打了：
+  **直链 `github.com/.../releases/download/v0.20.0/Macast-WebRTC-extras-macos-arm64-cp312-v0.20.0.zip`
+  在这台机器上回 0 字节（curl 退出码 000；9565 那个代理端口开着却 `SSL_ERROR_SYSCALL`）**，
+  而 `extras_urls()` 排在它前面的那条 `ghproxy.net` 前缀**服务了整份文件** —— 一次匿名
+  `Range: bytes=0-1023` 先拿到 **206 / 1024 字节**，随后分段续传跑满 **26,884,399 字节**，
+  `shasum -a 256` 与 Release 自己那条 `digest`（`085e322c…21ff6018`）**逐字一致**。
+  代价也量出来了：本会话盯着它跑的那一段是 **20:24 的 13,166,344 字节 → 20:43 的 26,884,399 字节**
+  ≈ **0.7 MB/min**，而且它是靠 `-C -` 续传才跑完的（代理会在中段断流，`fetch.log` 里那七行
+  attempt 就是断流记录 —— **这一句说的是探针**：产品自己的 `_fetch_extras_zip` 故意不续传，
+  所以真用户遇到断流听到的是"没下载下来，检查一下网络或开启镜像"，再来一次是整份重下）。所以两条结论：
+  ① 「镜像在前、直链兜底」那个顺序**不需要改**，今天它恰好是这台机器上唯一走得通的那条；
+  ② 但也别把它读成"镜像快" —— 对**打包安装的国内用户**这句话是"能装上，慢"，卡片与文档
+  都不许把它写成一条加速手段。重定向的第二跳由代理自己完成，我们从外面看不见，
+  所以被验证的是"这条地址交出正确字节"，不是"`objects.githubusercontent.com` 可达"。
+- **「一次成功的安装」也不再是欠着的那件事了 —— 而且用的是发布出去的那份字节**（2026-10-04）：
+  上一轮用的还是本地构建的 zip，这一轮把上面那份**已发布资产**（sha256 已对上 Release 的 digest）
+  原样喂进同一个打包形状仿真实例（临时配置目录 + 58999 + `meta_path` 拦掉这台 venv 里真实存在的
+  `aiortc`/`av`，只允许从落盘树里导入），走产品自己的安装器：五步 download → verify → unpack →
+  land → probe **全绿**，卡片答案是「已安装 WebRTC 依赖（1075 个文件）」，`ready` 与 `installed`
+  一起翻真，ABI 位上 1,076 个文件（1075 + 清单）；随后按「移除」，答案落在卡片上、点名
+  `.trash/20261004-204506/macos-arm64-cp312`，两个见证者翻回否，树可恢复。**双 PASS**。
+  一句别读错的方向：`ready` 之所以只能由这份包自己满足，是因为拦截器对 11 个根名一律抛
+  `ImportError`，除非 `spec.origin` 落在那棵树里 —— 所以"绿"证明的是**CI 那份包内容完整**，
+  不是仿真放水。顺带一条构建事实：CI 那份 macos 资产 **26,884,399 字节**，本地构建那份
+  26,884,928 —— 两个数字都真实、都不该被拿去和另一个比，因为校验的对象是**清单与文件自身**
+  （逐文件 sha256），不是跨构建的字节同一性。
+- **真机验收两处仍然欠着**：这台 Mac 的打包 `.app` 装一次并真开一路 WebRTC 镜像；`.68` 的打包
+  `.exe` 装一次并重跑 §4.8 那组跨机数 —— **动那台机器要先征求用户同意**。这两处**不再**是"等 CI
+  把 extras 资产发出来"（v0.20.0 的 Release 已经有四条：macos/linux×2/windows，各自带 digest），
+  而是等**换包**这件事本身：本机换 `.app` 会再要一次屏幕录制授权（AGENTS §8），所以那一按要连着
+  验收音频安装那一路，不是单独点一下。
 - **页面这一半今天（2026-10-04）走过了**：临时配置目录 + 错开端口的第二个实例，用 `meta_path`
   拦截器把这台 venv 里**真实存在**的 `aiortc`/`av` 藏起来，好让卡片读到打包产物上那个状态；
   28 项判定全过、零红、页面没有任何 JS 报错，520 / 1000 / 1680 三档各留初始与已落盘两张截图。
-  走过的是三条路，判据都是**卡片上渲染出来的字**：① 按「一键安装」，在没有资产的今天**必须**听到
-  一句实话（「下载依赖包失败：依赖包没下载下来（<那条 Release 地址>）…」），同时进度落回、
-  按钮重新可点、阶梯留着、scratch 清空 —— **这句失败是今天的正确行为**；② 手工把构建出来的包
+  走过的是三条路，判据都是**卡片上渲染出来的字**：① 按「一键安装」，听到一句实话（「下载依赖包失败：
+  依赖包没下载下来（<那条 Release 地址>）…」），同时进度落回、按钮重新可点、阶梯留着、scratch 清空
+  —— **那句失败在那一趟是正确的**：那一按跑在 tag 之前，四条 extras 资产还没有挂上 Release，链接
+  指向的东西根本不存在。今天同一条路只有在**镜像与直链都**拉不通时才该出现（本机实测：直链 0 字节 /
+  curl 000，加代理前缀那条能跑完整份 —— 见上一条）**；② 手工把构建出来的包
   放进 ABI 位而解释器仍导入不了 ⇒ 卡片必须把**两个见证者的分歧**印出来（「依赖包已落盘，
   现在还导入不了」）并同时给两个按钮；③ 按「移除」⇒ 答案落在卡片上、点名 `.trash` 里的新位置、
   两步阶梯、槽位清空、树仍可恢复、回到只有一个按钮。**这一趟逼出一条产品缺陷**：卡片那句
   `message` 在成功收尾时装的仍是**最后一步的标签**（「确认 aiortc 与 av 导入成功」），真正的新闻
   只活在 `notify()` 那条一闪而过的通知里 —— 安装与移除**两个方向**都是，所以 `_SetupProgress.finish`
   加了第二个参数、移除另起一条自己的两步机，并补了 **Part 60/C2（9 条）**，它只问**卡片**而不问
-  函数的返回值（C 段问的是后者）。**仍然欠着的只有"一次成功的安装"**：它需要真发布出来的资产
-  （①里失败的那条链接）加上把这台 Mac 的 `.app` 换成 v0.20.0 的产物，而换包会**再要一次屏幕录制
-  授权**（AGENTS §8）。源码跑的机器上 `ready` 为真、提示同时点名按钮与 `pip install aiortc av`
+  函数的返回值（C 段问的是后者）。**当时欠的"一次成功的安装"已经补上了**，用的就是①里那条链接
+  后来发布出去的字节（见上面「「一次成功的安装」也不再是欠着的那件事了」那条）：真下载 → 五步全绿 →
+  安装与移除双 PASS，走的还是这一趟那台打包形状仿真实例。**现在只欠把这台 Mac 的 `.app` 换成
+  v0.20.0 的产物再点一次**，而换包会**再要一次屏幕录制授权**（AGENTS §8）。源码跑的机器上 `ready` 为真、提示同时点名按钮与 `pip install aiortc av`
   那一行，是设计而不是缺陷（Part 60/D）。
 - **允许用户目录里的原生扩展，前提是没有 hardened runtime**：本机唯一的签名步骤是
   `build.yml:259` 的 `codesign --force --sign -`（ad-hoc，无 hardened runtime、无 library
