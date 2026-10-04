@@ -5,7 +5,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.28</macast.version>
+# <macast.version>0.29</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
@@ -150,7 +150,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.28'
+PLUGIN_VERSION = '0.29'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -4362,6 +4362,7 @@ class _SetupProgress(object):
         self.message = ''
         self.done = False
         self.ok = None
+        self._ever_shown = 0.0
 
     def _get(self, step_id):
         for st in self._steps:
@@ -4419,6 +4420,15 @@ class _SetupProgress(object):
                 self.message = '{}失败：{}'.format(st['label'], note)
 
     def overall(self):
+        """The bar's number, and it only ever goes up within one run.
+
+        A step that has not reported a fraction yet is credited a 15% guess, and
+        the first *real* fraction of a large download is smaller than that -- on
+        the packaged .app at v0.21.0 acceptance the card showed 3% for a moment,
+        then 0% once bytes started arriving. A bar that retreats reads as a run
+        that crashed, which is the exact misunderstanding this whole card exists
+        to avoid.
+        """
         weighted = {'done': 1.0, 'skipped': 1.0, 'fail': 1.0,
                     'running': None, 'pending': 0.0}
         total = 0.0
@@ -4431,7 +4441,10 @@ class _SetupProgress(object):
             if frac is None:
                 frac = st['pct'] if st['pct'] is not None else 0.15
             total += frac
-        return total / count if count else 0.0
+        pct = total / count if count else 0.0
+        if pct > self._ever_shown:
+            self._ever_shown = pct
+        return self._ever_shown
 
     def finish(self, ok, message=None):
         """Close the run, and -- when there is one -- make the *answer* the

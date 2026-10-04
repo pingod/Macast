@@ -495,7 +495,7 @@ except Exception:
 if SETTING_DIR:
     try:
         with open(os.path.join(SETTING_DIR, "macast_setting.json"),
-                  encoding="utf-8") as _fh:
+                  encoding="utf-8-sig") as _fh:
             transcode_dir = (json.load(_fh).get("Temp_Dir") or "").strip() \
                 or transcode_dir
     except Exception:

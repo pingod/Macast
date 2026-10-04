@@ -193,12 +193,23 @@ class Setting:
         """
         if not os.path.exists(SETTING_DIR):
             os.makedirs(SETTING_DIR)
-        with open(Setting.setting_path, "w") as f:
+        with open(Setting.setting_path, "w", encoding="utf-8") as f:
             json.dump(obj=Setting.setting, fp=f, sort_keys=True, indent=4)
 
     @staticmethod
     def load():
         """Load user settings
+
+        The read is `utf-8-sig` and the failure path is a rename, because both
+        of those carry a user's configuration that a plain `open(..., "r")` used
+        to lose. Our own writer escapes to ASCII, so the file is ASCII unless
+        something else touched it -- and PowerShell 5.1's
+        `Set-Content -Encoding UTF8`, and a hand edit saved as "UTF-8" by some
+        editors, both prepend a BOM. `json.load` raises on that byte, the old
+        code logged the exception and left `setting` empty, and the next
+        `save()` wrote defaults over the user's file: 36 keys became 11, the
+        API token regenerated, and nothing said so. A file we cannot read is
+        therefore moved aside intact before defaults are ever considered.
         """
         logger.info("Load Setting")
         if Setting.version is None:
@@ -212,12 +223,46 @@ class Setting:
                 Setting.setting = {}
             else:
                 try:
-                    with open(Setting.setting_path, "r") as f:
-                        Setting.setting = json.load(fp=f)
+                    with open(Setting.setting_path, "r", encoding="utf-8-sig") as f:
+                        loaded = json.load(fp=f)
+                    if not isinstance(loaded, dict):
+                        raise ValueError("顶层不是一个对象")
+                    Setting.setting = loaded
                     logger.info("Loaded settings from %s", Setting.setting_path)
                 except Exception as e:
-                    logger.error(e)
+                    Setting.setting = {}
+                    Setting.quarantine_unreadable_settings(e)
         return Setting.setting
+
+    @staticmethod
+    def quarantine_unreadable_settings(reason):
+        """Move an unreadable settings file aside, intact, before anything writes.
+
+        Returns the path it was moved to, or None when the rename itself failed
+        -- in which case the message says so, because that is the one shape
+        where a later save() really would overwrite the file.
+
+        The suffix loop is not decoration: this copy is the only surviving
+        record of the user's configuration, and two saves inside the same second
+        (`os.rename` replaces silently) would erase the first one. Same shape as
+        `.trash/` in `macast.py` and `screen_mirror.py`.
+        """
+        aside = "{}.corrupt-{}".format(Setting.setting_path,
+                                       time.strftime("%Y%m%d-%H%M%S"))
+        suffix = 0
+        while os.path.exists(aside):
+            suffix += 1
+            aside = "{}.corrupt-{}-{}".format(
+                Setting.setting_path, time.strftime("%Y%m%d-%H%M%S"), suffix)
+        try:
+            os.rename(Setting.setting_path, aside)
+        except OSError as move_error:
+            logger.error("设置文件读不懂（%s），而且移不开（%s）：在修好它之前不要保存设置，"
+                         "否则默认值会覆盖 %s", reason, move_error, Setting.setting_path)
+            return None
+        logger.error("设置文件读不懂（%s），本次从默认设置开始。原文件已完整保留在 %s，"
+                     "可以把自己的配置从那里搬回来。", reason, aside)
+        return aside
 
     @staticmethod
     def reload():

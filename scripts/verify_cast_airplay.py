@@ -28185,6 +28185,35 @@ try:
           and abs(_frozen60c3 - 0.03) < 1e-9 and _moving60c3 > _frozen60c3,
           'frozen=%r moving=%r' % (_frozen60c3, _moving60c3))
 
+    # The guess and the measurement are two different rulers, and for a big
+    # download the measurement starts *below* the guess: 0.15 of one step in
+    # five is 3%, while the first chunk of a 25.6 MB bundle is 0.4%. On the
+    # packaged .app at v0.21.0 acceptance the card read 3% for a moment and
+    # then 0% once bytes started arriving -- a bar that retreats reads as a run
+    # that crashed, which is the opposite of what this card is for.
+    _back60c3 = m60._SetupProgress(steps=m60.EXTRAS_STEPS)
+    _back60c3.enter('download', 'Macast-WebRTC-extras.zip')
+    _guess60c3 = _back60c3.snapshot()['pct']
+    _trace60c3 = [_guess60c3]
+    for _frac60c3 in (0.004, 0.05, 0.16, 0.6):
+        _back60c3.sub('download', _frac60c3, '已下载 %.1f MB / 25.6 MB'
+                      % (25.6 * _frac60c3))
+        _trace60c3.append(_back60c3.snapshot()['pct'])
+    check("Part 60/C3: and a bar never runs backwards -- the 0.15 guess is held "
+          "until the real fraction overtakes it, so the first bytes of a large "
+          "download do not drop the card from 3% to 0% the way the packaged "
+          ".app did at v0.21.0 acceptance, and the trace over a whole download "
+          "is non-decreasing and ends above where it started",
+          abs(_guess60c3 - 0.03) < 1e-9
+          and _trace60c3[1] == _guess60c3
+          and _trace60c3 == sorted(_trace60c3)
+          and _trace60c3[-1] > _guess60c3, str(_trace60c3))
+    check("Part 60/C3: and the clamp belongs to the run, not to the class -- a "
+          "fresh progress bar starts at 0, so a second install is not born "
+          "already at 3% (or worse: at 100%)",
+          m60._SetupProgress(steps=m60.EXTRAS_STEPS).snapshot()['pct'] == 0.0,
+          '')
+
     # A payload with real mass: `iter_content(chunk_size=65536)` has to hand
     # over several chunks before the fraction can be non-decreasing and reach
     # 1.0, and the zip is written stored, so the bytes here are the bytes there.
@@ -28712,6 +28741,320 @@ finally:
                                                           _saved60[1])
     utils.SETTING_DIR = _saved60[2]
     _shutil.rmtree(_tmp60, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Part 61: a settings file we cannot read must cost the user nothing.
+#
+# Found on 2026-10-05 while swapping the packaged .exe on the user's Windows
+# machine. One of my own probe scripts re-wrote his `macast_setting.json` with
+# PowerShell 5.1's `Set-Content -Encoding UTF8`, which prepends a BOM.
+# `json.load` raises on that one byte, the old `Setting.load()` logged the
+# exception and left `Setting.setting` empty, and the *next* `save()` wrote 11
+# defaults over his 36 keys -- including `Api_Token`, so every shortcut he had
+# configured was quietly re-keyed. Two contracts, both measured here instead of
+# argued: a BOM is an encoding detail we absorb, and a file that genuinely
+# cannot be parsed is moved aside whole before defaults are ever considered.
+# --------------------------------------------------------------------------
+print("\n=== Part 61: an unreadable settings file cannot eat the user's config ===")
+
+import ast as _ast61  # noqa: E402
+import logging as _logging61  # noqa: E402
+
+_tmp61 = _tempfile.mkdtemp(prefix="macast-part61-")
+_saved61 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+
+
+class _Grab61(_logging61.Handler):
+    def __init__(self):
+        _logging61.Handler.__init__(self)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.levelno, record.getMessage()))
+
+
+_grab61 = _Grab61()
+_lg61 = _logging61.getLogger(utils.logger.name)
+_lg61.addHandler(_grab61)
+_lvl61 = _lg61.level
+_lg61.setLevel(_logging61.DEBUG)
+
+# What his file actually looked like: real keys, one of them a token, and the
+# values are the ones the acceptance run read off that machine.
+_KEYS61 = {
+    "Api_Token": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+    "Macast_Renderer": "MPV Renderer",
+    "Github_CN_Mirror": True,
+    "DLNA_FriendlyName": "Macast(AMD-YES)",
+    "Temp_Dir": "D:/Macast/tmp",
+}
+# A real half-written file: 36 keys, cut off mid-value. `json.load` gives up on
+# this one, and no encoding change makes it parse -- so it is what the
+# quarantine path exists for.
+_BROKEN61 = ('{\n    "Api_Token": "a1b2",\n'
+             '    "Macast_Renderer": ').encode("utf-8")
+
+
+def _reset61():
+    utils.Setting.setting = {}
+    del _grab61.lines[:]
+
+
+def _corrupt_names61():
+    return sorted(n for n in os.listdir(_tmp61) if ".corrupt-" in n)
+
+
+try:
+    utils.SETTING_DIR = _tmp61
+    utils.Setting.setting_path = os.path.join(_tmp61, "macast_setting.json")
+    _os61 = utils.os  # the real module, so a stub can be put back by name
+    _json61 = json.dumps(_KEYS61, sort_keys=True, indent=4).encode("utf-8")
+
+    # -- A. what we can read -------------------------------------------------
+    _reset61()
+    with open(utils.Setting.setting_path, "wb") as _fh61:
+        _fh61.write(b"\xef\xbb\xbf" + _json61)
+    _back61 = utils.Setting.load()
+    check("Part 61: a settings file with a UTF-8 BOM loads with every key "
+          "intact -- PowerShell 5.1's `Set-Content -Encoding UTF8` and a hand "
+          "edit saved as \"UTF-8\" both write that byte, and losing the file "
+          "over it is how 36 keys became 11",
+          _back61 == _KEYS61, str(sorted(_back61))[:160])
+    check("Part 61: and the read really populated the place the app looks -- "
+          "asking for one of his keys by its SettingProperty answers with his "
+          "value, not with a fresh default (a token regenerated here is a "
+          "shortcut that stops working days later)",
+          utils.Setting.get(utils.SettingProperty.Api_Token, "")
+          == _KEYS61["Api_Token"],
+          repr(utils.Setting.get(utils.SettingProperty.Api_Token, ""))[:60])
+    check("Part 61: and a healthy read says nothing -- no log line about the "
+          "settings file, because the log the user opens is for problems",
+          [m for _l, m in _grab61.lines if "设置文件" in m] == [],
+          str(_grab61.lines)[:160])
+
+    _reset61()
+    with open(utils.Setting.setting_path, "wb") as _fh61:
+        _fh61.write(_json61)
+    check("Part 61: and the ordinary file still loads -- `utf-8-sig` is a "
+          "superset, so this fix cannot be the reason the normal path breaks",
+          utils.Setting.load() == _KEYS61, str(utils.Setting.setting)[:120])
+
+    # The round trip is the half that actually destroyed his config: a load
+    # that succeeds but a save that writes something else would pass all of
+    # the above.
+    _reset61()
+    with open(utils.Setting.setting_path, "wb") as _fh61:
+        _fh61.write(b"\xef\xbb\xbf" + _json61)
+    utils.Setting.load()
+    utils.Setting.save()
+    with open(utils.Setting.setting_path, "rb") as _fh61:
+        _after61 = _fh61.read()
+    check("Part 61: and load-then-save keeps every key -- the file on disk is "
+          "still his, strict UTF-8, with no BOM re-introduced (our writer "
+          "escapes to ASCII, so a BOM after this point means something else "
+          "touched it again)",
+          _after61[:3] != b"\xef\xbb\xbf"
+          and json.loads(_after61.decode("utf-8")) == _KEYS61,
+          repr(_after61[:40]))
+
+    # -- B. what we refuse, and what we keep ---------------------------------
+    _reset61()
+    with open(utils.Setting.setting_path, "wb") as _fh61:
+        _fh61.write(_BROKEN61)
+    _empty61 = utils.Setting.load()
+    _corrupt61 = _corrupt_names61()
+    _aside61 = (os.path.join(_tmp61, _corrupt61[0])
+                if len(_corrupt61) == 1 else None)
+    check("Part 61: a file that is not JSON starts from defaults AND is moved "
+          "aside whole in the same breath -- the empty dict is the safe state "
+          "for this run, the renamed file is the safe state for him",
+          _empty61 == {} and utils.Setting.setting == {} and _aside61,
+          str(_corrupt61))
+    check("Part 61: and the copy is byte-for-byte his, including the part that "
+          "broke us -- 'we could not parse it' is not 'it is junk'",
+          _aside61 and open(_aside61, "rb").read() == _BROKEN61, str(_aside61))
+    check("Part 61: and it is a move, not a copy -- the path the app writes to "
+          "is free, which is the only reason the next case can be about the "
+          "copy rather than about luck",
+          not os.path.exists(utils.Setting.setting_path),
+          str(os.listdir(_tmp61)))
+    utils.Setting.save()
+    check("Part 61: and saving defaults afterwards leaves that copy alone -- "
+          "his keys stay recoverable after the app has already written its own "
+          "over the path it uses",
+          open(_aside61, "rb").read() == _BROKEN61
+          and json.loads(open(utils.Setting.setting_path,
+                              encoding="utf-8").read()) != _KEYS61,
+          str(_aside61))
+    _err61 = [(l, m) for l, m in _grab61.lines if "设置文件" in m]
+    check("Part 61: the refusal is one ERROR the user keeps, names the copy it "
+          "made, and says what to do with it -- 'logged the exception' is not "
+          "an answer a person can act on",
+          len(_err61) == 1 and _err61[0][0] >= _logging61.ERROR
+          and os.path.basename(_aside61 or "!") in _err61[0][1]
+          and "搬回来" in _err61[0][1], str(_err61)[:220])
+
+    # A top-level list parses fine and would be installed as `setting`, which
+    # turns the next `Setting.get` into an AttributeError in a DLNA handler.
+    _reset61()
+    with open(utils.Setting.setting_path, "w", encoding="utf-8") as _fh61:
+        json.dump([1, 2, 3], _fh61)
+    _list61 = utils.Setting.load()
+    check("Part 61: and a file whose top level is not an object is refused the "
+          "same way -- json.load() succeeding is not the contract, a dict is",
+          _list61 == {} and len(_corrupt_names61()) == 2,
+          str(_corrupt_names61()))
+
+    # Two refusals inside one second: `os.rename` replaces silently, and this
+    # copy is the only surviving record of his configuration -- so the suffix
+    # loop (the same one `.trash/` uses) is load-bearing, not tidiness. The
+    # clock is frozen on the module global `utils.time`, which is what
+    # `quarantine_unreadable_settings` looks up, so the real `time` module
+    # stays untouched for everything else in this process.
+    _reset61()
+    _time61 = utils.time
+    utils.time = types.SimpleNamespace(strftime=lambda _fmt: "20261005-000000")
+    try:
+        for _round61 in range(3):
+            with open(utils.Setting.setting_path, "wb") as _fh61:
+                _fh61.write(_BROKEN61)
+            utils.Setting.load()
+        _frozen61 = sorted(n for n in _corrupt_names61()
+                          if "20261005-000000" in n)
+        _all61 = _corrupt_names61()
+    finally:
+        utils.time = _time61
+    check("Part 61: three refusals with the clock frozen keep three copies -- "
+          "identical stamps force the suffix, and no rename ever lands on a "
+          "copy that already holds somebody's settings",
+          _frozen61 == ['macast_setting.json.corrupt-20261005-000000',
+                        'macast_setting.json.corrupt-20261005-000000-1',
+                        'macast_setting.json.corrupt-20261005-000000-2'],
+          str(_frozen61))
+    check("Part 61: and every refusal this run made kept its own copy too -- "
+          "the two real-clock ones above, three frozen ones, five files, no "
+          "overwrite anywhere (the earlier second inside one second is why the "
+          "loop exists at all)",
+          len(_all61) == 5 and len(set(_all61)) == 5
+          and sum(1 for n in _all61 if n.endswith("-1")) == 2,
+          str(_all61))
+
+    # The one shape where defaults really would overwrite: the move failed.
+    # The stub goes on `utils.os`, not on the shared `os` module -- the same
+    # discipline as the frozen clock above, because the rest of this process
+    # has real files to move.
+    class _Os61(object):
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        def rename(self, src, dst):
+            _moves61.append(src)
+            raise OSError(1, "Operation not permitted")
+
+    _reset61()
+    with open(utils.Setting.setting_path, "wb") as _fh61:
+        _fh61.write(_BROKEN61)
+    _moves61 = []
+    utils.os = _Os61(_os61)
+    try:
+        _none61 = utils.Setting.load()
+    finally:
+        utils.os = _os61
+    _err61b = [m for _l, m in _grab61.lines if "不要保存设置" in m]
+    check("Part 61: when the file cannot even be moved, the log says 在修好它"
+          "之前不要保存设置 and names the path -- that is the single case where "
+          "a later save() destroys his config, so it must not read like the "
+          "benign one",
+          _none61 == {} and _moves61 == [utils.Setting.setting_path]
+          and len(_err61b) == 1 and utils.Setting.setting_path in _err61b[0],
+          str(_err61b)[:220])
+    check("Part 61: and a failed move leaves the file exactly where it was -- "
+          "no half-state where the app has 'started from defaults' with "
+          "nothing to recover from",
+          os.path.exists(utils.Setting.setting_path)
+          and open(utils.Setting.setting_path, "rb").read() == _BROKEN61,
+          str(os.listdir(_tmp61)))
+
+    # The same refusal, asked of the helper directly: `load()` delegates, so
+    # the answer it gave the app is this return value. A caller that got a
+    # path back could offer to open it; None is the honest answer when
+    # nothing was preserved.
+    _moves61b = []
+
+    class _Os61b(_Os61):
+        def rename(self, src, dst):
+            _moves61b.append(src)
+            raise OSError(1, "Operation not permitted")
+
+    utils.os = _Os61b(_os61)
+    try:
+        _none61b = utils.Setting.quarantine_unreadable_settings("测试")
+    finally:
+        utils.os = _os61
+    check("Part 61: and the helper says so in its return value too, not only "
+          "in the log -- a caller that got a path back can offer to open it, "
+          "and None is the honest answer when nothing was preserved",
+          _none61b is None and _moves61b == [utils.Setting.setting_path], '')
+
+    # -- C. the other reader of that file, and the pairing -------------------
+    # `scripts/selfcheck.py` reads the settings JSON as text on purpose (it
+    # must not touch `Setting`, §4.9). The same BOM makes it answer "no
+    # Temp_Dir" and then report free space for the wrong volume.
+    _src61 = open(os.path.join(REPO, "scripts", "selfcheck.py"),
+                  encoding="utf-8").read()
+    _lines61 = _src61.splitlines()
+    _at61 = [i for i, l in enumerate(_lines61) if "macast_setting.json" in l]
+    _block61 = "\n".join(l for i, l in enumerate(_lines61)
+                         if any(i >= j - 2 and i <= j + 3 for j in _at61))
+    check("Part 61: the preflight script that reads the same file reads it "
+          "utf-8-sig too -- one BOM, one behaviour, or the two readers "
+          "disagree about whether the user configured anything",
+          len(_at61) >= 1 and "utf-8-sig" in _block61, _block61[:200])
+
+    _utils61 = _ast61.parse(open(os.path.join(MACAST, "utils.py"),
+                                encoding="utf-8").read())
+
+    def _opens61(fn_name):
+        """Every open() inside Setting.<fn_name>, as (mode, encoding)."""
+        out = []
+        for node in _ast61.walk(_utils61):
+            if not (isinstance(node, _ast61.FunctionDef) and node.name == fn_name):
+                continue
+            for call in (n for n in _ast61.walk(node)
+                         if isinstance(n, _ast61.Call)
+                         and getattr(n.func, "id", "") == "open"):
+                const = [getattr(a, "value", None) for a in call.args]
+                kws = dict((k.arg, getattr(k.value, "value", None))
+                           for k in call.keywords)
+                out.append((kws.get("mode")
+                            if len(const) < 2 else const[1],
+                            kws.get("encoding")))
+        return out
+
+    check("Part 61: the pairing is structural, not lucky -- load() opens "
+          "utf-8-sig and save() opens with an explicit encoding on both sides. "
+          "A reader that absorbs a BOM next to a locale-dependent writer is "
+          "the same bug one release later on a machine whose ANSI codepage is "
+          "not UTF-8 (cp936 on this one)",
+          ("r", "utf-8-sig") in _opens61("load")
+          and len(_opens61("save")) == 1 and _opens61("save")[0][1],
+          "load=%r save=%r" % (_opens61("load"), _opens61("save")))
+except Exception as _e61:
+    check("Part 61 runs", False, "{}: {}".format(type(_e61).__name__, _e61))
+finally:
+    _lg61.setLevel(_lvl61)
+    try:
+        _lg61.removeHandler(_grab61)
+    except Exception:
+        pass
+    utils.Setting.setting, utils.Setting.setting_path = _saved61[0], _saved61[1]
+    utils.SETTING_DIR = _saved61[2]
+    _shutil.rmtree(_tmp61, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 
