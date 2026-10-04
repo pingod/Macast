@@ -48,6 +48,9 @@ CORE_LABELS = {
     'Disabled_Plugins': ('已停用的插件', '列表：被关掉（不加载）的插件标题。'),
     'Api_Token': ('管理令牌', '网页投屏入口与远程管理 API 的凭据，状态页可见可复制。'),
     'Github_CN_Mirror': ('启用国内镜像地址', 'bool：所有 GitHub 地址改走国内可达的镜像。'),
+    'Resolve_Cookie_Browser': ('网页投屏读取 cookie 的浏览器',
+                               '「网页地址投屏」在没有本机 cookie 文件时从哪个浏览器读会话 cookie；'
+                               '空＝不读取。cookie 内容不在这里，只存在配置目录的 resolve_cookies.txt。'),
 }
 
 #: Persisted keys of the built-in mpv renderer (macast_renderer/mpv.py).

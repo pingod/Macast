@@ -19,7 +19,7 @@
 # answerable while that is happening. A random port on all interfaces, the port
 # only ever appearing inside the media URL we hand out.
 #
-# Two serving shapes, chosen by `media_resolve.plan()`:
+# Three serving shapes, chosen by `media_resolve.plan()`:
 #
 #   proxy   Progressive files (mp4/webm/mkv...). No ffmpeg, no CPU, no temp file:
 #           the upstream bytes are forwarded. If the origin honours Range, the
@@ -31,6 +31,12 @@
 #           moment ffmpeg exits 0 with real bytes the length becomes known and
 #           Range serving starts to work. That asymmetry is the honest UI copy,
 #           not a bug.
+#   merge   A DASH ladder that split the picture and the sound into two addresses.
+#           Same file, same states, one more `-i` -- so `Relay.mode` stays 'remux'
+#           and the split lives only in `Relay.audio_url`. A relay does not need to
+#           know where its bytes came from in order to serve them, and every reader
+#           that asked "is this a growing file" would otherwise have to learn a
+#           second answer.
 #
 # Two red lines this repo has already bled over, both restated here because the
 # same traps are live in a third place now:
@@ -241,6 +247,12 @@ class Relay:
     watcher: object = None
     state: str = 'open'        # open | running | complete | failed
     error: str = ''
+
+    # DASH hands the picture and the sound as two addresses, so a remux can be
+    # fed a second input. It changes how the file is *made* and nothing about how
+    # it is served, which is why `mode` still says 'remux' either way.
+    audio_url: str = ''
+    audio_headers: dict = field(default_factory=dict)
 
     # The watcher thread and the encoder kill both write `state`; the store's own
     # lock must not be what serialises them, because a reader can hold the request
@@ -476,6 +488,19 @@ def probe_proxy(relay):
             pass
 
 
+#: An HLS or DASH manifest is a document that names more documents; without the
+#: segment protocols ffmpeg will not open it at all.
+PROTOCOL_WHITELIST = 'file,http,https,tcp,tls,crypto,httpproxy,data'
+
+
+def input_arguments(url, headers=None):
+    """ffmpeg's read side for one address, options in front of its own `-i`."""
+    args = []
+    if headers:
+        args += ['-headers', media_resolve.header_field(headers)]
+    return args + ['-protocol_whitelist', PROTOCOL_WHITELIST, '-i', url]
+
+
 def start_remux(relay, ffmpeg=None):
     """Copy the manifest's streams into one growing MP4 and hand it to the store.
 
@@ -483,6 +508,14 @@ def start_remux(relay, ffmpeg=None):
     re-encode. If the source needs re-encoding (an HEVC stream on an old TV), that
     is the *renderer's* problem and the renderer plugin that owns transcoding is
     `cast_local_file`, not this module.
+
+    A DASH ladder hands the picture and the sound as two addresses, so this may be
+    called with two inputs and it still produces one file. The per-input options
+    sit before their own `-i` because that is where ffmpeg reads them from -- one
+    `-headers` for the whole command would leave the second input unauthenticated,
+    which on these origins means "403", and a merged cast that fails this way fails
+    silently: ffmpeg exits, `watch_remux` says so, and the reason would be a header
+    nobody sent.
     """
     ffmpeg = ffmpeg or media_resolve.find_command('ffmpeg')
     if ffmpeg is None:
@@ -491,13 +524,10 @@ def start_remux(relay, ffmpeg=None):
         return False
     relay.path = os.path.join(relay_dir(), relay.relay_id + '.mp4')
     command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y']
-    if relay.headers:
-        command += ['-headers', media_resolve.header_field(relay.headers)]
-    # An HLS playlist is a document that names more documents; without the
-    # segment protocols ffmpeg will not open it at all.
-    command += ['-protocol_whitelist', 'file,http,https,tcp,tls,crypto,httpproxy,data',
-                '-i', relay.url,
-                '-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', relay.path]
+    command += input_arguments(relay.url, relay.headers)
+    if relay.audio_url:
+        command += input_arguments(relay.audio_url, relay.audio_headers)
+    command += ['-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', relay.path]
     try:
         relay.proc = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -510,6 +540,13 @@ def start_remux(relay, ffmpeg=None):
     relay.state = 'running'
     relay.length = None
     relay.ranges = False
+    # What leaves this process is now an MP4 whatever the source's address looked
+    # like, and that is the type the handler answers with, the Cast LOAD reports,
+    # and the DIDL puts in `protocolInfo`. A manifest URL has no useful suffix to
+    # map, so without this a remuxed cast advertises `application/octet-stream` --
+    # which a television reads as "not a media file" and a Chromecast reads as a
+    # reason to guess a handler (see `CastSender.load`).
+    relay.content_type = 'video/mp4'
     watch_remux(relay)
     return True
 
@@ -989,9 +1026,17 @@ def open_relay(candidate, title=''):
     belongs -- and because the answer ("this origin refuses you") has to reach the
     page in the same response.
     """
+    plan = media_resolve.plan(candidate)
     relay = Relay(relay_id=new_id(), url=candidate.url,
                   headers=dict(candidate.headers),
-                  mode=media_resolve.plan(candidate),
+                  # 'merge' is one of remux's shapes, not a third way to serve
+                  # bytes: one growing file, two inputs. Keeping the word out of
+                  # `mode` is what lets `size()`, `serve_plan` and `_pipe_file`
+                  # answer for a merged cast without ever learning where the sound
+                  # came from.
+                  mode='remux' if plan == 'merge' else plan,
+                  audio_url=candidate.audio_url,
+                  audio_headers=dict(candidate.audio_headers),
                   title=title or candidate.label or candidate.host,
                   content_type=content_type_for(candidate.url, candidate.probe))
     store.add(relay)

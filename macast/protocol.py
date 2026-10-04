@@ -1519,6 +1519,78 @@ class Handler:
         return {'code': 1,
                 'message': '没有可用的电脑投屏插件：在「插件」页签里启用 Screen Mirror'}
 
+    def _url_target_setting(self):
+        """The device-picking surface of the local-file caster, or None.
+
+        The core may not import a plugin, so this goes through the manager the same
+        way 电脑投屏 does: whichever renderer is *playing* is irrelevant here, and
+        the devices this answers with are exactly the ones the plugin's own
+        「输出目标」 menu offers.
+        """
+        manager = cherrypy_publish('get_plugin_manager', None)
+        if manager is None or not hasattr(manager, 'url_target_setting'):
+            return None
+        try:
+            return manager.url_target_setting()
+        except Exception as e:
+            logger.error('device target surface unavailable: %s' % e)
+            return None
+
+    def _url_target_unavailable(self):
+        """Why there is no device list, in the words the user can act on.
+
+        Same split as `_mirror_unavailable()`: a starting app needs one second, a
+        disabled plugin needs a checkbox.
+        """
+        if cherrypy_publish('get_plugin_manager', None) is None:
+            return {'code': 1, 'message': '应用还在启动，请一秒后再试'}
+        return {'code': 1,
+                'message': '没有可用的设备发现插件：在「插件」页签里启用 Local File Caster'}
+
+    def _cast_targets(self, refresh=False):
+        """The list for `query=cast-targets`: our own devices, never a live probe.
+
+        `refresh` is the card's 「重新搜索」 -- the plugin starts both searches in
+        the background and this answers with whatever the caches hold right now,
+        because a synchronous SSDP+mDNS round trip would hold a CherryPy worker for
+        three seconds to say nothing the next poll would not say anyway.
+
+        The flag arrives as query-string text, so truth is a name rather than
+        Python's idea of it: `?refresh=0` means "do not search".
+        """
+        if isinstance(refresh, str):
+            refresh = refresh.strip().lower() in ('1', 'true', 'yes', 'on')
+        setting = self._url_target_setting()
+        if setting is None:
+            refused = self._url_target_unavailable()
+            refused['targets'] = {'items': [], 'searching': False, 'known': False}
+            return refused
+        try:
+            state = (setting.target_refresh() if refresh
+                     else setting.target_state())
+        except Exception as e:
+            logger.error('cast targets read failed: %s' % e)
+            return {'code': 1, 'message': '读取设备列表失败：{}'.format(e),
+                    'targets': {'items': [], 'searching': False, 'known': False}}
+        # The first option is always this machine, and that half is the core's, not
+        # the plugin's: 'local' means "hand it to whichever renderer is selected",
+        # which is all this feature did before it could name devices at all.
+        state['items'] = [self._local_target()] + list(state.get('items') or [])
+        return {'code': 0, 'message': 'success', 'targets': state}
+
+    @staticmethod
+    def _local_target():
+        """The card's first option: this machine, whoever plays it.
+
+        The name is the *selected renderer's title*, the same value `query=status`
+        reports, because "本机" is not one thing: with MPV it is a window on this
+        Mac, and with Local File Caster selected it is that plugin's own chosen
+        device. The card has to say which one pressing 投屏 will reach.
+        """
+        return {'id': 'local', 'kind': 'local',
+                'name': Setting.get(SettingProperty.Macast_Renderer, '') or 'MPV',
+                'address': ''}
+
     def _mirror_state(self):
         """The plugin's facts plus the core's view of them, in one response.
 
@@ -1801,7 +1873,8 @@ class Handler:
             # Sensitive management queries: block unless local or token-bearing.
             if query in ('status', 'log', 'log-download', 'log-modules',
                          'launch-param', 'interfaces', 'subscribers',
-                         'module-settings', 'cast-info', 'resolve-status') \
+                         'module-settings', 'cast-info', 'resolve-status',
+                         'resolve-cookies', 'cast-targets') \
                     and not self._management_allowed():
                 return json.dumps({'code': 403,
                                    'message': 'Forbidden: management API requires local access or token'},
@@ -1892,6 +1965,23 @@ class Handler:
                 # is the only thing standing between `cast-resolved` and anyone
                 # on the LAN picking a candidate.
                 res = self._resolve_status(kwargs.get('job'))
+            elif query == 'resolve-cookies':
+                # The cookie panel's read: how many lines the local jar holds and
+                # which browser (if any) is allowed. Gated with the other sensitive
+                # queries, and it answers with counts and names only -- the values
+                # themselves are never echoed by anything in this file. Same
+                # `{code, message, <noun>}` shape as `resolve-status`, so the page
+                # has one way to tell "no panel data" from "here it is".
+                res = {'code': 0, 'message': 'success',
+                       'state': self._cookie_state()}
+            elif query == 'cast-targets':
+                # The 网页地址投屏 card's device list. Gated with the other sensitive
+                # queries rather than with `mirror-state`: this answers with names and
+                # LAN addresses of renderers, never with a frame of anything, and no
+                # token -- and because the whole repository is scanned for "we never
+                # send CORS headers" (a Part 48 invariant), a cross-site *read* of it
+                # cannot be turned into anything the attacker can act on.
+                res = self._cast_targets(kwargs.get('refresh'))
             elif query == 'status':
                 res = self.get_status()
             elif query == 'subscribers':
@@ -2003,6 +2093,14 @@ class Handler:
         # already hands an arbitrary URL to the player.
         ('resolve-page', GATE_MANAGEMENT, '_post_resolve_page'),
         ('cast-resolved', GATE_MANAGEMENT, '_post_cast_resolved'),
+        # Cookies for the page resolver. Management-gated like the two above, and
+        # for the same reason: neither writes anything that *runs*. The jar is data
+        # handed to yt-dlp as a file path this code chose, and the browser name is
+        # checked against `COOKIE_BROWSERS` before it reaches argv -- so this is not
+        # the `GATE_CODE` family (§4.7b), where a request hands us code to execute.
+        ('resolve-cookies', GATE_MANAGEMENT, '_post_resolve_cookies'),
+        ('resolve-cookies-clear', GATE_MANAGEMENT, '_post_resolve_cookies_clear'),
+        ('resolve-cookie-browser', GATE_MANAGEMENT, '_post_resolve_cookie_browser'),
         ('clear-play-history', GATE_MANAGEMENT, '_post_clear_play_history'),
         ('clear-log', GATE_MANAGEMENT, '_post_clear_log'),
         ('set-module-setting', GATE_CODE, '_post_set_module_setting'),
@@ -2020,7 +2118,8 @@ class Handler:
     #: is kept from quietly arriving at a dispatcher that never heard of it.
     POST_HELPER_PARAMS = ('token', 'key', 'value', 'remove', 'module',
                           'cast-title', 'mirror-args', 'plugin-key',
-                          'plugin-url', 'plugin-type', 'candidate', 'job')
+                          'plugin-url', 'plugin-type', 'candidate', 'job',
+                          'target')
 
     #: Parameters that mutate state, derived from the table: everything posted
     #: has to be at least management-gated, so this is the whole list.
@@ -2363,6 +2462,87 @@ class Handler:
     RESOLVE_JOBS_MAX = 4
     RESOLVE_JOB_TTL = 30 * 60
 
+    #: Where a pasted cookie jar lives: a file in the config directory, never a
+    #: key in the settings JSON. A jar is a pile of session secrets, and the
+    #: settings file is the thing people export, attach to bug reports and paste
+    #: into chats. It is also the file yt-dlp *writes back* after every run, so
+    #: the one place it grows must not be the one place that gets shared.
+    COOKIE_JAR_NAME = 'resolve_cookies.txt'
+
+    #: The browser names yt-dlp's `--cookies-from-browser` accepts, in its own
+    #: words. A whitelist because the value is read from hand-editable settings and
+    #: then handed to a subprocess as an argument: a name starting with `-` would
+    #: be a new switch rather than a browser, and reading somebody's cookie store
+    #: is not something a string from disk gets to decide quietly.
+    COOKIE_BROWSERS = ('brave', 'chrome', 'chromium', 'edge', 'firefox',
+                       'opera', 'safari', 'vivaldi', 'whale')
+
+    def _cookie_jar_path(self):
+        return os.path.join(SETTING_DIR, self.COOKIE_JAR_NAME)
+
+    def _cookie_jar_text(self):
+        """The jar's own text, or '' -- read with a cap, since it is user input.
+
+        `COOKIE_JAR_MAX_BYTES + 1` so an oversized file still fails the same
+        `cookie_jar_state` check that a paste would, instead of being silently
+        truncated into something that parses.
+        """
+        try:
+            with open(self._cookie_jar_path(), 'rb') as handle:
+                raw = handle.read(media_resolve.COOKIE_JAR_MAX_BYTES + 1)
+        except OSError:
+            return ''
+        return raw.decode('utf-8', 'replace')
+
+    def _cookie_browser_name(self):
+        """The browser the user pointed us at, or '' -- always a whitelisted name."""
+        if not Setting.has(SettingProperty.Resolve_Cookie_Browser):
+            return ''
+        name = str(Setting.get(SettingProperty.Resolve_Cookie_Browser, '')
+                   or '').strip().lower()
+        return name if name in self.COOKIE_BROWSERS else ''
+
+    def _cookie_settings(self):
+        """The dict `media_resolve.cookie_arguments` wants; `''` halves dropped.
+
+        Both halves are passed when both are set and the file wins -- that rule
+        lives in `cookie_arguments`, next to the switches themselves, because a jar
+        this app wrote is the one that accumulates the cookies the engine mints.
+        """
+        cookies = {}
+        if self._cookie_jar_text():
+            cookies['file'] = self._cookie_jar_path()
+        browser = self._cookie_browser_name()
+        if browser:
+            cookies['browser'] = browser
+        return cookies
+
+    def _cookie_state(self):
+        """What the cookie panel can say about this machine: counts, never values.
+
+        The jar is the one piece of state here that must never be echoed back --
+        `query=module-settings` and `launch-param` already hand out `Api_Token`, so
+        this reader being management-gated is not a licence to add a second secret
+        to the same response.
+        """
+        text = self._cookie_jar_text()
+        try:
+            cookies, bad = media_resolve.cookie_jar_state(text)
+        except ValueError:
+            # On disk the size cap is not a refusal, it is a report: the panel says
+            # the file is oversized and the next parse will simply not use it.
+            cookies, bad = 0, 0
+        return {
+            'jar': bool(text),
+            'cookies': cookies,
+            'bad': bad,
+            'path': self._cookie_jar_path(),
+            'browser': self._cookie_browser_name(),
+            'browsers': list(self.COOKIE_BROWSERS),
+            'max_bytes': media_resolve.COOKIE_JAR_MAX_BYTES,
+            'yt_dlp': media_resolve.find_command('yt-dlp') is not None,
+        }
+
     # Shared across Handler instances on purpose: `Handler` is subclassed by the
     # NVA protocol's handler, and two instances must not mean two candidate lists
     # for the same page. Mutated under `_resolve_lock`, read under it too -- no
@@ -2372,16 +2552,34 @@ class Handler:
     _resolve_lock = threading.Lock()
 
     def _resolve_page(self, page_url):
-        """Start one background parse of a page address and hand back its id."""
-        url = (page_url or '').strip()
-        if not url:
+        """Start one background parse of a page address and hand back its id.
+
+        The paste is whatever the phone's share button produced, which is a
+        *sentence* (`7.12 复制打开抖音，看看【…】https://v.douyin.com/iAbc/，…`) far
+        more often than it is a bare URL -- so `resolve_target` picks the address
+        out of it and the card says which one it picked and how many were there.
+        Asking people to cut the URL out by hand is a UI failure we can fix here.
+        """
+        text = (page_url or '').strip()
+        if not text:
             return {'code': 1, 'message': '请先填写网页地址'}
-        if not re.match(r'^https?://', url, re.I):
-            # Bare "example.com/video" would reach yt-dlp as a relative reference
-            # and come back as a search page for that text -- a wrong answer that
-            # looks like the site having no video.
-            return {'code': 1, 'message': '地址要以 http:// 或 https:// 开头'}
-        job = media_resolve.ResolveJob(url)
+        url, found = media_resolve.resolve_target(text)
+        if not url:
+            # `resolve_target` only ever returns something that already carries a
+            # scheme. So this is one of two refusals, and they need different
+            # sentences: a bare host would reach yt-dlp as a relative reference and
+            # come back as a *search* for that text -- a wrong answer that looks
+            # like the site having no video -- while a sentence with no address in
+            # it at all is a paste problem, not a scheme problem.
+            if len(text.split()) == 1:
+                return {'code': 1, 'message': '地址要以 http:// 或 https:// 开头'}
+            return {'code': 1,
+                    'message': '这段文字里没有找到网址；请连分享原文一起贴进来，'
+                               '但要包含以 http:// 或 https:// 开头的地址'}
+        note = '' if url == text else \
+            '从分享原文里读到 {} 个网址，解析第一个：{}'.format(found, url)
+        job = media_resolve.ResolveJob(url, cookies=self._cookie_settings(),
+                                       note=note)
         job_id = secrets.token_urlsafe(9)
         with self._resolve_lock:
             if not self._prune_resolve_jobs():
@@ -2391,7 +2589,8 @@ class Handler:
             self._resolve_jobs[job_id] = job
         job.start()
         logger.info('resolving page: %s', url)
-        return {'code': 0, 'message': 'success', 'job': job_id, 'url': url}
+        return {'code': 0, 'message': 'success', 'job': job_id, 'url': url,
+                'note': note}
 
     def _prune_resolve_jobs(self):
         """Free a slot, or say that every one is still working. Lock held."""
@@ -2429,12 +2628,13 @@ class Handler:
         return self._resolve_page(kwargs.get('resolve-page'))
 
     def _post_cast_resolved(self, kwargs):
-        """Relay one resolved candidate and hand its address to the renderer.
+        """Relay one resolved candidate and hand its address to a device.
 
         The device is *never* given the address that came out of the page: that
-        is the whole reason this feature has a relay. `cast_uri` then treats it
-        like any other URL push, so whichever renderer is current gets it -- mpv
-        on this machine, the Chromecast bridge, or the DLNA stream.
+        is the whole reason this feature has a relay. Which device gets the relay
+        address is the `target` parameter -- this machine's selected renderer (the
+        default, and the only answer v0.18 had) or one of the Cast/DLNA renderers
+        the caster plugin found on the LAN.
         """
         job = self._resolve_job(kwargs.get('job', ''))
         if job is None:
@@ -2463,7 +2663,8 @@ class Handler:
             reason = relay.error or relay.probe_error or '源站拒绝了这条地址'
             media_relay.store.drop(relay.relay_id)
             return {'code': 1, 'message': reason}
-        result = self._cast_url(media_relay.media_url(relay), title)
+        result = self._cast_relayed(relay, title, candidate,
+                                    str(kwargs.get('target', '') or ''))
         if result.get('code') != 0:
             media_relay.store.drop(relay.relay_id)
             return result
@@ -2471,6 +2672,125 @@ class Handler:
         result['note'] = media_resolve.relay_reason(candidate)
         result['message'] = 'success'
         return result
+
+    def _cast_relayed(self, relay, title, candidate, target_id=''):
+        """Hand the relay's address to the device the card named.
+
+        `target_id` empty or 'local' is exactly the behaviour this feature shipped
+        with: `cast_uri` through whichever renderer is selected, which is mpv on this
+        Mac unless the user chose a caster. Anything else goes to the plugin that
+        discovers devices, and that path deliberately does *not* touch our own
+        playback state -- the card can push while a different renderer is playing
+        here, and a second owner of that state would have the status page say
+        「正在播放」about two things at once. How long that television plays, and when
+        it stops, is decided on the television.
+
+        Either way the device is given the relay address and never the page's URL;
+        that is the entire reason the relay exists.
+        """
+        url = media_relay.media_url(relay)
+        if target_id in ('', 'local'):
+            return self._cast_url(url, title)
+        setting = self._url_target_setting()
+        if setting is None:
+            refused = self._url_target_unavailable()
+            return {'code': 1, 'message': refused['message']}
+        try:
+            ok, message = setting.target_push(
+                target_id, url, title=title,
+                content_type=relay.content_type,
+                duration=candidate.duration, live=not relay.seekable)
+        except Exception as exc:
+            logger.exception('relaying %s to %s failed', title or url, target_id)
+            return {'code': 1, 'message': '投给这台设备失败：{}'.format(exc)}
+        # The plugin answers with (ok, words) because its own menu has to print the
+        # same words; a failed hand-off takes the relay with it, so the caller sees
+        # one outcome and no orphaned registration waiting for the TTL.
+        return {'code': 0 if ok else 1, 'message': message,
+                'target': target_id}
+
+    def _post_resolve_cookies(self, kwargs):
+        """Save a pasted Netscape jar into the config directory.
+
+        Validated *before* it is written, because a malformed jar is not an error
+        to yt-dlp: it resolves the page anonymously and comes back with fewer
+        addresses. So the user's only other clue that the paste was junk is the card
+        saying「页面里没有读到视频地址」, which reads as "this site has no video".
+        "3 条 cookie，2 行看不懂" at paste time is the moment anyone can act on.
+
+        Written to a temp name and `os.replace`d, so a parse running concurrently
+        never opens a half-written jar; and no backup is kept of the old one,
+        deliberately -- this file is a credential cache, and copies of it are not
+        something a feature that overwrites it on purpose should leave lying around.
+        """
+        text = kwargs.get('resolve-cookies')
+        if isinstance(text, (list, tuple)):
+            text = text[0] if text else ''
+        try:
+            cookies, bad = media_resolve.cookie_jar_state(text or '')
+        except ValueError as exc:
+            return {'code': 1, 'message': str(exc)}
+        if cookies == 0:
+            return {'code': 1,
+                    'message': '这份文件里没有一条能读懂的 cookie（{} 行看不懂）。'
+                               '要 Netscape 格式：每行 7 个 TAB 分隔的字段'.format(bad)}
+        path = self._cookie_jar_path()
+        temporary = path + '.tmp'
+        try:
+            os.makedirs(SETTING_DIR, exist_ok=True)
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                handle.write(text if text.endswith('\n') else text + '\n')
+            os.replace(temporary, path)
+        except OSError as exc:
+            logger.error('cookie jar write failed for %s: %s', path, exc)
+            return {'code': 1, 'message': '保存失败：{}: {}'.format(
+                type(exc).__name__, exc)}
+        # Counts and a file name only: the values themselves never go near a log.
+        logger.info('saved %d cookies (%d unreadable lines) for page resolve',
+                    cookies, bad)
+        return {'code': 0,
+                'message': '已保存 {} 条 cookie{}'.format(
+                    cookies,
+                    '，另有 {} 行看不懂（一并存了）'.format(bad) if bad else ''),
+                'cookies': cookies, 'bad': bad}
+
+    def _post_resolve_cookies_clear(self, kwargs):
+        """Forget the pasted jar. The browser setting is a separate decision."""
+        try:
+            os.remove(self._cookie_jar_path())
+        except FileNotFoundError:
+            return {'code': 0, 'message': '本机没有保存过 cookie 文件'}
+        except OSError as exc:
+            return {'code': 1, 'message': '删除失败：{}: {}'.format(
+                type(exc).__name__, exc)}
+        browser = self._cookie_browser_name()
+        return {'code': 0, 'message': '已清除 cookie 文件' + (
+            '，下次解析改用 {}'.format(browser) if browser else '')}
+
+    def _post_resolve_cookie_browser(self, kwargs):
+        """Turn browser-cookie reading on or off, by name.
+
+        Off by default and this is the only switch: nothing here opens a cookie
+        store that the user has not pointed at, and the value is re-checked against
+        `COOKIE_BROWSERS` on every read (`_cookie_browser_name`), so editing the
+        settings JSON by hand cannot put a new argv switch in the parse command.
+        """
+        name = str(kwargs.get('resolve-cookie-browser') or '').strip().lower()
+        if name in ('', '0', 'off', 'none', '关闭', '不用'):
+            Setting.unset(SettingProperty.Resolve_Cookie_Browser)
+            return {'code': 0, 'message': '不再从浏览器读取 cookie'}
+        if name not in self.COOKIE_BROWSERS:
+            return {'code': 1,
+                    'message': '不认识「{}」这个浏览器，可选：{}'.format(
+                        name, '、'.join(self.COOKIE_BROWSERS))}
+        Setting.set(SettingProperty.Resolve_Cookie_Browser, name)
+        if self._cookie_jar_text():
+            # Saying this out loud is the whole point of the ordering rule in
+            # `cookie_arguments`: otherwise the switch looks broken.
+            return {'code': 0, 'message': '已设为 {}，但本机存过 cookie 文件，'
+                                          '解析仍以文件为准（清除文件后才会用浏览器）'.format(name)}
+        return {'code': 0, 'message': '下次解析会从 {} 读取 cookie'.format(name)}
 
     def _post_clear_play_history(self, kwargs):
         try:

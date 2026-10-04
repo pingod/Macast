@@ -14431,6 +14431,58 @@ class _PlayerSetting36(object):
     def build_menu(self):
         return [macast_mod.MenuItem('Player Size')]
 
+class _Plugin36(object):
+    """One row of the plugin manager's renderer table, in the real plugin's shape.
+
+    `plugin_class` is where `MENU_HIDDEN` is read from, so this stands in for a
+    `MacastPlugin` and not for a menu item: the app must not decide by title,
+    which is user-editable (`MacastPluginManager.resolve_title`) while that
+    attribute is not.
+    """
+
+    def __init__(self, title, exported=None):
+        self.title = title
+        self.plugin_class = exported
+        self.plugin_factory = None
+        # What `get_instance()` hands to `service.renderer`, and why the menu
+        # survives a renderer switch: line for line, the app splices in
+        # `service.renderer.renderer_setting.build_menu()`.
+        self.instance = types.SimpleNamespace(
+            title=title, renderer_setting=_PlayerSetting36())
+        self.plugin_instance = self.instance
+
+    def get_instance(self):
+        return self.instance
+
+
+class _Hidden36(object):
+    """A renderer class that refuses a menu row, as ScreenMirrorRenderer does."""
+    MENU_HIDDEN = True
+
+
+class _Manager36(macast_mod.MacastPluginManager):
+    """The real plugin manager, minus the disk scan.
+
+    `MacastPluginManager.__init__` appends to `sys.path`, creates the plugin
+    directories and `refresh()`es from disk and from the user's settings; none of
+    that belongs in a menu test. So this builds only the two lists the menu reads
+    and inherits every judgement the real class makes -- including
+    `menu_renderers()` and `is_menu_hidden()`, which is the point: the filter
+    under test is the shipped one, not a paraphrase that could drift from it.
+    """
+
+    def __init__(self):
+        self.renderer_all = [_Plugin36('MPV'),
+                             _Plugin36('Screen Mirror', _Hidden36),
+                             _Plugin36('IINA')]
+        self.renderer_list = list(self.renderer_all)
+        self.protocol_list = [types.SimpleNamespace(title=t)
+                              for t in ('DLNA', 'Chromecast')]
+
+    def get_renderer(self, title):
+        plugin = [p for p in self.renderer_list if p.title == title][0]
+        return plugin.get_instance()
+
 
 class _Renderer36(object):
     def __init__(self):
@@ -14472,11 +14524,7 @@ class _App36(object):
         self.mode = 'tray'
         self.service = types.SimpleNamespace(renderer=_Renderer36(),
                                              protocol=_Protocol36())
-        self.plugin_manager = types.SimpleNamespace(
-            renderer_list=[types.SimpleNamespace(title=t)
-                           for t in ('MPV', 'IINA')],
-            protocol_list=[types.SimpleNamespace(title=t)
-                           for t in ('DLNA', 'Chromecast')])
+        self.plugin_manager = _Manager36()
         self.enabled_protocols = ['DLNA']
         self.setting_renderer = 'MPV'
         self.setting_menubar_icon = 0
@@ -14517,9 +14565,6 @@ class _App36(object):
     def on_toggle_service_click(self, item):
         self.toggles += 1
 
-    def on_renderer_change_click(self, item):
-        pass
-
     def on_protocol_toggle_click(self, item):
         pass
 
@@ -14546,7 +14591,8 @@ for _n36 in ('build_app_menu', 'build_setting_menu', '_playback_menu_rows',
              'build_history_menu', '_refresh_app_menu', '_apply_app_menu',
              'renderer_av_uri', 'renderer_av_stop', 'on_open_page_click',
              'on_stop_playback_click', 'on_copy_uri_click', 'on_history_click',
-             'on_clear_history_click', 'update_service_status'):
+             'on_clear_history_click', 'update_service_status',
+             'on_renderer_change_click'):
     setattr(_App36, _n36, getattr(macast_mod.Macast, _n36))
 #: A staticmethod object, not the bare function: assigning the function to a
 #: class would turn `self` into its first argument.
@@ -14579,6 +14625,28 @@ def _history_rows36(app):
         if item is not None and item.text == 'Play History':
             return [i for i in item.children if i is not None]
     return []
+
+
+def _group36(app, label):
+    """The live children of a named submenu, at any depth, separators dropped.
+
+    Breadth-first, so a top-level row answers before a submenu row of the same
+    name -- and because 电脑投屏's rows are not where Renderers hangs: the
+    renderer group lives one level down, inside Setting.
+    """
+    queue = list(app.menu)
+    while queue:
+        item = queue.pop(0)
+        if item is None:
+            continue
+        if item.text == label:
+            return [i for i in (item.children or []) if i is not None]
+        queue.extend(item.children or [])
+    return []
+
+
+def _checked36(app, label):
+    return [i.text for i in _group36(app, label) if i.checked]
 
 
 class _Clip36(object):
@@ -14758,6 +14826,106 @@ try:
           'Renderers' in _all36(_app36) and 'Protocols' in _all36(_app36)
           and 'Menubar Icon' in _all36(_app36)
           and 'Advanced Setting' in _all36(_app36), str(_all36(_app36)))
+
+    # -- a renderer that refuses a menu row ----------------------------------
+    # Screen Mirror is the one that does, and it is the user's ruling rather
+    # than an oversight: since v0.12 the menu bar has no 电脑投屏 row at all
+    # (AGENTS.md §4.8, 「菜单栏里一条镜像行都没有，只剩通知」), while a Renderers row
+    # reads as the door to that console and only offers a player switch.
+    # Hiding is a *display* decision: the plugin stays installed, stays
+    # selectable by other means, and a persisted `Macast_Renderer` that names it
+    # keeps playing -- which is why the checked loop must be able to say
+    # "nothing of mine is on this menu" instead of ticking row 0.
+    _rows_r36 = _group36(_app36, 'Renderers')
+    check("the Renderers group lists the renderers that want a row, in list order",
+          [i.text for i in _rows_r36] == ['MPV', 'IINA'],
+          str([i.text for i in _rows_r36]))
+    check("and Screen Mirror is nowhere on the menu, playing or idle",
+          not any('Screen Mirror' in t for t in _all36(_app36)),
+          str(_all36(_app36)))
+    check("hiding the row did not hide the plugin",
+          [p.title for p in _app36.plugin_manager.renderer_list]
+          == ['MPV', 'Screen Mirror', 'IINA']
+          and [p.title for p in _app36.plugin_manager.menu_renderers()]
+          == ['MPV', 'IINA'],
+          'the page and the persisted selection still see three renderers; only '
+          'the menu is filtered -- ' + str(
+              [p.title for p in _app36.plugin_manager.renderer_list]))
+    check("the menu's indices are dense over the *visible* list",
+          [i.data for i in _rows_r36] == [0, 1],
+          'a row that indexes the full list would put Screen Mirror under a '
+          'click meant for IINA -- ' + str([i.data for i in _rows_r36]))
+    _click36 = _App36()
+    _click36._apply_app_menu()
+    _notify36[:] = []
+    _click36.on_renderer_change_click(_group36(_click36, 'Renderers')[1])
+    check("...so the second row really is the second *visible* renderer",
+          _click36.setting_renderer == 'IINA'
+          and _click36.service.renderer.title == 'IINA'
+          and utils.Setting.setting.get('Macast_Renderer') == 'IINA',
+          '{} / {}'.format(_click36.setting_renderer,
+                           _click36.service.renderer.title))
+    _hidden_sel36 = _App36(setting_renderer='Screen Mirror')
+    _hidden_sel36._apply_app_menu()
+    check("a hidden renderer that is what is playing gets no checkmark",
+          _checked36(_hidden_sel36, 'Renderers') == [],
+          'ticking MPV here is the lie this branch used to tell -- '
+          + str([(i.text, i.checked) for i in
+                 _group36(_hidden_sel36, 'Renderers')]))
+    _gone_sel36 = _App36(setting_renderer='PotPlayer')
+    _gone_sel36._apply_app_menu()
+    check("...while a selection that names nothing installed still falls back "
+          "to the first row, the way on_plugins_changed will resolve it",
+          _checked36(_gone_sel36, 'Renderers') == ['MPV'],
+          str(_checked36(_gone_sel36, 'Renderers')))
+    _shown_sel36 = _App36(setting_renderer='IINA')
+    _shown_sel36._apply_app_menu()
+    check("and a visible selection ticks exactly its own row",
+          _checked36(_shown_sel36, 'Renderers') == ['IINA'],
+          str(_checked36(_shown_sel36, 'Renderers')))
+
+    # The judgement itself, on the shipped class rather than on this file's
+    # fake: three shapes a plugin can arrive in, and the one base class that
+    # must not answer for all of them.
+    _mgr36 = object.__new__(macast_mod.MacastPluginManager)
+    _marked36 = _Plugin36('Marked', _Hidden36)
+    _plain36 = _Plugin36('Plain')
+    _instance_only36 = types.SimpleNamespace(
+        title='ByInstance', plugin_class=None, plugin_factory=None,
+        plugin_instance=_Hidden36())
+    _mgr36.renderer_list = [_plain36, _marked36, _instance_only36]
+    _mgr36.renderer_all = list(_mgr36.renderer_list)
+    check("the shipped filter drops a marked class and keeps an unmarked one",
+          [p.title for p in _mgr36.menu_renderers()] == ['Plain'],
+          str([p.title for p in _mgr36.menu_renderers()]))
+    check("...asking the exported class, so a plugin nobody has instantiated "
+          "yet still answers",
+          _instance_only36.plugin_class is None
+          and _mgr36.is_menu_hidden(_instance_only36) is True
+          and _mgr36.is_menu_hidden(_plain36) is False,
+          'the marker lives on the class; the instance may not exist at all')
+    _base36 = importlib.import_module('macast.renderer').Renderer
+    check("no menu row is hidden by accident: the base Renderer says nothing",
+          getattr(_base36, 'MENU_HIDDEN', False) is False,
+          'a marker on the base class would empty the Renderers group for '
+          'every plugin')
+    _mirror36 = _load_plugin('screen_mirror_plugin_v36', 'screen_mirror.py')
+    check("the shipped Screen Mirror really is the one that refuses a row",
+          getattr(_mirror36.ScreenMirrorRenderer, 'MENU_HIDDEN', False) is True,
+          'and the app decides by that attribute, never by the title')
+    _declared36 = []
+    for _fn36 in sorted(os.listdir(os.path.join(
+            MACAST, 'plugins', 'renderer'))):
+        if not _fn36.endswith('.py'):
+            continue
+        with open(os.path.join(MACAST, 'plugins', 'renderer', _fn36),
+                  encoding='utf-8') as _f36c:
+            _declared36.append((_fn36,
+                                'MENU_HIDDEN = True' in _f36c.read()))
+    check("exactly one bundled renderer asks to be hidden",
+          [n for n, hit in _declared36 if hit] == ['screen_mirror.py'],
+          'the rest keep their row -- ' + str(_declared36))
+    _notify36[:] = []
 
     # -- the translations the menu shows ------------------------------------
     _used36 = set(_re35.findall(r"_\(\s*'((?:[^'\\]|\\.)*)'\s*\)", _src36))
@@ -16604,6 +16772,13 @@ try:
             _session42.page_token))
         _answer42 = _conn42.getresponse()
         _answer42.read()
+        # `end_headers` flushes the header block before it counts, so the client
+        # can hold its answer while the server thread has not reached the
+        # increment yet. Wait for the fact instead of grabbing an instant --
+        # same lesson as Part 9's argv file and Part 24's sink (AGENTS.md 4.2),
+        # and the shape that made Part 56/B red on the Linux runner on
+        # 2026-10-04 while macOS stayed green.
+        _wait_until(lambda: _session42.exchanges >= 1, timeout=2.0)
         check("a served request is counted as an exchange",
               _answer42.status == 200 and _session42.exchanges == 1,
               'status={} exchanges={}'.format(_answer42.status,
@@ -16620,6 +16795,7 @@ try:
         _conn42.request('GET', '/browser?token=wrong')
         _bad42 = _conn42.getresponse()
         _bad42.read()
+        _wait_until(lambda: _session42.exchanges >= 2, timeout=2.0)
         check("a rejected token is recorded too, and junk paths are not",
               _bad42.status == 403 and _session42.exchanges == 2,
               'status={} exchanges={} (the /nope miss must not count)'.format(
@@ -16639,6 +16815,11 @@ try:
             _conn42.request('GET', '/browser?token=wrong')
             _conn42.getresponse().read()
         _conn42.close()
+        # Same race as the two reads above, in a shape that can only be
+        # awaited: the last of these requests may still be inside
+        # `end_headers` while the client has already read its 403.
+        _wait_until(lambda: _session42.exchanges == 2 + _limit42 + 2,
+                    timeout=4.0)
         check("every answer is counted but only the first few are described",
               _session42.exchanges == 2 + _limit42 + 2
               and _logged42 == 2 and len(_ex_lines42()) == _limit42,
@@ -17227,17 +17408,26 @@ check("网页地址投屏: the ceiling the help states on concurrent parses is t
 # and it is only true because the handler hands the renderer a relay URL and
 # nothing else. Read it out of the one line that does the handing.
 check("网页地址投屏: every resolved address really is served from this machine",
-      'self._cast_url(media_relay.media_url(relay)' in _proto_src44
+      'url = media_relay.media_url(relay)' in _proto_src44
+      and 'self._cast_url(url, title)' in _proto_src44
       and '一律由本机中转供流' in _help44,
       'the page never sees the origin URL, so the help must say who serves it')
 from macast import media_resolve as _mr44  # noqa: E402
 _plans44 = {_mr44.plan(_mr44.Candidate(url='http://h/a.mp4', origin='page')),
-            _mr44.plan(_mr44.Candidate(url='http://h/a.m3u8', origin='page'))}
-check("网页地址投屏: the two relay shapes the help describes are the two plans "
-      "the code can pick",
-      _plans44 == {'proxy', 'remux'}
+            _mr44.plan(_mr44.Candidate(url='http://h/a.m3u8', origin='page')),
+            _mr44.plan(_mr44.Candidate(url='http://h/a.mpd', origin='page',
+                                       audio_url='http://h/a.mpd?audio=1'))}
+check("网页地址投屏: the three relay shapes the help describes are the three plans "
+      "the code can pick -- and the third one is the answer to「这条没有音轨」: a DASH "
+      "ladder that split the picture and the sound into two addresses gets merged into "
+      "one stream by this machine instead of being offered as a silent cast. The "
+      "second `-i` the help promises lives in the relay's own command builder, so the "
+      "sentence and the argv are bound to each other",
+      _plans44 == {'proxy', 'remux', 'merge'}
       and '原样转发' in _help44 and '-c copy' in _help44
-      and "c', 'copy" in _relay_src44 and "'-f', 'mp4'" in _relay_src44,
+      and "c', 'copy" in _relay_src44 and "'-f', 'mp4'" in _relay_src44
+      and '两条一起喂给 ffmpeg 合成一条流' in _help44
+      and 'relay.audio_url' in _relay_src44,
       'plan() says %s' % sorted(_plans44))
 check("网页地址投屏: the hole the help admits is the sentence the card prints",
       '需要 JavaScript 才能算出地址的站点' in _help44
@@ -22263,6 +22453,10 @@ try:
     # served one -- it exists to log what a receiver fetched, or tried to.
     # That is why this probe moves `exchanges` to 1, and the stats check
     # below expects that 1 rather than a zero.
+    # The increment happens after the header block is flushed, so on a fast
+    # runner the 404 can be fully read before the counter has moved (AGENTS.md
+    # 4.2 -- wait for the fact). This one red on the Linux runner 2026-10-04.
+    _wait_until(lambda: _sess56.exchanges >= 1, timeout=2.0)
     check("Part 56/B: this session serves no byte stream over HTTP -- a "
           "player pointed at the stream URL gets an honest 404, not a "
           "socket that waits forever; and that refusal is one exchange, "
@@ -23576,10 +23770,22 @@ finally:
 #        `serve_plan` as a callable decision, then real sockets for the HTTP
 #        semantics ("a contract you can only assert by opening a socket is a
 #        contract that has already been broken once here" -- Part 25), then
-#        growth, eviction, TTL and the orphan sweep.
+#        growth, eviction, TTL and the orphan sweep. N's second half carries the
+#        DASH 音画合并 plan: a candidate with a paired `audio_url` reaches ffmpeg
+#        as a *second input*, with that input's own headers before its own `-i`,
+#        while the relay still serves the single `remux` shape it already knows.
 #   O-P  the handler wiring: validation, the job ceiling, and the one statement
 #        this whole feature rests on -- the device is *never* handed the address
 #        that came out of the page.
+#   R    the features that landed on top of the card after it was written: a
+#        分享文案 paste (the address has to be read out of a sentence a phone
+#        produced), the engine's own refusal (stderr to the card, in the engine's
+#        words), cookies (a paste to a 0600 file to a subprocess argument, plus the
+#        browser-reader whitelist), and the device dropdown (this machine first,
+#        then whatever the caster plugin can already reach -- no new protocol
+#        code). Cut along the two ways each of these rots: the reading drifting from
+#        the thing it reads, and a caller re-deriving an answer the callee already
+#        gave.
 #   Q    the page's text contract: the card renders the backend's answers and
 #        derives none of them.
 # --------------------------------------------------------------------------
@@ -23591,8 +23797,12 @@ from macast import media_resolve as mr59
 from macast import media_relay as mrel59
 
 _tmp59 = _tempfile.mkdtemp(prefix="macast-resolve59-")
+# `protocol.SETTING_DIR` is in this list because the cookie jar is written there by
+# name (`_cookie_jar_path`), and Part 59 §10 says nothing here may touch the real
+# config directory. Redirecting only `utils.SETTING_DIR` would not have helped: the
+# handler imported that name at import time, so it still holds the user's path.
 _saved59 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR,
-            mrel59.SETTING_DIR)
+            mrel59.SETTING_DIR, protocol.SETTING_DIR)
 
 
 def _cleanup59():
@@ -23628,6 +23838,7 @@ def _cleanup59():
 try:
     utils.SETTING_DIR = _tmp59
     mrel59.SETTING_DIR = _tmp59
+    protocol.SETTING_DIR = _tmp59
     utils.Setting.setting = {}
     utils.Setting.setting_path = os.path.join(_tmp59, "macast_setting.json")
 
@@ -24064,9 +24275,15 @@ try:
           and mr59.exceeds_cap(_cand59('http://h/a.mp4', mr59.Probe(
               reach=mr59.REACH_OPENED, height=1080)), 0) is False, '')
 
-    _720 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264', height=720,
+    # Both carry a sound track on purpose: a measured row with moving picture and
+    # no audio and no partner is what `visible()` hides, and these two feed the
+    # polling and cap checks whose subject is counters, not the silent filter (that
+    # has rows of its own further down).
+    _720 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264',
+                      audio_codec='aac', height=720,
                       duration=60.0, bitrate=2000000)
-    _1080 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264', height=1080,
+    _1080 = mr59.Probe(reach=mr59.REACH_OPENED, video_codec='h264',
+                       audio_codec='aac', height=1080,
                        duration=60.0, bitrate=5000000)
     def _ord59(pairs, ceiling=0):
         # `rank` decides `last_resort` and `reason` itself; asking it to sort a
@@ -24182,7 +24399,8 @@ try:
                            'video_codec', 'audio_codec', 'width', 'height',
                            'duration', 'bitrate', 'measured', 'reach', 'live',
                            'segmented', 'last_resort', 'reason', 'mode',
-                           'relay', 'headers'}
+                           'relay', 'headers', 'merged', 'audio_label',
+                           'silent'}
           and _DESC59['bitrate'] == 2000 and _DESC59['height'] == 720
           and _DESC59['container'] == 'MP4' and _DESC59['measured'] is True
           and _DESC59['mode'] == 'proxy' and _DESC59['live'] is False,
@@ -24325,7 +24543,8 @@ try:
           and set(_snapI59) == {'url', 'done', 'step', 'step_label',
                                'seconds', 'step_seconds', 'scraped',
                                'from_ytdlp', 'measured', 'rejected', 'error',
-                               'candidates'}
+                               'candidates', 'note', 'hidden_silent',
+                               'engine_note', 'needs_cookies'}
           and _snapI59['step_label'] == mr59.STEP_LABELS['queued']
           and _snapI59['url'] == 'http://vid.example/watch/7', str(_snapI59))
     check("every step has a Chinese label and no label belongs to a step that "
@@ -24340,7 +24559,7 @@ try:
     _oldI59 = _patch59(
         scrape_page=lambda url, body=None, opener=None:
             [_cand59('http://h{}.example/a.mp4'.format(i)) for i in range(4)],
-        ytdlp_candidates=lambda url, binary=None: [],
+        ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
         measure=lambda cand, binary=None: (
             setattr(cand, 'probe', _720), time.sleep(0.05))[0],
         find_command=lambda name, **kw: '/usr/bin/yt-dlp')
@@ -24375,7 +24594,7 @@ try:
           and 'measure' in _stepsI59, str((_stepsI59, _countsI59)))
 
     _oldI59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
-                       ytdlp_candidates=lambda url, binary=None: [],
+                       ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
                        find_command=lambda name, **kw: '/usr/bin/yt-dlp')
     try:
         _emptyI59 = mr59.resolve_now('http://vid.example/watch/7')
@@ -24407,7 +24626,7 @@ try:
     _oldI59 = _patch59(
         scrape_page=lambda url, body=None, opener=None:
             [_cand59('http://h1.example/a.mp4'), _cand59('http://h2.example/b.mp4')],
-        ytdlp_candidates=lambda url, binary=None: [],
+        ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
         measure=lambda cand, binary=None: setattr(
             cand, 'probe', mr59.Probe(reach=mr59.REACH_REFUSED,
                                       error='403')),
@@ -24437,7 +24656,7 @@ try:
             scrape_page=lambda url, body=None, opener=None: [
                 _cand59('http://h{}.example/a{}.mp4'.format(i % hosts, i))
                 for i in range(count)],
-            ytdlp_candidates=lambda url, binary=None: [],
+            ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
             measure=lambda cand, binary=None: (
                 setattr(cand, 'probe', _720), callsI59.append(cand.url))[0],
             find_command=lambda name, **kw: '/usr/bin/yt-dlp')
@@ -24482,7 +24701,7 @@ try:
 
     _seenI59 = []
     _oldI59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
-                       ytdlp_candidates=lambda url, binary=None: [])
+                       ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [])
     try:
         _finishI59 = mr59.ResolveJob('http://vid.example/watch/7',
                                      on_finish=lambda job: _seenI59.append(job))
@@ -24510,7 +24729,7 @@ try:
     _oldI59 = _patch59(
         scrape_page=lambda url, body=None, opener=None:
             (_ for _ in ()).throw(ValueError('boom')),
-        ytdlp_candidates=lambda url, binary=None: [],
+        ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
         find_command=lambda name, **kw: '/usr/bin/yt-dlp')
     try:
         _crashI59 = mr59.resolve_now('http://vid.example/watch/7')
@@ -25405,14 +25624,28 @@ JSON
     _fakeff59 = os.path.join(_ffdir59, 'ffmpeg')
     _write_fake(_ffdir59, 'ffmpeg', r"""#!/bin/sh
 # Fake remuxer. The output path is the LAST argv entry; the argv is recorded
-# there so the caller can be asked what it actually ran, one parameter per line.
+# there so the caller can be asked what it actually ran. One parameter per
+# record, separated by \037 and NOT by a newline: `-headers` is
+# media_resolve.header_field's CRLF join, so a two-header pair is one parameter
+# that contains newlines, and a line-per-parameter format would split it and
+# shift every index the checks below take relative to `-i`.
 out=$(eval echo \${$#})
-printf '%s\n' "$@" > "$out.argv"
+printf '%s\037' "$@" > "$out.argv"
 printf 'ABCDABCDAB' >> "$out"
 sleep 0.6
 printf 'ABCDABCDAB' >> "$out"
 exit 0
 """)
+    def _ffargv59(path):
+        """The argv the fake remuxer recorded, as the parameter list it was.
+
+        `newline=''` is load-bearing: `-headers` is `header_field`'s CRLF join, and
+        Python's default text mode would translate that CRLF into LF, so the value
+        read back would no longer be the bytes ffmpeg was handed.
+        """
+        with open(path, encoding='utf-8', newline='') as _fh59:
+            return _fh59.read().split('\x1f')[:-1]
+
     _remux59 = _relay59(relay_id='remuxed', url='http://h/index.m3u8',
                         mode='remux', state='running', ranges=False,
                         length=None, content_type='video/mp4',
@@ -25426,8 +25659,7 @@ exit 0
         _restore59(_old59)
     _saw_complete59 = _wait_until(lambda: _remux59.state == 'complete', 20)
     _remux_body59 = _ask59('/relay/remuxed/media')
-    with open(_remux59.path + '.argv', encoding='utf-8') as _av59:
-        _argv59 = [line.rstrip('\n') for line in _av59]
+    _argv59 = _ffargv59(_remux59.path + '.argv')
     check("a remux started for real produces a file at the path ffmpeg is given "
           "(the LAST argv entry) and grows into a seekable one: state `complete`, "
           "length 20, ranges True, and the bytes a viewer reads back are exactly "
@@ -25476,6 +25708,72 @@ exit 0
           os.path.dirname(_remux59.path) == mrel59.relay_dir()
           and _remux59.path == os.path.join(mrel59.relay_dir(),
                                            'remuxed.mp4'), _remux59.path)
+
+    # -- ③ the merge plan: two inputs, one growing file --------------------
+    # DASH hands the picture and the sound as two addresses, and the whole of
+    # 音画合并 is one ffmpeg command with a second `-i`. The two facts that make it
+    # safe are the two a later edit is most likely to undo: an input's option set
+    # sits *before that input's own* `-i` (so a picture's Referer is never sent to
+    # the sound's host), and the serving mode stays `remux` (so `size`,
+    # `serve_plan` and the byte log never have to learn a third shape).
+    _merge_cand59 = mr59.Candidate(
+        url='http://h/video.mpd', origin='ytdlp',
+        headers={'Referer': 'http://vid.example/', 'User-Agent': 'Macast/59'},
+        label='1080p', title='合并音轨', audio_url='http://h/audio.mpd',
+        audio_headers={'Referer': 'http://vid.example/'},
+        audio_label='audio 192k')
+    _old59 = _patch59(find_command=lambda name, **kw:
+                      _fakeff59 if name == 'ffmpeg' else None)
+    try:
+        _merged59 = mrel59.open_relay(_merge_cand59, title='合并音轨')
+    finally:
+        _restore59(_old59)
+    _merge_done59 = _wait_until(lambda: _merged59.state == 'complete', 20)
+    _margv59 = _ffargv59(_merged59.path + '.argv')
+    _mi59 = [i for i, _x59 in enumerate(_margv59) if _x59 == '-i']
+    check("a paired DASH candidate plans as `merge` and opens as a *remux*: the "
+          "card says 合并 (and offers 「这条没有音轨」 to the rows that could not be "
+          "paired), while the relay answers with one of the two shapes this module "
+          "already knows how to serve. A third `mode` word would mean `size()`, "
+          "`serve_plan` and the growing-file watcher each learning to answer a "
+          "question they cannot tell apart -- the sound's address is a second input "
+          "to ffmpeg, not a second stream to this machine",
+          mr59.plan(_merge_cand59) == 'merge'
+          and mr59.describe(_merge_cand59)['mode'] == 'merge'
+          and mr59.describe(_merge_cand59)['merged'] is True
+          and mr59.describe(_merge_cand59)['silent'] is False
+          and _merged59.mode == 'remux'
+          and _merged59.audio_url == 'http://h/audio.mpd'
+          and _merge_done59 and _merged59.state == 'complete'
+          and _merged59.length == 20 and _merged59.ranges is True,
+          '{} {} {!r} {}'.format(_merged59.mode, _merged59.state,
+                                 _merged59.error, _merge_done59))
+    check("and that one command carries both addresses with *each* input's own "
+          "request headers: two `-i`, each preceded by its own "
+          "`-headers`/`-protocol_whitelist` pair, `-c copy` after both, and the "
+          "growing file as the last parameter. ffmpeg's per-input options are "
+          "positional, so a header set written after the wrong `-i` fetches the "
+          "picture with the sound's headers -- on a DASH pair that is two different "
+          "CDN hosts, and the failure the user reads is a 403 the card cannot "
+          "explain. The two header dicts are deliberately unequal here: a fixture "
+          "where both sides carried the same Referer would pass with the inputs "
+          "swapped",
+          len(_mi59) == 2
+          and _margv59[_mi59[0] + 1] == 'http://h/video.mpd'
+          and _margv59[_mi59[1] + 1] == 'http://h/audio.mpd'
+          and all(_margv59[_p59 - 4] == '-headers'
+                  and _margv59[_p59 - 3] == mr59.header_field(_hdr59)
+                  and _margv59[_p59 - 2] == '-protocol_whitelist'
+                  for _p59, _hdr59 in ((_mi59[0], _merge_cand59.headers),
+                                       (_mi59[1], _merge_cand59.audio_headers)))
+          and _margv59.count('-protocol_whitelist') == 2
+          and _margv59[_mi59[0] - 3] != _margv59[_mi59[1] - 3]
+          and _margv59.index('-c') > _mi59[1]
+          and _margv59[_margv59.index('-c') + 1] == 'copy'
+          and _margv59[-1] == _merged59.path,
+          ' | '.join(_margv59))
+    mrel59.store.drop(_merged59.relay_id)
+
     # -- O/P: the two POSTs and one GET the page actually calls -------------
     _host59, _port59 = mrel59.ensure_server()
     _origin_port59 = _origin59.server_address[1]
@@ -25544,7 +25842,7 @@ exit 0
     # fetches a page. Without this, every "does the handler answer correctly"
     # case below would also be a live network test with a live yt-dlp.
     _oldO59 = _patch59(scrape_page=lambda url, body=None, opener=None: [],
-                       ytdlp_candidates=lambda url, binary=None: [],
+                       ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None: [],
                        find_command=lambda name, **kw: '/usr/bin/yt-dlp')
     # `drop` watched by name: a refusal that claims to have deregistered its
     # relay has to say *which id* it removed, or the claim is unfalsifiable.
@@ -25678,8 +25976,8 @@ exit 0
               and _status_none59['code'] == 1
               and _status_none59['status'] is None, str(_status_unknown59))
         _status_good59 = _handler59._resolve_status(_job_id59)
-        check("the same call for a job that IS here is the job's own twelve "
-              "counters and nothing else: the page draws its progress from these "
+        check("the same call for a job that IS here is the job's own status dict and "
+              "nothing else: the page draws its progress from these "
               "and only these, so a key added to `status()` is a key the card can "
               "read, and a key it reads that is not there renders「undefined」in "
               "the middle of a Chinese sentence",
@@ -25700,6 +25998,7 @@ exit 0
             _full59['j0'] = _one_job59          # one of them finishes
             _as59()
             _admitted59 = _post59(_handler59, **{'resolve-page': _good_url59})
+            _after_full59 = dict(_full59)
         finally:
             _full59.clear()
             _full59.update(_before_full59)
@@ -25717,8 +26016,13 @@ exit 0
               "an answer somebody may or may not still be reading, while a running "
               "one is the answer a page is polling for. Losing the running job to "
               "make room would leave that page asking for a job that has stopped "
-              "existing mid-sentence",
-              _admitted59['code'] == 0 and len(_admitted59.get('job', '')) >= 8,
+              "existing mid-sentence -- so the one that goes is `j0`, the finished "
+              "one, and the four running slots are untouched",
+              _admitted59['code'] == 0 and len(_admitted59.get('job', '')) >= 8
+              and 'j0' not in _after_full59
+              and _after_full59[_admitted59['job']] is not _one_job59
+              and [k for k, v in _after_full59.items() if v is _busy59]
+                  == ['j1', 'j2', 'j3'],
               str(_admitted59))
         _ttl59 = protocol.Handler._resolve_jobs
         _old_job59 = mr59.ResolveJob(_good_url59)
@@ -25833,16 +26137,20 @@ exit 0
               "asking the relay a second question, and a note that is a second "
               "copy of the rule rather than the rule's own words is a note that "
               "goes stale the day `plan()` changes",
-              _pushed59[0][1] == '第三集 · 夏日回响'
+              len(_pushed59) == 1
+              and _pushed59[0][1] == '第三集 · 夏日回响'
               and _cast59['relay']['id'] in _pushed_url59
               and _cast59['relay']['mode'] == 'proxy'
               and _cast59['relay']['seekable'] is True
               and _cast59['relay']['length'] == 2000
               and set(_cast59['relay']) == set(_relay59().status())
               and _cast59['note'] == mr59.relay_reason(_one_job59.candidates[0]),
-              str(_cast59.get('relay')))
-        _served59 = _ask59('/relay/{}/media'.format(_cast59['relay']['id']),
-                           port=_port59)
+              str([_cast59.get('relay'), _pushed59]))
+        # Read the id through `.get`, not `[...]`: the two cases above already report
+        # a refused cast, and a KeyError here would take the remaining ~50 cases of
+        # this Part down with it (AGENTS.md §4.2, 测试自己的实现也是实现).
+        _served59 = _ask59('/relay/{}/media'.format(
+            (_cast59.get('relay') or {}).get('id', '')), port=_port59)
         check("the address we just handed to the renderer really serves the bytes "
               "on this machine's port, from the fixture origin through the relay: "
               "a green「投屏成功」that points at a listener returning 404 is the "
@@ -25858,7 +26166,7 @@ exit 0
         # failed relay is gone" to "something older than eight is gone". The cap and
         # its eviction rule have their own case above, on a dedicated store.
         for _leftover59 in sorted(mrel59.store.entries):
-            if _leftover59 != _cast59['relay']['id']:
+            if _leftover59 != (_cast59.get('relay') or {}).get('id', ''):
                 mrel59.store.drop(_leftover59)
         _before_dead59 = dict(mrel59.store.entries)
         _dropped59[:] = []
@@ -25907,6 +26215,895 @@ exit 0
               and len(_tgt_dead59.pushed) == 0,
               str([_no_renderer59, _dropped59]))
 
+        # ---- R: the paste, the engine's own words, cookies, and a device ----
+        # Three features landed on top of the card this Part was written for, and
+        # each one moves a fact across a seam: 分享文案 crosses from "a sentence a
+        # phone produced" to "the address we parse"; the engine's refusal crosses
+        # from stderr to the card; a cookie jar crosses from a paste to a file to a
+        # subprocess argument; and the relay address crosses from this machine to a
+        # television named in a dropdown. Every one of them can rot in the same two
+        # ways -- the reading drifting from the thing it reads, and a caller
+        # re-deriving an answer the callee already gave -- so the cases below are
+        # cut along those two shapes rather than along the four features.
+        _plain59 = 'https://v.douyin.com/iAbc12/'
+        _second59 = 'https://ex.com/part2?x=1'
+        _sentence59 = ('7.12 复制打开抖音，看看【某某的作品】' + _plain59 +
+                       '，这个视频 ' + _second59 + '。')
+        check("a share sentence yields its first address plus a count of how many "
+              "were in there, and a paste that already IS an address stays exactly "
+              "that: what a phone's share button hands over is a sentence with the "
+              "URL buried in it, and making people cut it out by hand is the UI "
+              "failure this function exists to end. The full-width comma after an "
+              "address must not be carried into it, and neither may a trailing "
+              "ASCII one -- `https://ex.com/a.` and `https://ex.com/a` are the same "
+              "address, and the first is what the sentence actually contains. And an "
+              "address keeps its own letters: the exclusion class is punctuation "
+              "only, so `r`, `u`, `3` and `0` must survive -- a share link cut at the "
+              "first `r` reads as「这站没有视频」, which is the same wrong answer the "
+              "bare-host rule refuses. That cut happened once for real, because a "
+              "second raw fragment written *underneath* an open triple-quoted string "
+              "is not concatenation -- the `r'` and its contents land inside the "
+              "character class (AGENTS.md §4.2, 那对括号是承重的)",
+              mr59.looks_like_url(_plain59) is True
+              and mr59.looks_like_url(_plain59 + '  ') is True
+              and mr59.looks_like_url(_sentence59) is False
+              and mr59.looks_like_url('example.com/watch/7') is False
+              and mr59.looks_like_url('') is False
+              and mr59.resolve_target(_plain59) == (_plain59, 1)
+              and mr59.resolve_target(_sentence59) == (_plain59, 2)
+              and mr59.resolve_target('三集连播 没有链接') == ('', 0)
+              and mr59.resolve_target('') == ('', 0)
+              and mr59.extract_share_urls(_sentence59) == [_plain59, _second59]
+              and mr59.extract_share_urls('https://ex.com/a.') == ['https://ex.com/a']
+              and mr59.extract_share_urls('a https://ex.com/x b https://ex.com/x')
+                  == ['https://ex.com/x']
+              and mr59.extract_share_urls('看看 https://youtu.be/3rRu1?si=Ab 这个')
+                  == ['https://youtu.be/3rRu1?si=Ab'],
+              str([mr59.resolve_target(_sentence59),
+                   mr59.extract_share_urls(_sentence59)]))
+        check("and the extractor never invents a scheme: a bare host yields nothing, "
+              "so the caller's refusal is the only answer that paste can get. Hand "
+              "`example.com/watch/7` to yt-dlp and it searches for that text and "
+              "comes back looking like「这站没有视频」-- the same wrong answer group "
+              "O refuses at the POST, which is why the rule has to hold here too "
+              "and not only in the handler",
+              mr59.extract_share_urls('example.com/watch/7') == []
+              and mr59.resolve_target('example.com/watch/7') == ('', 0),
+              str(mr59.resolve_target('example.com/watch/7')))
+
+        _before_r159 = dict(protocol.Handler._resolve_jobs)
+        _as59()
+        _paste59 = _post59(_handler59, **{'resolve-page': _sentence59})
+        _paste_id59 = _paste59.get('job', '')
+        _paste_job59 = protocol.Handler._resolve_jobs.get(_paste_id59)
+        _paste_wait59 = _wait_until(lambda: _paste_job59 is not None
+                                    and _paste_job59.done, 10)
+        _paste_note59 = '从分享原文里读到 2 个网址，解析第一个：' + _plain59
+        _paste_status59 = _handler59._resolve_status(_paste_id59)
+        check("the parse runs on the address, not on the sentence, and the card is "
+              "told which one it got: `url` is what came out of the blurb, `note` "
+              "says how many were in there and names the one that was picked, and "
+              "the status the page polls reports both from the job itself rather "
+              "than from a second copy the handler kept. A two-part post that "
+              "quietly plays part one is a user convinced the app is broken",
+              _paste59['code'] == 0 and _paste_wait59
+              and _paste_id59 not in _before_r159
+              and _paste59['url'] == _plain59
+              and _paste59['note'] == _paste_note59
+              and _paste_job59.page_url == _plain59
+              and isinstance(_paste_status59.get('status'), dict)
+              and _paste_status59['status']['url'] == _plain59
+              and _paste_status59['status']['note'] == _paste_note59,
+              str([_paste59, _paste_status59.get('status')]))
+        check("a paste that was already an address says nothing extra: the note is "
+              "the empty string rather than「读到 1 个网址」, because explaining a "
+              "reading nobody questioned is noise on a card that shows `note` "
+              "verbatim -- the sentence exists to answer「我是不是粘错了」",
+              _started59['note'] == ''
+              and _started59['url'] == _good_url59, str(_started59))
+        _before_noaddr59 = set(protocol.Handler._resolve_jobs)
+        _noaddr59 = _post59(_handler59, **{'resolve-page': '三集连播 没有链接'})
+        check("a sentence with no address in it is refused in the paste's own words "
+              "and starts nothing: 「地址要以 http:// 开头」 would send this reader "
+              "off to look for a missing scheme when the real problem is that no "
+              "link was shared. The registry is asked in the two breaths around the "
+              "call, so a refused paste provably registered nothing -- and *not* by "
+              "comparing with the set the case above started from, because admitting "
+              "that paste's own job was itself allowed to free a finished slot "
+              "(_prune_resolve_jobs, and the ceiling case three pages back). A "
+              "before/after that spans an admission measures the eviction, not this "
+              "refusal",
+              _noaddr59['code'] == 1
+              and _noaddr59['message']
+                  == ('这段文字里没有找到网址；请连分享原文一起贴进来，'
+                      '但要包含以 http:// 或 https:// 开头的地址')
+              and 'job' not in _noaddr59
+              and set(protocol.Handler._resolve_jobs) == _before_noaddr59
+              and _paste_id59 in _before_noaddr59,
+              str([_noaddr59, 'paste=' + repr(_paste_id59),
+                   'before=' + repr(sorted(_before_noaddr59)),
+                   'now=' + repr(sorted(protocol.Handler._resolve_jobs))]))
+        protocol.Handler._resolve_jobs.pop(_paste_id59, None)
+
+        def _refuser59(note):
+            """An engine that answers with one sentence and hands over no address."""
+            def _inner(url, binary=None, cookies=None, sink=None):
+                if sink is not None:
+                    sink.append(note)
+                return []
+            return _inner
+
+        _deny59 = 'ERROR: [BiliBili] BV1xx4y1: 需要登录或提供 cookies 才能访问此页面'
+        _oldR259 = _patch59(ytdlp_candidates=_refuser59(_deny59))
+        try:
+            _deny_job59 = mr59.ResolveJob('https://www.bilibili.com/video/BV1xx4y1/')
+            _deny_job59.run()
+        finally:
+            _restore59(_oldR259)
+        _deny_status59 = _deny_job59.status()
+        check("the engine's refusal reaches the card in the engine's words, and a "
+              "cookie wall is told apart from an empty page: before `sink` these "
+              "two looked identical from outside -- non-zero code, no addresses -- "
+              "and the card said「没有地址」while yt-dlp had actually said「需要 "
+              "cookies」. `error` carries the quote, `engine_note` carries it raw, "
+              "and `needs_cookies` is the flag that decides whether the cookie "
+              "panel is worth showing at all",
+              _deny_job59.done and _deny_job59.candidates == []
+              and _deny_status59['engine_note'] == _deny59
+              and _deny_status59['needs_cookies'] is True
+              and _deny_job59.error
+                  == '页面里没有读到视频地址（yt-dlp 说：{}）'.format(_deny59),
+              str([_deny_job59.error, _deny_status59['needs_cookies']]))
+        _other59 = 'ERROR: [Unknown] Unsupported URL'
+        _oldR2b59 = _patch59(ytdlp_candidates=_refuser59(_other59))
+        try:
+            _other_job59 = mr59.ResolveJob('https://nowhere.example/watch/1')
+            _other_job59.run()
+        finally:
+            _restore59(_oldR2b59)
+        check("a refusal that says nothing about sessions stays a plain refusal: "
+              "`needs_cookies` is our guess at somebody else's wording, which is "
+              "why it lives next to the word list it reads and not in the page. A "
+              "panel offering to paste cookies for a site yt-dlp does not know is "
+              "a button that does nothing",
+              _other_job59.status()['needs_cookies'] is False
+              and _other_job59.error.endswith('（yt-dlp 说：{}）'.format(_other59)),
+              str([_other_job59.error, _other_job59.status()['needs_cookies']]))
+        # `find_command` is stubbed to answer「没有」 rather than read off whichever
+        # binary this machine happens to have (§4.2's 「两种 runner 上说同一句话」).
+        _oldR2c59 = _patch59(ytdlp_candidates=lambda url, binary=None, cookies=None,
+                             sink=None: [],
+                             find_command=lambda name, **kw: None)
+        try:
+            _noytdlp_job59 = mr59.ResolveJob('https://nowhere.example/watch/2')
+            _noytdlp_job59.run()
+        finally:
+            _restore59(_oldR2c59)
+        check("and an empty pool on a machine without yt-dlp says which of the two "
+              "it is: one address source is missing, or the other one answered and "
+              "found nothing. §4.2's「空结果要说清是哪一种空」applied to the "
+              "sentence rather than to the counter",
+              _noytdlp_job59.error
+                  == '页面里没有读到视频地址（这台机器没有装 yt-dlp，'
+                     '只能抓 HTML 里写明的地址）'
+              and _noytdlp_job59.status()['needs_cookies'] is False,
+              str(_noytdlp_job59.error))
+        check("`engine_note` takes the first line with anything on it and nothing "
+              "else: `--quiet` silences progress, not `ERROR:`, and a real stderr "
+              "carries a traceback underneath it. The truncation and the two "
+              "fallbacks are each a decision, so each gets its own answer",
+              mr59.engine_note(types.SimpleNamespace(
+                  stderr='\n\nERROR: first real line\nTraceback (most recent call '
+                         'last):\n', returncode=1)) == 'ERROR: first real line'
+              and mr59.engine_note(types.SimpleNamespace(stderr='   \n',
+                                                         returncode=0))
+                  == 'yt-dlp 没有返回任何地址'
+              and mr59.engine_note(types.SimpleNamespace(stderr='',
+                                                         returncode=2))
+                  == 'yt-dlp 退出码 2'
+              and len(mr59.engine_note(types.SimpleNamespace(
+                  stderr='E: ' + 'x' * 400, returncode=1))) == 200,
+              str(mr59.engine_note(types.SimpleNamespace(stderr='',
+                                                         returncode=2))))
+        check("the cookie-word list is the entire guess, and it is a tuple rather "
+              "than a regex so an addition is auditable: every extractor phrases it "
+              "differently -- yt-dlp's bilibili module writes「cookies to access "
+              "this webpage」and its tiktok module「Fresh cookies (not necessarily "
+              "logged in) are needed」-- while a Chinese page says「需要登录」or"
+              "「未授权」",
+              all(mr59.needs_cookies(_w59) for _w59 in (
+                  'ERROR: cookies to access this webpage',
+                  'Fresh cookies (not necessarily logged in) are needed',
+                  '请 log in 后重试', '需要登录', '未授权', 'unauthorized',
+                  'Sign in to continue', 'HTTP Error 401: Unauthorized',
+                  'authentication required'))
+              and mr59.needs_cookies('ERROR: Unsupported URL') is False
+              and mr59.needs_cookies('') is False
+              and mr59.needs_cookies(None) is False,
+              str([mr59.needs_cookies('请 log in 后重试'),
+                   mr59.needs_cookies('ERROR: Unsupported URL')]))
+
+        _jar59 = ('# Netscape HTTP Cookie File\n'
+                  '.example.com\tTRUE\t/\tFALSE\t0\tsess\tabc123\n'
+                  '\n'
+                  '.other.com\tTRUE\t/\tTRUE\t2000000000\ttoken\tzzz9\n'
+                  '这一行根本没有 TAB\n')
+        check("a jar is counted, never run: two readable lines, one junk, comments "
+              "and blanks skipped, eight fields still one cookie, and an empty "
+              "domain zero. This is the only moment anybody learns the paste was "
+              "junk, because a malformed jar is not an error to yt-dlp -- it "
+              "resolves the page anonymously and comes back with fewer addresses",
+              mr59.cookie_jar_state(_jar59) == (2, 1)
+              and mr59.cookie_jar_state('') == (0, 0)
+              and mr59.cookie_jar_state('# HttpOnlyCookieJar\n\n') == (0, 0)
+              and mr59.cookie_jar_state('a\tb\tc\td\te\tf') == (0, 1)
+              and mr59.cookie_jar_state('.x.com\tTRUE\t/\tFALSE\t0\tk\tv\textra')
+                  == (1, 0)
+              and mr59.cookie_jar_state('\tTRUE\t/\tFALSE\t0\tsess\tabc') == (0, 1),
+              str(mr59.cookie_jar_state(_jar59)))
+        check("an HttpOnly line is a cookie, not a comment: `#HttpOnly_` is how a "
+              "Netscape jar flags the attribute, and the standard library's "
+              "`MozillaCookieJar` strips that prefix *before* it skips comment "
+              "lines -- a jar exported from a browser marks its session cookies "
+              "that way, so a reader that skips every `#` line counts a pile of "
+              "real login cookies as nothing and refuses the paste. That is "
+              "exactly the file this feature exists to accept. Junk after the prefix "
+              "is still junk, and an indented marker is a comment to the engine too "
+              "-- the prefix binds at index 0 of the raw line, so counting it as a "
+              "cookie would promise a login state yt-dlp never loads",
+              mr59.cookie_jar_state(
+                  '#HttpOnly_.example.com\tTRUE\t/\tTRUE\t0\tsess\tabc\n') == (1, 0)
+              and mr59.cookie_jar_state(
+                  '# Netscape HTTP Cookie File\n'
+                  '#HttpOnly_.a.com\tTRUE\t/\tTRUE\t0\tk\tv\n'
+                  '#HttpOnly_.b.com\tTRUE\t/\tTRUE\t0\tk\tw\n') == (2, 0)
+              and mr59.cookie_jar_state('#HttpOnly_short\n') == (0, 1)
+              and mr59.cookie_jar_state('#HttpOnly_\n') == (0, 0)
+              and mr59.cookie_jar_state('#HttpOnly_# 还是注释\n') == (0, 0)
+              and mr59.cookie_jar_state(
+                  '  #HttpOnly_indented\n') == (0, 0),
+              str(mr59.cookie_jar_state(
+                  '#HttpOnly_.example.com\tTRUE\t/\tTRUE\t0\tsess\tabc\n')))
+        try:
+            _big59 = mr59.cookie_jar_state(
+                '# pad\n' + 'x' * (mr59.COOKIE_JAR_MAX_BYTES + 8))
+        except ValueError as _exc59:
+            _big59 = str(_exc59)
+        check("the size cap is a refusal with a number in it, not a truncation: "
+              "this text is written into the config directory and handed to a "
+              "subprocess as a path, so a 200 MB paste is a disk problem before it "
+              "is anything else. A silently clipped jar would parse and then be "
+              "read as「这站没有视频」",
+              _big59 == 'cookie 文件太大了（上限 {} KB）'.format(
+                  mr59.COOKIE_JAR_MAX_BYTES // 1024), str(_big59)[:120])
+        check("the cookie switches are built from names and paths, never from a "
+              "value, and the file wins when both halves are set -- a jar this app "
+              "wrote accumulates the cookies the engine mints, while a browser "
+              "profile is somebody else's store we only borrow. "
+              "`--cookies-from-browser` is the one extra switch this feature was "
+              "granted, and the name is lowercased on the way in because the "
+              "whitelist it cleared is spelled lowercase",
+              mr59.cookie_arguments(None) == []
+              and mr59.cookie_arguments({}) == []
+              and mr59.cookie_arguments({'file': '/tmp/j.txt'})
+                  == ['--cookies', '/tmp/j.txt']
+              and mr59.cookie_arguments({'file': '/tmp/j.txt', 'browser': 'chrome'})
+                  == ['--cookies', '/tmp/j.txt']
+              and mr59.cookie_arguments({'file': '   ', 'browser': 'Chrome'})
+                  == ['--cookies-from-browser', 'chrome']
+              and mr59.cookie_arguments({'browser': 'firefox'})
+                  == ['--cookies-from-browser', 'firefox'],
+              str(mr59.cookie_arguments({'file': '/tmp/j.txt',
+                                         'browser': 'chrome'})))
+
+        _jar_path59 = _handler59._cookie_jar_path()
+        _junk_post59 = _post59(_handler59, **{
+            'resolve-cookies': '这一份是从别处粘的，没有 TAB\n'})
+        check("a paste with nothing readable in it is refused at paste time and "
+              "creates no file: the alternative is the card saying「这页没有视频」, "
+              "which reads as a property of the site and sends the user off to find "
+              "a different page. The refusal quotes the format it wants, because "
+              "「Netscape 格式」means nothing to somebody who has never seen one",
+              _junk_post59['code'] == 1
+              and '没有一条能读懂的 cookie（1 行看不懂）' in _junk_post59['message']
+              and '每行 7 个 TAB 分隔的字段' in _junk_post59['message']
+              and not os.path.exists(_jar_path59),
+              str([_junk_post59, os.path.exists(_jar_path59)]))
+        _cookie_post59 = _post59(_handler59, **{'resolve-cookies': _jar59})
+        _cookie_read59 = json.loads(
+            _handler59.GET('api', query='resolve-cookies').decode())
+        check("a real jar lands as a 0600 file inside the config directory this "
+              "Part redirected, and answers with counts only: a jar is a pile of "
+              "session secrets while `macast_setting.json` is the thing people "
+              "export, attach to bug reports and paste into chats, so the secrets "
+              "get their own file and never a settings key. `path` pointing inside "
+              "the temp directory is the proof that nothing was written into the "
+              "user's real one (§10's first rule), the mode is the proof nobody "
+              "else on the machine can read it, and the absent `.tmp` is the proof "
+              "the replace ran -- `yt_dlp` is True because `find_command` is "
+              "stubbed, not because this runner happens to have it",
+              _cookie_post59['code'] == 0
+              and _cookie_post59['cookies'] == 2 and _cookie_post59['bad'] == 1
+              and '已保存 2 条 cookie' in _cookie_post59['message']
+              and '另有 1 行看不懂（一并存了）' in _cookie_post59['message']
+              and set(_cookie_post59) == {'code', 'message', 'cookies', 'bad'}
+              and os.path.exists(_jar_path59)
+              and _jar_path59.startswith(_tmp59)
+              and os.stat(_jar_path59).st_mode & 0o777 == 0o600
+              and not os.path.exists(_jar_path59 + '.tmp')
+              and _cookie_read59['code'] == 0
+              and set(_cookie_read59) == {'code', 'message', 'state'}
+              and set(_cookie_read59['state']) == {'jar', 'cookies', 'bad', 'path',
+                                                   'browser', 'browsers', 'max_bytes',
+                                                   'yt_dlp'}
+              and _cookie_read59['state']['jar'] is True
+              and _cookie_read59['state']['cookies'] == 2
+              and _cookie_read59['state']['bad'] == 1
+              and _cookie_read59['state']['path'] == _jar_path59
+              and _cookie_read59['state']['browser'] == ''
+              and _cookie_read59['state']['browsers']
+                  == list(protocol.Handler.COOKIE_BROWSERS)
+              and _cookie_read59['state']['max_bytes']
+                  == mr59.COOKIE_JAR_MAX_BYTES
+              and _cookie_read59['state']['yt_dlp'] is True
+              and 'abc123' not in json.dumps(_cookie_read59, ensure_ascii=False)
+              and 'zzz9' not in json.dumps(_cookie_post59, ensure_ascii=False),
+              str(_cookie_read59['state']))
+        _jar_bytes59 = open(_jar_path59, 'rb').read()
+        _big_post59 = _post59(_handler59, **{
+            'resolve-cookies': '# pad\n'
+                               + 'x' * (mr59.COOKIE_JAR_MAX_BYTES + 8)})
+        check("an oversized paste is refused on the way in and leaves the jar that "
+              "was already there byte for byte: the panel would report a file the "
+              "next parse refuses to use, and a half-written credential cache is "
+              "worse than the old one it replaced",
+              _big_post59['code'] == 1
+              and 'cookie 文件太大了（上限 256 KB）' in _big_post59['message']
+              and open(_jar_path59, 'rb').read() == _jar_bytes59
+              and not os.path.exists(_jar_path59 + '.tmp'), str(_big_post59))
+        # Every line of this one carries the HttpOnly prefix, which is what a browser
+        # export of a live session looks like -- the exact paste this feature exists
+        # to accept, and the one the counting rule used to read as an empty jar.
+        _httponly_jar59 = ('# Netscape HTTP Cookie File\n'
+                           '#HttpOnly_.sina.com.cn\tTRUE\t/\tTRUE\t0\tSUB\tSUBmy-secret\n'
+                           '#HttpOnly_.weibo.com\tTRUE\t/\tTRUE\t0\tSSOLoginState\t99\n')
+        _httponly_post59 = _post59(_handler59, **{'resolve-cookies': _httponly_jar59})
+        _httponly_read59 = json.loads(
+            _handler59.GET('api', query='resolve-cookies').decode())
+        check("a jar whose cookies are all HttpOnly is accepted and counted, because "
+              "`#HttpOnly_` is how the format flags the attribute, not how it starts "
+              "a comment -- a reader that skips every `#` line calls a whole browser "
+              "export「没有一条能读懂的 cookie」and refuses the very paste the login "
+              "panel asks for. The prefix must also survive the round trip: the file "
+              "is handed to yt-dlp, which re-reads it with the same rule, so a jar we "
+              "silently stripped would lose the attribute it just told us about",
+              _httponly_post59['code'] == 0
+              and _httponly_post59['cookies'] == 2
+              and _httponly_post59['bad'] == 0
+              and '已保存 2 条 cookie' in _httponly_post59['message']
+              and _httponly_read59['state']['cookies'] == 2
+              and open(_jar_path59, 'rb').read() == _httponly_jar59.encode()
+              and 'SUBmy-secret' not in json.dumps(_httponly_post59,
+                                                   ensure_ascii=False)
+              and 'SUBmy-secret' not in json.dumps(_httponly_read59,
+                                                   ensure_ascii=False),
+              str([_httponly_post59, _httponly_read59['state']]))
+        # Put the earlier jar back so the rest of this section reads as one session.
+        _repaste59 = _post59(_handler59, **{'resolve-cookies': _jar59})
+        check("and the paste that came before is not special: the same route accepts "
+              "a mixed jar right after an all-HttpOnly one and the file is whatever "
+              "the user last pasted",
+              _repaste59['code'] == 0 and _repaste59['cookies'] == 2
+              and open(_jar_path59, 'rb').read() == _jar59.encode(),
+              str(_repaste59))
+        _browser_post59 = _post59(_handler59,
+                                  **{'resolve-cookie-browser': 'Chrome'})
+        check("switching browser-cookie reading on while a jar exists says the file "
+              "still wins, out loud: without that sentence the switch reads as "
+              "broken the first time a parse ignores it, and the ordering rule "
+              "would be a fact only `cookie_arguments` knows. The name is stored "
+              "lowercased and the panel reports the same spelling",
+              _browser_post59['code'] == 0
+              and _browser_post59['message']
+                  == '已设为 chrome，但本机存过 cookie 文件，'
+                     '解析仍以文件为准（清除文件后才会用浏览器）'
+              and _handler59._cookie_state()['browser'] == 'chrome',
+              str(_browser_post59))
+        _bad_browser59 = _post59(_handler59,
+                                 **{'resolve-cookie-browser': 'safari2'})
+        _dash_browser59 = _post59(_handler59, **{
+            'resolve-cookie-browser': '--config-locations=/tmp/evil'})
+        check("a name that is not on the list is refused with the list in the "
+              "answer, and nothing is stored: the value comes off a hand-editable "
+              "setting and then lands in a subprocess argv, so a leading `-` is "
+              "not a browser but a new switch, and reading somebody's cookie store "
+              "is not something a string from disk gets to decide quietly",
+              _bad_browser59['code'] == 1
+              and _bad_browser59['message'].startswith(
+                  '不认识「safari2」这个浏览器，可选：brave')
+              and '、'.join(protocol.Handler.COOKIE_BROWSERS)
+                  in _bad_browser59['message']
+              and _dash_browser59['code'] == 1
+              and _dash_browser59['message'].startswith('不认识「--')
+              and _handler59._cookie_state()['browser'] == 'chrome',
+              str([_bad_browser59, _dash_browser59]))
+        # A hand-edited `macast_setting.json` is the whole threat model here, so it
+        # is simulated by writing the key directly, past the POST that would refuse
+        # it -- which is exactly why the read path re-checks the whitelist.
+        utils.Setting.set(protocol.SettingProperty.Resolve_Cookie_Browser,
+                          '--cookies=/tmp/evil')
+        _bypass_read59 = _handler59._cookie_state()
+        _bypass_args59 = mr59.cookie_arguments(_handler59._cookie_settings())
+        check("and the whitelist is re-checked on every read, not only on write: "
+              "the settings file is the thing a user edits by hand, so the only "
+              "thing standing between a string from disk and the parse command is "
+              "`_cookie_browser_name()`. The panel answers「no browser」, the dict "
+              "the handler builds carries no browser half, and the argv this "
+              "paste would have produced contains no injected switch",
+              _bypass_read59['browser'] == ''
+              and 'browser' not in _handler59._cookie_settings()
+              and _bypass_args59 == ['--cookies', _jar_path59],
+              str([_bypass_read59['browser'], _bypass_args59]))
+
+        class _SpyJob59(object):
+            """A ResolveJob that records what the handler handed it and runs nothing.
+
+            `_resolve_page` starts a real thread, so without this stand-in the only
+            way to see the cookie dict would be to catch a live parse mid-flight.
+            """
+
+            def __init__(self, page_url, max_height=0, on_finish=None, cookies=None,
+                         note=''):
+                _seen_cookies59.append(dict(cookies or {}))
+                self.page_url = page_url
+                self.done = True
+                self.step = 'done'
+                self.candidates = []
+                self.error = ''
+                self.started = time.time()
+
+            def start(self):
+                pass
+
+        _seen_cookies59 = []
+        # The hand-edit above replaced「chrome」with junk on purpose, and every case
+        # below reads the configured state again, so put the good value back through
+        # the route that validates it rather than around it.
+        _as59()
+        _post59(_handler59, **{'resolve-cookie-browser': 'Chrome'})
+        _oldR459 = _patch59(ResolveJob=_SpyJob59)
+        _before_spy59 = dict(protocol.Handler._resolve_jobs)
+        try:
+            _as59()
+            _spy_a59 = _post59(_handler59, **{'resolve-page': _good_url59})
+            _clear_a59 = _post59(_handler59, **{'resolve-cookies-clear': '1'})
+            _as59()
+            _spy_b59 = _post59(_handler59, **{'resolve-page': _good_url59})
+            _off59 = _post59(_handler59, **{'resolve-cookie-browser': '不用'})
+            _as59()
+            _spy_c59 = _post59(_handler59, **{'resolve-page': _good_url59})
+            _clear_b59 = _post59(_handler59, **{'resolve-cookies-clear': '1'})
+        finally:
+            protocol.Handler._resolve_jobs = _before_spy59
+            _restore59(_oldR459)
+        check("the jar is what reaches the parse: the handler builds the cookie "
+              "dict and hands it to the job with both halves present when both are "
+              "configured, and the ordering decision is left to `cookie_arguments` "
+              "instead of being re-implemented here. A jar that is saved and never "
+              "passed is the entire feature doing nothing -- and three parses, "
+              "taken in the order the user would reach them, answer「file wins」, "
+              "「browser only」and「nothing at all」",
+              _spy_a59['code'] == 0 and _spy_b59['code'] == 0
+              and _spy_c59['code'] == 0
+              and _seen_cookies59 == [{'file': _jar_path59, 'browser': 'chrome'},
+                                      {'browser': 'chrome'}, {}],
+              str(_seen_cookies59))
+        check("clearing the jar is a separate decision from switching the browser "
+              "off, and the answer says which one just became live:「已清除 cookie "
+              "文件，下次解析改用 chrome」 is the moment the borrowed profile starts "
+              "being read, and a second clear has to say there was nothing to "
+              "forget rather than pretending to delete it again",
+              _clear_a59['code'] == 0
+              and _clear_a59['message'] == '已清除 cookie 文件，下次解析改用 chrome'
+              and not os.path.exists(_jar_path59)
+              and _off59['code'] == 0
+              and _off59['message'] == '不再从浏览器读取 cookie'
+              and _handler59._cookie_state()['browser'] == ''
+              and _clear_b59['code'] == 0
+              and _clear_b59['message'] == '本机没有保存过 cookie 文件',
+              str([_clear_a59, _off59, _clear_b59]))
+
+        class _SurfR59(object):
+            """The caster plugin's device surface, as much of it as the core gets.
+
+            Every read returns a *fresh* dict on purpose: `_cast_targets` prepends
+            its own「本机」entry to whatever the plugin hands back, so a surface
+            sharing one list would turn the second read into a dropdown with 本机
+            twice in it. That is a bug nobody can catch by asking once.
+            """
+
+            def __init__(self):
+                self.states = 0
+                self.refreshes = 0
+                self.pushes = []
+                self.answer = (True, '已投给「客厅电视」')
+                self.push_error = None
+                self.read_error = None
+
+            def _state(self):
+                return {'items': [{'id': 'cast-1', 'kind': 'cast',
+                                   'name': '客厅电视',
+                                   'address': '192.168.1.30:8009'}],
+                        'searching': False, 'known': True}
+
+            def target_state(self):
+                self.states += 1
+                if self.read_error:
+                    raise self.read_error
+                return self._state()
+
+            def target_refresh(self):
+                self.refreshes += 1
+                if self.read_error:
+                    raise self.read_error
+                state = self._state()
+                state['started'] = True
+                return state
+
+            def target_push(self, target_id, url, title='', content_type='',
+                            duration=0.0, live=False):
+                self.pushes.append({'target': target_id, 'url': url,
+                                    'title': title, 'content_type': content_type,
+                                    'duration': duration, 'live': live})
+                if self.push_error:
+                    raise self.push_error
+                return self.answer
+
+        _surfR59 = _SurfR59()
+        _mgrR59 = types.SimpleNamespace(url_target_setting=lambda: _surfR59)
+        _get_mgrR59 = lambda: _mgrR59                                # noqa: E731
+        _real_publish59 = protocol.cherrypy_publish
+
+        def _publish_none59(method, default=None):
+            return default
+
+        protocol.cherrypy_publish = _publish_none59
+        try:
+            _no_mgr59 = json.loads(
+                _handler59.GET('api', query='cast-targets').decode())
+        finally:
+            protocol.cherrypy_publish = _real_publish59
+        check("while nobody has answered the event yet the device list is the "
+              "one-second sentence, not an empty dropdown: §4.8's「应用还在启动」"
+              "vs「去启用插件」split, applied to the second reader that asks it -- "
+              "a card that shows「本机」alone two seconds before the plugin exists "
+              "teaches the user that no television is on this network",
+              _no_mgr59['code'] == 1
+              and _no_mgr59['message'] == '应用还在启动，请一秒后再试'
+              and _no_mgr59['targets'] == {'items': [], 'searching': False,
+                                           'known': False}, str(_no_mgr59))
+        cherrypy.engine.subscribe('get_plugin_manager', _get_mgrR59)
+        try:
+            _targets_read59 = json.loads(
+                _handler59.GET('api', query='cast-targets').decode())
+            _targets_again59 = json.loads(
+                _handler59.GET('api', query='cast-targets').decode())
+            _local_row59 = _targets_read59['targets']['items'][0]
+            check("the first option is always this machine and that half is the "
+                  "core's, not the plugin's: `local` means「hand it to whichever "
+                  "renderer is selected」, which is all this feature did before it "
+                  "could name devices at all, so it stays first and keeps the "
+                  "renderer's own title rather than the word 本机. The plugin's "
+                  "television arrives behind it, and asking twice returns two "
+                  "two-item lists -- the prepending must not compound, because a "
+                  "duplicated 本机 in a dropdown is a device that is not there",
+                  _targets_read59['code'] == 0
+                  and set(_targets_read59) == {'code', 'message', 'targets'}
+                  and _local_row59 == protocol.Handler._local_target()
+                  # ... and the name asked a second time of the fact that decides it,
+                  # because comparing it to `_local_target()` alone compares the answer
+                  # to the function that produced it: hardcoding「本机」passes that.
+                  and _local_row59['name'] == (
+                      utils.Setting.setting.get(
+                          utils.SettingProperty.Macast_Renderer.name) or 'MPV')
+                  and _local_row59['name'] != '本机'
+                  and _targets_read59['targets']['items'][1]['id'] == 'cast-1'
+                  and _targets_read59['targets']['searching'] is False
+                  and _targets_read59['targets']['known'] is True
+                  and _surfR59.states == 2 and _surfR59.refreshes == 0
+                  and [len(r['targets']['items']) for r in
+                       (_targets_read59, _targets_again59)] == [2, 2],
+                  str([_local_row59, _targets_read59['targets']]))
+            _named59 = utils.Setting.setting.get(
+                utils.SettingProperty.Macast_Renderer.name)
+            utils.Setting.setting[utils.SettingProperty.Macast_Renderer.name] = \
+                'Local File Caster'
+            _renamed59 = json.loads(
+                _handler59.GET('api', query='cast-targets').decode())
+            utils.Setting.setting[utils.SettingProperty.Macast_Renderer.name] = _named59
+            check("and that first row follows the renderer the menu chose, because "
+                  "「本机」is not one thing: with MPV it is a window on this Mac, and "
+                  "with a caster selected it is that plugin's own chosen device, so "
+                  "the row has to say which one 投屏 will reach. The setting is put "
+                  "back afterwards -- this Part's other readers ask the same dict",
+                  _renamed59['targets']['items'][0]['name'] == 'Local File Caster'
+                  and _renamed59['targets']['items'][0]['id'] == 'local'
+                  and utils.Setting.setting.get(
+                      utils.SettingProperty.Macast_Renderer.name) == _named59,
+                  str([_renamed59['targets']['items'][0], _named59]))
+            _refresh_read59 = json.loads(
+                _handler59.GET('api', query='cast-targets', refresh='1').decode())
+            _quiet_read59 = json.loads(
+                _handler59.GET('api', query='cast-targets', refresh='0').decode())
+            _false_read59 = json.loads(
+                _handler59.GET('api', query='cast-targets', refresh='false')
+                .decode())
+            check("「重新搜索」is a real search and `refresh=0` is a real no: the "
+                  "flag arrives as query-string text, so truth is a name rather "
+                  "than Python's idea of it, and the plugin's own「started」 marker "
+                  "survives the core's prepending. A button that re-reads a cache "
+                  "is a button that never finds the television that just woke up",
+                  _refresh_read59['code'] == 0
+                  and _refresh_read59['targets']['started'] is True
+                  and _refresh_read59['targets']['items'][0]['id'] == 'local'
+                  and _surfR59.refreshes == 1
+                  and _quiet_read59['code'] == 0
+                  and 'started' not in _quiet_read59['targets']
+                  and _false_read59['code'] == 0
+                  and 'started' not in _false_read59['targets']
+                  # Four no-refresh reads plus this one that did search: the row the
+                  # dropdown follows (`_renamed59`, above) is the fifth, and a stale
+                  # number here would read as "the search ran twice".
+                  and _surfR59.refreshes == 1 and _surfR59.states == 5,
+                  str([_refresh_read59['targets'], _surfR59.states,
+                       _surfR59.refreshes]))
+            _as59(ip='192.168.1.99')
+            try:
+                _lan_targets59 = json.loads(
+                    _handler59.GET('api', query='cast-targets').decode())
+            except Exception as _exc59:
+                _lan_targets59 = '{}: {}'.format(type(_exc59).__name__, _exc59)
+            _as59()
+            check("the device list is management-gated like every query that names "
+                  "something sensitive: it answers with the hostnames and LAN "
+                  "addresses of renderers on this network, so an unauthenticated "
+                  "read from another machine is a map of the room",
+                  isinstance(_lan_targets59, dict)
+                  and _lan_targets59.get('code') == 403, str(_lan_targets59))
+            _mgrR59.url_target_setting = lambda: None
+            _off_plugin59 = _handler59._cast_targets()
+            check("a manager that answers but has no device plugin is the other "
+                  "sentence, and it names the plugin to switch on: one second and a "
+                  "checkbox are different problems, and the pair is what §4.8's "
+                  "mirror reader already promises",
+                  _off_plugin59['code'] == 1
+                  and _off_plugin59['message']
+                      == '没有可用的设备发现插件：在「插件」页签里启用 Local File '
+                         'Caster'
+                  and _off_plugin59['targets'] == {'items': [], 'searching': False,
+                                                   'known': False},
+                  str(_off_plugin59))
+
+            def _raise_mgr59():
+                raise RuntimeError('manager is half-built')
+
+            _mgrR59.url_target_setting = _raise_mgr59
+            _mgr_raise59 = _handler59._cast_targets()
+            _bare_mgr59 = types.SimpleNamespace(mirror_setting=lambda: None)
+
+            def _publish_bare59(method, default=None):
+                if method == 'get_plugin_manager':
+                    return _bare_mgr59
+                return _real_publish59(method, default)
+
+            protocol.cherrypy_publish = _publish_bare59
+            try:
+                _no_method59 = _handler59._cast_targets()
+            finally:
+                protocol.cherrypy_publish = _real_publish59
+            _no_surface59 = types.SimpleNamespace(mirror_setting=lambda: None)
+            _mgrR59.url_target_setting = lambda: _no_surface59
+            _no_target_state59 = _handler59._cast_targets()
+            check("three ways to have no device list, and the two sentences they "
+                  "deserve: a manager whose lookup throws is a plugin mid-reload "
+                  "(one second), a manager with no such method is a build that never "
+                  "grew this surface (a checkbox), and an object that IS a plugin but "
+                  "has no `target_state` is a read that failed -- which the code says "
+                  "as 读取设备列表失败 rather than inventing the「启用插件」sentence for "
+                  "a plugin that is plainly enabled. The `hasattr` gate is on the "
+                  "manager, not on the surface, and these three answers are how a "
+                  "reader can tell that apart",
+                  _mgr_raise59['code'] == 1
+                  and '没有可用的设备发现插件' in _mgr_raise59['message']
+                  and _no_method59['code'] == 1
+                  and '没有可用的设备发现插件' in _no_method59['message']
+                  and _no_method59['targets'] == {'items': [], 'searching': False,
+                                                  'known': False}
+                  and _no_target_state59['code'] == 1
+                  and _no_target_state59['message'].startswith('读取设备列表失败：')
+                  and 'target_state' in _no_target_state59['message']
+                  and _no_target_state59['targets']['items'] == [],
+                  str([_mgr_raise59, _no_method59, _no_target_state59]))
+            _surfR59.read_error = RuntimeError('ssdp is wedged')
+            _mgrR59.url_target_setting = lambda: _surfR59
+            _read_fail59 = _handler59._cast_targets()
+            _surfR59.read_error = None
+            check("when the plugin is there and the read itself fails, the answer "
+                  "is the plugin's error rather than a fabricated empty list: an "
+                  "empty dropdown and「no devices」are the same lie either way, so "
+                  "the only honest reading of a wedged search is「读取设备列表失败」"
+                  "with the reason attached",
+                  _read_fail59['code'] == 1
+                  and _read_fail59['message'] == '读取设备列表失败：ssdp is wedged'
+                  and _read_fail59['targets']['items'] == [], str(_read_fail59))
+
+            # -- the hand-off: who is given the relay address -----------------
+            _dev_cand59 = mr59.Candidate(
+                url=_good_url59, origin='ytdlp',
+                headers={'Referer': 'http://vid.example/'}, label='mp4 720p',
+                title='第二集 · 秋风',
+                probe=mr59.Probe(reach=mr59.REACH_OPENED, container='mp4',
+                                 video_codec='h264', audio_codec='aac',
+                                 duration=42.5))
+            _dev_job59 = mr59.ResolveJob(_plain59)
+            _dev_job59.candidates = [_dev_cand59]
+            _dev_job59.done = True
+            _dev_job59.step = 'done'
+            protocol.Handler._resolve_jobs['devcast'] = _dev_job59
+            _before_dev59 = dict(mrel59.store.entries)
+            _pushed_before59 = len(_tgt59.pushed)
+            _dropped59[:] = []
+            _as59()
+            _dev_cast59 = _post59(_handler59, **{'job': 'devcast',
+                                                'candidate': '0',
+                                                'target': 'cast-1',
+                                                'cast-resolved': '1'})
+            _push59 = _surfR59.pushes[-1] if _surfR59.pushes else {}
+            _dev_ids59 = set(mrel59.store.entries) - set(_before_dev59)
+            check("a named device is handed the relay address and nothing else: "
+                  "the URL is this machine's /relay/<id>/media, the origin's signed "
+                  "address appears nowhere in it, and the content type, the "
+                  "duration and the live marker are the relay's and the "
+                  "candidate's own answers rather than a second reading of them. "
+                  "`live` is `not seekable` because a television that cannot scrub "
+                  "must not be told to try",
+                  _dev_cast59['code'] == 0
+                  and _dev_cast59['message'] == 'success'
+                  and _dev_cast59['target'] == 'cast-1'
+                  and set(_dev_cast59) == {'code', 'message', 'target', 'relay',
+                                           'note'}
+                  and len(_push59) > 0
+                  and _push59.get('target') == 'cast-1'
+                  and '/relay/{}/media'.format(_dev_cast59['relay']['id'])
+                      in _push59.get('url', '')
+                  and _good_url59 not in _push59.get('url', '')
+                  and _push59.get('title') == '第二集 · 秋风'
+                  and _push59.get('content_type')
+                      == mrel59.content_type_for(_good_url59, _dev_cand59.probe)
+                  and _push59.get('duration') == 42.5
+                  and _dev_cast59['relay']['seekable'] is True
+                  and _push59.get('live') is False
+                  and len(_dev_ids59) == 1
+                  and _dev_ids59 == {_dev_cast59['relay']['id']},
+                  str([_push59, _dev_cast59.get('relay')]))
+            check("and our own playback state is untouched by a device cast: the "
+                  "selected renderer's `cast_uri` was not called, once or ever. "
+                  "The card can push while a different player is running here, and "
+                  "a second owner of that state would have the status page say"
+                  "「正在播放」about two things at once -- how long the television "
+                  "plays, and when it stops, is decided on the television",
+                  len(_tgt59.pushed) == _pushed_before59, str(len(_tgt59.pushed)))
+            _before_refuse59 = dict(mrel59.store.entries)
+            _dropped59[:] = []
+            _surfR59.answer = (False, '设备列表里没有这一台（它可能刚关机，或者搜索'
+                                      '结果已过期），请点「重新搜索」再投')
+            _dev_refused59 = _post59(_handler59, **{'job': 'devcast',
+                                                    'candidate': '0',
+                                                    'target': 'cast-9',
+                                                    'cast-resolved': '1'})
+            check("a refusal from the plugin is passed through in the plugin's own "
+                  "words, because that sentence is the one that names the fix, and "
+                  "the relay goes with it: the hand-off failed, so nobody is "
+                  "streaming, and leaving the registration behind would hold one of "
+                  "eight slots until the TTL for a television that never answered. "
+                  "The answer still names the device -- this one WAS asked, which is "
+                  "what separates it from the case three lines below",
+                  _dev_refused59['code'] == 1
+                  and _dev_refused59['message'] == _surfR59.answer[1]
+                  and _dev_refused59['target'] == 'cast-9'
+                  and len(_dropped59) == 1
+                  and set(mrel59.store.entries) == set(_before_refuse59),
+                  str([_dev_refused59, _dropped59]))
+            _surfR59.answer = (True, '已投给「客厅电视」')
+            _before_throw59 = dict(mrel59.store.entries)
+            _dropped59[:] = []
+            _surfR59.push_error = RuntimeError('socket closed mid-LOAD')
+            _thrown59 = _post59(_handler59, **{'job': 'devcast', 'candidate': '0',
+                                               'target': 'cast-1',
+                                               'cast-resolved': '1'})
+            _surfR59.push_error = None
+            check("an exception from the plugin is a sentence with the reason in it "
+                  "and a closed relay, not a stack trace to the page: 投给这台设备"
+                  "失败：socket closed mid-LOAD is what the card can print, and the "
+                  "store is back to the set it held before this call",
+                  _thrown59['code'] == 1
+                  and _thrown59['message'] == '投给这台设备失败：socket closed '
+                                              'mid-LOAD'
+                  and len(_dropped59) == 1
+                  and set(mrel59.store.entries) == set(_before_throw59),
+                  str([_thrown59, _dropped59]))
+            _before_none59 = dict(mrel59.store.entries)
+            _dropped59[:] = []
+            _pushes_none59 = len(_surfR59.pushes)
+            _mgrR59.url_target_setting = lambda: None
+            _lost_mgr59 = _post59(_handler59, **{'job': 'devcast', 'candidate': '0',
+                                                 'target': 'cast-1',
+                                                 'cast-resolved': '1'})
+            _mgrR59.url_target_setting = lambda: _surfR59
+            check("and a device cast that cannot find the surface takes the relay "
+                  "with it too: the same「启用插件」sentence as the reader, the "
+                  "plugin never asked, and no registration left for the TTL to "
+                  "find. This is the shape a mid-flight plugin reload leaves "
+                  "behind, and a green card over a dead relay is the one outcome "
+                  "worse than a red one",
+                  _lost_mgr59['code'] == 1
+                  and '没有可用的设备发现插件' in _lost_mgr59['message']
+                  and 'target' not in _lost_mgr59
+                  and len(_surfR59.pushes) == _pushes_none59
+                  and len(_dropped59) == 1
+                  and set(mrel59.store.entries) == set(_before_none59),
+                  str([_lost_mgr59, _dropped59]))
+            _local_pushed59 = len(_tgt59.pushed)
+            _surface_pushed59 = len(_surfR59.pushes)
+            _states_before_local59 = _surfR59.states
+            _as59()
+            _dev_local59 = _post59(_handler59, **{'job': 'devcast',
+                                                  'candidate': '0',
+                                                  'target': 'local',
+                                                  'cast-resolved': '1'})
+            check("「本机」is the same request v0.18 already answered: an empty "
+                  "target and the word `local` both go through the selected "
+                  "renderer, the device surface is not consulted, and the relay "
+                  "address is still what gets handed over. The dropdown's first "
+                  "option has to be today's behaviour, not a new code path that "
+                  "merely looks like it -- so the surface's read counter must not "
+                  "move either, and an omitted `target` answers the same way",
+                  _dev_local59['code'] == 0
+                  and len(_tgt59.pushed) == _local_pushed59 + 1
+                  and '/relay/{}/media'.format(_dev_local59['relay']['id'])
+                      in _tgt59.pushed[-1][0]
+                  and _good_url59 not in _tgt59.pushed[-1][0]
+                  and len(_surfR59.pushes) == _surface_pushed59
+                  and _surfR59.states == _states_before_local59,
+                  str([_dev_local59, len(_surfR59.pushes)]))
+            _omitted_pushed59 = len(_tgt59.pushed)
+            _as59()
+            _dev_omitted59 = _post59(_handler59, **{'job': 'devcast',
+                                                    'candidate': '0',
+                                                    'cast-resolved': '1'})
+            check("and a POST that names no device at all is the same call: the "
+                  "`target` key is optional in `POST_HELPER_PARAMS`, not a required "
+                  "field, so the page that has never grown a dropdown still casts. "
+                  "Empty string and `local` have to be one branch, not two that can "
+                  "drift",
+                  _dev_omitted59['code'] == 0
+                  and len(_tgt59.pushed) == _omitted_pushed59 + 1
+                  and '/relay/{}/media'.format(_dev_omitted59['relay']['id'])
+                      in _tgt59.pushed[-1][0]
+                  and len(_surfR59.pushes) == _surface_pushed59
+                  and _surfR59.states == _states_before_local59,
+                  str([_dev_omitted59, len(_tgt59.pushed)]))
+            for _left_r59 in sorted(set(mrel59.store.entries)
+                                    - set(_before_dev59)):
+                mrel59.store.drop(_left_r59)
+        finally:
+            try:
+                cherrypy.engine.unsubscribe('get_plugin_manager', _get_mgrR59)
+            except Exception:
+                pass
+            protocol.cherrypy_publish = _real_publish59
+            protocol.Handler._resolve_jobs.pop('devcast', None)
+
         # ---- Q: the page's text contract ---------------------------------
         # There is no JavaScript engine in this suite, so the front end is read as
         # text -- the method Part 35/44/57/58 use for the same reason. What is under
@@ -25951,73 +27148,136 @@ exit 0
               "解不出」from「解出来了但都被判定剔除」",
               _tpl_keys59 <= _status_keys59
               and {'done', 'error', 'step_label', 'candidates', 'scraped',
-                   'from_ytdlp', 'measured', 'rejected', 'seconds'} <= _tpl_keys59,
+                   'from_ytdlp', 'measured', 'rejected', 'seconds',
+                   'hidden_silent', 'engine_note', 'needs_cookies',
+                   'note'} <= _tpl_keys59,
               str(sorted(_tpl_keys59 - _status_keys59)))
         _cand_keys59 = set(_re59.findall(r'\bc\.([A-Za-z_][A-Za-z0-9_]*)', _card59))
         _desc_keys59 = set(mr59.describe(_one_job59.candidates[0]))
         check("the same question asked of a candidate row: every `c.<key>` is one "
               "`describe()` put into the JSON the page got back, and the row shows "
               "exactly the facts a user compares before clicking -- title, address, "
-              "size, duration-or-live, container, which engine produced it, the two "
-              "codec names behind the silent-picture warning below, and the "
-              "backend's own relay sentence. The card renders that sentence verbatim "
+              "size, duration-or-live, container, which engine produced it, the three "
+              "names behind the two badges below (merged / audio_label / silent), and "
+              "the backend's own relay sentence. The card renders that sentence verbatim "
               "(`{{ c.relay }}`) rather than paraphrasing it, because the reason an "
-              "address is proxied is a rule in `relay_reason()`, not a caption",
+              "address is proxied is a rule in `relay_reason()`, not a caption. Note "
+              "what is *not* here: the two codec names. The card used to read them and "
+              "do the arithmetic; now `describe()` answers「这条没有音轨」 outright, so "
+              "no judgment lives in the browser",
               _cand_keys59 <= _desc_keys59
               and {'title', 'url', 'width', 'height', 'live', 'duration',
                    'container', 'origin', 'relay', 'mode',
-                   'video_codec', 'audio_codec'} == _cand_keys59
+                   'merged', 'audio_label', 'silent'} == _cand_keys59
               and '{{ c.relay }}' in _card59,
               str([sorted(_cand_keys59 - _desc_keys59), sorted(_cand_keys59)]))
         # Found on a real site, 2026-10-03: bilibili's DASH ladder hands back a
-        # picture-only row and a sound-only row as two separate addresses, so the
-        # tallest candidate on the page is one the television plays *without any
-        # audio*. The relay cannot fix that (there is nothing second to merge with),
-        # and §4.8's rule for a shape whose cost is invisible in the symptom is that
-        # the price gets printed next to the control, not in a manual.
+        # picture-only row and a sound-only row as two separate addresses. The first
+        # answer was a badge saying「这条没有音轨」; the second (this round) is the
+        # merge -- the relay feeds ffmpeg both addresses and copies them into one
+        # growing MP4, so the row is no longer silent at all. The badge stays for the
+        # case the merge cannot serve: a picture with *no* partner address, which the
+        # candidate list now drops entirely (§4.8: an option that cannot play is a
+        # lying option), so what remains on the card is the paired shape's receipt.
+        _merged59 = _re59.search(
+            r'<el-tag v-if="(c\.merged)"[^>]*>\s*([^<{]*)'
+            r'\{\{\s*c\.audio_label\s*\?', _card59)
         _silent59 = _re59.search(
-            r'<el-tag v-if="(c\.video_codec && !c\.audio_codec)"[^>]*>'
+            r'<el-tag v-else-if="(c\.silent)"[^>]*>'
             r'([^<]*)</el-tag>', _card59)
         _silent_probe59 = mr59.Candidate(
             url=ORIGIN59 + '/video-only.m4s', origin='ytdlp')
-        _silent_probe59.probe = mr59.Probe(video_codec='av1', audio_codec='')
+        _silent_probe59.probe = mr59.Probe(video_codec='av1', audio_codec='',
+                                           reach=mr59.REACH_OPENED)
         _with_sound59 = mr59.Candidate(url=ORIGIN59 + '/both.mp4', origin='ytdlp')
-        _with_sound59.probe = mr59.Probe(video_codec='h264', audio_codec='aac')
-        check("the silent-picture warning is keyed on the two codec names the probe "
-              "actually reported, and says which half is missing. Both operands have "
-              "to be there: `!c.audio_codec` alone would flag a pure-audio row (which "
-              "is an *audio cast*, said out loud by `relay_reason`) as a broken video, "
-              "and `c.video_codec` alone would flag the normal case. The two shapes "
-              "are asked of `describe()`, so the keys this tag reads are keys the "
-              "backend really returns for them",
-              _silent59 is not None and '音轨' in _silent59.group(2)
-              and _silent59.group(1) == 'c.video_codec && !c.audio_codec'
-              and mr59.describe(_silent_probe59)['video_codec'] == 'av1'
-              and mr59.describe(_silent_probe59)['audio_codec'] == ''
-              and mr59.describe(_with_sound59)['audio_codec'] == 'aac',
-              str([_silent59.group(0)[:120] if _silent59 else 'no such tag',
-                   mr59.describe(_silent_probe59)['video_codec'],
-                   mr59.describe(_silent_probe59)['audio_codec'],
-                   mr59.describe(_with_sound59)['audio_codec']]))
+        _with_sound59.probe = mr59.Probe(video_codec='h264', audio_codec='aac',
+                                         reach=mr59.REACH_OPENED)
+        _paired59 = mr59.Candidate(url=ORIGIN59 + '/video.mpd', origin='ytdlp',
+                                   audio_url=ORIGIN59 + '/audio.mpd',
+                                   audio_label='中文 128k')
+        _paired59.probe = mr59.Probe(video_codec='av1', audio_codec='',
+                                     reach=mr59.REACH_OPENED)
+        _audio_only59 = mr59.Candidate(url=ORIGIN59 + '/only.m4a', origin='ytdlp')
+        _audio_only59.probe = mr59.Probe(video_codec='', audio_codec='aac',
+                                         reach=mr59.REACH_OPENED)
+        _unmeasured59 = mr59.Candidate(url=ORIGIN59 + '/unknown.m4s', origin='ytdlp')
+        _unmeasured59.probe = mr59.Probe(reach=mr59.REACH_UNPROVEN)
+        check("the two badges are keyed on the two answers `describe()` computes, not "
+              "on codec names the browser compares: a row that has a partner address "
+              "is「画面＋声音」and says which audio was picked, and only a *measured* "
+              "picture with neither sound nor partner is silent. Every one of those "
+              "words is the backend's, because the page reads no codec name at all "
+              "any more -- and the shape that used to be miscalled is asked again "
+              "here: a pure-audio row is an *audio cast*, not a broken video "
+              "(relay_reason says so out loud), and an address this machine could not "
+              "measure is unknown, not silent, so hiding it would turn「没读到」into"
+              "「这站没有声音」-- the one distinction this module exists to keep",
+              _merged59 is not None and _silent59 is not None
+              and _merged59.group(1) == 'c.merged'
+              and _silent59.group(1) == 'c.silent' and '音轨' in _silent59.group(2)
+              and '画面＋声音' in _merged59.group(2)
+              and mr59.describe(_paired59)['merged'] is True
+              and mr59.describe(_paired59)['silent'] is False
+              and mr59.describe(_paired59)['audio_label'] == '中文 128k'
+              and mr59.plan(_paired59) == 'merge'
+              and mr59.describe(_silent_probe59)['silent'] is True
+              and mr59.describe(_silent_probe59)['merged'] is False
+              and mr59.describe(_with_sound59)['silent'] is False
+              and mr59.describe(_audio_only59)['silent'] is False
+              and mr59.describe(_unmeasured59)['silent'] is False,
+              str([_merged59 and _merged59.groups(),
+                   _silent59 and _silent59.groups(),
+                   mr59.describe(_paired59)['merged'],
+                   mr59.describe(_silent_probe59)['silent'],
+                   mr59.describe(_audio_only59)['silent'],
+                   mr59.describe(_unmeasured59)['silent']]))
+        check("a silent row never reaches the card at all: `visible()` drops it and "
+              "the job counts what it dropped, so the page says「另外 N 条只有画面…」"
+              "instead of offering N casts that will play without sound. The count is "
+              "printed, because「解出 6 条、这里只有 4 条」without a number is a riddle. "
+              "A paired row is *not* dropped by the same question -- it has a partner "
+              "address, so it is the merge, not a silent one",
+              [c.url for c in mr59.visible([_with_sound59, _silent_probe59,
+                                             _paired59])[1]]
+              == [_silent_probe59.url]
+              and mr59.visible([_paired59])[0] != []
+              and 'resolve.hidden_silent' in _card59
+              and '只有画面' in _card59 and '不列它们' in _card59,
+              str([[c.url for c in mr59.visible(
+                  [_with_sound59, _silent_probe59, _paired59])[1]],
+                   len(mr59.visible([_paired59])[0])]))
         _mode_tests59 = _re59.findall(r"c\.mode\s*===\s*'([a-z]+)'", _card59)
         _mode_line59 = _re59.search(
-            r"\{\{\s*c\.mode === 'remux' \? '([^']*)' : '([^']*)'\s*\}\}", _card59)
+            r"\{\{\s*c\.mode === 'proxy' \? '([^']*)' : '([^']*)'\s*\}\}", _card59)
         _prog59 = mr59.Candidate(url=ORIGIN59 + '/range/last.mp4', origin='page')
         _seg59 = mr59.Candidate(url='https://example.test/hls/index.m3u8',
                                 origin='page')
-        check("the one sentence the page builds for itself is keyed on exactly the two "
-              "values `plan()` can return, and the branch a viewer reads is the branch "
-              "this candidate's suffix selects: a `.mp4` is proxied and gets the Range "
-              "condition, a `.m3u8` is remuxed and gets「拖动要用完才准」. That half "
-              "sentence is load-bearing -- the remux path writes a temp file that only "
-              "grows (§4.8: no length, no seek ahead of the write), so a card that "
-              "promised a draggable stream on an HLS page would be the exact lie this "
-              "design was supposed to prevent",
-              _mode_tests59 == ['remux']
+        check("the one sentence the page builds for itself asks exactly one question "
+              "--「是不是原样转发」-- because `plan()` has three answers and only one of "
+              "them can be served by translating Range. So the branch is keyed on "
+              "`proxy`, not on `remux`: a merged DASH row is a third thing, and it "
+              "belongs on the same side as the remux, because it inherits every "
+              "property a remux has (the relay keeps one serving shape and two ways "
+              "of filling it -- `media_relay.open_relay()` stores merge as `remux`). "
+              "The branch a viewer reads is the branch this candidate's own address "
+              "selects: a `.mp4` is proxied and gets the Range condition, a `.m3u8` "
+              "is remuxed and a split DASH ladder is merged, and both get the "
+              "half sentence about waiting for the file to be written. That half "
+              "sentence is load-bearing -- both paths write a temp file "
+              "that only grows (§4.8: no length, no seek ahead of the write), and a "
+              "measured one (2026-10-04): a standard MP4 gets its `moov` when ffmpeg "
+              "*exits*, so a half-written relay file answers `moov atom not found` to "
+              "any player that opens it. So the card has to say 「写完才播得起来」 and "
+              "not merely that dragging is limited -- a promise of a playable-but-"
+              "undraggable stream on an HLS page would be the exact lie "
+              "this design was supposed to prevent",
+              _mode_tests59 == ['proxy']
               and mr59.plan(_prog59) == 'proxy' and mr59.plan(_seg59) == 'remux'
+              and mr59.plan(_paired59) == 'merge'
               and _mode_line59 is not None
-              and '转封装' in _mode_line59.group(1)
-              and 'Range' in _mode_line59.group(2)
+              and 'Range' in _mode_line59.group(1)
+              and '转封装' in _mode_line59.group(2)
+              and '写完' in _mode_line59.group(2)
               and _mode_line59.group(1) != _mode_line59.group(2),
               str([_mode_tests59, _mode_line59 and _mode_line59.groups()]))
         check("no `v-html` in the card and none in the resolve JS. The row title is "
@@ -26065,38 +27325,56 @@ exit 0
                            '排序')),
               str([_pairs59, _divisor59 and _divisor59.group(1)]))
         _rows59 = {row[0]: row for row in protocol.Handler.POST_ROUTES
-                   if row[0] in ('resolve-page', 'cast-resolved')}
+                   if row[0] in ('resolve-page', 'cast-resolved',
+                                 'resolve-cookies', 'resolve-cookies-clear',
+                                 'resolve-cookie-browser')}
         _posted59 = set(_re59.findall(r"fd\.append\('([a-z-]+)'", _js59))
-        check("the three names this card speaks are the names the backend listens "
-              "for: `resolve-page` and `cast-resolved` are rows in "
-              "`Handler.POST_ROUTES` on the management gate, so Part 51's "
+        check("every name this card speaks is a name the backend listens "
+              "for: `resolve-page`, `cast-resolved` and the three cookie routes are "
+              "rows in `Handler.POST_ROUTES` on the management gate, so Part 51's "
               "route-by-route loop covers them and a button posting a field nobody "
               "registered gets the「不认识这个字段」answer instead of a fake success; "
-              "`job` and `candidate` are helper fields beside the route; and the "
-              "polling GET asks for `query=resolve-status`, which group O already "
+              "`job`, `candidate` and `target` are helper fields beside the route; and "
+              "the polling GET asks for `query=resolve-status`, which group O already "
               "proved is management-gated on a real request",
-              sorted(_rows59) == ['cast-resolved', 'resolve-page']
+              sorted(_rows59) == ['cast-resolved', 'resolve-cookie-browser',
+                                  'resolve-cookies', 'resolve-cookies-clear',
+                                  'resolve-page']
               and all(row[1] == protocol.GATE_MANAGEMENT
                       for row in _rows59.values())
-              and _posted59 == {'resolve-page', 'cast-resolved', 'job', 'candidate'}
+              and _posted59 == {'resolve-page', 'cast-resolved', 'job',
+                                 'candidate', 'target', 'resolve-cookies',
+                                 'resolve-cookies-clear',
+                                 'resolve-cookie-browser'}
               and all(name in protocol.Handler.POST_HELPER_PARAMS
-                      for name in ('job', 'candidate'))
+                      for name in ('job', 'candidate', 'target'))
               and 'query=resolve-status' in _js59,
               str([sorted(_rows59), sorted(_posted59)]))
         _reads59 = set(_re59.findall(r'\bdata\.([A-Za-z_][A-Za-z0-9_]*)', _js59))
-        _answers59 = (set(_started59) | set(_status_good59) | set(_cast59))
+        _answers59 = (set(_started59) | set(_status_good59) | set(_cast59)
+                      | set(_cookie_post59) | set(_cookie_read59)
+                      | set(_targets_read59) | set(_dev_cast59))
         check("and the keys the page reads back out of those answers are keys these "
-              "three handlers actually returned for the requests this Part really "
-              "made: `code`, `message`, `job`, `status`, `note`. `note` is the "
-              "relay's own reason sentence, handed back by the cast POST rather than "
-              "assembled from the row -- group P pins it equal to "
+              "handlers actually returned for the requests this Part really "
+              "made: `code`, `message`, `job`, `status`, `note`, `state`, `targets`, "
+              "`target`. `note` is the relay's own reason sentence, handed back by the "
+              "cast POST rather than assembled from the row -- group P pins it equal to "
               "`relay_reason(candidate)`, and a page that re-derived it would be a "
-              "second copy of that rule wearing a caption",
-              _reads59 == {'code', 'message', 'job', 'status', 'note'}
+              "second copy of that rule wearing a caption. The envelope shape is the "
+              "other half of this: GET does not auto-wrap, so every reader here has to "
+              "return `{code, message, <noun>}` itself, and `state`/`targets` are the "
+              "two nouns the cookie panel and the device list answer under, while "
+              "`target` is the device the cast POST echoes back to confirm the row it "
+              "just handed over",
+              _reads59 == {'code', 'message', 'job', 'status', 'note',
+                           'state', 'targets', 'target'}
               and _reads59 <= _answers59
               and 'note' in _cast59
+              and 'state' in _cookie_read59
+              and 'targets' in _targets_read59
+              and 'target' in _dev_cast59
               and _cast59['note'] == mr59.relay_reason(_one_job59.candidates[0]),
-              str(sorted(_reads59)))
+              str([sorted(_reads59), sorted(_answers59)]))
         _poll_start59 = _js59.index('async read_resolve_status()')
         _poll59 = _js59[_poll_start59:_js59.index('start_resolve_poll()',
                                                   _poll_start59)]
@@ -26126,14 +27404,19 @@ exit 0
               str(_card59.count('casting === i')))
         check("the card states the relay in its own hint, in the same words the "
               "handler enforces: the pasted thing is a page address, not a video "
-              "address, and the television never receives the origin's signed, "
-              "short-lived, header-requiring URL. That sentence is what keeps a failed "
+              "address, a whole share sentence may be pasted as-is, and the television "
+              "never receives the origin's signed, short-lived, header-requiring URL. "
+              "That sentence is what keeps a failed "
               "cast from being read as「地址填错了」, and it is the reason the feature "
-              "has a relay at all -- so it belongs on the card, not only in this file",
-              '粘贴<b>网页</b>地址（不是视频地址）' in _card59
+              "has a relay at all -- so it belongs on the card, not only in this file. "
+              "The share-text half is the newer promise: `resolve_target` will read a "
+              "Douyin blurb, and a card that still says「粘贴网页地址」alone teaches "
+              "people to cut the URL out by hand",
+              '粘贴<b>网页</b>地址（不是视频地址' in _card59
+              and '分享文案' in _card59
               and '电视永远拿不到源站' in _card59
               and '会过期' in _card59,
-              _card59[:120])
+              _card59[:160])
     finally:
         _restore59(_oldO59)
         mrel59.store.drop = _real_drop59
@@ -26154,6 +27437,7 @@ finally:
                                                          _saved59[1])
     utils.SETTING_DIR = _saved59[2]
     mrel59.SETTING_DIR = _saved59[3]
+    protocol.SETTING_DIR = _saved59[4]
     _shutil.rmtree(_tmp59, ignore_errors=True)
 
 # --------------------------------------------------------------------------

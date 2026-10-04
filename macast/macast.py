@@ -595,11 +595,45 @@ class MacastPluginManager:
         while a class attribute is not.
         """
         for plugin in self.renderer_all:
-            exported = (plugin.plugin_class or plugin.plugin_factory
-                        or type(plugin.plugin_instance))
-            if getattr(exported, 'MIRROR_CONSOLE', False):
+            if getattr(self.exported_class(plugin), 'MIRROR_CONSOLE', False):
                 return plugin
         return None
+
+    @staticmethod
+    def exported_class(plugin):
+        """The class a plugin exports, before anything is instantiated.
+
+        The markers the app asks about (`MIRROR_CONSOLE`, `URL_TARGET_RENDERER`,
+        `MENU_HIDDEN`) live on that class, and a plugin whose instance has not
+        been built yet still has to answer.
+        """
+        return (plugin.plugin_class or plugin.plugin_factory
+                or type(plugin.plugin_instance))
+
+    def is_menu_hidden(self, plugin):
+        """Whether this renderer refuses a row in the menu's Renderers group.
+
+        Screen Mirror is the one that does: its control surface is the settings
+        page's 「电脑投屏」 tab, and a menu row would read as the way to reach it
+        (AGENTS.md §4.8, v0.12 -- "菜单栏里一条镜像行都没有，只剩通知").
+
+        Asked of the exported class, never of the title: a title is user-editable
+        (`MacastPluginManager.resolve_title`), so matching one would let a rename
+        hide the wrong renderer.
+        """
+        return bool(getattr(self.exported_class(plugin), 'MENU_HIDDEN', False))
+
+    def menu_renderers(self):
+        """The renderers the menu offers, in menu order.
+
+        This is the list whose *index* becomes a menu item's `data`, so every
+        reader of that index -- the checked loop and `on_renderer_change_click`
+        -- has to come through here rather than `renderer_list`. Hiding a row is
+        safe only because the hidden plugin is still selectable by other means
+        when it was already chosen: a persisted `Macast_Renderer` keeps working,
+        and nothing here tears a running session away from its owner.
+        """
+        return [p for p in self.renderer_list if not self.is_menu_hidden(p)]
 
     def mirror_setting(self):
         """The screen-mirror plugin's console surface, whatever is playing.
@@ -623,6 +657,44 @@ class MacastPluginManager:
             return None
         setting = getattr(instance, 'renderer_setting', None)
         if setting is None or not hasattr(setting, 'console_state'):
+            return None
+        return setting
+
+    def url_target_plugin(self):
+        """The renderer plugin that can push one URL to a chosen LAN device, or None.
+
+        Found by a class attribute (`URL_TARGET_RENDERER`) for the same reason as
+        `console_plugin()`: 「网页地址投屏」 has to offer devices whichever renderer is
+        selected, and a title is user-editable while an attribute is not.
+        """
+        for plugin in self.renderer_all:
+            if getattr(self.exported_class(plugin), 'URL_TARGET_RENDERER', False):
+                return plugin
+        return None
+
+    def url_target_setting(self):
+        """The device-picking surface, whichever renderer is playing.
+
+        Instantiating is not selecting, exactly as in `mirror_setting()`: nothing
+        here calls `start()`, so no bus topic is taken over and no media is routed
+        to this renderer. It exists so the card can name the电视 on the LAN -- the
+        same list the plugin's own 「输出目标」 menu reads -- without the user having
+        to switch renderers to reach a device.
+        """
+        plugin = self.url_target_plugin()
+        if plugin is None:
+            return None
+        is_enabled = getattr(self, 'is_plugin_enabled', None)
+        if is_enabled is not None and hasattr(self, 'renderer_list'):
+            if not is_enabled(plugin):
+                return None
+        try:
+            instance = plugin.get_instance()
+        except Exception as e:
+            logger.error('Creating the local file caster failed: %s', e)
+            return None
+        setting = getattr(instance, 'renderer_setting', None)
+        if setting is None or not hasattr(setting, 'target_state'):
             return None
         return setting
 
@@ -1086,7 +1158,10 @@ class Macast(App):
                                                 self.on_start_at_login_click,
                                                 checked=self.setting_start_at_login)
 
-        renderer_names = [r.title for r in self.plugin_manager.renderer_list]
+        # The menu's index is an index into *this* list, so the click handler has
+        # to read the same one back (`menu_renderers`, not `renderer_list`).
+        menu_renderers = self.plugin_manager.menu_renderers()
+        renderer_names = [r.title for r in menu_renderers]
         renderer_select = []
         if len(renderer_names) > 1:
             self.renderer_menuitem = MenuItem(_("Renderers"),
@@ -1098,7 +1173,14 @@ class Macast(App):
                     i.checked = True
                     break
             else:
-                self.renderer_menuitem.children[0].checked = True
+                if self.setting_renderer not in [
+                        r.title for r in self.plugin_manager.renderer_list]:
+                    # Nothing selected at all (uninstalled, or switched off): the
+                    # fallback that `on_plugins_changed` will make is the first
+                    # row, so check that one. A *hidden* renderer is the other case
+                    # of "no row matches", and putting a checkmark on a renderer that
+                    # is not playing is the lie this branch would tell.
+                    self.renderer_menuitem.children[0].checked = True
 
         protocol_names = [r.title for r in self.plugin_manager.protocol_list]
         # Protocols are checkboxes, not radio buttons: multiple may run
@@ -1516,7 +1598,7 @@ class Macast(App):
         self._apply_app_menu()
 
     def on_renderer_change_click(self, item):
-        renderer_config = self.plugin_manager.renderer_list[item.data]
+        renderer_config = self.plugin_manager.menu_renderers()[item.data]
         self.service.renderer = renderer_config.get_instance()
         Setting.set(SettingProperty.Macast_Renderer, renderer_config.title)
         self.setting_renderer = renderer_config.title

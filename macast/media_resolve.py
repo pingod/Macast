@@ -205,6 +205,12 @@ class Candidate:
     probe: Probe = None
     last_resort: bool = False
     reason: str = ''
+    # DASH hands the picture and the sound as two addresses. `audio_url` is the
+    # partner this row was *paired* with at parse time, so the pairing decision
+    # lives with the engine output and nowhere else.
+    audio_url: str = ''
+    audio_headers: dict = field(default_factory=dict)
+    audio_label: str = ''
 
     @property
     def host(self):
@@ -226,6 +232,18 @@ class Candidate:
     @property
     def audio_only(self):
         return self.path_suffix in AUDIO_SUFFIXES
+
+    @property
+    def silent(self):
+        """A measured picture with no sound and no partner address to merge in.
+
+        Only a *measured* row may answer this. An address ffprobe never got to is
+        unknown, not silent, and hiding it would turn「这台机器没读到」into「这站
+        没有声音」-- the one distinction this module exists to keep.
+        """
+        probe = self.probe
+        return bool(probe and probe.measured and probe.moving_picture
+                    and not probe.audio_codec and not self.audio_url)
 
     @property
     def height(self):
@@ -430,29 +448,146 @@ def absolute_url(page_url, href):
 # engine 2 -- yt-dlp
 # ---------------------------------------------------------------------------
 
-def ytdlp_candidates(page_url, binary=None):
+def ytdlp_candidates(page_url, binary=None, cookies=None, sink=None):
     """Every rendition yt-dlp can name for this page, with its headers.
 
     `-J` and not `-g`: `-g` prints one address and throws away the `http_headers`
     that make that address readable, and those headers are the reason the relay
     exists. The JSON also carries the whole ladder, so `rank` has something to
     rank.
+
+    `sink` is where the engine's *own* sentence goes when it refuses. Before it, a
+    refusal and an absent binary looked identical from the outside: the return
+    code was checked, stderr was thrown away, and the card said「没有地址」while the
+    engine had actually said「需要 fresh cookies」. That is a different answer and
+    the user has to hear the one that was given.
     """
     binary = binary or find_command('yt-dlp')
     if binary is None:
         return []
     command = [binary, '-J', '--no-playlist', '--no-warnings', '--quiet',
-               '--socket-timeout', '20', page_url]
+               '--socket-timeout', '20']
+    command += cookie_arguments(cookies)
+    command += [page_url]
     try:
         completed = subprocess.run(command, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, timeout=YTDLP_TIMEOUT,
                                    creationflags=console_flags(), text=True,
                                    encoding='utf-8', errors='replace')
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _sink(sink, 'yt-dlp 没能运行（{}: {}）'.format(type(exc).__name__, exc))
         return []
     if completed.returncode != 0 or not (completed.stdout or '').strip():
+        _sink(sink, engine_note(completed))
         return []
     return parse_ytdlp_json(completed.stdout)
+
+
+def cookie_arguments(cookies):
+    """yt-dlp's cookie switches from the caller's dict; never a cookie value.
+
+    `{'file': path, 'browser': name}`, either half optional. The file wins when
+    both are set, because a jar this app wrote is the one that accumulates the
+    cookies the engine mints (yt-dlp saves the jar back), while a browser profile
+    is somebody else's store we only borrow.
+    """
+    cookies = cookies or {}
+    path = (cookies.get('file') or '').strip()
+    if path:
+        return ['--cookies', path]
+    browser = (cookies.get('browser') or '').strip().lower()
+    if browser:
+        return ['--cookies-from-browser', browser]
+    return []
+
+
+def engine_note(completed, limit=200):
+    """The first line the engine actually complained about, in its own words.
+
+    `--quiet` silences progress, not `ERROR:` -- which is the whole reason this is
+    worth reading. Truncated because a real stderr also carries tracebacks, and a
+    traceback on a settings page is not an explanation.
+    """
+    text = (completed.stderr or '').strip()
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            return line[:limit]
+    if completed.returncode:
+        return 'yt-dlp 退出码 {}'.format(completed.returncode)
+    return 'yt-dlp 没有返回任何地址'
+
+
+def _sink(sink, note):
+    if sink is not None and note:
+        sink.append(note)
+
+
+#: What an engine says when the page will not hand anything over without a
+#: session. Every extractor phrases it differently -- yt-dlp's bilibili module
+#: writes 「cookies to access this webpage」, its tiktok module writes 「Fresh
+#: cookies (not necessarily logged in) are needed」 -- but they all say one of
+#: these words, and a return code never distinguishes them from "this site has
+#: no video". Matched here rather than in the page for the same reason every
+#: other reading on that card is computed here: it is our guess at somebody
+#: else's sentence, so it must have one owner that the tests can pin.
+_COOKIE_WORDS = ('cookie', 'log in', 'login', 'logged in', 'sign in',
+                 'authentication', 'unauthorized', '需要登录', '授权')
+
+
+def needs_cookies(note):
+    """Whether an engine's own refusal sentence is asking for a session."""
+    text = (note or '').lower()
+    return any(word in text for word in _COOKIE_WORDS)
+
+
+# ---------------------------------------------------------------------------
+# a pasted cookie jar
+# ---------------------------------------------------------------------------
+
+#: A jar is a list of `(domain, name, value)` lines in a fixed shape. The cap is
+#: not politeness: this text is written into the config directory and then handed
+#: to a subprocess as a file path, and a 200 MB paste is a disk problem.
+COOKIE_JAR_MAX_BYTES = 256 * 1024
+COOKIE_JAR_FIELDS = 7
+
+#: An HttpOnly cookie is a *cookie* whose line starts with this, not a comment.
+#: Same prefix, same ordering rule as the standard library's
+#: `http.cookiejar.MozillaCookieJar` -- and the ordering is the whole bug: a jar
+#: exported from a browser marks its session cookies this way, so a reader that
+#: skips every `#` line reads a pile of real login cookies as "nothing here".
+HTTPOONLY_PREFIX = '#HttpOnly_'
+
+
+def cookie_jar_state(text):
+    """`(cookies, bad_lines)` for a pasted Netscape jar -- it reads, it does not run.
+
+    Why validate a file whose only reader is yt-dlp: an empty or malformed jar
+    produces *no* error at all from the engine (it simply resolves the page
+    anonymously and comes back with fewer addresses), so the user's next clue that
+    the paste was junk is the card saying「页面里没有读到视频地址」. Saying
+    "3 条 cookie，2 行看不懂" at paste time is the only moment anyone can act on it.
+    """
+    text = text or ''
+    if len(text.encode('utf-8')) > COOKIE_JAR_MAX_BYTES:
+        raise ValueError('cookie 文件太大了（上限 {} KB）'.format(
+            COOKIE_JAR_MAX_BYTES // 1024))
+    cookies = bad = 0
+    for line in text.splitlines():
+        if line.startswith(HTTPOONLY_PREFIX):
+            line = line[len(HTTPOONLY_PREFIX):]
+        # Then the same skip the engine's own reader applies, *after* the prefix is
+        # gone: the prefix binds at index 0 of the raw line, so an indented
+        # `  #HttpOnly_…` stays a comment, while `#HttpOnly_# …` is a comment too.
+        # Counting either as a cookie would promise a login state yt-dlp never loads.
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        fields = line.rstrip('\r\n').split('\t')
+        if len(fields) >= COOKIE_JAR_FIELDS and fields[0].strip():
+            cookies += 1
+        else:
+            bad += 1
+    return cookies, bad
 
 
 def parse_ytdlp_json(text):
@@ -474,6 +609,8 @@ def parse_ytdlp_json(text):
     for entry in entries[:3]:
         shared = normalize_headers(entry.get('http_headers'))
         entry_title = entry.get('title')
+        video_rows = []
+        audio_rows = []
         for form in entry.get('formats') or []:
             if not isinstance(form, dict):
                 continue
@@ -486,12 +623,75 @@ def parse_ytdlp_json(text):
             # is a claim about the page that the page never made.
             title = entry_title if isinstance(entry_title, str) and entry_title.strip() \
                 else form.get('title')
-            found.append(Candidate(
+            candidate = Candidate(
                 url=url, origin='ytdlp',
                 headers=normalize_headers(form.get('http_headers') or shared),
                 label=format_label(form),
-                title=title if isinstance(title, str) else ''))
+                title=title if isinstance(title, str) else '')
+            kind = track_kind(form)
+            if kind == 'video':
+                video_rows.append((candidate, form))
+            elif kind == 'audio':
+                audio_rows.append((candidate, form))
+            else:
+                found.append(candidate)
+        pair_tracks(video_rows, audio_rows)
+        found.extend(candidate for candidate, _ in video_rows)
+        found.extend(candidate for candidate, _ in audio_rows)
     return dedupe(found)
+
+
+def track_kind(form):
+    """'video' / 'audio' when the engine states the tracks outright, else ''.
+
+    `'none'` is yt-dlp's word for "this rendition does not carry that track", and
+    it is the only reason DASH's split ladders can be paired at all. Anything else
+    -- a file that holds both, or a page whose formats say nothing -- returns `''`
+    rather than a guess from the file suffix: a silent 1080p row read as "has
+    sound" is the lie this whole feature exists to stop telling.
+    """
+    if not isinstance(form, dict):
+        return ''
+    video = form.get('vcodec')
+    audio = form.get('acodec')
+    if not isinstance(video, str) or not isinstance(audio, str):
+        return ''
+    has_video = video != 'none'
+    has_audio = audio != 'none'
+    if has_video and not has_audio:
+        return 'video'
+    if has_audio and not has_video:
+        return 'audio'
+    return ''
+
+
+def _track_bitrate(form):
+    """The engine's own best guess at this track's bit rate, or 0.0."""
+    for name in ('abr', 'tbr', 'br'):
+        value = form.get(name)
+        try:
+            if value is not None and float(value) > 0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def pair_tracks(video_rows, audio_rows):
+    """Attach the best-sounding partner to every picture-only row, in place.
+
+    One rule decides which sound a picture gets: the highest bit rate the engine
+    named, ties broken by the address so a rerun says the same thing. Every video
+    row may reuse the same audio row -- merging happens once per cast, and a
+    480p/1080p pair of rungs that share one sound track is not two casts.
+    """
+    if not audio_rows:
+        return
+    best = max(audio_rows, key=lambda row: (_track_bitrate(row[1]), row[0].url))
+    for candidate, _form in video_rows:
+        candidate.audio_url = best[0].url
+        candidate.audio_headers = best[0].headers
+        candidate.audio_label = best[0].label
 
 
 def normalize_headers(headers):
@@ -759,6 +959,75 @@ def rank(candidates, ceiling=0):
         lambda x, y: preference(x, y, ceiling)))
 
 
+def visible(candidates):
+    """(rows to show, rows hidden for having no sound at all).
+
+    On a DASH ladder the *top* rung is routinely picture-only -- bilibili's 1080p
+    is exactly that -- so leaving it on the card is how「投上去没声音」comes back as
+    a bug report about our relay. Only a measured, silent, unpairable row is
+    dropped; `Candidate.silent` says why an unknown row is not the same thing.
+    """
+    kept = [c for c in candidates if not c.silent]
+    return kept, [c for c in candidates if c.silent]
+
+
+# ---------------------------------------------------------------------------
+# a pasted share blurb
+# ---------------------------------------------------------------------------
+
+#: Share text is a sentence with one URL buried in it, wrapped in the app's own
+#: full-width punctuation -- which is why the class excludes it: `…https://v.douyin.
+#: com/iAbc/，复制打开抖音` would otherwise carry the comma into the address.
+_SHARE_URL = re.compile(
+    '''https?://[^\\s<>"'\u3000，。、；：！？（）【】《》“”‘’]+''',
+    re.IGNORECASE)
+
+
+def looks_like_url(text):
+    """Whether the whole paste *is* an address, and not a sentence holding one."""
+    text = (text or '').strip()
+    if not text or len(text.split()) != 1:
+        return False
+    return urllib.parse.urlsplit(text).scheme.lower() in ('http', 'https')
+
+
+def extract_share_urls(text):
+    """Every http(s) address inside a paste, in the order they appear, unique.
+
+    The bare-host rule still holds: this only ever returns something that already
+    carries a scheme, so a paste of `example.com/watch/7` yields nothing here and
+    the caller still refuses it. Feeding that string to yt-dlp would turn it into a
+    *search* for the text and hand back an answer that looks like "this site has no
+    video".
+    """
+    found = []
+    for match in _SHARE_URL.finditer(text or ''):
+        url = match.group(0).rstrip('.,;:!?)\'"')
+        if url not in found:
+            found.append(url)
+    return found
+
+
+def resolve_target(text):
+    """`(address, how many were found)` for whatever the user pasted.
+
+    The share blurb is the whole reason this exists: what a phone actually hands
+    over is a sentence -- `7.12 复制打开抖音，看看【…】https://v.douyin.com/iAbc/ …` --
+    and asking people to cut the URL out of it is a UI failure we can fix here. The
+    first address is the one we parse; the count is what the page says back, so a
+    multi-part post is understood as "this part" rather than silently dropping the
+    rest. `('', 0)` means the paste carried no address at all, which is the caller's
+    refusal to phrase -- and the bare-host refusal in `looks_like_url`'s own words.
+    """
+    text = (text or '').strip()
+    if not text:
+        return '', 0
+    if looks_like_url(text):
+        return text, 1
+    found = extract_share_urls(text)
+    return (found[0], len(found)) if found else ('', 0)
+
+
 def display_title(candidate, fallback=''):
     """What to call this on the television.
 
@@ -806,6 +1075,8 @@ def relay_reason(candidate):
     returns confirms: one request header disqualifies the hand-off. The device
     will fetch the URL minutes from now, from its own IP, with no Referer at all.
     """
+    if candidate.audio_url:
+        return '画面与声音是两条地址（DASH 分轨）：由 Macast 合并成一条流供出'
     if candidate.segmented:
         return '清单流（HLS/DASH）：电视不会自己读清单，由 Macast 转封装供流'
     if candidate.headers:
@@ -815,7 +1086,16 @@ def relay_reason(candidate):
 
 
 def plan(candidate):
-    """'proxy' (zero CPU, Range translated) or 'remux' (one ffmpeg, one container)."""
+    """'proxy', 'remux', or 'merge' -- which of the three shapes serves this one.
+
+    `merge` is a remux with a second input: the picture and the sound arrive as two
+    addresses and ffmpeg copies both into one growing MP4. It therefore inherits
+    every property the relay gives a remuxed file (no length while it grows, no
+    seeking until ffmpeg exits 0), which is why `media_relay` keeps one serving
+    shape and two ways of filling it.
+    """
+    if candidate.audio_url:
+        return 'merge'
     return 'remux' if candidate.segmented else 'proxy'
 
 
@@ -833,10 +1113,13 @@ class ResolveJob:
 
     STEPS = ('scrape', 'ytdlp', 'measure', 'rank')
 
-    def __init__(self, page_url, max_height=0, on_finish=None):
+    def __init__(self, page_url, max_height=0, on_finish=None, cookies=None,
+                 note=''):
         self.page_url = page_url
         self.max_height = max_height
         self.on_finish = on_finish
+        self.cookies = cookies or {}
+        self.note = note
         self.candidates = []
         self.error = ''
         self.done = False
@@ -847,6 +1130,8 @@ class ResolveJob:
         self.from_ytdlp = 0
         self.measured = 0
         self.rejected = 0
+        self.engine_note = ''
+        self.hidden_silent = 0
         self._lock = threading.Lock()
         self._thread = None
 
@@ -884,15 +1169,16 @@ class ResolveJob:
         self._enter('scrape')
         scraped = scrape_page(self.page_url)
         self._enter('ytdlp', scraped=len(scraped))
-        resolved = ytdlp_candidates(self.page_url)
-        self._enter('measure', from_ytdlp=len(resolved))
+        notes = []
+        resolved = ytdlp_candidates(self.page_url, cookies=self.cookies,
+                                    sink=notes)
+        self._enter('measure', from_ytdlp=len(resolved),
+                    engine_note=notes[0] if notes else '')
         pool = dedupe(scraped + resolved)
         if not pool:
             with self._lock:
                 self.candidates = []
-                self.error = ('页面里没有读到视频地址'
-                              + ('（这台机器没有装 yt-dlp，只能抓 HTML 里写明的地址）'
-                                 if find_command('yt-dlp') is None else ''))
+                self.error = '页面里没有读到视频地址' + self._why_empty()
             return
 
         hosts = {}
@@ -909,11 +1195,31 @@ class ResolveJob:
 
         self._enter('rank', measured=self.measured)
         with self._lock:
-            self.candidates = rank(pool, self.max_height)
-            self.rejected = len(pool) - len(self.candidates)
-            if not self.candidates:
-                self.error = '读到的 {} 个地址没有一个能通过判定（源站拒绝，或没有画面）'.format(
-                    len(pool))
+            ranked = rank(pool, self.max_height)
+            shown, hidden = visible(ranked)
+            self.candidates = shown
+            self.hidden_silent = len(hidden)
+            self.rejected = len(pool) - len(shown)
+            if not shown:
+                self.error = ('读到的 {} 个候选里，{} 条只有画面、又配不出能合并的声音，'
+                              '其余没有一个能通过判定'.format(len(pool), len(hidden))
+                              if hidden else
+                              '读到的 {} 个地址没有一个能通过判定（源站拒绝，或没有画面）'.format(
+                                  len(pool)))
+
+    def _why_empty(self):
+        """Why nothing came back, in whichever of the two voices actually spoke.
+
+        A machine without yt-dlp and an engine that answered are different
+        sentences -- and the engine's own words are the only explanation a
+        cookie-walled site ever gives, which is the reason `ytdlp_candidates`
+        hands its first stderr line back instead of swallowing it.
+        """
+        if self.engine_note:
+            return '（yt-dlp 说：{}）'.format(self.engine_note)
+        if find_command('yt-dlp') is None:
+            return '（这台机器没有装 yt-dlp，只能抓 HTML 里写明的地址）'
+        return ''
 
     def status(self):
         """The dict `query=resolve-status` hands the page.
@@ -924,6 +1230,7 @@ class ResolveJob:
         with self._lock:
             return {
                 'url': self.page_url,
+                'note': self.note,
                 'done': self.done,
                 'step': self.step,
                 'step_label': STEP_LABELS.get(self.step, self.step),
@@ -933,6 +1240,12 @@ class ResolveJob:
                 'from_ytdlp': self.from_ytdlp,
                 'measured': self.measured,
                 'rejected': self.rejected,
+                'hidden_silent': self.hidden_silent,
+                'engine_note': self.engine_note,
+                # Computed here and not in the page: which of an engine's many
+                # refusal sentences means "bring a session" is our guess at
+                # somebody else's wording, so it needs one owner the tests can pin.
+                'needs_cookies': needs_cookies(self.engine_note),
                 'error': self.error,
                 'candidates': [describe(c) for c in self.candidates],
             }
@@ -979,11 +1292,17 @@ def describe(candidate):
         'mode': plan(candidate),
         'relay': relay_reason(candidate),
         'headers': sorted(candidate.headers),
+        # The card's「这条没有音轨」badge and its merged sibling. Computed here and
+        # not in the page: `audio_codec` comes from a probe this machine ran, and a
+        # second copy of that reading in JavaScript is「提示比代码活得久」again.
+        'merged': bool(candidate.audio_url),
+        'audio_label': candidate.audio_label,
+        'silent': candidate.silent,
     }
 
 
-def resolve_now(page_url, max_height=0):
+def resolve_now(page_url, max_height=0, cookies=None):
     """Synchronous resolve, for a caller that can afford to wait (tests, CLI)."""
-    job = ResolveJob(page_url, max_height=max_height)
+    job = ResolveJob(page_url, max_height=max_height, cookies=cookies)
     job.run()
     return job

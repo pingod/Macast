@@ -135,6 +135,21 @@
         .resolve-relay { flex: 1 1 220px; min-width: 0; font-size: 11px;
             color: var(--text-soft); line-height: 1.5; }
         .resolve-none { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+        /* 「投给哪一台」那一行。宽度一律 class + min(绝对值, 视口百分比)：写在 style=""
+           里的像素宽在窄屏会撑出横向滚动（Part 44 页宽那半守的就是这条）。 */
+        .target-label { font-size: 12px; color: var(--text-soft); }
+        .target-select { width: min(240px, 60%); }
+        .target-kind { float: right; color: var(--text-soft); font-size: 11px; }
+        .target-note { flex: 1 1 200px; min-width: 0; margin-top: 0; }
+        /* 站点 cookie 那块：默认收起，标题行就是状态行（本机存了几条、有没有开浏览器读取），
+           所以不开也读得到当前情形。宽度用 min(绝对值, 视口百分比)，窄屏不撑出横向滚动。 */
+        .cookie-box { margin-top: 12px; padding-top: 8px;
+            border-top: 1px dashed var(--border, rgba(0, 0, 0, .12)); font-size: 12px; }
+        .cookie-head { cursor: pointer; display: flex; flex-wrap: wrap; gap: 6px;
+            align-items: baseline; }
+        .cookie-state { color: var(--text-soft); font-size: 11px; }
+        .cookie-select { width: min(180px, 45%); }
+        .cookie-box code { font-family: monospace; }
         /* 日志面板：整份日志线性增长（实测 ~27KB/分钟），所以只渲染末尾若干行，
            并且用 <pre> 纯文本而不是 v-html（日志里含发送端提供的标题/URL）。 */
         .log-bar {
@@ -779,17 +794,44 @@
                 <div class="cast-box pane-wide">
                     <h3 class="cast-title">网页地址投屏</h3>
                     <div class="hint" style="margin-top:0;margin-bottom:10px;">
-                        粘贴<b>网页</b>地址（不是视频地址）：Macast 先把页面里写明的直链抓出来，
-                        再叫 yt-dlp 把同一个页面解一遍，两份结果合成一个候选列表；选一条就投给
-                        当前渲染器。解出来的地址一律由本机中转供流 —— 电视永远拿不到源站那个带签名、
+                        粘贴<b>网页</b>地址（不是视频地址，App 的分享文案整段贴进来也行）：Macast 先把页面里写明的直链抓出来，
+                        再叫 yt-dlp 把同一个页面解一遍，两份结果合成一个候选列表；选一条、再选<b>投给谁</b>
+                        （默认是本机当前渲染器，也可以直接投给局域网里的 Chromecast 或 DLNA 电视）。
+                        解出来的地址一律由本机中转供流 —— 电视永远拿不到源站那个带签名、
                         会过期、还要求请求头的地址，而那正是「搜得到地址却播不起来」的成因。
+                        DASH 把画面与声音分成两条地址时，这里会把它们<strong>在本机合并成一条流</strong>。
+                        解不出时先看下面那块「站点要登录态时」：有些站点连没登录的访客都要先有一条会话
+                        cookie 才交出地址，那句话会被原样印在这里，不是「这个站没有视频」。
                     </div>
                     <div class="install-row" style="margin:0;">
                         <el-input v-model="page_url" size="small" class="install-url" clearable
-                                  placeholder="https://example.com/watch/12345"
+                                  placeholder="https://example.com/watch/12345，或直接贴分享原文"
                                   @keyup.enter.native="resolve_page"></el-input>
                         <el-button size="small" type="primary" icon="el-icon-search"
                                    :loading="resolving" @click="resolve_page">解析</el-button>
+                    </div>
+                    <div class="install-row" style="margin:8px 0 8px 0;">
+                        <span class="target-label">投给</span>
+                        <el-select v-model="cast_target" size="small" class="target-select"
+                                   @change="on_cast_target_change">
+                            <el-option v-for="t in cast_targets.items" :key="t.id"
+                                       :label="t.name" :value="t.id">
+                                <span>{{ t.name }}</span>
+                                <span class="target-kind">{{ t.kind === 'cast' ? 'Chromecast'
+                                    : (t.kind === 'dlna' ? 'DLNA' : '本机') }}</span>
+                            </el-option>
+                        </el-select>
+                        <el-button size="small" plain icon="el-icon-refresh"
+                                   :loading="cast_targets.searching"
+                                   @click="refresh_cast_targets">重新搜索</el-button>
+                        <span class="hint target-note">
+                            <template v-if="cast_targets.message">{{ cast_targets.message }}</template>
+                            <template v-else-if="!cast_targets.known && !cast_targets.searching">
+                                还没搜到过设备。点「重新搜索」；投给电视时由这台 Mac 中转供流，
+                                播放与进度都在电视上，Macast 不接管。
+                            </template>
+                            <template v-else>第一项是本机当前渲染器；投给电视的那几台，停止与拖动都在电视上。</template>
+                        </span>
                     </div>
 
                     <div v-if="resolve_error" class="hint">{{ resolve_error }}</div>
@@ -797,6 +839,7 @@
                     <div v-if="resolve" class="resolve-steps">
                         <el-progress v-if="!resolve.done" :percentage="resolve_percent"
                                      :stroke-width="6"></el-progress>
+                        <div v-if="resolve.note" class="hint">{{ resolve.note }}</div>
                         <div class="resolve-line">
                             <span v-if="!resolve.done">{{ resolve.step_label }}…</span>
                             <span v-else-if="resolve.error">{{ resolve.error }}</span>
@@ -808,6 +851,18 @@
                                 判定剔除 {{ resolve.rejected }} 个 ·
                                 {{ resolve.seconds }} 秒
                             </span>
+                        </div>
+                        <!-- 引擎自己被源站挡住时说的原话。它和「这台机器没装 yt-dlp」是两句
+                             不同的话，而只有前者需要用户去做一件事（给 cookie）。 -->
+                        <div v-if="resolve.engine_note && !resolve.from_ytdlp" class="hint">
+                            yt-dlp 这一路说：<b>{{ resolve.engine_note }}</b>
+                            <span v-if="resolve.needs_cookies">
+                                —— 这通常是<b>站点要会话 cookie</b>，用下面那块「站点要登录态时」解决。
+                            </span>
+                        </div>
+                        <div v-if="resolve.hidden_silent" class="hint">
+                            另外 {{ resolve.hidden_silent }} 条只有画面、源站又没有交回可合并的音轨，
+                            投上去必然没声音，所以这里不列它们。
                         </div>
                         <div v-if="resolve.candidates.length" class="resolve-cands">
                             <div v-for="(c, i) in resolve.candidates" :key="i" class="resolve-cand">
@@ -823,14 +878,18 @@
                                         {{ c.live ? '直播流' : fmt_duration(c.duration) }}
                                     </el-tag>
                                     <el-tag size="mini" effect="plain">{{ c.container || '容器未知' }}</el-tag>
-                                    <el-tag v-if="c.video_codec && !c.audio_codec" size="mini" type="warning"
+                                    <el-tag v-if="c.merged" size="mini" type="success" effect="plain"
+                                            title="源站把画面与声音分成两条地址（DASH 分轨），本机合并成一条流">
+                                        画面＋声音{{ c.audio_label ? '（' + c.audio_label + '）' : '' }}
+                                    </el-tag>
+                                    <el-tag v-else-if="c.silent" size="mini" type="warning"
                                             effect="plain">这条没有音轨</el-tag>
                                     <el-tag v-if="c.origin === 'ytdlp'" size="mini" type="info"
                                             effect="plain">yt-dlp</el-tag>
                                 </div>
                                 <div class="resolve-relay">
                                     <div>{{ c.relay }}</div>
-                                    <div>{{ c.mode === 'remux' ? '转封装后供流，拖动要用完才准' : '原样转发；源站支持 Range 时才能拖动' }}</div>
+                                    <div>{{ c.mode === 'proxy' ? '原样转发；源站支持 Range 时才能拖动' : '转封装后要等写完才播得起来，拖动也只到已写完处' }}</div>
                                 </div>
                                 <el-button size="mini" type="primary" plain
                                            icon="el-icon-video-play"
@@ -839,9 +898,72 @@
                             </div>
                         </div>
                         <div v-else-if="resolve.done" class="resolve-none">
-                            这个页面里没有能投出来的视频地址。需要 JavaScript 才能算出地址的站点
-                            （部分播放器页面）这一版解不了：那要在这台机器上真开一个浏览器，
-                            代价是每个页面都得多养一个 Chrome 进程。
+                            这个页面里没有能投出来的视频地址。两种可能，页面说的是哪一种就照哪一种办：
+                            ① 站点要先有会话 cookie 才交出地址（上面若有 yt-dlp 的原话，用下面那块解决）；
+                            ② 地址要 JavaScript 才算得出来（部分播放器页面）—— 这一版解不了，
+                            那要在这台机器上真开一个浏览器，代价是每个页面都得多养一个 Chrome 进程。
+                        </div>
+                    </div>
+
+                    <div class="cookie-box">
+                        <div class="cookie-head" @click="toggle_cookie_panel">
+                            <i :class="cookie_open ? 'el-icon-arrow-down' : 'el-icon-arrow-right'"></i>
+                            <b>站点要登录态时</b>
+                            <span class="cookie-state">
+                                <template v-if="cookie_state">
+                                    本机 cookie 文件：{{ cookie_state.jar ? (cookie_state.cookies + ' 条' + (cookie_state.bad ? '（' + cookie_state.bad + ' 行看不懂）' : '')) : '未保存' }} ·
+                                    从浏览器读取：{{ cookie_state.browser || '关' }}
+                                </template>
+                            </span>
+                        </div>
+                        <div v-if="cookie_open">
+                            <div class="hint" style="margin-top:6px;">
+                                Macast <b>不代你登录</b>：这里没有账号密码表单，也不弹登录窗 —— 那要在每台机器上养一个
+                                真浏览器，而这台机器上的解析是靠命令行工具完成的。可行的做法是<b>用你正在用的浏览器登录</b>，
+                                把它手里的 cookie 交给 Macast，两种交法：
+                            </div>
+                            <div class="hint" style="margin-bottom:8px;">
+                                <b>一、粘贴 cookie 文件</b>（推荐，最可控）：在浏览器里装一个导出 Netscape 格式 cookie 的扩展
+                                （如「Get cookies.txt LOCALLY」），<b>先在那个浏览器里打开目标站点</b>（要登录的就登录，
+                                不登录的站点只需要页面自己铸过一条匿名 cookie，例如抖音），导出后把文件内容整段贴进来。
+                                它存在本机配置目录的 <code>resolve_cookies.txt</code>，之后 yt-dlp 会自己把续期的 cookie
+                                写回同一份文件，所以一次粘贴能用好一阵子；过期了就重新导一次。
+                                行首的 <code>#HttpOnly_</code> 不用管也不用删 —— 那是浏览器给这类 cookie 打的标记，
+                                一份导出的会话 cookie 常常整片都是它，读这份文件的工具认得。
+                            </div>
+                            <el-input v-model="cookie_text" type="textarea" :rows="4" size="small"
+                                      placeholder="# Netscape HTTP Cookie File&#10;.example.com&#9;TRUE&#9;/&#9;FALSE&#9;0&#9;name&#9;value"></el-input>
+                            <div class="install-row" style="margin-top:6px;">
+                                <el-button size="small" type="primary" :loading="cookie_busy"
+                                           :disabled="!cookie_text.trim()" @click="save_cookies">保存这份 cookie 文件</el-button>
+                                <el-button size="small" plain :loading="cookie_busy"
+                                           :disabled="!cookie_state || !cookie_state.jar"
+                                           @click="clear_cookies">清除本机保存的</el-button>
+                            </div>
+                            <div class="hint" style="margin-top:10px;margin-bottom:6px;">
+                                <b>二、让它直接读浏览器的 cookie 库</b>（省事，但把整个 profile 交给这条命令）：
+                                选中即生效，Macast 只在解析页面时读那一个浏览器的 cookie，不复制、不上传、不写日志。
+                                两者都设了时<b>以文件为准</b>（文件是这台机器自己攒的那一份），把文件清除才会改用浏览器。
+                            </div>
+                            <div class="install-row">
+                                <el-select v-model="cookie_browser" size="small" class="cookie-select"
+                                           placeholder="不读取" clearable
+                                           @change="set_cookie_browser">
+                                    <el-option v-for="b in (cookie_state ? cookie_state.browsers : [])" :key="b"
+                                               :label="b" :value="b"></el-option>
+                                </el-select>
+                                <span class="hint" style="margin:0;">
+                                    Macast 不会自己打开你的浏览器数据：这个下拉是<b>关</b>的时候，那一路命令根本不带 cookie 参数。
+                                </span>
+                            </div>
+                            <div v-if="cookie_state && !cookie_state.yt_dlp" class="hint" style="margin-top:8px;">
+                                顺带一句：这台机器现在<b>没有装 yt-dlp</b>，所以上面两种交法暂时都只影响不到解析结果 ——
+                                现在只有「抓 HTML 里写明的直链」那一路在工作。装上之后不需要重启 Macast。
+                            </div>
+                            <div class="hint" style="margin-top:8px;">
+                                cookie 是凭据：页面上永远只报<b>条数</b>，不显示内容；日志里也只有条数；它不进设置导出
+                                （所以「高级设置」那一份 JSON 可以放心贴给别人）。不想留了就点上面「清除本机保存的」。
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1518,18 +1640,48 @@
                 <p><strong>状态 → 网页地址投屏</strong>吃的是<strong>网页</strong>地址：Macast 先把页面里
                     写明的直链（<code>&lt;video src&gt;</code> / <code>&lt;source&gt;</code> /
                     <code>og:video</code>）抓出来，再叫 <code>yt-dlp</code> 把同一个页面解一遍，
-                    两份结果合成一个候选列表；点「投屏」的那一条会交给<strong>当前渲染器</strong>
-                    （mpv、Chromecast 中继、DLNA 都算，菜单栏切了哪个就投给哪个）。</p>
+                    两份结果合成一个候选列表；<strong>投给谁</strong>由那块卡片上的「投给」选 ——
+                    第一项永远是<strong>当前渲染器</strong>（mpv、Chromecast 中继、DLNA 都算，
+                    菜单栏切了哪个就投给哪个），也可以直接选局域网里的一台 Chromecast 或 DLNA 电视。</p>
                 <ul>
+                    <li><strong>投给电视的那几台，Macast 只负责把地址交出去</strong>：播放、暂停、拖动、
+                        停止都在电视上，进度与音量也不会回到这里（菜单栏那个当前渲染器继续播它自己的东西）。
+                        这是刻意的 —— 要是这一条也接管播放状态，「状态」页就会同时对两件事说「正在播放」。
+                        发现设备靠的正是本地文件投屏那个插件自己那套搜索，所以列表和它的「输出目标」菜单
+                        <strong>永远一致</strong>；两者没搜到同一批设备是不可能的。</li>
                     <li><strong>解出来的地址一律由本机中转供流</strong>，电视永远拿不到源站那个地址。
                         这不是多此一举：那些地址多数带签名、会过期，还要求 <code>Referer</code> 或
                         <code>Cookie</code> —— 交给电视就等于「明明搜到了地址却播不起来」。中转会把
                         这些请求头由 Macast 自己补上。</li>
-                    <li><strong>两种中转，按地址的形状选</strong>：一条渐进式文件（mp4/mkv/音频）
+                    <li><strong>三种中转，按地址的形状选</strong>：一条渐进式文件（mp4/mkv/音频）
                         是原样转发，几乎不吃 CPU，源站支持 <code>Range</code> 时电视才能拖动；
                         HLS / DASH 这类分片地址没有「一个文件」可读，于是用 ffmpeg <code>-c copy</code>
-                        转封装成一个正在长大的 MP4 —— 不重编码，画质不变，但<strong>拖动要用完才准</strong>，
-                        这一点候选列表里每一行都写在自己那句话上。</li>
+                        转封装成一个正在长大的 MP4 —— 不重编码，画质不变，但<strong>要等它写完才播得起来</strong>
+                        （标准 MP4 的轨道表写在文件头，ffmpeg 是在退出的那一刻才把它搬到那里的，
+                        所以半截文件连"有哪些轨"都读不出来），拖动也只能拖到已经写完的位置；
+                        源站把画面和声音交成<strong>两条地址</strong>时（DASH 分轨，bilibili 就是这样）
+                        在这句话上多一步：两条一起喂给 ffmpeg 合成一条流。哪一种都由候选列表里
+                        每一行自己那句话说明。</li>
+                    <li><strong>只有画面、又配不出可合并音轨的候选不列出来</strong> —— 投上去必然没声音，
+                        所以它不是「一条能投的」，而是一个会骗人的选项。被这样藏起来的条数会写在
+                        列表上面（「另外 N 条…」），这样「页面里解出 6 条、这里只有 4 条」不是一句谜。</li>
+                    <li><strong>整段分享文案可以直接贴</strong>。抖音那类「7.12 复制打开抖音…
+                        <code>https://v.douyin.com/…</code>，复制此链接…」粘进来，Macast 会自己把
+                        网址读出来（读到几个、用了哪一个都会写在卡片上）；一段文字里一个网址都没有时
+                        才会说「没有找到网址」。</li>
+                    <li><strong>有些站点要先有一条会话 cookie 才交出地址，这不等于要你登录账号</strong>。
+                        典型是抖音：浏览器里不登录也能看，因为页面自己铸了一条匿名 cookie，
+                        而命令行的那一路没有浏览器替它铸。卡片会把 <code>yt-dlp</code> 的<strong>原话</strong>
+                        印出来（而不是笼统一句「解不出来」），并指出那是 cookie 这一类。
+                        解决它在下面那块「站点要登录态时」，两条路：粘贴 Netscape 格式的 cookie 文件，
+                        或者选一个浏览器让解析去读它的 cookie 库。</li>
+                    <li><strong>Macast 不代你登录</strong>：这里没有账号密码表单，也不会弹登录窗 ——
+                        那要在这台机器上养一个真浏览器，代价与上面「JavaScript 那一类」是同一笔账。
+                        cookie 是凭据，所以它只存在本机配置目录的一个文件里（<code>resolve_cookies.txt</code>，
+                        其他程序读不到，权限 600），页面和日志都只报<strong>条数</strong>，
+                        它<strong>不进设置的 JSON</strong>，所以「高级设置」那份配置可以放心贴给别人看。
+                        「从浏览器读取」默认是关的，关着的时候那一路命令根本不带 cookie 参数；
+                        两者都设了时以文件为准。</li>
                     <li><strong>需要 JavaScript 才能算出地址的站点解不出来</strong>，这一条是设计而不是坏掉：
                         这一路只有「抓页面 + yt-dlp」两台引擎，为了那几个站点在应用里养一个 Chrome 进程
                         不值得。解不出来时列表会明说「这个页面里没有能投出来的视频地址」，
@@ -1914,6 +2066,21 @@
             resolve_error: '',
             casting: -1,
             resolve_timer: 0,
+            // 站点 cookie 面板。`cookie_state` 由 /api?query=resolve-cookies 下发，
+            // 只有条数/浏览器名/路径，永不含 cookie 值（见 protocol._cookie_state）。
+            cookie_open: false,
+            cookie_state: null,
+            cookie_text: '',
+            cookie_browser: '',
+            cookie_busy: false,
+
+            // 「投给哪一台」。列表由 /api?query=cast-targets 下发，第一项永远是本机
+            // （`local`，就是这一版之前的唯一行为）；设备 id 只来自后端，页面自己不
+            // 拼地址 —— 一个手写的地址会把这台机器变成连接任意主机的通道。
+            // 选择记在 localStorage：同一局域网里通常总是投给同一台电视。
+            cast_targets: {items: [], searching: false, known: false, message: ''},
+            cast_target: 'local',
+            target_timer: 0,
 
 
             //setting
@@ -2001,6 +2168,14 @@
             this.load_status();
             this.load_interfaces();
             this.load_cast_info();
+            // 「投给谁」的上次选择。只有名字在这里，列表还要等解析完成那一次去搜
+            // （`refresh_cast_targets`），所以这一行不碰网络。
+            try {
+                this.cast_target = localStorage.getItem('macast_cast_target') || 'local';
+            } catch (e) {
+                console.log(e);
+                this.cast_target = 'local';
+            }
             this.status_interval = setInterval(() => this.load_status(), 3000);
             this.registerPWA();
         },
@@ -2015,6 +2190,7 @@
             }
             this.mirror_stop_poll();
             this.stop_resolve_poll();
+            this.stop_target_poll();
         },
         activated() {
 
@@ -2678,6 +2854,15 @@
                     if (data.status.done) {
                         this.stop_resolve_poll();
                         this.resolving = false;
+                        if (data.status.needs_cookies && !this.cookie_state) {
+                            // 那句话把用户送去下面那块面板，就别让面板的标题行
+                            // 在他点开之前是空的。这一支只在解析结束那一次跑到。
+                            this.read_cookie_state();
+                        }
+                        // 同一支"只跑一次"：候选列表出来了，用户下一步就要选「投给谁」，
+                        // 所以在这里发起第一轮设备搜索（它跑在插件的后台线程里）。
+                        // 页面加载时不搜 —— 没解析过页面的用户不该被这次组播打扰。
+                        this.refresh_cast_targets();
                     }
                 } catch (err) {
                     console.log(err);
@@ -2705,6 +2890,190 @@
                     this.start_resolve_poll();
                 }
             },
+            // -- 站点 cookie（「网页地址投屏」的登录态） --------------------------
+            //
+            // 这块面板说得出口的事实只有两种：本机文件里有几条 cookie、以及允许从
+            // 哪个浏览器读。cookie 的**值**从头到尾不经过这里 —— 后端读它、交给
+            // yt-dlp 自己，日志里也只落条数（protocol._cookie_state 那句 docstring
+            // 就是这条边界）。所以这里永远不许新增"看看里面是什么"的按钮。
+            toggle_cookie_panel() {
+                this.cookie_open = !this.cookie_open;
+                // 只在第一次展开时问一次。这三行状态不是每次轮询都要的东西，
+                // 而它要管理令牌，页面不该在用户没碰这块时替他多问一次。
+                if (this.cookie_open && !this.cookie_state) {
+                    this.read_cookie_state();
+                }
+            },
+            async read_cookie_state(sync = true) {
+                await this.management_token();
+                let url = '/api?query=resolve-cookies';
+                if (this.cast_info.token) {
+                    url += '&token=' + encodeURIComponent(this.cast_info.token);
+                }
+                try {
+                    let res = await this.$http.get(url);
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        // 局域网那台设备打开的页面拿不到令牌，这里就是 403；标题行
+                        // 宁可什么都不显示，也不要显示一个"未保存"（那是两句不同的话）。
+                        this.cookie_state = null;
+                        return;
+                    }
+                    this.cookie_state = data.state;
+                    if (sync) {
+                        // 选中项由后端答回来：不在白名单里的名字会被拒绝，这里就必须
+                        // 把框读回真实的那个值，而不是留着一个没生效的选择。
+                        this.cookie_browser = data.state.browser || '';
+                    }
+                } catch (err) {
+                    console.log(err);
+                    this.cookie_state = null;
+                }
+            },
+            async save_cookies() {
+                let text = (this.cookie_text || '').trim();
+                if (!text) return;
+                this.cookie_busy = true;
+                let fd = new window.FormData();
+                fd.append('resolve-cookies', text);
+                this.$http.post('/api', fd).then(res => {
+                    this.cookie_busy = false;
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        this.$message.error(data.message || '保存失败');
+                        return;
+                    }
+                    // 后端那句已经把"几条能读、几行看不懂"说清楚了，原样转述，
+                    // 不在这里再数一遍（这份文件的内容页面看不见，能数的只有后端）。
+                    this.$message.success(data.message);
+                    this.cookie_text = '';
+                    this.read_cookie_state(false);
+                }).catch(err => {
+                    this.cookie_busy = false;
+                    console.log(err);
+                    this.$message.error('保存失败，请确认 Macast 正在运行');
+                });
+            },
+            clear_cookies() {
+                this.$confirm('确定清除本机保存的 cookie 文件？下次要再用就得重新粘贴一份。',
+                              '提示', {type: 'warning'})
+                    .then(() => {
+                        this.cookie_busy = true;
+                        let fd = new window.FormData();
+                        fd.append('resolve-cookies-clear', '1');
+                        return this.$http.post('/api', fd);
+                    }).then(res => {
+                        this.cookie_busy = false;
+                        let data = res.data || {};
+                        if (data.code !== 0) {
+                            this.$message.error(data.message || '清除失败');
+                            return;
+                        }
+                        this.$message.success(data.message);
+                        this.read_cookie_state();
+                    }).catch(err => {
+                        this.cookie_busy = false;
+                        if (err !== 'cancel' && err !== 'close') {
+                            console.log(err);
+                            this.$message.error('清除失败，请确认 Macast 正在运行');
+                        }
+                    });
+            },
+            set_cookie_browser() {
+                // el-select 的清空（clearable）会把值置成 undefined，那就是"不读取"，
+                // 和后端约定的空串同一个意思，别把它当成"用户没改"而不发。
+                this.cookie_busy = true;
+                let fd = new window.FormData();
+                fd.append('resolve-cookie-browser', this.cookie_browser || '');
+                this.$http.post('/api', fd).then(res => {
+                    this.cookie_busy = false;
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        this.$message.error(data.message || '设置失败');
+                        this.read_cookie_state();
+                        return;
+                    }
+                    this.$message.success(data.message);
+                    // 成功后仍要读回来：那句"仍以文件为准"只有后端知道本机有没有文件。
+                    this.read_cookie_state();
+                }).catch(err => {
+                    this.cookie_busy = false;
+                    console.log(err);
+                    this.$message.error('设置失败，请确认 Macast 正在运行');
+                    this.read_cookie_state();
+                });
+            },
+            // -- 「投给哪一台」（设备列表由 cast_local_file 插件的发现缓存回答） --------
+            //
+            // 这一栏不做的事：页面绝不猜地址，也绝不为凑出列表而轮询。后端第一次被问到时
+            // 会在后台发起 mDNS + SSDP 各一轮（`_searching` 会告诉我们在跑），所以这里只在
+            // 「还在搜」的时候每 2 秒再读一次，搜完就停 —— 电视不会因为我们问得勤就出现得快些。
+            async read_cast_targets(refresh) {
+                await this.management_token();
+                let url = '/api?query=cast-targets';
+                if (this.cast_info.token) {
+                    url += '&token=' + encodeURIComponent(this.cast_info.token);
+                }
+                if (refresh) url += '&refresh=1';
+                try {
+                    let res = await this.$http.get(url);
+                    let data = res.data || {};
+                    if (data.code !== 0) {
+                        // 403（局域网那台设备打开的页面拿不到令牌）或没有插件：保留上一次
+                        // 的列表，只把那句解释留给选择框下面的一行 —— 清空列表会让人以为
+                        // 「家里没电视」，而那正好是这一栏要回答的反面。
+                        this.cast_targets.message = data.message || '';
+                        return false;
+                    }
+                    this.cast_targets = data.targets || {};
+                    this.cast_targets.message = '';
+                    this.keep_cast_target();
+                    return true;
+                } catch (err) {
+                    console.log(err);
+                    this.cast_targets.message = '读取设备列表失败，请确认 Macast 正在运行';
+                    return false;
+                }
+            },
+            keep_cast_target() {
+                // 选中的那台不见了（关机、或搜索结果过期）就退回本机，而不是留一个
+                // 下拉框里根本没有的值：投屏按钮按它查的是后端缓存，留着只会失败。
+                // 但「还在搜」时不降级 —— 第一轮读数常常只有本机那一项，那时判定会把
+                // 上次记住的电视抹掉，用户看到的是"每次都要重新选一遍"。
+                let items = this.cast_targets.items || [];
+                if (items.some(item => item.id === this.cast_target)) return;
+                if (this.cast_targets.searching) return;
+                this.cast_target = 'local';
+            },
+            start_target_poll() {
+                this.stop_target_poll();
+                this.target_timer = setInterval(() => {
+                    if (document.hidden) return;
+                    if (!this.cast_targets.searching) {
+                        // 搜完这一轮就把表停掉，等用户点「重新搜索」。
+                        this.stop_target_poll();
+                        return;
+                    }
+                    this.read_cast_targets(false);
+                }, 2000);
+            },
+            stop_target_poll() {
+                if (this.target_timer) {
+                    clearInterval(this.target_timer);
+                    this.target_timer = 0;
+                }
+            },
+            async refresh_cast_targets() {
+                let ok = await this.read_cast_targets(true);
+                if (ok && this.cast_targets.searching) this.start_target_poll();
+            },
+            on_cast_target_change(id) {
+                try {
+                    localStorage.setItem('macast_cast_target', id || 'local');
+                } catch (e) {
+                    console.log(e);
+                }
+            },
             cast_resolved(index) {
                 if (!this.resolve) return;
                 let cand = this.resolve.candidates[index];
@@ -2714,6 +3083,9 @@
                 fd.append('cast-resolved', '1');
                 fd.append('job', this.resolve_job);
                 fd.append('candidate', index);
+                // 'local' 也照原样发出去：后端把它当空值处理（= 当前渲染器），
+                // 而把它念回来让这一次投屏在日志里指名道姓，比"什么都没发"更好查。
+                fd.append('target', this.cast_target || 'local');
                 this.$http.post('/api', fd).then(res => {
                     this.casting = -1;
                     let data = res.data || {};
@@ -2724,7 +3096,8 @@
                     // note 是"这条为什么要由 Macast 中转"那句话：用户要看到的是
                     // 投出去的地址不是源站那个，而不是一个光秃秃的"成功"。换行在
                     // $notify 里不会渲染（它写的是 textContent），所以用分隔符。
-                    this.$notify({title: '已开始投屏',
+                    let where = this.target_name(data.target);
+                    this.$notify({title: '已开始投屏' + (where ? ' → ' + where : ''),
                                   message: cand.title + ' · ' + (data.note || ''),
                                   duration: 5000});
                     this.load_status();
@@ -2733,6 +3106,15 @@
                     console.log(err);
                     this.$message.error('投屏失败，请确认 Macast 正在运行');
                 });
+            },
+            target_name(id) {
+                // 「本机」这一项的名字是后端给的当前渲染器标题，所以这里念的是那一项
+                // 自己的标签，而不是又拼一个词 —— 两处答案不一致比没有名字更糟。
+                let items = this.cast_targets.items || [];
+                for (let i = 0; i < items.length; i++) {
+                    if (items[i].id === id) return items[i].name;
+                }
+                return '';
             },
             fmt_duration(s) {
                 if (!s || s <= 0) return '时长未知';

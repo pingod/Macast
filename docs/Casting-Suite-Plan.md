@@ -473,10 +473,17 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 - Sonos、多房间、麦克风直通、全局热键、HDR、鼠标点击高亮。
 - 搬任何 PolyForm Noncommercial（MirrorCast）代码 —— 只实现同一协议事实。
 - **网页地址投屏**（P8）一侧：需要 **JavaScript 才算得出地址**的站点（那要每个页面多养一个浏览器
-  进程 = 二阶段的决定，已把覆盖空洞写在卡片上而不是藏在手册里）· DASH 把画面与声音分成两条地址时的
-  **合并**（只标注「这条没有音轨」；中转没有第二条可合）· 「选一台设备投过去」（一律交给**当前渲染器**）·
+  进程 = 二阶段的决定，已把覆盖空洞写在卡片上而不是藏在手册里）·
   把 `/relay/<随机 id>/media` 链接**当保密链接**（它故意只有随机 id + 空闲 TTL，没有令牌，
-  转发出去拿到的人就能读这路流）。
+  转发出去拿到的人就能读这路流）· **代用户登录**（这里做的是"把用户自己粘进来的 cookie 存好、
+  交给引擎"，不是弹一个表单替他填账号密码 —— Macast 从不登录任何站点）。
+  **同一栏里有两条在 v0.19 被用户自己撤销了，别再抄回去**：DASH 音画**合并**（v0.18 只标注
+  「这条没有音轨」，因为中转当时没有第二条可合；现在 `plan()` 会答 `merge` = 带第二条输入的
+  remux）、**「选一台设备投过去」**（v0.18 一律交给**当前渲染器**；现在卡片上有下拉，第一项
+  永远是本机，其余复用 `cast_local_file` 的发现与投递，**没有一行新的协议代码**）。
+  留在"不做"那一侧的相关边界只剩两条：合并后**不做音轨切换**（一个视频行只配一条音频行，
+  按码率挑）、以及上面那句"不代登录"。**把这两件留在"不做"清单里是一句过期的谎**，与
+  §4.8「提示比代码活得久」同族。
 
 ## 6. 进度台账
 
@@ -491,6 +498,7 @@ AGENTS.md §4.9 的举证习惯）；不触碰用户真实配置；每次推送�
 | P6 文档/索引/发版 | ⏳ 进行中 —— 第一~五批已落（§4 点名要重验的那条已知不一致已修；索引可达性已定性并按"保持私有"落地；用户指南 + 自检随行项；端到端回归 + 它的耦合守卫；v0.9 修掉用户报的「永远装不完」）。**只剩发版**：版本号与 tag 已推（`aece62e` / `v0.7.15`），但 Release 产物被 Actions 存储配额挡在门外，见下面的 §6.3 | `7028bd4`（`screen_mirror` v0.8 解析修复 + Part 31 + Part 29 用例改判 + Part 30 + pyobjc 声明）＋ 紧随的 info.json 提交（Screen Mirror 0.7 → 0.8，指到 `7028bd4` 的 40 位 SHA）＋ `8a27b47`（第二批：`scripts/check_index_reachability.py` + selfcheck「online plugin index」段 + AGENTS §4.6/§5/§6 + 两份 README + 本文 §6 的可达性结论）＋ `d8643ea`／`fa32676`（第三批：`docs/Casting-Suite.md` 用户指南 + selfcheck 的「sender plugins」段 + Part 32 一致性用例）＋ 第四批 `839b208`（`scripts/e2e_smoke.py` + Part 33 + "保持私有"决定的文案与文档落地，已推送）＋ 第五批 `0996789`（`screen_mirror` v0.9 一键设置五态判定 + Part 29 反循环用例 + `NSMicrophoneUsageDescription` + selfcheck 的「盘上有驱动 ≠ 能采集」，紧随的 info.json 提交 `e58274b` 把条目指回它） | **§4 原条目"复核 `_avfoundation_lists` 的引号解析"结论：那不是一个解析瑕疵，而是一条从 v0.1 就断掉的主路径。** 真实 `ffmpeg -f avfoundation -list_devices true -i ""` 在这台机器上输出的是小写 `AVFoundation video devices:` + `[0] OBS Virtual Camera`（**全程没有双引号**），而旧解析找的是大写 `Video devices:` 并且只取双引号之间的内容 ⇒ 真机上两个列表恒为空 ⇒ `_probe_avfoundation` 回 None ⇒ 菜单报「ffmpeg 没有列出任何屏幕采集设备（avfoundation）」，**macOS 镜像四个版本根本起不来**。为什么一直没被发现：Part 21/22/23 的假 ffmpeg 输出的正是那个虚构格式（测试与实现共享同一个错误假设）。修法与防线：解析器重写（同时认旧版 `List of Video devices:` + `0) name`；**没有索引的行不算设备** —— `-i N:none` 需要那个数字），Part 21/22/23/25 的假 ffmpeg 全部换成真机逐字输出，新增 **Part 31（11 条）**：真机输出 / 旧版写法 / 无索引行 / 真 subprocess 的 argv / 不可解码的设备名 / 探测最终交给 ffmpeg 的 `-i 2:none` 与 BlackHole 的 `2:2`+`-map 0:a:0` / 空列表仍判"无从采集"，外加两条**自我审查**：把被替换掉的旧解析原样留在用例里（它在真机输出上回 `([], [])`，错误保持可执行而不是轶事），以及扫描测试文件自己 —— 任何 `-list_devices` 回答里出现"带引号却没有索引"的设备行立即变红。**A/B 两轮**：① 只把旧 `_avfoundation_lists` 换回去（保留新解析器与修正后的 fixture）→ **968/979**，红的 11 条横跨 Part 21/22/23/31（`probe is None`、`没有列出任何屏幕采集设备`、DLNA 段落整段中止）；② 只把 Part 23 的 fixture 换回虚构格式 → **1059/1064**，红的 5 条里点名了两行虚构 fixture —— 也就是"假 ffmpeg 说谎"这件事现在既能被实现层抓到，也能被形状层抓到。③ Part 29 那条 "announces v0.7" 改成"公告版本号 == 清单版本号"（文件里出现任何其他版本号即红）：它原来要求每次发版都记得改测试文件，而它要抓的恰恰是"标签过期"。**pyobjc 那条也已定性**（§4 原文列的第二处不一致）：`Foundation`/`objc` 来自 `pyobjc-framework-Cocoa`，`requirements/darwin.txt` 与 macOS CI 的 pip 列表现在都点名它，Part 30（8 条）反过来禁止 `plugins/*.py` 引入任何 Macast 没声明的包（负样本 `import aiortc`，正样本 `cherrypy`/`Foundation`/`os`），并互相咬住两处：darwin.txt ⊆ build.yml 的 pip 列表、utils.py 在 darwin 守卫下 import AppKit 是 pyobjc 的**锚**。**发版后套件 1083/1083**，`pyflakes` 干净（只剩基线两条）。**未验证**：真机上重跑镜像（修复本身就是冲着"真机从没成功起过"去的，这台 Mac 有 ffmpeg 与采集设备，但完整镜像链路要在 GUI 里点头授权才算走通）。**同批次的第二个发现（P6 的 §4.6 前提条件）**：为了回答"v0.8 这条固定链接别人拉得到吗"，把 P5 那句"沙箱测不出"重测了一遍 —— **测得出，而且答案是拉不到**：`pingod/Macast` 是私有仓库 （`gh api repos/pingod/Macast --jq .private` → true；匿名 API 404、公开上游 200；`data.jsdelivr.com/v1/packages/gh/pingod/Macast` 404 "Couldn't fetch versions"）。9 条固定链接实测 5 条还回 200（CDN 缓存），4 条已经 404，包括刚发的 Screen Mirror 0.8 与 P5 的 RAOP 0.2 / AirPlay Screen Mirror —— 私有状态不变，剩下的会逐条掉光，没有人碰它也会坏。新增 `scripts/check_index_reachability.py`（纯 stdlib、无凭据、带公开上游对照组，`INDEX_OK` / `INDEX_PRIVATE` / `INCONCLUSIVE` / `AMBIGUOUS` + 逐条状态表 + 退出码 0/2/3；`--json` 给 CI/cron，`--url-only` 单问一个地址），selfcheck 增「online plugin index」段跑同样的三问，`plugins/README.md` 顶部与 README_ZH 的插件段落改为**明说这个前提**。三条出路（改公开 / 把 plugins/ 发到公开仓库并改 `plugin_repo.REPO` / 保持私有并只承诺手动安装）里第一条是**所有者决定**。**［2026-09-21 已定：保持私有，官方承诺只有「手动安装」这一条路］** —— 决定已落进产品文案与全部文档：`plugins/README.md` 顶部改口为"这个目录是**源码**，不是安装源"，设置页 `repo_failed` 的兜底从一句话扩成一段（说明原因 + 两条手动路线），`README_ZH.md` 与 `docs/Casting-Suite.md` §0 同步，AGENTS §4.6/§5 写明**以后不要再提"改公开 / 另立公开仓库"**，`check_index_reachability.py` 在私有状态下稳定报 `INDEX_PRIVATE`（退出码 2）**从此是预期信号而不是待修的 bug**。**同批次的第三项（P6 的文档与随行自检）**：写了 `docs/Casting-Suite.md` —— 面向使用者的**逐目标首次设置流程**（Chromecast 兼容通道 / Chromecast 低延迟 / DLNA 老电视 / 浏览器 / 本地文件 / uxplay / shairport-sync），每条链路都写明"验证到什么程度"，把散在 §2.1–§2.6 各段末的"未验证"落到用户读得到的地方。**§3.2 承诺而 P1-P4 都没做的 selfcheck 随行项也补上了**：`selfcheck.py` 新增「sender plugins」段，问的是发送端真正会卡住的六件事 —— ffprobe 在不在、`-encoders` 里有没有 libx264/h264_videotoolbox/mpeg2video/ac3（这四个各自对应一条**静默失效**的链路）、有没有 libass、**avfoundation 到底列没列出屏幕**（就是 Part 31 那条 bug 想骗过去的同一个问题，自检现在自己会答）、系统音频采集口（mac 查 HAL 里的 BlackHole 驱动文件，Linux 问 `pactl` 要 sink monitor —— 都**不碰 CoreAudio**，因为沙箱里设备枚举不可用）、转码临时目录剩余空间、以及**这个局域网里到底有没有东西可投**（真 mDNS browse + 真 SSDP `MediaRenderer` 探测）。本机实测：编码器四条全 OK、**libass 确实没有**（ffmpeg 9.0.2 的 configuration 里没有 `--enable-libass`，所以"烧字幕"这条路在这台机器上真的不可用，报告说的就是事实）、avfoundation 列出 1 块屏幕、BlackHole 已装、149 GiB 可用、**搜到 1 台 Chromecast 与 1 台 DLNA 渲染器**（就是 Macast 自己）。自检读设置**只读 JSON 文本、不 import `Setting`**（AGENTS §10）。**新增 Part 32（7 条）**守的是"自检与插件各说各话"这一族：编码器集合要与插件实际 `-c:v/-c:a` 双向对齐（多一个过期探针也红）、查找目录必须覆盖插件的搜索路径、只允许读真实存在的设置键、mDNS/SSDP 目标串两侧逐字一致、以及"永远不写用户设置"。**A/B 两轮**：① 从自检里删掉 `ac3` 探针与 `/opt/local/bin` → **1088/1090**，两条红分别点名 codecs 与 search dirs；② 加一个插件不用的 `libx265` 探针 + 一句 `Setting.set(` → **1088/1090**，红在"过期探针"与"不许写设置"。**发版后套件 1090/1090**，`pyflakes` 干净（只剩基线两条）。**第四批（端到端回归 + "保持私有"决定的落地）**见下面的 §6.1 —— 它把发版前套件推到 **1106/1106**；**第五批**（用户报的「系统声音一键安装永远装不完」）见下面的 §6.2 —— 它把套件推到 **1121/1121**，并且第一次让"跳过安装"这一步变得可测 |
 | P7 控制面搬到网页 | ✅ 已交付（**打桩 + 真实例浏览器 + 真产物**；投屏链路本身仍未碰过真电视） | 已提交 `224d6d6`：删除 `macast/mirror_console.py`（1931 行）与 `macast/config_window.py`（229 行），新增 `macast/mirror_view.py`（252 行），`screen_mirror` 0.10 → 0.11（净 -341 行），`macast/xml/setting.html` +436 行（新增「电脑投屏」页签），`Macast.py` / `macast/gui.py` / `macast/macast.py` 一起瘦身，Part 35 整段重写为 115 条 | **1187/1187**、`pyflakes` 干净；A/B 两轮（删端点那一行 → 1186；删"镜像中预览让位"六行 → Part 35 三条红）；真实例 + 真浏览器抓到**三条**打桩抓不到的缺陷；产物 `bash scripts/build_macos_arm.sh` 真启动并验过页签在不在。细节与那三条缺陷见下面的 §6.4 |
 | P8 网页地址投屏（**本规划之外的一条功能，2026-10-03 由用户直接提出**） | ✅ 已交付（**真站解析验过一次；真电视一台都没碰过**） | 单个 `feat+release` 提交，带 tag `v0.18.0`（应用版本两处 0.17.0 → 0.18.0）：新增 `macast/media_resolve.py`（解析层，纯 stdlib）+ `macast/media_relay.py`（中转层）+ `macast/protocol.py` 两个 POST（`resolve-page` / `cast-resolved`，都是 `GATE_MANAGEMENT`）与一个 GET（`query=resolve-status`）+ `macast/xml/setting.html`「状态」tab 的新卡片与帮助段 + **Part 59（132 条）**与 Part 44 里把帮助那几句绑回三个文件的用例 + 文档（`docs/Casting-Suite.md` §2b、AGENTS §3/§4.14/§6/§9、本文 §5/§6） | 见下面的 §6.5 —— 取证（castor 精读 + bilibili 真站）、七个定点变异体 1/1/1/3/1/2/2、以及一次**测试自己**的崩（`check()` 的 detail 传成 `None` ⇒ Part 59 后半 8 条根本没跑） |
+| P8.1 网页地址投屏第二轮（**同一张卡片上的四件事，2026-10-04 由用户提出并逐项拍板**） | ✅ 代码 + 用例 + 文档已交付（**三件验证仍欠着**：merge 的真站复验、设备下拉与 cookie 那块的三档真浏览器验收、投给一台真电视） | 单个 `feat+release` 提交，带 tag `v0.19.0`（应用版本两处 0.18.0 → 0.19.0）：① `screen_mirror` 的 `MENU_HIDDEN` —— 菜单栏 Renderers 组里不再有「电脑投屏」那一行（控制面在 P7 就搬进网页了，见 §6.4；已持久化成 `Macast_Renderer = Screen Mirror` 的安装仍然按名字命中，`set_media_url` 的 Bridge 让位照旧）；② `plan()` 新增第三种判决 `merge` + `pair_tracks()`（DASH 的画面行配上声音行，第二条输入**带自己的请求头**）；③ `visible()` 把"度量过、是活动画面、既没有声音也没有可配的声音地址"的行**收起**并在旁边报出条数（**先合并、后过滤**是用户钉的顺序，反过来 bilibili 那张卡片是空的）；④ `looks_like_url` / `extract_share_urls`（整段分享文案）、`engine_note()`（引擎拒绝原话第一行 + `needs_cookies` 词表）、cookie jar（`resolve_cookies.txt`，0600，只在门控内读写，页面只报条数）、`_cast_targets()` + `cast_local_file.target_push`（设备下拉，第一项永远是本机）+ `macast/xml/setting.html` 同一张卡片新增的两块 + **Part 59 132→174 条**（新 R 段）+ Part 36 的 13 条菜单栏用例 + 文档（`docs/Casting-Suite.md` §2b/§5/§6、AGENTS §2/§3/§4.14/§6/§9、本文 §5/§6.5/§6.6） | 见下面的 §6.6 —— 十七个定点变异体（v0.18 七个 1/1/1/3/1/2/2 + v0.19 十个 1/3/1/4/1/1/2/7/2/2），两轮"0 红"的自我修正（`_local_target()` 的名字写死那一版第一版用例是**自证**的），以及**写文档时抓到的一条真 bug**（cookie jar 把 `#HttpOnly_` 那一行读成注释） |
 
 ### 6.1 P6 第四批明细（commit `839b208`，已推送）：端到端冒烟 + "保持私有"决定的落地
 
@@ -727,6 +735,10 @@ AGENTS §4.10b），所以这 11 个文件证明的是"这 11 个插件在冻结
    **一律由 Macast 侧中转供流**；不引 castor 依赖。必须 JS 才算得出地址的站点留作二阶段（CDP），
    而**这个覆盖空洞要写在页面上**。
 2. **目标 = 当前渲染器**：不做"选一台设备"，交出去走现成的 `_cast_url`。
+   **这一条在下一轮被用户自己撤销**（2026-10-04，「投给哪台设备要能选」）：现在卡片上有下拉，
+   第一项永远是本机、其余复用 `cast_local_file` 已有的发现与投递，仍然**没有一行新的协议代码**。
+   留在原地的理由是当时那句判定本身没错 —— **"不做设备选择"约束的是"要不要新写一条投递路径"，
+   而不是"页面上能不能出现一行设备名"**；复用现成插件的缓存清单，代价是零。见下面的 §6.6。
 3. **供流 = 代理优先、只在需要时转封装**：直链 = 带请求头注入的反向转发 + **Range 翻译**（零 CPU，
    观众能拖）；HLS/DASH = `ffmpeg -c copy` 转封装成**会增长的临时文件**（拖动只能用满才准，
    这句代价印在卡片上）。
@@ -776,7 +788,9 @@ md5 逐字节校验（**绝不用 `git restore`**）。
 自家接收端上验过（§4.9 那一族的边界原样适用：我们不崩、日志也没 ERROR，只是发送端可能不认账）；
 ② 真站解析**只跑过一次**（bilibili），它证明的是这条链路在这台机器上通，不是"上千站点都解得出"；
 ③ **需要 JavaScript 才算得出地址的站点解不出**，这句写在卡片上而不是藏在手册里；④ 中转链接**不是
-保密通道**（随机 id + 30 分钟空闲 TTL，无令牌）；⑤ DASH 音画分两条时**只标注不合并**。
+保密通道**（随机 id + 30 分钟空闲 TTL，无令牌）；⑤ DASH 音画分两条时**只标注不合并** —— 这一条
+在 v0.19 已被推翻（`plan()` 现在会答 `merge`），见 §6.6；当时的取证（"页面上最高那条投出去没有声音"）
+仍然是对的，改变的是我们对它的回应方式。
 
 **署名（AGENTS §4.12 那一族）**：两个新文件都是**我们写的**（文件头已是 pingod），但 castor 的 MIT 层
 只落在 `macast/media_resolve.py` 上 —— 它的头点名 `https://github.com/stupside/castor`（MIT）与
@@ -787,3 +801,95 @@ md5 逐字节校验（**绝不用 `git restore`**）。
 的 `THIRD_PARTY` 表**：这台克隆算不出台账（§4.12 末条：fork 点的 215 条上游对象不在这里），
 而 §4.12 明令不许用手算差值去凑。欠的那一步留在这里，**由有完整历史的克隆补**：把这两个文件登记进
 `THIRD_PARTY`，然后让 `provenance.py --check --stamp` 去更新 `docs/Provenance.md` 的台账行与两张表。
+
+### 6.6 P8.1 明细（应用 v0.19.0，tag `v0.19.0`）：同一张卡片上的四件事
+
+**用户 2026-10-04 一口气提了四项，逐项拍板后合并成这一轮**（原话「没问题，按此方案执行」）。
+四条都不是新流程，而是 P8 那张卡片**已经在这里**之上加的动作 —— 所以这一轮的形状是"bounded"：
+`media_resolve.py` / `media_relay.py` / `protocol.py` / `setting.html` 四个文件里改，
+没有新的模块、没有新的协议代码、没有新的 pip 依赖。
+
+**① 菜单栏里那一行（`screen_mirror.MENU_HIDDEN`）**。P7 把控制面整个搬进网页之后（§6.4），
+菜单栏 Renderers 组里留着的那一行只剩一个作用：让用户以为关掉它能停掉镜像。
+隐藏的是**行**不是插件 —— 已持久化成 `Macast_Renderer = Screen Mirror` 的安装仍然按名字命中，
+`set_media_url` 的 Bridge 让位照旧，那两件事由 Part 36 的 13 条菜单栏用例钉住
+（顶层菜单该有什么、以及"不许出现电脑投屏行"这条用户裁定本身）。
+
+**② 音画合并排在过滤之前**。`plan()` 交出第三种判决 `merge`，`pair_tracks()` 给画面行配上声音行，
+第二条输入**带自己的请求头**（`input_arguments(url, headers)` 把 `-headers` 写在那条 `-i` **之前** ——
+DASH 的两条轨道各有各的签名头，共用一份等于第二条必然 403）。
+`visible()` 随后才收起"度量过、是活动画面、既没有声音地址也没有音轨"的行，并在旁边报出收起条数。
+**先合并、后过滤是用户钉的顺序**，反过来做的话 bilibili 那张卡片是空的：它的 DASH 梯子里
+每一条画面行单独看都"没有音轨"，先过滤等于把合并的对象全删了。未度量的行**永不**收起 ——
+"探针没问出来"与"确实没有声音"是两句不同的话，这句从 v0.18 就写在判定表上。
+
+**③ 整段分享文案 + 引擎自己的拒绝原话**。`looks_like_url` 与 `extract_share_urls` 是两问
+（前者判"这串是不是一个地址"，后者从一段抖音分享文案里**挖**地址），挖出来之后仍要过裸 host 那一问
+—— 交给引擎的必须是"一个网址"，否则 `example.com/watch/7` 会变成对这串文本的搜索（§6.5 那条老红线）。
+`engine_note()` 把引擎 stderr 的第一行非空文本原样交回卡片（截 200 字符），`_COOKIE_WORDS` 命中
+就单独答 `needs_cookies`：**"解不出"最有用的一种是源站把原因说清楚了而我们没转述**。
+
+**④ 登录 cookie 与投给哪台设备**。这一条同时是 ⑥ 和 ② 两问，落在一处：
+- **不代登录**是硬边界（没有账号密码表单、不弹登录窗），给的是两条**交 cookie** 的路：
+  粘贴 Netscape 文件到 `SETTING_DIR/resolve_cookies.txt`，或允许 `--cookies-from-browser <白名单>`。
+  文件优先于浏览器；白名单在**每次读**的时候复查，因为设置 JSON 是手改的，而一个以 `-` 开头的
+  浏览器名会变成一条新的 argv 开关。文件 0600、**不进设置 JSON**、页面与日志只报条数不报值 ——
+  那份 JSON 会被导出、被贴进 bug 报告，而 cookie 就是登录态本身。
+- **设备下拉**复用 `cast_local_file` 已有的发现与投递（`target_state` / `target_refresh` / `target_push`），
+  **没有一行新的协议代码**；`_cast_targets()` 只读插件的**缓存**（同步问一次要按住一个 CherryPy
+  worker 三秒），第一项永远是「本机」。"本机"那一行的名字读的是决定它的那个事实
+  （`Setting.get(Macast_Renderer)` 或 `MPV`），不是抄一个字符串 —— 这一条是被变异体逼出来的，见下。
+  投给别台设备时**不碰我们自己的播放态**：两个 owner 会让状态页同时声称在放两件事。
+
+**验证**：`pyflakes` 干净；套件 **2229/2235**（红的仍是 §4.12 那 6 条 Part 34，本机跑的时候
+用户自己的实例在 8009/58880 上，总数按 §2 那条规矩先看过）。**Part 59 132 → 174 条**（新 R 段：
+分享文案 / 引擎原话 / cookie 一整条链 / 设备下拉），Part 36 +13 条。**十七个定点变异体**
+= v0.18 的七个（1/1/1/3/1/2/2）+ v0.19 的十个（1/3/1/4/1/1/2/7/2/2）：
+`rstrip` 挪进正则 / 裸 host 白名单接受空 scheme / 合并的第二路输入复用画面那份 headers /
+`plan()` 把 merge 报成 remux / jar 写成 0644 / 白名单只在写入时查 / 核心不再拼「本机」/
+`target` 只认 `'local'` 不认空 / `_local_target()` 的名字写死 / 删掉 `#HttpOnly_` 那一支。
+
+**这一轮的两轮"0 红"自我修正**（都是**用例没有牙**，不是产品没问题）：
+① `target` 只认 `'local'` 那个变异体第一次跑让 Part 59 **在中间抛 `IndexError` 就死了**，
+把后面约 53 条一起藏起来（`check()` 不捕异常）—— 修法是失败路径用 `.get()` 读回中转 id、
+清扫循环只摘还活着的那几条，重跑之后红 7 条且**每条都落在自己那句话上**。
+② `_local_target()` 的名字写死那个变异体**第一次跑出 0 红**，因为原用例写的是
+`items[0] == _local_target()`：把答复和产出它的函数比，是同义反复。现在这个名字必须
+**第二遍问那个决定它的事实**（`Setting` 里那个键），并新增一条"换一个渲染器选法，那一行跟着变"。
+改判顺带又抓到一条漂移：那次多出来的读取让后面一条用例的 `_surfR59.states` 从 4 变 5，
+读起来完全像产品坏了 —— 同一族的教训是"两个见证者必须分开报"。
+③ 第三条同族、这一轮自己踩的：新用例里一个局部变量取了 `_restore59` 这个名字，而那正是
+Part 59 的 I 段定义的还原助手（`verify_cast_airplay.py:24414`，整段末尾的 `finally` 靠它把
+`media_resolve` 的三个全局挂回去）⇒ `finally` 拿到一个 dict，红法是
+`TypeError: 'dict' object is not callable` 加一句「Part 59 runs」，把这一格之后**所有**用例吞掉。
+写新用例前先 grep 一遍那个文件的作用域（AGENTS §4.14）。
+
+**写文档时抓到一条真 bug，随 v0.19 一起发**（这是这一轮唯一一处"代码跟着文档改"）：
+`cookie_jar_state()` 原先把每一行以 `#` 开头的都当注释跳过，而浏览器导出的 Netscape 文件里
+**`#HttpOnly_` 那一行开头是 cookie 不是注释** —— 那是格式标记"脚本读不到"的属性，
+一次真会话导出的 cookie 常常**整片**都带它。后果正是这个功能存在的理由被反着实现了一遍：
+用户从浏览器导出、整段贴进来，计数回 0，卡片说"这份文件里没有 cookie"，
+而他手里那份是他全部的登录态。判据照**标准库的读取规则**写（`MozillaCookieJar._really_load`：
+在**原始行的 index 0** 上剥前缀，**剥完之后**才套用"空行/以 `#` 开头就跳过"）——
+顺序就是整个 bug；所以 `#HttpOnly_` 光秃秃一行、`#HttpOnly_# …` 都是 `(0, 0)` 而不是"一条坏行"，
+而缩进的 `  #HttpOnly_…` 对引擎仍是注释（前缀按 index 0 绑定），把它数成 cookie 等于
+承诺一份 yt-dlp 从来不会加载的登录态。**旧的 jar 用例为什么没抓到**：它喂的是
+`'# HttpOnlyCookieJar'` —— 带空格的**头注释**，真实形状零覆盖，所以删掉那一支时
+**只有新写的两条用例变红、旧用例全绿**（§4.2「假 ffmpeg 抄虚构格式」同族：
+不提问的检查等于通过的检查）。同步改了 `setting.html` 的粘贴提示与 `docs/Casting-Suite.md` §2b.4，
+免得用户去手删那个前缀。
+
+**这一轮欠着的三件验证**（发版前后都要读成"欠着"而不是"过了"）：
+① 以 `merge` 供流的**真站复验**（bilibili 那一次是 v0.18 的取证，那时只有标注没有合并）；
+② 设备下拉与 cookie 那块的**三档真浏览器验收**（§10 那条要求：临时配置目录 + 错开端口的实例，
+绝不碰用户的 58880）；③ **投给一台真电视**——本局域网没有 Chromecast（打桩套件只证明
+`target_push` 的三种失败形状各自带走中转，不证明任何一台真设备认账，§4.9 那一族的边界原样适用）。
+cookie 那一格另有一条边界要说清：**它的对齐对象是标准库的读取规则，不是某一份真浏览器导出的实跑**
+—— 后者同样欠着，而这一轮那个 bug 恰恰说明这两件事不一样。
+
+**署名（AGENTS §4.12 那一族）**：这一轮**没有引入新的第三方层**。`#HttpOnly_` 那条判据来自
+标准库（`http.cookiejar`，MIT 许可的 CPython 本体，不是又一层转写），四个改动都落在
+我们自己写的 `media_resolve.py` / `media_relay.py` / `protocol.py` / `setting.html` 上；
+`media_resolve.py` 头上那层 **castor** 归属仍只在 v0.18 那一批搬来的两张表上
+（`STILL_IMAGE_CODECS` + `ADMISSION_TABLE` / `preference()` 骨架），这一轮没有新增搬来的东西。
+`THIRD_PARTY` 那笔欠账不变，仍**由有完整历史的克隆补**（本机算不出台账，见 §4.12 末条与 §6.5 末段）。

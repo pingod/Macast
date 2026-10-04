@@ -10048,6 +10048,14 @@ class ScreenMirrorRenderer(Renderer):
     #: the user having picked it as the current renderer first.
     MIRROR_CONSOLE = True
 
+    #: No row in the menu's Renderers group. The control surface is the settings
+    #: page's 「电脑投屏」 tab (v0.12, AGENTS.md §4.8: 菜单栏里一条镜像行都没有，只剩
+    #: 通知), and a row here reads as the way to reach it while only offering a
+    #: renderer switch. A `Macast_Renderer` that still names this plugin keeps
+    #: working -- the menu just does not put a checkmark on a renderer that is
+    #: not playing.
+    MENU_HIDDEN = True
+
     def __init__(self):
         super(ScreenMirrorRenderer, self).__init__()
         self._lock = threading.Lock()

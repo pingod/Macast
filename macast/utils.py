@@ -135,6 +135,13 @@ class SettingProperty(Enum):
     # install downloads, update check) goes through a domestic mirror.
     # Absent key == off; see macast/plugin_repo.py.
     Github_CN_Mirror = 19
+    # Which browser 网页地址投屏 may read session cookies out of, when the user
+    # turns that on. Only ever one of `Handler.COOKIE_BROWSERS`: the value is
+    # checked again on the way out because this file is hand-editable (高级设置)
+    # and it lands in a subprocess argv. The cookie *values* are never here —
+    # they live in their own file in the config directory (see §4.14), because
+    # this one is what people export and attach to bug reports.
+    Resolve_Cookie_Browser = 20
 
 
 def unadvertisable_reason(addr, netmask):

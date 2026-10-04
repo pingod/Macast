@@ -1594,6 +1594,127 @@ def build_didl(url, title, content_type, duration=0.0, size=0,
     ).format(escape(title or ''), upnp_class, ' '.join(attrs), escape(url))
 
 
+# -- handing one URL to a device the page chose ------------------------------
+
+#: How many Cast channels to leave open after a page-card hand-off.
+MAX_HANDOFFS = 4
+_handoffs = []
+_handoff_lock = threading.Lock()
+
+
+def _remember_handoff(sender):
+    """Keep the channel that just played something, so we are not the one who hung up.
+
+    Closing the socket the instant LOAD is answered is a sender hanging up in the
+    middle of a session, and what a receiver does then is the receiver's business --
+    so this does not guess. The last few channels stay open until newer hand-offs
+    crowd them out. The media itself is served by the relay's HTTP server, which
+    does not care either way.
+    """
+    with _handoff_lock:
+        _handoffs.append(sender)
+        stale = _handoffs[:-MAX_HANDOFFS]
+        del _handoffs[:-MAX_HANDOFFS]
+    for old in stale:
+        _close_quietly(old)
+
+
+def cast_target_items():
+    """[(id, kind, name, address)] from both discovery caches, Cast first.
+
+    Reads the same caches the plugin's own 「输出目标」 menu reads, so the two can
+    never disagree about what is on the LAN. Never searches here: a page that polls
+    once a second must not spawn an mDNS or SSDP round trip per poll --
+    `start_target_search()` is the ask.
+    """
+    items = []
+    for name, host, port in list(_devices):
+        items.append(('cast:{}:{}'.format(host, port), 'cast', name,
+                      '{}:{}'.format(host, port)))
+    for name, control, host in list(_dlna_devices):
+        items.append(('dlna:' + control, 'dlna', name, control))
+    return items
+
+
+def cast_target_state():
+    """Everything the card needs: the list, and whether a search is in flight."""
+    return {
+        'items': [{'id': found_id, 'kind': kind, 'name': name,
+                   'address': address}
+                  for found_id, kind, name, address in cast_target_items()],
+        'searching': bool(_searching or _dlna_searching),
+        'known': bool(_devices or _dlna_devices),
+    }
+
+
+def start_target_search():
+    """Ask for both kinds of device; True when either one actually started."""
+    return bool(start_search() or start_renderer_search())
+
+
+def target_by_id(target_id):
+    """(kind, name, address) for one of our own ids; None for anything else.
+
+    The id is matched against the live caches rather than the address being read
+    off the request: a stale or hand-written id must not turn this machine into an
+    opener of connections to whatever host the page named.
+    """
+    for found_id, kind, name, address in cast_target_items():
+        if found_id == target_id:
+            return kind, name, address
+    return None
+
+
+def upnp_class_for(content_type):
+    """Which UPnP item class a renderer should read this as."""
+    return ('object.item.audioItem.musicTrack'
+            if str(content_type or '').startswith('audio/')
+            else 'object.item.videoItem')
+
+
+def push_url_to(target, url, title='', content_type='', duration=0.0,
+                live=False):
+    """Hand one URL to one device, and leave this plugin's own session alone.
+
+    Deliberately not `LocalFileRenderer._push`: that one *adopts* the hand-off --
+    its generation, its watchdog, its `set_state_*`, its playlist. The card pushes
+    while some other renderer may be the one playing here, and a second owner of
+    the playback state would have the state page say「正在播放」about two things at
+    once. So the device is told what to play and nothing more: how long it plays,
+    and when it stops, is decided on the device.
+    """
+    kind, name, address = target
+    timeout = number(Setting.get(SettingProperty.Timeout, 5), 5.0)
+    try:
+        if kind == 'cast':
+            host, _, port = address.partition(':')
+            sender = CastSender(host, int(port) if port.isdigit() else CAST_PORT,
+                                timeout=timeout)
+            sender.connect()
+            sender.launch()
+            entry = sender.load(url, content_type, live=live, title=title)
+            state = (entry.get('playerState') or '').upper()
+            handoff = sender
+        else:
+            sender = DlnaSender(address, timeout=timeout)
+            sender.set_uri(url, build_didl(url, title, content_type, duration,
+                                           0, upnp_class_for(content_type)))
+            sender.play()
+            state = sender.transport_state()
+            # A DLNA renderer holds no channel between actions: the SOAP answer is
+            # the whole conversation, and the item keeps playing without us.
+            sender.close()
+            handoff = None
+    except Exception as e:
+        logger.exception('pushing %s to %s failed', title or url, name)
+        return False, '投给「{}」失败：{}'.format(name, e)
+    if handoff is not None:
+        _remember_handoff(handoff)
+    logger.info('page card pushed %s to %s (%s): %s', title or url, name,
+                address, state or '状态未知')
+    return True, '已投给「{}」'.format(name)
+
+
 # -- the settings this plugin reads back ------------------------------------
 
 def target_kind():
@@ -1897,6 +2018,12 @@ def _remove(path):
 
 class LocalFileRenderer(Renderer):
     """Serves local media to one chosen device and follows what it does."""
+
+    #: The core finds this plugin for 「网页地址投屏」 by this attribute and not by
+    #: title, for the same reason as Screen Mirror's `MIRROR_CONSOLE` (see
+    #: `MacastPluginManager.console_plugin`): the feature has to work whichever
+    #: renderer the user selected, and a title is editable while this is not.
+    URL_TARGET_RENDERER = True
 
     def __init__(self):
         super(LocalFileRenderer, self).__init__()
@@ -2594,7 +2721,12 @@ def _teardown(output, job, entries, store, keep_app=False):
 # -- the menu ---------------------------------------------------------------
 
 class LocalFileSetting(RendererSetting):
-    """The menu bar half: choose a device, choose files, steer playback."""
+    """The menu bar half: choose a device, choose files, steer playback.
+
+    It also answers for the「网页地址投屏」card (`target_state` / `target_refresh` /
+    `target_push`), because the devices this plugin can see are exactly the
+    devices that card can offer -- and the core may not import this module.
+    """
 
     def _renderer(self):
         renderers = cherrypy.engine.publish('get_renderer')
@@ -2759,6 +2891,42 @@ class LocalFileSetting(RendererSetting):
         else:
             cherrypy.engine.publish('app_notify', 'Macast',
                                     '投屏目标：{}'.format(name), sound=False)
+
+    # -- the「网页地址投屏」card's surface ------------------------------------
+
+    def target_state(self):
+        """The device list the page shows, plus the search kick a first read needs.
+
+        Asking here is what makes a cold machine answer at all: the caches are only
+        ever filled by a search, and the menu's own `build_menu` is not on this
+        path. Same shape as Screen Mirror's `request_probes()` -- the page's first
+        read asks, and the next poll reads what landed.
+        """
+        if not _devices and not _dlna_devices:
+            start_target_search()
+        return cast_target_state()
+
+    def target_refresh(self):
+        """What 「重新搜索」 on the card does: start both, report what is known now."""
+        started = start_target_search()
+        state = cast_target_state()
+        state['started'] = started
+        return state
+
+    def target_push(self, target_id, url, title='', content_type='',
+                    duration=0.0, live=False):
+        """One URL to one device, or the reason that pair is not possible.
+
+        `(ok, message)`, and the caller is a management POST that shows the message
+        either way -- a device picked from a stale list has to be named, not
+        silently dropped back onto this machine.
+        """
+        target = target_by_id(target_id)
+        if target is None:
+            return False, ('设备列表里没有这一台（它可能刚关机，或者搜索结果已过期），'
+                           '请点「重新搜索」再投')
+        return push_url_to(target, url, title=title, content_type=content_type,
+                           duration=duration, live=live)
 
     # -- folder and queue --------------------------------------------------
 
