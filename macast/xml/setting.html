@@ -889,7 +889,7 @@
                                 </div>
                                 <div class="resolve-relay">
                                     <div>{{ c.relay }}</div>
-                                    <div>{{ c.mode === 'proxy' ? '原样转发；源站支持 Range 时才能拖动' : '转封装后要等写完才播得起来，拖动也只到已写完处' }}</div>
+                                    <div>{{ c.mode === 'proxy' ? '原样转发；源站支持 Range 时才能拖动' : '转封装能边写边播；写完之前没有可信长度，拖动要等它写完' }}</div>
                                 </div>
                                 <el-button size="mini" type="primary" plain
                                            icon="el-icon-video-play"
@@ -1697,9 +1697,10 @@
                     <li><strong>三种中转，按地址的形状选</strong>：一条渐进式文件（mp4/mkv/音频）
                         是原样转发，几乎不吃 CPU，源站支持 <code>Range</code> 时电视才能拖动；
                         HLS / DASH 这类分片地址没有「一个文件」可读，于是用 ffmpeg <code>-c copy</code>
-                        转封装成一个正在长大的 MP4 —— 不重编码，画质不变，但<strong>要等它写完才播得起来</strong>
-                        （标准 MP4 的轨道表写在文件头，ffmpeg 是在退出的那一刻才把它搬到那里的，
-                        所以半截文件连"有哪些轨"都读不出来），拖动也只能拖到已经写完的位置；
+                        转封装成一个正在长大的 MP4 —— 不重编码，画质不变，而且<strong>能边写边播</strong>
+                        （它写进去的是自描述的碎片，轨道表在文件一开头就交出去，所以播放器读到的是
+                        已经写到的那一段），代价是<strong>写完之前它没有可信长度</strong>，
+                        所以拖动要等它写完；
                         源站把画面和声音交成<strong>两条地址</strong>时（DASH 分轨，bilibili 就是这样）
                         在这句话上多一步：两条一起喂给 ffmpeg 合成一条流。哪一种都由候选列表里
                         每一行自己那句话说明。</li>

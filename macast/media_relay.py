@@ -254,6 +254,22 @@ class Relay:
     audio_url: str = ''
     audio_headers: dict = field(default_factory=dict)
 
+    # The sound this relay will write, named by whoever knows it: the engine's
+    # `acodec` for the row that was cast, else what a probe read. `''` is "nobody
+    # has said", and the gate that reads it refuses to guess -- the filter it would
+    # add is one that *fails* on opus and mp2. The second ask is `ADTS_TELLS`: when
+    # nobody could name the sound, ffmpeg names it itself by complaining.
+    audio_codec: str = ''
+
+    # Whether the command running right now carries `-bsf:a aac_adtstoasc`. Set
+    # either by that gate before the first spawn, or by the retry after ffmpeg's
+    # own complaint; it is also the latch that makes the retry happen once.
+    adtstoasc: bool = False
+
+    # The binary this relay's job was started with, kept so a retry does not go
+    # looking for ffmpeg a second time (and finds a different one).
+    ffmpeg: str = ''
+
     # The watcher thread and the encoder kill both write `state`; the store's own
     # lock must not be what serialises them, because a reader can hold the request
     # thread for the length of a video. One lock per relay, never nested.
@@ -501,6 +517,112 @@ def input_arguments(url, headers=None):
     return args + ['-protocol_whitelist', PROTOCOL_WHITELIST, '-i', url]
 
 
+#: The codecs that arrive as ADTS frames and therefore cannot be copied into an
+#: MP4 as they stand: the muxer answers `Malformed AAC bitstream detected` and
+#: exits 255, so the relay reports a failure and the viewer a 502. `mp4a` is the
+#: same codec spelled the way an RtpMap/`acodec` field spells it.
+AAC_CODECS = ('aac', 'mp4a')
+
+
+def needs_adtstoasc(codec):
+    """Whether this sound has to be reframed to live inside an MP4.
+
+    Measured, not inferred: the filter *refuses* to run on what it was not written
+    for -- opus and mp2 both exit 234 having produced zero bytes -- so "apply it
+    whenever there is audio" is not a safe shape. An unknown codec gets nothing,
+    which is exactly what this relay did before the question was asked.
+
+    Unknown is not the same as absent, and that gap is reachable: a muxed HLS
+    variant whose playlist declares no `CODECS=` gives the engine nothing to
+    report, and a row over the measurement quota never gets probed. Both arrive
+    here as `''`, and both are ADTS. Hence `ADTS_TELLS`.
+    """
+    name = (codec or '').strip().lower()
+    return any(name.startswith(prefix) for prefix in AAC_CODECS)
+
+
+#: The two halves of the sentence ffmpeg writes when it meets ADTS in an MP4
+#: muxer, quoted from 9.0.2 on a muxed-TS source nobody could name:
+#: `[mp4 @ …] Malformed AAC bitstream detected: use the audio bitstream filter
+#: 'aac_adtstoasc' to fix it` -- then exit 255, after 23 KB of unusable file.
+#: Asking the source is the first ask; this is the second one, and it is ffmpeg
+#: naming its own problem rather than us guessing at one.
+ADTS_TELLS = ('Malformed AAC bitstream', 'aac_adtstoasc')
+
+
+def tells_adts(stderr):
+    """Whether ffmpeg asked, in its own words, for the reframing filter."""
+    text = stderr or ''
+    return any(tell in text for tell in ADTS_TELLS)
+
+
+def remux_arguments(with_adtstoasc):
+    """ffmpeg's write side for a remux: a file a viewer can open while it grows.
+
+    A standard MP4 is not that file. Its `moov` is written by ffmpeg *on exit*,
+    after the index, so every byte before it is undecodable -- measured: the first
+    moment any player could open the growing file was the moment ffmpeg stopped,
+    and a viewer that arrived earlier read a 200 with zero recognisable bytes and
+    reported "Failed to recognize file format".
+
+    A fragmented MP4 puts the track headers in an `empty_moov` up front and appends
+    self-describing `moof`+`mdat` pairs forever, so the prefix *is* the file. Two
+    options make that reachable rather than merely scheduled:
+
+    * `+frag_keyframe` closes a fragment at each keyframe -- and an AAC packet
+      carries the KEY flag, so a stream with sound cuts a fragment about every
+      21 ms of audio and the video rides along with it.
+    * `-flush_packets 1` is what actually gets those bytes past ffmpeg's ~256 KiB
+      write buffer. Without it the growing file sat at 28 bytes for three seconds
+      on a 600 kbit fixture, which reads like the container not working.
+
+    It is still an MP4 with the same suffix and the same `video/mp4` type, so the
+    orphan sweep and every content-type map keep answering as before.
+    """
+    args = ['-c', 'copy']
+    if with_adtstoasc:
+        args += ['-bsf:a', 'aac_adtstoasc']
+    return args + ['-movflags', '+frag_keyframe+empty_moov+default_base_moof',
+                   '-flush_packets', '1', '-f', 'mp4']
+
+
+def _spawn_remux(relay):
+    """Run the transmux with whatever this relay already records, once.
+
+    Every fact the command needs lives on the relay -- the inputs, their headers,
+    the binary, whether the reframing filter is on -- so the retry after ffmpeg's
+    ADTS complaint is a flip of one boolean and this same call, not a second copy
+    of the argv. A relay that was built by hand is not a thing that can be
+    re-spawned from nowhere; `start_remux` is what fills these fields in.
+    """
+    command = [relay.ffmpeg, '-hide_banner', '-loglevel', 'error', '-y']
+    command += input_arguments(relay.url, relay.headers)
+    if relay.audio_url:
+        command += input_arguments(relay.audio_url, relay.audio_headers)
+    command += remux_arguments(relay.adtstoasc)
+    command.append(relay.path)
+    try:
+        relay.proc = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
+            creationflags=media_resolve.console_flags())
+    except OSError as exc:
+        relay.state = 'failed'
+        relay.error = '无法启动 ffmpeg：{}'.format(exc)
+        return False
+    relay.state = 'running'
+    relay.length = None
+    relay.ranges = False
+    # What leaves this process is now an MP4 whatever the source's address looked
+    # like, and that is the type the handler answers with, the Cast LOAD reports,
+    # and the DIDL puts in `protocolInfo`. A manifest URL has no useful suffix to
+    # map, so without this a remuxed cast advertises `application/octet-stream` --
+    # which a television reads as "not a media file" and a Chromecast reads as a
+    # reason to guess a handler (see `CastSender.load`).
+    relay.content_type = 'video/mp4'
+    return True
+
+
 def start_remux(relay, ffmpeg=None):
     """Copy the manifest's streams into one growing MP4 and hand it to the store.
 
@@ -522,32 +644,38 @@ def start_remux(relay, ffmpeg=None):
         relay.state = 'failed'
         relay.error = '这台机器没有 ffmpeg，无法把清单流转封装'
         return False
+    relay.ffmpeg = ffmpeg
     relay.path = os.path.join(relay_dir(), relay.relay_id + '.mp4')
-    command = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y']
-    command += input_arguments(relay.url, relay.headers)
-    if relay.audio_url:
-        command += input_arguments(relay.audio_url, relay.audio_headers)
-    command += ['-c', 'copy', '-movflags', '+faststart', '-f', 'mp4', relay.path]
-    try:
-        relay.proc = subprocess.Popen(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace',
-            creationflags=media_resolve.console_flags())
-    except OSError as exc:
-        relay.state = 'failed'
-        relay.error = '无法启动 ffmpeg：{}'.format(exc)
+    relay.adtstoasc = needs_adtstoasc(relay.audio_codec)
+    if not _spawn_remux(relay):
         return False
-    relay.state = 'running'
-    relay.length = None
-    relay.ranges = False
-    # What leaves this process is now an MP4 whatever the source's address looked
-    # like, and that is the type the handler answers with, the Cast LOAD reports,
-    # and the DIDL puts in `protocolInfo`. A manifest URL has no useful suffix to
-    # map, so without this a remuxed cast advertises `application/octet-stream` --
-    # which a television reads as "not a media file" and a Chromecast reads as a
-    # reason to guess a handler (see `CastSender.load`).
-    relay.content_type = 'video/mp4'
     watch_remux(relay)
+    return True
+
+
+def _retry_adtstoasc(relay, code, stderr):
+    """Give the transmux its second command when ffmpeg asked for the filter.
+
+    True means "this outcome is mine now" -- the retry either re-spawned the job or
+    reported its own reason -- so the caller does not write a verdict over it. Three
+    things must all be true: the job failed, the filter was *not* already on (so
+    this happens once and cannot loop), and ffmpeg's words name ADTS.
+
+    The junk file goes first. Without it the viewer that is already waiting in
+    `remux_has_bytes` would see 23 KB of unusable bytes appear and be handed a 200
+    that plays as nothing -- the exact symptom this whole module exists to stop.
+    With the file gone and the state back to `running`, that wait keeps waiting for
+    the second command's first real byte instead.
+    """
+    if code == 0 or relay.adtstoasc or not tells_adts(stderr):
+        return False
+    relay.adtstoasc = True
+    try:
+        os.remove(relay.path)
+    except OSError:
+        pass
+    if _spawn_remux(relay):
+        watch_remux(relay)
     return True
 
 
@@ -576,12 +704,14 @@ def watch_remux(relay):
                 relay.state = 'complete'
                 relay.length = relay.size()
                 relay.ranges = True
-            else:
-                relay.state = 'failed'
-                relay.ranges = False
-                relay.length = None
-                relay.error = '转封装没有产出可用的文件（ffmpeg 退出码 {}{}）'.format(
-                    code, '：' + _last_line(stderr) if stderr else '')
+                return
+            if _retry_adtstoasc(relay, code, stderr):
+                return
+            relay.state = 'failed'
+            relay.ranges = False
+            relay.length = None
+            relay.error = '转封装没有产出可用的文件（ffmpeg 退出码 {}{}）'.format(
+                code, '：' + _last_line(stderr) if stderr else '')
 
     thread = threading.Thread(target=finish, daemon=True, name='RELAY_REMUX')
     relay.watcher = thread
@@ -726,6 +856,45 @@ def serve_plan(relay, range_header):
     return ServePlan(206, start, end, total, True, end - start + 1)
 
 
+def remux_has_bytes(relay, timeout=GROW_WAIT_SECONDS, poll=GROW_POLL):
+    """Wait until the transmux has actually written something we can hand over.
+
+    Measured on this machine, three shapes of the same request against a relay
+    whose ffmpeg had not created its output yet:
+
+      * file absent   -> **0.0013 s, 0 bytes**
+      * file, empty   -> held 6.01 s (the wait inside `_pipe_file`)
+      * file, growing -> streamed 118,784 bytes
+
+    The first line is the bug. `open()` raises `FileNotFoundError`, which *is* an
+    `OSError`, so the "the viewer left" clause in `_respond` swallowed it after the
+    status line and headers had already gone out: a `200` with no body, which every
+    player reads as an immediate EOF. mpv's wording for that is
+    `Failed to recognize file format`, and the menu reads back 「File error」 --
+    a message about the *file*, from a request that never had one.
+
+    So the wait belongs **before** `send_response`, not inside the pipe: once the
+    headers are out, the only honest answer left is a truncated one. `False` means
+    either the transmux failed (the caller says 502, the same sentence the
+    completion watcher uses) or it never started writing (503, try again).
+    """
+    waited = 0.0
+    while True:
+        if relay.state == 'failed':
+            return False
+        try:
+            if os.path.getsize(relay.path) > 0:
+                return True
+        except OSError:
+            # Not created yet. That is the whole reason this function exists, so
+            # it is a reason to keep waiting, not to answer.
+            pass
+        if waited >= timeout:
+            return False
+        time.sleep(poll)
+        waited += poll
+
+
 # ---------------------------------------------------------------------------
 # serving
 # ---------------------------------------------------------------------------
@@ -819,9 +988,17 @@ class RelayHandler(BaseHTTPRequestHandler):
             self._refuse(502)
             return
         if relay.mode == 'remux' and not relay.path:
-            # Registered but with no bytes to hand over: refuse rather than open a
-            # lengthless 200 the player would wait on forever.
+            # Registered but with no output path at all: there is no file this
+            # relay will ever have, so refuse rather than open a lengthless 200
+            # the player would wait on forever.
             self._refuse(410)
+            return
+        if relay.mode == 'remux' and not remux_has_bytes(relay):
+            # The transmux has produced nothing yet. Answering now would be the
+            # zero-byte `200` documented on `remux_has_bytes`, so the two ways
+            # that happens get said apart: a failure the watcher already saw, and
+            # a job that simply has not written anything yet.
+            self._refuse(502 if relay.state == 'failed' else 503)
             return
         plan = serve_plan(relay, self.headers.get('Range'))
         if plan.status == 416:
@@ -1027,6 +1204,7 @@ def open_relay(candidate, title=''):
     page in the same response.
     """
     plan = media_resolve.plan(candidate)
+    probe = candidate.probe
     relay = Relay(relay_id=new_id(), url=candidate.url,
                   headers=dict(candidate.headers),
                   # 'merge' is one of remux's shapes, not a third way to serve
@@ -1037,6 +1215,11 @@ def open_relay(candidate, title=''):
                   mode='remux' if plan == 'merge' else plan,
                   audio_url=candidate.audio_url,
                   audio_headers=dict(candidate.audio_headers),
+                  # The engine's word first: it is there for every row the ladder
+                  # has, whether or not this machine ever got to probe it. The probe
+                  # is the fallback for a row that came off the page's HTML.
+                  audio_codec=(candidate.audio_codec
+                               or (probe.audio_codec if probe else '')),
                   title=title or candidate.label or candidate.host,
                   content_type=content_type_for(candidate.url, candidate.probe))
     store.add(relay)

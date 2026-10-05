@@ -205,6 +205,11 @@ class Candidate:
     probe: Probe = None
     last_resort: bool = False
     reason: str = ''
+    # The sound this row carries, named the way the *engine* names it. The relay
+    # asks this before any probe exists: an address can be cast while unmeasured,
+    # and whether an AAC bitstream has to be rewritten for the container we write
+    # is decided at that moment. `''` means nobody has said -- not "no sound".
+    audio_codec: str = ''
     # DASH hands the picture and the sound as two addresses. `audio_url` is the
     # partner this row was *paired* with at parse time, so the pairing decision
     # lives with the engine output and nowhere else.
@@ -627,6 +632,7 @@ def parse_ytdlp_json(text):
                 url=url, origin='ytdlp',
                 headers=normalize_headers(form.get('http_headers') or shared),
                 label=format_label(form),
+                audio_codec=engine_audio_codec(form),
                 title=title if isinstance(title, str) else '')
             kind = track_kind(form)
             if kind == 'video':
@@ -665,6 +671,22 @@ def track_kind(form):
     return ''
 
 
+def engine_audio_codec(form):
+    """The name the engine gives this rendition's sound, or '' when it says none.
+
+    `'none'` is yt-dlp's word for "this track is not here", and it must come back
+    as `''`: the relay's question is "is this AAC", and a literal "none" would
+    answer it yes. The value is the codec id, so it stays whatever shape the engine
+    printed (`aac`, `mp4a.40.2`, `opus`) -- the relay matches a family, not a name.
+    """
+    if not isinstance(form, dict):
+        return ''
+    audio = form.get('acodec')
+    if not isinstance(audio, str) or audio.strip().lower() == 'none':
+        return ''
+    return audio.strip().lower()
+
+
 def _track_bitrate(form):
     """The engine's own best guess at this track's bit rate, or 0.0."""
     for name in ('abr', 'tbr', 'br'):
@@ -692,6 +714,10 @@ def pair_tracks(video_rows, audio_rows):
         candidate.audio_url = best[0].url
         candidate.audio_headers = best[0].headers
         candidate.audio_label = best[0].label
+        # The row's own `acodec` said `none`, so it has no codec *of its own* to
+        # report. After pairing, the sound that reaches the player is this
+        # partner's, and that is the fact the relay needs.
+        candidate.audio_codec = best[0].audio_codec
 
 
 def normalize_headers(headers):
@@ -716,6 +742,13 @@ def format_label(form):
         parts.append(str(form['ext']))
     if form.get('height'):
         parts.append('{}p'.format(form['height']))
+    codec = form.get('vcodec')
+    if isinstance(codec, str) and codec and codec != 'none':
+        codec_name = codec.split('.')[0].split('-')[0].lower()
+        codec_names = {'avc1': 'H.264', 'avc': 'H.264', 'h264': 'H.264',
+                       'hev1': 'H.265', 'hvc1': 'H.265', 'hevc': 'H.265',
+                       'av01': 'AV1', 'vp9': 'VP9', 'vp09': 'VP9'}
+        parts.append(codec_names.get(codec_name, codec_name.upper()))
     if form.get('format_note'):
         parts.append(str(form['format_note']))
     if form.get('tbr'):
@@ -1090,9 +1123,9 @@ def plan(candidate):
 
     `merge` is a remux with a second input: the picture and the sound arrive as two
     addresses and ffmpeg copies both into one growing MP4. It therefore inherits
-    every property the relay gives a remuxed file (no length while it grows, no
-    seeking until ffmpeg exits 0), which is why `media_relay` keeps one serving
-    shape and two ways of filling it.
+    every property the relay gives a remuxed file (playable while it grows, but no
+    trustworthy length until ffmpeg exits 0, which is what seeking needs), which is
+    why `media_relay` keeps one serving shape and two ways of filling it.
     """
     if candidate.audio_url:
         return 'merge'

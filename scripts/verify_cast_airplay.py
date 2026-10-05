@@ -24161,6 +24161,16 @@ try:
           and [c.label for c in _B59]
           == ['mp4 720p progressive 1800 k', 'webm 1080p 160 k'],
           str([(c.headers, c.label) for c in _B59]))
+    check("same-resolution codec renditions are visibly distinct, not mistaken "
+          "for duplicate options",
+          mr59.format_label({'ext': 'mp4', 'height': 1080,
+                             'vcodec': 'avc1.640033'}) == 'mp4 1080p H.264'
+          and mr59.format_label({'ext': 'mp4', 'height': 1080,
+                                 'vcodec': 'hvc1.1.6.L150.90'})
+          == 'mp4 1080p H.265'
+          and mr59.format_label({'ext': 'mp4', 'height': 1080,
+                                 'vcodec': 'av01.0.08M.08'})
+          == 'mp4 1080p AV1', '')
     _PL59 = json.dumps({'_type': 'playlist', 'entries': [
         {'title': 'one', 'formats': [{'url': 'http://h/1a.mp4'}]},
         {'title': 'four', 'formats': [{'url': 'http://h/4a.mp4'},
@@ -24550,15 +24560,19 @@ try:
               _cand59('http://h/a.mp4', headers={'cookie': 'session=secret',
                                                  'referer': 'r'})),
               ensure_ascii=False), '')
-    check("`plan` is the two shapes and nothing else, chosen by the address's "
+    check("`plan` is the three shapes and nothing else, chosen by the address's "
           "own container: a file the relay can serve by translating Range, or a "
-          "document that names segments and therefore needs one ffmpeg. The "
-          "card, the relay, and the two sentences in the help all read this one "
+          "document that names segments and therefore needs one ffmpeg, or a split "
+          "DASH ladder whose sound lives at a second address -- which is the same "
+          "remux with one more input, and it is why the count is three and not two. "
+          "The card, the relay, and the two sentences in the help all read this one "
           "function",
           mr59.plan(_cand59('http://h/a.mp4')) == 'proxy'
           and mr59.plan(_cand59('http://h/a.m3u8')) == 'remux'
           and mr59.plan(_cand59('http://h/a.mpd')) == 'remux'
-          and mr59.plan(_cand59('http://h/a')) == 'proxy', '')
+          and mr59.plan(_cand59('http://h/a')) == 'proxy'
+          and mr59.plan(mr59.Candidate(url='http://h/a.mp4', origin='page',
+                                       audio_url='http://h/a.m4s')) == 'merge', '')
     _DESC59 = mr59.describe(_cand59('http://h/a.mp4', _720,
                                     headers={'referer': 'r'}, title='夏日回响'))
     check("describe is everything the card prints, with every number read off "
@@ -25773,6 +25787,313 @@ JSON
           '{} {!r} {!r}'.format(_quiet59.state, _quiet59.error,
                                 _quiet59.length))
 
+    # -- N, third half: the sound that arrives in the wrong wrapper ---------
+    # A muxed MPEG-TS carries AAC in ADTS frames, and an mp4 muxer refuses those
+    # bytes: it wants them raw, which is what `aac_adtstoasc` rewrites. Two ways to
+    # know a row needs it -- the codec name we read from the engine, and ffmpeg's
+    # own words when it dies on the bitstream -- and the second one is the only one
+    # that fires for the rows nobody could name (a muxed HLS whose playlist declares
+    # no `CODECS=`, and any row past `MAX_MEASURED` that was never probed at all).
+    _gate59 = (('aac', 'mp4a.40.2', 'AAC', ' aac-he ', 'mp4a', 'mp4a.0.2')
+               , ('opus', 'mp2', '', '  ', None, 'hevc', 'vorbis', 'mp3',
+                  'ac-3'))
+    _gate_bad59 = [(c, mrel59.needs_adtstoasc(c))
+                   for c in _gate59[0] if mrel59.needs_adtstoasc(c) is not True]
+    _gate_bad59 += [(c, mrel59.needs_adtstoasc(c))
+                    for c in _gate59[1] if mrel59.needs_adtstoasc(c) is not False]
+    check("the bitstream filter is asked for by codec name, and the name is matched "
+          "as a prefix because the real field carries a profile: bilibili's DASH "
+          "sound rows arrive as `mp4a.40.2`, which is the same codec and the same "
+          "no-op, while `opus` and `mp2` measure ffmpeg exiting **234 having written "
+          "nothing** when the filter is forced on them. So「凡是有声音就加」is not a "
+          "safe reading of this function -- it is a table with two names in it, and "
+          "'aac-he ' and '  ' and None are here because the field comes from a "
+          "string the site chose, not from our own enum",
+          len(_gate59[0]) >= 4 and len(_gate59[1]) >= 6 and not _gate_bad59,
+          str(_gate_bad59))
+    _ADTS_SENTENCE59 = ("[mp4 @ 0x7f8b93815400] Malformed AAC bitstream detected: "
+                        "use the audio bitstream filter 'aac_adtstoasc' to fix it")
+    _tell59 = [(mrel59.tells_adts(_ADTS_SENTENCE59), True),
+               (mrel59.tells_adts('Malformed AAC bitstream'), True),
+               (mrel59.tells_adts('aac_adtstoasc'), True),
+               (mrel59.tells_adts('Server returned 403 Forbidden'), False),
+               (mrel59.tells_adts(''), False),
+               (mrel59.tells_adts(None), False)]
+    check("ffmpeg's own words are the second witness, and either half of the sentence "
+          "is enough to recognise it -- the two `ADTS_TELLS` strings are the only "
+          "copies of that text in the repo, and the two halves are checked alone so "
+          "that the list cannot quietly grow a third entry that nothing ever matches. "
+          "An empty stderr and a `None` answer False instead of crashing: `_drain` "
+          "returns '' when the process had no pipe at all, and a reader that raised "
+          "there would take the watcher's thread down before it could write the "
+          "failure sentence the card needs",
+          all(got == want for got, want in _tell59)
+          and mrel59.ADTS_TELLS == ('Malformed AAC bitstream', 'aac_adtstoasc')
+          and len(mrel59.ADTS_TELLS) == 2
+          and [w for _, w in _tell59].count(True) == 3,
+          str(_tell59))
+    _onargv59 = mrel59.remux_arguments(True)
+    _offargv59 = mrel59.remux_arguments(False)
+    check("the whole difference between the two argv is one pair of parameters, in "
+          "the one place that can hold it: `-c copy`, then `-bsf:a "
+          "aac_adtstoasc` when the codec says so, then the fragment-MP4 flags that "
+          "make the prefix playable. `_on[:2] + _on[4:] == _off` is the point -- "
+          "everything else is byte-for-byte the same command, because a second copy "
+          "of an argv to keep in sync is the failure mode this function exists to "
+          "prevent (`_spawn_remux` calls it once and nothing else builds remux "
+          "arguments)",
+          _onargv59[2:4] == ['-bsf:a', 'aac_adtstoasc']
+          and _onargv59[:2] + _onargv59[4:] == _offargv59
+          and '-bsf:a' not in _offargv59
+          and _offargv59[:2] == ['-c', 'copy']
+          and _offargv59[-2:] == ['-f', 'mp4'],
+          str((_onargv59, _offargv59)))
+
+    def _retrycase59(name, code, stderr, latched=False):
+        """One verdict from `_retry_adtstoasc`, with the junk file still on disk.
+
+        Every path here is a *refusal*, so no process is ever spawned: the accept
+        branch is driven below through a fake ffmpeg instead, where the re-spawn is
+        the thing being measured.
+        """
+        relay = _relay59(relay_id='retry', url='http://h/x.m3u8', mode='remux',
+                         state='running', audio_codec='')
+        relay.adtstoasc = latched
+        relay.path = os.path.join(_tmp59, name + '.mp4')
+        with open(relay.path, 'wb') as junk:
+            junk.write(b'J' * 23417)
+        verdict = mrel59._retry_adtstoasc(relay, code, stderr)
+        return (relay, verdict, os.path.exists(relay.path))
+
+    _retry59 = [_retrycase59(*case) for case in (
+        ('adts-zero', 0, _ADTS_SENTENCE59),
+        ('adts-latched', 255, _ADTS_SENTENCE59, True),
+        ('adts-other', 255, 'Server returned 404 Forbidden'))]
+    check("the retry says no three separate ways, and each no keeps the job exactly "
+          "as the watcher found it: exit 0 is not this problem (the caller's own "
+          "`complete` branch reads the file), a filter already applied is not a "
+          "second chance (that is the latch, and without it a TS that still will not "
+          "mux would be re-spawned forever), and an error that does not name the "
+          "bitstream is somebody else's failure. All three leave ffmpeg's 23 KB of "
+          "junk in place and the relay still `running` with no sentence -- the "
+          "caller writes its own verdict right after, quoting the last line it "
+          "actually saw, so a retry that tidied up first would be deleting the "
+          "evidence from under that message",
+          [v for _, v, _ in _retry59] == [False, False, False]
+          and [relay.adtstoasc for relay, _, _ in _retry59] == [False, True, False]
+          and [kept for _, _, kept in _retry59] == [True, True, True]
+          and all(relay.state == 'running' and relay.error == ''
+                  for relay, _, _ in _retry59),
+          str([(r.adtstoasc, v, k) for r, v, k in _retry59]))
+
+    _adtsdir59 = os.path.join(_tmp59, 'adtsbin')
+    _adtspf59 = _write_fake(_adtsdir59, 'ffmpeg', r"""#!/bin/sh
+# The remuxer that dies the way a real one does on an ADTS track: first try
+# without `-bsf:a` writes junk and exits 255 with ffmpeg's own sentence on stderr;
+# only the re-spawn that carries the filter produces a playable file.
+#
+# Both argv are APPENDED, records separated by 0x16, so the two attempts can be
+# asked apart. The fake remuxer above truncates because there is one run; this one
+# exists to prove a second run happened, and the first attempt's argv is half of
+# the claim. NOTE the two octal escapes are not interchangeable: printf reads
+# `\036` as **octal** 36 (= 0x1E), while the reader below splits on b'\x16'.
+# Writing the wrong one joins the two records and the case reads "one attempt"
+# for a retry that really ran.
+out=$(eval echo \${$#})
+printf '%s\037' "$@" >> "$out.argv"
+printf '\026' >> "$out.argv"
+case " $* " in
+  *" -bsf:a "*)
+    printf 'GOODPREFIXGOODPREFIX' >> "$out"
+    exit 0
+    ;;
+esac
+printf 'JUNKJUNKJUNKJUNKJUNK' >> "$out"
+echo '[mp4 @ 0x7f8b93815400] Malformed AAC bitstream detected: use the audio ' >&2
+echo "bitstream filter 'aac_adtstoasc' to fix it" >&2
+exit 255
+""")
+
+    def _adts_args59(path):
+        """Every argv the fake above recorded, oldest first."""
+        with open(path, newline='') as handle:
+            blob = handle.read()
+        return [rec.split('\x1f')[:-1] for rec in blob.split('\x16') if rec]
+
+    _adtsrelay59 = _relay59(relay_id=mrel59.new_id(), url='http://h/live.ts',
+                            mode='remux', state='running', audio_codec='')
+    mrel59.store.add(_adtsrelay59)
+    try:
+        mrel59.start_remux(_adtsrelay59, ffmpeg=_adtspf59)
+        _adts_done59 = _wait_until(lambda: _adtsrelay59.state in ('complete',
+                                                                 'failed'), 20)
+        _adts_body59 = (_ask59('/relay/{}/media'.format(_adtsrelay59.relay_id))
+                        if _adtsrelay59.state == 'complete' else (0, {}, b''))
+        _adts_tries59 = _adts_args59(_adtsrelay59.path + '.argv')
+    finally:
+        mrel59.store.drop(_adtsrelay59.relay_id)
+    check("and the retry really runs: one row with no codec name at all goes out "
+          "without the filter, ffmpeg answers with the ADTS sentence and 255, and the "
+          "watcher starts the *same job again* with `-bsf:a aac_adtstoasc` -- two "
+          "recorded argv, the first without the filter and the second with it, which "
+          "is why the fake appends rather than truncates. The relay ends `complete`, "
+          "the latch is up so this session will not loop, and the bytes a viewer "
+          "pulls off the socket are the 20 good ones: the 15 junk bytes were "
+          "unlinked before the second spawn, so an answer that starts with "
+          "JUNKJUNK is not reachable here. This is the whole 23,417-byte failure the "
+          "user saw on Windows-shaped streams, driven end to end",
+          _adts_done59 and _adtsrelay59.state == 'complete'
+          and _adtsrelay59.adtstoasc is True and _adtsrelay59.error == ''
+          and _adtsrelay59.ranges is True and _adtsrelay59.length == 20
+          and len(_adts_tries59) == 2 and '-bsf:a' not in _adts_tries59[0]
+          and _adts_tries59[1][_adts_tries59[1].index('-bsf:a') + 1]
+          == 'aac_adtstoasc'
+          and _adts_body59[0] == 200 and _adts_body59[2] == b'GOODPREFIXGOODPREFIX',
+          str((_adtsrelay59.state, _adtsrelay59.adtstoasc, _adtsrelay59.error,
+               _adts_body59[0], _adts_body59[2][:24], len(_adts_tries59))))
+
+    # -- the wait before the first byte -------------------------------------
+    _rh_path59 = os.path.join(_tmp59, 'rh-absent.mp4')
+    if os.path.exists(_rh_path59):
+        os.remove(_rh_path59)
+    _rh_absent59 = _relay59(relay_id='rh', url='http://h/x.m3u8', mode='remux',
+                            state='running', path=_rh_path59)
+    _t059 = time.time()
+    _rh_no59 = mrel59.remux_has_bytes(_rh_absent59, timeout=0.3, poll=0.05)
+    _rh_wait59 = time.time() - _t059
+    _rh_empty59 = _relay59(relay_id='rh2', url='http://h/x.m3u8', mode='remux',
+                           state='running')
+    _rh_empty59.path = os.path.join(_tmp59, 'rh-empty.mp4')
+    open(_rh_empty59.path, 'wb').close()
+    _rh_seed59 = _relay59(relay_id='rh3', url='http://h/x.m3u8', mode='remux',
+                          state='running')
+    _rh_seed59.path = _temp59('rh-on.mp4')
+    check("three states of the same temp file, read by the function that answers the "
+          "player: no file at all and a file that exists but is empty both say "
+          "*nothing yet* after spending the whole short timeout, while one byte on "
+          "disk says go immediately. The empty file is the one that used to be the "
+          "bug -- `os.path.exists` is True for it, so a check written on existence "
+          "handed the viewer a `200` with a `Content-Length` nobody could honour and "
+          "mpv read that as「Failed to recognize file format」. The two negative "
+          "answers are *timed* here, not grabbed: each spent at least 0.25 of the "
+          "0.3 s it was given, which is the loop waiting on a file instead of "
+          "deciding from `os.path.exists`",
+          _rh_no59 is False and _rh_wait59 >= 0.25
+          and mrel59.remux_has_bytes(_rh_empty59, timeout=0.3, poll=0.05) is False
+          and mrel59.remux_has_bytes(_rh_seed59, timeout=5.0, poll=0.05) is True,
+          str((_rh_no59, _rh_wait59)))
+
+    _rh_failed59 = _relay59(relay_id='rh4', url='http://h/x.m3u8', mode='remux',
+                            state='failed', path=_rh_path59)
+    _t059 = time.time()
+    _rh_quick59 = mrel59.remux_has_bytes(_rh_failed59)
+    _rh_quick_time59 = time.time() - _t059
+
+    def _rh_grew59():
+        time.sleep(0.15)
+        with open(_rh_path59, 'wb') as first:
+            first.write(b'\x00\x00\x00\x18ftypiso5')
+    _rh_thread59 = threading.Thread(target=_rh_grew59, daemon=True)
+    _rh_thread59.start()
+    _rh_became59 = mrel59.remux_has_bytes(_rh_absent59, timeout=1.5, poll=0.05)
+    _rh_thread59.join()
+    check("a relay the watcher already gave up on answers in a blink instead of "
+          "spending the whole 20 s on a file that will never be written -- the state "
+          "question is the first statement inside the loop, before the size question, "
+          "and the measured answer here is under two seconds against a "
+          "`GROW_WAIT_SECONDS` of twenty. The same loop is also what makes a slow "
+          "ffmpeg *not* a failure: a file that appears mid-wait turns the answer to "
+          "True without the caller having to ask twice",
+          _rh_quick59 is False and _rh_quick_time59 < 2.0 and _rh_became59 is True,
+          str((_rh_quick59, _rh_quick_time59, _rh_became59)))
+
+    # -- the same three answers over a real socket ---------------------------
+    _svr59 = []
+    _rh_41059 = _relay59(relay_id=mrel59.new_id(), url='http://h/x.m3u8',
+                         mode='remux', state='running', path='')
+    _rh_50359 = _relay59(relay_id=mrel59.new_id(), url='http://h/x.m3u8',
+                         mode='remux', state='running', ranges=False,
+                         length=None, content_type='video/mp4')
+    _rh_50359.path = os.path.join(_tmp59, 'svr-empty.mp4')
+    open(_rh_50359.path, 'wb').close()
+    _rh_50259 = _relay59(relay_id=mrel59.new_id(), url='http://h/x.m3u8',
+                         mode='remux', state='running', ranges=False,
+                         length=None, content_type='video/mp4')
+    _rh_50259.path = os.path.join(_tmp59, 'svr-never.mp4')
+    _rh_held59 = _relay59(relay_id=mrel59.new_id(), url='http://h/x.m3u8',
+                          mode='remux', state='running', ranges=False,
+                          length=None, content_type='video/mp4')
+    _rh_held59.path = os.path.join(_tmp59, 'svr-held.mp4')
+    open(_rh_held59.path, 'wb').close()
+    for _rh_one59 in (_rh_41059, _rh_50359, _rh_50259, _rh_held59):
+        mrel59.store.add(_rh_one59)
+        _svr59.append(_rh_one59.relay_id)
+
+    def _rh_fail59():
+        # The watcher's answer, arriving *after* the viewer knocked: the request
+        # has to enter `_respond` while the relay still reads `running`, or the
+        # first branch would hand back its own 502 and this case would be proving
+        # nothing about the wait.
+        time.sleep(0.3)
+        with _rh_50259.lock:
+            _rh_50259.state = 'failed'
+            _rh_50259.ranges = False
+            _rh_50259.length = None
+    _flip59 = threading.Thread(target=_rh_fail59, daemon=True)
+    _flip59.start()
+    _t059 = time.time()
+    _rh_502_hit59 = _ask59('/relay/{}/media'.format(_rh_50259.relay_id))
+    _rh_502_time59 = time.time() - _t059
+    _flip59.join()
+
+    def _rh_fill59():
+        time.sleep(0.3)
+        with open(_rh_held59.path, 'wb') as body:
+            body.write(b'\x00\x00\x00\x18ftypiso5' + b'serve me')
+        with _rh_held59.lock:
+            # `complete` only, and deliberately no length and no ranges: the
+            # remux has not told us its real size until the watcher publishes one,
+            # so the answer here is a lengthless 200 that ends at EOF.
+            _rh_held59.state = 'complete'
+    _serve59 = threading.Thread(target=_rh_fill59, daemon=True)
+    _serve59.start()
+    _t059 = time.time()
+    _rh_200_hit59 = _ask59('/relay/{}/media'.format(_rh_held59.relay_id))
+    _rh_200_time59 = time.time() - _t059
+    _serve59.join()
+
+    _rh_old59 = mrel59.remux_has_bytes
+    mrel59.remux_has_bytes = lambda relay, *a, **kw: False
+    try:
+        _rh_503_hit59 = _ask59('/relay/{}/media'.format(_rh_50359.relay_id))
+    finally:
+        mrel59.remux_has_bytes = _rh_old59
+    _rh_410_hit59 = _ask59('/relay/{}/media'.format(_rh_41059.relay_id))
+    for _rh_id59 in _svr59:
+        mrel59.store.drop(_rh_id59)
+    check("and the three ways a remux is not ready sound different to the player, "
+          "because each one tells it to do a different thing: no output path at all "
+          "is a 410 (this relay will never have a file -- and without that guard the "
+          "wait below would burn twenty seconds first), nothing written yet is a 503 "
+          "(try again; the transmux is running), and a failure the watcher already "
+          "saw is a 502 -- reached here at 0.3 s, not 20, because the short-circuit "
+          "above is what the socket path actually uses. None of the three is the "
+          "answer that used to come back: a `200` with no `Content-Range`, no length "
+          "and no bytes, which every player reads as a broken file. The fourth row is "
+          "the honest one -- a viewer that knocks at 0.1 s is *held* until the encoder "
+          "writes, then gets 200 and the real 18 bytes",
+          _rh_410_hit59[0] == 410 and _rh_503_hit59[0] == 503
+          and _rh_502_hit59[0] == 502 and _rh_502_time59 < 5.0
+          and _rh_200_hit59[0] == 200 and _rh_200_time59 >= 0.2
+          and _rh_200_hit59[2] == b'\x00\x00\x00\x18ftypiso5serve me'
+          and 'content-length' not in _rh_503_hit59[1]
+          and all(hit[2] == b'not here' for hit in (_rh_410_hit59, _rh_503_hit59,
+                                                    _rh_502_hit59)),
+          str((_rh_410_hit59[0], _rh_503_hit59[0], _rh_502_hit59[0],
+               round(_rh_502_time59, 2), _rh_200_hit59[0],
+               round(_rh_200_time59, 2), _rh_200_hit59[2],
+               _rh_503_hit59[1].get('content-length'))))
+
     _noff59 = _relay59(relay_id='no_ffmpeg', url='http://h/x.m3u8',
                        mode='remux')
     _old59 = _patch59(find_command=lambda name, **kw: None)
@@ -25845,13 +26166,30 @@ exit 0
                                       _remux59.error, _remux59.length,
                                       _remux_body59[2][:8]))
     check("the remux argv is a `-c copy` container job and not a re-encode, with "
-          "the protocol whitelist an HLS playlist cannot open without and "
-          "`+faststart` so the index lands where a seek can find it. Re-encoding "
-          "here would be a second renderer nobody asked for; the point is one "
-          "file a device can walk with byte offsets",
+          "the protocol whitelist an HLS playlist cannot open without, and with "
+          "the two things that make the growing file playable *while it grows*: "
+          "`+frag_keyframe+empty_moov+default_base_moof` puts the track headers at "
+          "byte 0 and appends self-describing fragments forever, and "
+          "`-flush_packets 1` is what actually gets those bytes past ffmpeg's "
+          "~256 KiB write buffer. Measured on a 600 kbit fixture (2026-10-05): the "
+          "frag flags alone left the growing file at **28 bytes for three seconds** "
+          "-- which reads exactly like the container not working -- while with "
+          "`-flush_packets 1` a player could open it at 0.25 s. `+faststart` is "
+          "gone on purpose: it relocates `moov` *on exit*, so the first decodable "
+          "moment of that shape was the moment ffmpeg stopped (the §4.14 card used "
+          "to promise 「写完才播得起来」 for that reason). Re-encoding here would be "
+          "a second renderer nobody asked for; the point is one file a device can "
+          "walk with byte offsets. And `-bsf:a` is *absent* on this relay: its "
+          "`audio_codec` was never filled in, so the reframing filter is a codec "
+          "decision, not something the write side does unconditionally (the "
+          "opus/mp2 shape exits 234 when it is)",
           '-c' in _argv59 and _argv59[_argv59.index('-c') + 1] == 'copy'
           and '-f' in _argv59 and _argv59[_argv59.index('-f') + 1] == 'mp4'
-          and '+faststart' in ' '.join(_argv59)
+          and '+frag_keyframe+empty_moov+default_base_moof' in _argv59
+          and '-flush_packets' in _argv59
+          and _argv59[_argv59.index('-flush_packets') + 1] == '1'
+          and '+faststart' not in ' '.join(_argv59)
+          and '-bsf:a' not in _argv59
           and '-protocol_whitelist' in _argv59
           and 'file,http,https,tcp,tls,crypto,httpproxy,data' in _argv59
           and '-y' in _argv59 and '-loglevel' in _argv59
@@ -25944,6 +26282,86 @@ exit 0
           and _margv59[-1] == _merged59.path,
           ' | '.join(_margv59))
     mrel59.store.drop(_merged59.relay_id)
+
+    # -- the sound's codec name crosses from candidate to relay --------------
+    # `needs_adtstoasc` and `_retry_adtstoasc` both read `relay.audio_codec`, and
+    # the only thing in the product that *fills* it is `open_relay`. The ADTS block
+    # above has to build its relay by hand (that is how the first, unlatched try is
+    # forced), so it never passes through that hand-off -- which made it the one
+    # mutation this Part could not catch: delete the line and every check still
+    # passes while the filter goes permanently dead on every real site. These
+    # candidates therefore enter through `open_relay`, and the witness is the argv
+    # the fake recorded rather than the field we wrote the name into.
+    def _bsf_arg59(argv):
+        """The value `-bsf:a` was given, or '' when the command carries no such option."""
+        return argv[argv.index('-bsf:a') + 1] if '-bsf:a' in argv else ''
+
+    _bsf_cands59 = (
+        # The engine names the sound for every row the ladder has, measured or not.
+        ('engine', mr59.Candidate(url='http://h/video.mpd', origin='ytdlp',
+                                  audio_url='http://h/audio.mpd',
+                                  audio_codec='mp4a.40.2')),
+        # A row that came off the page's HTML has no engine word; the probe is the
+        # other half of the same `or`.
+        ('probe', mr59.Candidate(
+            url='http://h/index.m3u8', origin='page', audio_codec='',
+            probe=mr59.Probe(reach=mr59.REACH_OPENED, container='mpegts',
+                             video_codec='h264', audio_codec='aac'))),
+        # And the shape that must *not* get it: the filter on opus exits 234 having
+        # written nothing, so a relay that added it unconditionally would be
+        # trading one broken container for another.
+        ('opus', mr59.Candidate(url='http://h/video.mpd', origin='ytdlp',
+                                audio_url='http://h/audio.mpd',
+                                audio_codec='opus')),
+    )
+    _bsf_old59 = _patch59(find_command=lambda name, **kw:
+                          _fakeff59 if name == 'ffmpeg' else None)
+    try:
+        _bsf_relays59 = [mrel59.open_relay(_c59, title=_why59)
+                         for _why59, _c59 in _bsf_cands59]
+    finally:
+        _restore59(_bsf_old59)
+    _bsf_done59 = _wait_until(lambda: all(_r59.state in ('complete', 'failed')
+                                          for _r59 in _bsf_relays59), 20)
+    _bsf_argv59 = [_ffargv59(_r59.path + '.argv') for _r59 in _bsf_relays59]
+    _bsf_said59 = str([(_r59.audio_codec, _r59.adtstoasc, _r59.state,
+                        _bsf_arg59(_a59))
+                       for _r59, _a59 in zip(_bsf_relays59, _bsf_argv59)])
+    check("the name of the sound travels from the candidate into the relay that "
+          "serves it, and the reframing filter is decided on that journey: a paired "
+          "DASH row the engine called `mp4a.40.2` and a manifest row only the probe "
+          "could name both go out carrying `-bsf:a aac_adtstoasc`, both end "
+          "`complete`, and both are the same serving shape (`remux`) they were "
+          "before this filter existed. The engine's word wins over the probe's "
+          "because an address can be cast while it is still unmeasured, and the "
+          "viewer is already waiting for a first byte at that moment -- a filter "
+          "decided *after* an ffprobe run would be decided too late for the one "
+          "command that matters",
+          _bsf_done59 and _bsf_relays59[0].audio_codec == 'mp4a.40.2'
+          and _bsf_relays59[1].audio_codec == 'aac'
+          and [_r59.state for _r59 in _bsf_relays59[:2]] == ['complete',
+                                                             'complete']
+          and [_r59.mode for _r59 in _bsf_relays59] == ['remux'] * 3
+          and [_r59.adtstoasc for _r59 in _bsf_relays59[:2]] == [True, True]
+          and [_bsf_arg59(_a59) for _a59 in _bsf_argv59[:2]]
+              == ['aac_adtstoasc', 'aac_adtstoasc'],
+          _bsf_said59)
+    check("and the same journey says *no* for a sound that would rather die than be "
+          "reframed: `opus` reaches the relay as the name the engine gave, the "
+          "filter stays off, and the command that runs is the one that produced "
+          "bytes here (state `complete` -- an absent option in a dead job would "
+          "prove nothing). This is the whole reason the filter is a codec decision: "
+          "measured on the real tool, opus and mp2 each exit 234 having written "
+          "zero bytes when `aac_adtstoasc` is put on them, so an unconditional "
+          "filter would trade the ADTS failure for a silent one",
+          _bsf_done59 and _bsf_relays59[2].audio_codec == 'opus'
+          and _bsf_relays59[2].state == 'complete'
+          and _bsf_relays59[2].adtstoasc is False
+          and _bsf_argv59[2] and _bsf_arg59(_bsf_argv59[2]) == ''
+          and _bsf_relays59[2].length == 20,
+          _bsf_said59)
+    for _bsf_one59 in _bsf_relays59:
+        mrel59.store.drop(_bsf_one59.relay_id)
 
     # -- O/P: the two POSTs and one GET the page actually calls -------------
     _host59, _port59 = mrel59.ensure_server()
@@ -27432,23 +27850,30 @@ exit 0
               "of filling it -- `media_relay.open_relay()` stores merge as `remux`). "
               "The branch a viewer reads is the branch this candidate's own address "
               "selects: a `.mp4` is proxied and gets the Range condition, a `.m3u8` "
-              "is remuxed and a split DASH ladder is merged, and both get the "
-              "half sentence about waiting for the file to be written. That half "
-              "sentence is load-bearing -- both paths write a temp file "
-              "that only grows (§4.8: no length, no seek ahead of the write), and a "
-              "measured one (2026-10-04): a standard MP4 gets its `moov` when ffmpeg "
-              "*exits*, so a half-written relay file answers `moov atom not found` to "
-              "any player that opens it. So the card has to say 「写完才播得起来」 and "
-              "not merely that dragging is limited -- a promise of a playable-but-"
-              "undraggable stream on an HLS page would be the exact lie "
-              "this design was supposed to prevent",
+              "is remuxed and a split DASH ladder is merged, and both get the same "
+              "half sentence. That half sentence has carried two different promises "
+              "and the machine is what told us which one it is now. Measured "
+              "2026-10-04 against the shape this file was written for: a standard "
+              "MP4 gets its `moov` when ffmpeg *exits*, so a half-written relay file "
+              "answered `moov atom not found` to any player that opened it, and the "
+              "honest card said 「写完才播得起来」. Measured 2026-10-05 against the "
+              "shape `remux_arguments()` ships now (fragmented MP4 + "
+              "`-flush_packets 1`): a viewer reads recognizable tracks out of the "
+              "first 64 KiB while the file is still growing, so that promise became "
+              "false in the *other* direction -- what is actually left is that there "
+              "is no trustworthy length until ffmpeg exits 0, so dragging waits. The "
+              "card must say both halves --「能边写边播」and「写完之前没有可信长度」-- "
+              "because a card that only says the first is the exact lie this design "
+              "was supposed to prevent, and a card that only says the second is the "
+              "lie the previous shape told",
               _mode_tests59 == ['proxy']
               and mr59.plan(_prog59) == 'proxy' and mr59.plan(_seg59) == 'remux'
               and mr59.plan(_paired59) == 'merge'
               and _mode_line59 is not None
               and 'Range' in _mode_line59.group(1)
               and '转封装' in _mode_line59.group(2)
-              and '写完' in _mode_line59.group(2)
+              and '边写边播' in _mode_line59.group(2)
+              and '可信长度' in _mode_line59.group(2)
               and _mode_line59.group(1) != _mode_line59.group(2),
               str([_mode_tests59, _mode_line59 and _mode_line59.groups()]))
         check("no `v-html` in the card and none in the resolve JS. The row title is "
