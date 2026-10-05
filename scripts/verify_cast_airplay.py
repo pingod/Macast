@@ -100,6 +100,9 @@ class MockRenderer:
     def set_media_url(self, url, start="0"):
         self._rec("set_media_url", url, start)
 
+    def set_media_title(self, data):
+        self._rec("set_media_title", data)
+
     def set_media_pause(self):
         self._rec("set_media_pause")
 
@@ -14778,8 +14781,14 @@ try:
     check("an entry without a title falls back to its url, not to blank",
           _hist36[2].data == 'http://a/three.mp4', str(_hist36[2].text))
     _app36.on_history_click(_hist36[0])
-    check("clicking one casts it again, through the protocol that owns casting",
-          _app36.service.protocol.cast == [('http://a/one.mp4', '')],
+    check("clicking one casts it again, through the protocol that owns casting -- "
+          "and it casts it *named*. The history row already carries the title the "
+          "original cast brought, so re-casting with an empty title would let "
+          "`cast_uri` fall back to the filename: the same item, second time, "
+          "paints `one - mpv` in the window. That is the bug this round fixed, "
+          "caught here because this menu is one of the two places a cast can "
+          "start without a sender's title",
+          _app36.service.protocol.cast == [('http://a/one.mp4', u'第一部')],
           str(_app36.service.protocol.cast))
 
     _long36 = u'影片' * 40
@@ -17445,9 +17454,14 @@ check("网页地址投屏: the three relay shapes the help describes are the thr
       and '两条一起喂给 ffmpeg 合成一条流' in _help44
       and 'relay.audio_url' in _relay_src44,
       'plan() says %s' % sorted(_plans44))
-check("网页地址投屏: the hole the help admits is the sentence the card prints",
+check("网页地址投屏: the hole the help admits is the sentence the card prints, and "
+      "the one place that speaks it is the code that builds the empty-result "
+      "sentence -- a card that merely happens to contain the phrase today is a "
+      "card that loses it the day someone shortens the string",
       '需要 JavaScript 才能算出地址的站点' in _help44
-      and '需要 JavaScript 才能算出地址的站点' in _page44,
+      and '需要 JavaScript 才能算出地址的站点' in _page44
+      and '需要 JavaScript 才能算出地址的站点' in _resolve_src44
+      and 'JS_HOLE' in _resolve_src44,
       'an admitted limit has to be readable where the user hits it, not only '
       'in the dialog')
 _saved_find44 = _mr44.find_command
@@ -24074,6 +24088,40 @@ try:
           mr59.scrape_page(PAGE59, body='<script>player({file: '
                        '"https://cdn.example/config.mp4"})</script>')[0].url
           == 'https://cdn.example/config.mp4', '')
+    # -- the same half, on the page that broke it ---------------------------
+    # A PHP site that hands its player config through `json_encode` writes every
+    # slash as `\/` (JSON_UNESCAPED_SLASHES is opt-in). The literal scan refuses
+    # to cross a backslash, so the address stops being one address and becomes a
+    # *path* -- which then resolves against the page, and the card offers an
+    # address on the site's own host that no server has ever served. Measured on
+    # the reported page, 2026-10-05: two real m3u8s in `route1Data`, and what came
+    # back was `https://pomo.mom/index.m3u8`.
+    _ESC59 = (r'<script>var route1Data = "{\"name\":\"夏日回响\","'
+              r'\"file\":\"https:\/\/vip.example\/20260831\/39120_6bd22a86'
+              r'\/index.m3u8\",\"alt\":\"https:\/\/vip.example\/b.flv'
+              r'?sign=1\u0026ts=2\"}";</script>')
+    _esc_urls59 = [c.url for c in mr59.scrape_page(PAGE59, body=_ESC59)]
+    check("an address JSON-escaped inside a player config is read as the address "
+          "it spells, and the fabrication it used to produce is gone: `\\/` means "
+          "`/`, `\\u0026` means the query separator, and nothing resolves against "
+          "the page host. This is the difference between a card that offers the "
+          "two real streams and a card that offers one address its own server "
+          "returns 404 for",
+          _esc_urls59 == ['https://vip.example/20260831/39120_6bd22a86/index.m3u8',
+                          'https://vip.example/b.flv?sign=1&ts=2']
+          and 'http://vid.example/index.m3u8' not in _esc_urls59,
+          str(_esc_urls59))
+    check("the escape pass is one pass with JSON's own pairing, so an escaped "
+          "backslash cannot lend its backslash to the character after it (`\\\\/` "
+          "is `\\` then a plain `/`, not an escaped slash), and a codepoint at or "
+          "above 0x80 is left exactly as written -- it is somebody's title, not a "
+          "piece of an address, and rewriting it would make the scanned text "
+          "differ from the page where nothing needs it to",
+          mr59._json_unescape(r'a\\/b') == 'a\\/b'
+          and mr59._json_unescape(r'a\/b') == 'a/b'
+          and mr59._json_unescape(r'A\u0041B') == 'AAB'
+          and mr59._json_unescape(r'A\u4e2dB') == r'A\u4e2dB'
+          and mr59._json_unescape(_STATIC59) == _STATIC59, '')
     check("a page that builds its address in JavaScript gives this engine "
           "nothing, and that is the documented hole rather than a crash: an "
           "empty list is what the card's own sentence is written for",
@@ -24729,7 +24777,7 @@ try:
                                'seconds', 'step_seconds', 'scraped',
                                'from_ytdlp', 'measured', 'rejected', 'error',
                                'candidates', 'note', 'hidden_silent',
-                               'engine_note', 'needs_cookies'}
+                               'engine_note', 'needs_cookies', 'cookie_problem'}
           and _snapI59['step_label'] == mr59.STEP_LABELS['queued']
           and _snapI59['url'] == 'http://vid.example/watch/7', str(_snapI59))
     check("every step has a Chinese label and no label belongs to a step that "
@@ -24793,20 +24841,85 @@ try:
             _restore59(_patchedI59)
     finally:
         _restore59(_oldI59)
-    check("an empty result says *which* empty result it is, and the machine's "
-          "yt-dlp is the difference between the two sentences: 「页面里没有读到 "
-          "视频地址」 alone tells a user to look for another page, while the "
-          "machine that has no yt-dlp can only ever read what the HTML spells "
-          "out -- and saying so is the only way they learn to install it. Both "
-          "answers come with an empty candidate list, never with a stale one",
-          _emptyI59.error == '页面里没有读到视频地址'
-          and 'yt-dlp' not in _emptyI59.error
+    _holeI59 = '页面里没有读到视频地址（yt-dlp 这次也没有交出一个地址；' \
+               + mr59.JS_HOLE + '）'
+    check("an empty result says *which* empty result it is, in whichever of the "
+          "voices actually spoke: 「页面里没有读到视频地址」 alone tells a user to "
+          "look for another page, a machine with no yt-dlp can only ever read "
+          "what the HTML spells out (so it must not claim the other reason), and "
+          "a machine that *has* the engine and still got nothing is the "
+          "documented JavaScript hole -- so that one has to say so. The hole "
+          "sentence is read off `JS_HOLE` rather than retyped here: a check that "
+          "copies the prose is a check that agrees with any paraphrase of it. "
+          "All three come with an empty candidate list, never a stale one",
+          _emptyI59.error == _holeI59
           and _noYtdlpI59.error == ('页面里没有读到视频地址'
                                     '（这台机器没有装 yt-dlp，'
                                     '只能抓 HTML 里写明的地址）')
+          and mr59.JS_HOLE not in _noYtdlpI59.error
           and _emptyI59.candidates == [] and _noYtdlpI59.candidates == []
           and _emptyI59.done and _noYtdlpI59.done,
           repr((_emptyI59.error, _noYtdlpI59.error)))
+
+    def _voiced59(note, binary='/usr/bin/yt-dlp'):
+        """The job's own empty-result sentence for one engine answer.
+
+        `sink` is how the engine talks back (`ytdlp_candidates` hands its first
+        stderr line to the job), so this drives the real path rather than
+        assigning `engine_note` by hand -- the distinction the four voices turn
+        on is made *while* the note is being collected.
+        """
+        old = _patch59(
+            scrape_page=lambda url, body=None, opener=None: [],
+            ytdlp_candidates=lambda url, binary=None, cookies=None, sink=None:
+                (sink.append(note) if sink is not None and note else None, [])[1],
+            find_command=lambda name, **kw: binary)
+        try:
+            return mr59.resolve_now('http://vid.example/watch/7')
+        finally:
+            _restore59(old)
+
+    _say59 = _voiced59('ERROR: Unsupported URL: http://vid.example/watch/7')
+    _cook59 = _voiced59('ERROR: [bilibili] cookies to access this webpage')
+    _note59 = _voiced59('ERROR: HTTP Error 500: Internal Server Error')
+    check("an engine that says 「this is not a site I have a reader for」 is "
+          "reporting *our* hole, not the page's emptiness -- so the two sentences "
+          "it belongs in both appear, the engine's own words first (it is the "
+          "witness) and the hole second (it is the action). A note that is any "
+          "other refusal keeps only the engine's words: labelling a 500 as a "
+          "JavaScript limitation would send the user hunting for a browser "
+          "argument the page never needed",
+          _say59.error == ('页面里没有读到视频地址（yt-dlp 说：ERROR: Unsupported URL: '
+                          'http://vid.example/watch/7；' + mr59.JS_HOLE + '）')
+          and _note59.error == ('页面里没有读到视频地址（yt-dlp 说：ERROR: HTTP '
+                                'Error 500: Internal Server Error）')
+          and mr59.JS_HOLE not in _note59.error,
+          repr((_say59.error, _note59.error)))
+    check("a note that is about *cookies* is about the cookie panel, not the "
+          "JavaScript hole, and it never borrows that sentence: the panel below "
+          "the card is the action here, and a second, different explanation "
+          "printed next to it is how a user ends up doing the wrong one",
+          _cook59.error == ('页面里没有读到视频地址（yt-dlp 说：ERROR: [bilibili] '
+                            'cookies to access this webpage）')
+          and mr59.JS_HOLE not in _cook59.error
+          and _cook59.status()['needs_cookies'] is True,
+          repr(_cook59.error))
+    check("`engine_says_unsupported` answers from its own word table and not "
+          "from the general 'is there an ERROR line' shape: `unable to extract` "
+          "is deliberately *absent*, because that phrase means an extractor the "
+          "engine does have ran and answered -- re-labelling a real answer about "
+          "this page as our limitation is the one way this classifier could send "
+          "someone to the wrong site",
+          all(mr59.engine_says_unsupported(w) for w in (
+              'ERROR: Unsupported URL: https://x/y',
+              'no supported extractors', 'Requested URL is not supported'))
+          and not mr59.engine_says_unsupported('ERROR: [x] Unable to extract '
+                                              'video url: could not find any')
+          and not mr59.engine_says_unsupported('')
+          and not mr59.engine_says_unsupported(None),
+          repr([(w, mr59.engine_says_unsupported(w)) for w in (
+              'unsupported url', 'no supported', 'not supported',
+              'unable to extract video url')]))
 
     _oldI59 = _patch59(
         scrape_page=lambda url, body=None, opener=None:
@@ -26954,9 +27067,12 @@ exit 0
               "`needs_cookies` is our guess at somebody else's wording, which is "
               "why it lives next to the word list it reads and not in the page. A "
               "panel offering to paste cookies for a site yt-dlp does not know is "
-              "a button that does nothing",
+              "a button that does nothing -- and that same site is the hole, so "
+              "the sentence has to say the hole too. The two clauses are decided "
+              "by two different tables and neither borrows the other's answer",
               _other_job59.status()['needs_cookies'] is False
-              and _other_job59.error.endswith('（yt-dlp 说：{}）'.format(_other59)),
+              and _other_job59.error.endswith('（yt-dlp 说：{}；{}）'.format(
+                  _other59, mr59.JS_HOLE)),
               str([_other_job59.error, _other_job59.status()['needs_cookies']]))
         # `find_command` is stubbed to answer「没有」 rather than read off whichever
         # binary this machine happens to have (§4.2's 「两种 runner 上说同一句话」).
@@ -26977,8 +27093,9 @@ exit 0
                      '只能抓 HTML 里写明的地址）'
               and _noytdlp_job59.status()['needs_cookies'] is False,
               str(_noytdlp_job59.error))
-        check("`engine_note` takes the first line with anything on it and nothing "
-              "else: `--quiet` silences progress, not `ERROR:`, and a real stderr "
+        check("`engine_note` reads the engine's `ERROR:` marker line, and only falls "
+              "back to the first line with anything on it when the engine never wrote "
+              "one: `--quiet` silences progress, not `ERROR:`, and a real stderr "
               "carries a traceback underneath it. The truncation and the two "
               "fallbacks are each a decision, so each gets its own answer",
               mr59.engine_note(types.SimpleNamespace(
@@ -26994,6 +27111,61 @@ exit 0
                   stderr='E: ' + 'x' * 400, returncode=1))) == 200,
               str(mr59.engine_note(types.SimpleNamespace(stderr='',
                                                          returncode=2))))
+        # A jar with one good line and one junk line passes the paste validator (it
+        # counts *cookies*, not lines), so it reaches argv as `--cookies`, and the
+        # engine's first word about it is this warning -- measured on this machine
+        # with the project's exact argv:
+        #
+        #     WARNING: skipping cookie file entry due to invalid length 1: ...
+        #
+        # `--no-warnings` does not silence it, because it is not a logger call: it
+        # goes out through `write_string` (`yt_dlp/cookies.py:1386`), which bypasses
+        # the whole logging machinery. So the note must skip past it, or our own
+        # cookie file's grammar becomes the site's demand.
+        _jarwarn59 = ("WARNING: skipping cookie file entry due to invalid length 1: "
+                      "'not a cookie jar at all\\n'\n"
+                      "ERROR: [generic] x: Unable to download webpage: "
+                      "HTTPConnection(host='127.0.0.1', port=9): Failed to establish "
+                      "a new connection: [Errno 61] Connection refused (caused by "
+                      'TransportError("HTTPConnection(host=\'127.0.0.1\', port=9): '
+                      'Failed to establish a new connection: [Errno 61] Connection '
+                      "refused\"))")
+        _jarhead59 = _jarwarn59.splitlines()[0]
+        check("the warning that names our jar, not the site: it contains the word "
+              "`cookie`, so as a note it would be read as 「this page wants a "
+              "session」 and sent the user to the cookie panel they had already "
+              "filled in. This is the same wrong answer `COOKIE_PROBLEMS` was built "
+              "to kill, arriving by a different door -- and the two halves of that "
+              "sentence are both pinned, because a check that only asks the good half "
+              "cannot tell a fixed reader from a classifier that never fires",
+              mr59.needs_cookies(_jarhead59) is True
+              and mr59.cookie_source_problem(_jarhead59) == ''
+              and mr59.engine_note(types.SimpleNamespace(stderr=_jarwarn59,
+                                                        returncode=1))
+                  == _jarwarn59.splitlines()[1][:200]
+              and mr59.needs_cookies(mr59.engine_note(
+                  types.SimpleNamespace(stderr=_jarwarn59, returncode=1))) is False,
+              str(mr59.engine_note(types.SimpleNamespace(stderr=_jarwarn59,
+                                                        returncode=1))))
+        check("and a warning in front must not mask a real answer either: the same "
+              "shape with the .68 vivaldi refusal underneath it still resolves to the "
+              "`not_found` family, which is what gates `needs_cookies` in `status()` "
+              "(`needs_cookies(note) and not cookie_source_problem(note)`) -- so the "
+              "card gets its 「这句点的是本机这一侧」 sentence instead of 「这通常是站点"
+              "要会话 cookie」. And when no line carries a marker, the first line still "
+              "speaks: this feature's whole premise is that the engine's own words are "
+              "the answer, so a reader that only knows how to find `ERROR:` would "
+              "report a bare exit code for an extractor that wrote prose",
+              mr59.cookie_source_problem(
+                  mr59.engine_note(types.SimpleNamespace(
+                      stderr=_jarhead59 + '\nERROR: could not find vivaldi cookies '
+                                          'database in "C:\\Users\\Administrator'
+                                          '\\AppData\\Local\\Vivaldi\\User '
+                                          'Data"', returncode=1))) == 'not_found'
+              and mr59.engine_note(types.SimpleNamespace(
+                  stderr=_jarhead59 + '\nWARNING: nothing here is a marker\n',
+                  returncode=1)) == _jarhead59,
+              str(mr59.cookie_source_problem(_jarhead59)))
         check("the cookie-word list is the entire guess, and it is a tuple rather "
               "than a regex so an addition is auditable: every extractor phrases it "
               "differently -- yt-dlp's bilibili module writes「cookies to access "
@@ -27011,6 +27183,105 @@ exit 0
               and mr59.needs_cookies(None) is False,
               str([mr59.needs_cookies('请 log in 后重试'),
                    mr59.needs_cookies('ERROR: Unsupported URL')]))
+
+        # Every sentence below is copied out of the installed `yt_dlp/cookies.py`
+        # (line numbers in the comments) or off one real card -- never paraphrased
+        # (§4.2's「假命令行工具的输出必须是真工具在这台机器上的逐字输出」). Feeding
+        # the bytes is also the only option for two of them: this Mac has both a
+        # Safari and a Vivaldi cookie database, so their not-found sentences cannot
+        # be produced here at all.
+        check("which of *our* cookie sources the engine blames, family by family: "
+              "the store was not found where we pointed it (cookies.py:318 quotes "
+              "the root it searched, :146 does not, :584 names neither), the "
+              "browser holds its own database open (:363, Windows only), the key "
+              "that decrypts it was unreachable (:1099 DPAPI, :971 keyring, :919 "
+              "kwallet, :1020/:1029 Chrome's Local State), or the browser has no "
+              "profiles to name (:313). This table exists because `needs_cookies` "
+              "cannot do its job without it -- the word `cookie` sits just as "
+              "confidently in「could not find vivaldi cookies database」as in a "
+              "site's「cookies to access this webpage」, and the first of those is "
+              "ours to fix. A refusal is not a session request",
+              mr59.cookie_source_problem(
+                  r'ERROR: could not find vivaldi cookies database in '
+                  r'"C:\Users\Administrator\AppData\Local\Vivaldi\User Data"'
+              ) == 'not_found'
+              and mr59.cookie_source_problem(
+                  'ERROR: could not find firefox cookies database in '
+                  '/home/someone/.mozilla/firefox/profile.default'
+              ) == 'not_found'
+              and mr59.cookie_source_problem(
+                  'ERROR: could not find safari cookies database') == 'not_found'
+              and mr59.cookie_source_problem(
+                  'ERROR: custom safari cookies database not found') == 'not_found'
+              and mr59.cookie_source_problem(
+                  'ERROR: Could not copy Chrome cookie database. See  '
+                  'https://github.com/yt-dlp/yt-dlp/issues/7271  for more info'
+              ) == 'locked'
+              and mr59.cookie_source_problem(
+                  'ERROR: Failed to decrypt with DPAPI. See  '
+                  'https://github.com/yt-dlp/yt-dlp/issues/10927  for more info'
+              ) == 'decrypt'
+              and mr59.cookie_source_problem(
+                  'ERROR: failed to read from keyring') == 'decrypt'
+              and mr59.cookie_source_problem(
+                  'ERROR: kwallet-query command not found. KWallet and kwallet-query '
+                  'must be installed to read from KWallet. Please install one of them'
+              ) == 'decrypt'
+              and mr59.cookie_source_problem(
+                  'ERROR: could not find local state file') == 'decrypt'
+              and mr59.cookie_source_problem(
+                  'ERROR: no encrypted key in Local State') == 'decrypt'
+              and mr59.cookie_source_problem(
+                  'ERROR: vivaldi does not support profiles') == 'bad_profile'
+              and mr59.cookie_source_problem(_other59) == ''
+              and mr59.cookie_source_problem(_deny59) == ''
+              and mr59.cookie_source_problem('') == ''
+              and mr59.cookie_source_problem(None) == '',
+              str([mr59.cookie_source_problem(
+                       'ERROR: custom safari cookies database not found'),
+                   mr59.cookie_source_problem(_deny59)]))
+        check("and the row order is load-bearing, not cosmetic:「Could not copy "
+              "Chrome cookie database」contains a not-found fragment too, so a "
+              "locked store would be reported as a missing one if `not_found` were "
+              "checked first -- and the card would then tell the user to point at a "
+              "directory that is sitting right there, instead of closing the "
+              "browser. Four fragments nest that way inside `locked`'s own sentence",
+              'cookie database' in 'Could not copy Chrome cookie database'
+              and any('cookie database' in words
+                      for problem, words in mr59._COOKIE_SOURCE_TABLE
+                      if problem == 'not_found')
+              and mr59.cookie_source_problem(
+                  'ERROR: Could not copy Chrome cookie database. See  '
+                  'https://github.com/yt-dlp/yt-dlp/issues/7271  for more info'
+              ) == 'locked',
+              str(mr59.cookie_source_problem(
+                  'ERROR: Could not copy Chrome cookie database')))
+
+        _vivaldi_root59 = r'C:\Users\Administrator\AppData\Local\Vivaldi\User Data'
+        _vivaldi_spec59 = 'vivaldi:' + _vivaldi_root59
+        _vivaldi_note59 = (r'ERROR: could not find vivaldi cookies database in "'
+                           + _vivaldi_root59 + '"')
+        _oldR2v59 = _patch59(ytdlp_candidates=_refuser59(_vivaldi_note59))
+        try:
+            _vivaldi_job59 = mr59.ResolveJob('https://www.bilibili.com/video/BV1xx4y1/')
+            _vivaldi_job59.run()
+        finally:
+            _restore59(_oldR2v59)
+        _vivaldi_status59 = _vivaldi_job59.status()
+        check("that judgement survives all the way to the job the page polls, and "
+              "changes the sentence rather than hiding it: the card still quotes "
+              "yt-dlp verbatim (voice ②, our own path is not the engine's silence "
+              "about a site it does not know), but `needs_cookies` now answers "
+              "False so the「这通常是站点要会话 cookie」line never appears, and "
+              "`cookie_problem` names the family the four card sentences key off",
+              _vivaldi_status59['cookie_problem'] == 'not_found'
+              and _vivaldi_status59['needs_cookies'] is False
+              and _vivaldi_status59['engine_note'] == _vivaldi_note59
+              and _vivaldi_job59.error
+                  == '页面里没有读到视频地址（yt-dlp 说：{}）'.format(_vivaldi_note59)
+              and mr59.JS_HOLE not in _vivaldi_job59.error,
+              str([_vivaldi_status59['cookie_problem'],
+                   _vivaldi_status59['needs_cookies'], _vivaldi_job59.error]))
 
         _jar59 = ('# Netscape HTTP Cookie File\n'
                   '.example.com\tTRUE\t/\tFALSE\t0\tsess\tabc123\n'
@@ -27070,8 +27341,11 @@ exit 0
               "wrote accumulates the cookies the engine mints, while a browser "
               "profile is somebody else's store we only borrow. "
               "`--cookies-from-browser` is the one extra switch this feature was "
-              "granted, and the name is lowercased on the way in because the "
-              "whitelist it cleared is spelled lowercase",
+              "granted. Only the name half of the spec is case-folded, and it is "
+              "folded inside `cookie_browser_spec` where the lowercase whitelist is "
+              "checked; the profile half is handed over byte for byte, because on "
+              "Windows it is a path and `C:\\Users\\ADMINI~1` is a different "
+              "directory from one we rewrote",
               mr59.cookie_arguments(None) == []
               and mr59.cookie_arguments({}) == []
               and mr59.cookie_arguments({'file': '/tmp/j.txt'})
@@ -27081,9 +27355,57 @@ exit 0
               and mr59.cookie_arguments({'file': '   ', 'browser': 'Chrome'})
                   == ['--cookies-from-browser', 'chrome']
               and mr59.cookie_arguments({'browser': 'firefox'})
-                  == ['--cookies-from-browser', 'firefox'],
+                  == ['--cookies-from-browser', 'firefox']
+              and mr59.cookie_arguments({'browser': _vivaldi_spec59})
+                  == ['--cookies-from-browser', _vivaldi_spec59],
               str(mr59.cookie_arguments({'file': '/tmp/j.txt',
                                          'browser': 'chrome'})))
+
+        # The grammar is yt-dlp's own: `BROWSER[+KEYRING][:PROFILE][::CONTAINER]`
+        # (`yt_dlp/cookies.py`, `parse_browser_specification`). We accept a strict
+        # subset of it, so these rejects are each a sentence the panel has to be
+        # able to say -- and the accepts are what makes the「名字:资料目录」escape
+        # hatch real rather than decorative: the profile is the one thing a user can
+        # get wrong in a way we cannot check for them.
+        check("the spec grammar, accept side: a bare name, a name plus an absolute "
+              "directory (the whole point of the escape hatch -- Chrome-family "
+              "databases do live at odd roots), and a relative profile name, all "
+              "survive with the profile untouched. A trailing colon with nothing "
+              "after it is a typo, not an empty profile: it would be handed over as "
+              "`chrome:` and the engine would read a profile literally named \"\"",
+              mr59.cookie_browser_spec('chrome') == 'chrome'
+              and mr59.cookie_browser_spec(_vivaldi_spec59) == _vivaldi_spec59
+              and mr59.cookie_browser_spec('  Vivaldi:'
+                                           + _vivaldi_root59 + '  ')
+                  == 'vivaldi:' + _vivaldi_root59
+              and mr59.cookie_browser_spec('firefox:ProfileABC')
+                  == 'firefox:ProfileABC'
+              and mr59.cookie_browser_spec('safari:') == 'safari',
+              str([mr59.cookie_browser_spec('safari:'),
+                   mr59.cookie_browser_spec('chrome:Default')]))
+        check("and the reject side, which is every grammar we refuse to spell out: "
+              "the engine's `+KEYRING` and `::CONTAINER` (both would make the value "
+              "we store mean something other than「which browser, which folder」, "
+              "and a keyring is a second credential store this panel never asked to "
+              "reach), a profile that starts with `-` (it would land in argv as an "
+              "option), a CR or LF (the value is written into a settings JSON and "
+              "then into a command line -- either way a newline is a second "
+              "instruction), an unknown name, and nothing at all. Unknown names are "
+              "refused *here* and again on the way out, which is why the classifier "
+              "table has no `unknown browser:` row: no such spec ever reaches argv",
+              mr59.cookie_browser_spec('chrome+GNOMEKEYRING') == ''
+              and mr59.cookie_browser_spec('chrome::2') == ''
+              and mr59.cookie_browser_spec('chrome:-Flag') == ''
+              and mr59.cookie_browser_spec('chrome:Default::2') == ''
+              and mr59.cookie_browser_spec('chrome\n--config-locations=/tmp/evil') == ''
+              and mr59.cookie_browser_spec('chrome:\tvivaldi') == ''
+              and mr59.cookie_browser_spec('opera') == 'opera'
+              and mr59.cookie_browser_spec('safari2') == ''
+              and mr59.cookie_browser_spec('--cookies-from-browser=chrome') == ''
+              and mr59.cookie_browser_spec('') == ''
+              and mr59.cookie_browser_spec(None) == '',
+              str([mr59.cookie_browser_spec('chrome::2'),
+                   mr59.cookie_browser_spec('chrome:-Flag')]))
 
         _jar_path59 = _handler59._cookie_jar_path()
         _junk_post59 = _post59(_handler59, **{
@@ -27216,6 +27538,47 @@ exit 0
               and _dash_browser59['message'].startswith('不认识「--')
               and _handler59._cookie_state()['browser'] == 'chrome',
               str([_bad_browser59, _dash_browser59]))
+        # The four sentences the card now shows for a local cookie failure all end by
+        # telling the user to point at the right profile directory, and until this
+        # spelling existed the panel had no way to take one -- the browser control was
+        # a closed dropdown of nine names. So the same field now takes `名字:资料目录`,
+        # which is the engine's own `BROWSER[:PROFILE]` grammar.
+        _profile_post59 = _post59(_handler59,
+                                  **{'resolve-cookie-browser': _vivaldi_spec59})
+        _profile_state59 = _handler59._cookie_state()
+        check("a browser *and* the directory it keeps its cookies in is accepted, and "
+              "both halves survive: the profile is a Windows path with a drive letter, "
+              "so a value that was lowercased or split on every colon as a whole would "
+              "either name a directory that does not exist or truncate the path. The "
+              "panel reports the whole spec back (not just the name -- the user needs "
+              "to see which profile is being read), and the ordering sentence still "
+              "names the file as the winner because the jar is still on disk",
+              _profile_post59['code'] == 0
+              and _profile_post59['message']
+                  == '已设为 {}，但本机存过 cookie 文件，'
+                     '解析仍以文件为准（清除文件后才会用浏览器）'.format(
+                         _vivaldi_spec59)
+              and _profile_state59['browser'] == _vivaldi_spec59
+              and utils.Setting.get(
+                  protocol.SettingProperty.Resolve_Cookie_Browser) == _vivaldi_spec59,
+              str([_profile_post59, _profile_state59['browser']]))
+        # The container syntax is real yt-dlp (`chrome:Default::2`), so a user who has
+        # read the engine's help gets this instead of a usage error off the parse.
+        _tail_post59 = _post59(_handler59,
+                               **{'resolve-cookie-browser': 'chrome:Default::2'})
+        check("the half we do not support is refused by name, after the name that was "
+              "fine: the `不认识「…」` sentence above would send this user looking for "
+              "a browser called `chrome:Default::2`, so the refusal has to say which "
+              "half failed and what the second half may be -- and it must not store "
+              "anything, because a rejected value that lands in settings is the next "
+              "read path's problem",
+              _tail_post59['code'] == 1
+              and _tail_post59['message']
+                  == '「chrome:Default::2」我们只认到浏览器名字为止：后面可以跟一段'
+                     '「:资料目录」（那个浏览器存放 cookie 的目录），'
+                     '但不能是 +钥匙串、::容器，也不能以 - 开头'
+              and _handler59._cookie_state()['browser'] == _vivaldi_spec59,
+              str(_tail_post59))
         # A hand-edited `macast_setting.json` is the whole threat model here, so it
         # is simulated by writing the key directly, past the POST that would refuse
         # it -- which is exactly why the read path re-checks the whitelist.
@@ -27226,7 +27589,7 @@ exit 0
         check("and the whitelist is re-checked on every read, not only on write: "
               "the settings file is the thing a user edits by hand, so the only "
               "thing standing between a string from disk and the parse command is "
-              "`_cookie_browser_name()`. The panel answers「no browser」, the dict "
+              "`_cookie_browser_spec()`. The panel answers「no browser」, the dict "
               "the handler builds carries no browser half, and the argv this "
               "paste would have produced contains no injected switch",
               _bypass_read59['browser'] == ''
@@ -27739,6 +28102,7 @@ exit 0
               and {'done', 'error', 'step_label', 'candidates', 'scraped',
                    'from_ytdlp', 'measured', 'rejected', 'seconds',
                    'hidden_silent', 'engine_note', 'needs_cookies',
+                   'cookie_problem',
                    'note'} <= _tpl_keys59,
               str(sorted(_tpl_keys59 - _status_keys59)))
         _cand_keys59 = set(_re59.findall(r'\bc\.([A-Za-z_][A-Za-z0-9_]*)', _card59))
@@ -28013,6 +28377,96 @@ exit 0
               and '电视永远拿不到源站' in _card59
               and '会过期' in _card59,
               _card59[:160])
+        _cp_hits59 = list(_re59.finditer(
+            r'<span (v-if|v-else-if)="resolve\.cookie_problem === \'([a-z_]+)\'">'
+            r'(.*?)</span>', _card59, _re59.S))
+        _cp_picks59 = {
+            'not_found': '名字:资料目录',
+            'locked': '完全退出',
+            'decrypt': '钥匙串',
+            'bad_profile': '不接受「:资料目录」这一半写法',
+        }
+        check("the card has exactly one sentence per family the classifier can answer, "
+              "and they are mutually exclusive and ordered: the "
+              "`resolve.cookie_problem === '<family>'` spans are a `v-if` followed by "
+              "`v-else-if` (so two of them can never print at once), their family names "
+              "are `media_resolve.COOKIE_PROBLEMS` as a set, and the「站点要会话 cookie」"
+              "span sits **after** all four. That order is the whole answer to the "
+              "report this round fixes -- the engine's own sentence said `cookie` because "
+              "*our* read of the chosen browser failed, and a card that offers「去给一条 "
+              "cookie」before it says the cookie it was given is unreadable sends the user "
+              "back to the panel they had already configured. A fifth row added to the "
+              "classifier without a sentence here turns red. The second half is §4.8's "
+              "「每一条失败文案必须给出下一步」: each sentence says 本机这一侧 and names "
+              "its own action (point at the profile directory, quit that browser "
+              "completely, unlock the keychain, drop the half after the colon), so four "
+              "families that print a diagnosis with nothing to do about it still fail",
+              len(_cp_hits59) == len(mr59.COOKIE_PROBLEMS) == 4
+              and set(m.group(2) for m in _cp_hits59) == set(mr59.COOKIE_PROBLEMS)
+              and [m.group(1) for m in _cp_hits59] == ['v-if'] + ['v-else-if'] * 3
+              and all('本机这一侧' in m.group(3) for m in _cp_hits59)
+              and all(_cp_picks59[m.group(2)] in m.group(3) for m in _cp_hits59)
+              and _card59.index('v-else-if="resolve.needs_cookies"')
+              > _cp_hits59[-1].end(),
+              str([[m.group(1), m.group(2)] for m in _cp_hits59]))
+        _none_hit59 = _re59.search(
+            r'<div v-else-if="resolve\.done" class="resolve-none">(.*?)</div>',
+            _card59, _re59.S)
+        _none_body59 = _none_hit59.group(1) if _none_hit59 else ''
+        _none_cp_hit59 = _re59.search(
+            r'<template v-if="resolve\.cookie_problem">(.*?)</template>',
+            _none_body59, _re59.S)
+        _none_cp59 = _none_cp_hit59.group(1) if _none_cp_hit59 else ''
+        check("the empty-result branch does not re-answer a question the sentence above "
+              "already answered: `resolve-none` splits on `resolve.cookie_problem`, and "
+              "the cookie-source half must not carry the JavaScript-hole explanation "
+              "(that one belongs to the other half, where it is true). Someone whose "
+              "browser keeps its profile somewhere other than the default location, and "
+              "who reads「地址要 JavaScript 才算得出来 —— 这一版解不了」, abandons a tool "
+              "that would have worked after one more field. The 「修好，再解析一次」 in "
+              "this half is the promise that the same paste will succeed once our side is "
+              "fixed -- and the `v-else` half keeps naming JavaScript and Chrome, which is "
+              "the boundary §4.14 still declares",
+              'JavaScript' not in _none_cp59
+              and '修好' in _none_cp59 and '再解析一次' in _none_cp59
+              and 'JavaScript' in _none_body59 and 'Chrome' in _none_body59,
+              _none_cp59[:160])
+        _sel59 = _re59.search(r'<el-select v-model="cookie_browser"[^>]*>', _card59)
+        check("the panel can type the fix the card asks for: the browser selector is "
+              "`filterable allow-create default-first-option`, and the hint under it says "
+              "the cell takes `名字:资料目录`, that the profile half is handed to the "
+              "engine **原样** (so it is that browser's own location, not a path Macast "
+              "guessed), and that `+钥匙串` and `::容器` are refused with a reason. "
+              "Without `allow-create` every one of the four sentences above instructs the "
+              "user to do the single thing this page cannot express -- Element UI's closed "
+              "dropdown is why this round's report existed; `getOption()` falling back to "
+              "`label: value` is what lets a spec read back from the backend still render "
+              "in the box",
+              _sel59 is not None
+              and all(word in _sel59.group(0)
+                      for word in ('filterable', 'allow-create',
+                                   'default-first-option'))
+              and '名字:资料目录' in _card59
+              and '原样交给解析命令' in _card59
+              and '+钥匙串' in _card59 and '::容器' in _card59,
+              str(_sel59 and _sel59.group(0)))
+        _help_mark59 = _page59.find('custom-class="macast-dialog help-dialog"')
+        _help_end59 = _page59.find('</el-dialog>', _help_mark59)
+        _help59 = (_page59[_help_mark59:_help_end59]
+                   if _help_mark59 >= 0 and _help_end59 > _help_mark59 else '')
+        check("帮助 and the card say the same four things (§4.13 -- a capability must be "
+              "asked of twice, once from the page and once from the thing that decides "
+              "it): every next-step phrase the card prints is in the help dialog too, and "
+              "so is the `名字:资料目录` path and the `+钥匙串` / `::容器` refusal. The "
+              "count is bound the same way: the help says 「后者是四种」and the classifier "
+              "has exactly four rows, so the fifth row that turns the card check red also "
+              "turns this one red instead of leaving a documented-as-four list behind",
+              all(phrase in _help59 and phrase in _card59
+                  for phrase in _cp_picks59.values())
+              and '+钥匙串' in _help59 and '::容器' in _help59
+              and '后者是四种' in _help59
+              and len(mr59.COOKIE_PROBLEMS) == 4,
+              str([p for p in _cp_picks59.values() if p not in _help59]))
     finally:
         _restore59(_oldO59)
         mrel59.store.drop = _real_drop59
@@ -29359,11 +29813,14 @@ try:
                         'macast_setting.json.corrupt-20261005-000000-2'],
           str(_frozen61))
     check("Part 61: and every refusal this run made kept its own copy too -- "
-          "the two real-clock ones above, three frozen ones, five files, no "
-          "overwrite anywhere (the earlier second inside one second is why the "
-          "loop exists at all)",
+          "the two real-clock ones above plus three frozen ones, five files, "
+          "all distinct, so no rename ever landed on a copy that already holds "
+          "somebody's settings. The two real-clock refusals may or may not "
+          "share a second depending on how fast this machine is, and that is "
+          "not this product's business -- the frozen trio above is what proves "
+          "the suffix loop",
           len(_all61) == 5 and len(set(_all61)) == 5
-          and sum(1 for n in _all61 if n.endswith("-1")) == 2,
+          and len(_frozen61) == 3,
           str(_all61))
 
     # The one shape where defaults really would overwrite: the move failed.
@@ -29482,6 +29939,825 @@ finally:
     _shutil.rmtree(_tmp61, ignore_errors=True)
 
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Part 62: whatever changes the player's address must name the player.
+#
+# Reported 2026-10-05 as 「标题不对哦~」: after casting a bilibili web address
+# (which §4.14 always relays through our own `/relay/<random id>/media`), the
+# mpv window read 「media - mpv」 instead of the video's title.  Measured on
+# mpv v0.41.0 (`mpv --list-options`), the default title template is
+#
+#     ${?media-title:${media-title}}${!media-title:No file} - mpv
+#
+# so the window shows `media-title`, and `media-title` is the file's own `title`
+# tag or, failing that, the *filename* -- which for a relay URL is the literal
+# "media".  Three things follow, and each is a separate question below:
+#
+#   1. `set_media_title` was writing mpv's `title` property, which only the OSC
+#      overlay reads (`--script-opts=...,osc-title=${title}`, see
+#      `build_mpv_params`).  The window kept reading `media-title`.  The seam is
+#      `force-media-title`; `--title` itself is the user's option and stays
+#      untouched.  Both naming properties survive a later `loadfile`, which
+#      `reload()` relies on and which is why a URL change with no name change
+#      keeps wearing the *previous* item's title.
+#   2. `reload()` re-arms through `set_media_title`, so there is one owner of
+#      "how the player is named" rather than two that can drift.
+#   3. Every call site that changes the address must name it (or be a wrapper,
+#      an alias, or a deliberate re-push of the *same* address).  That is now
+#      counted over the whole repo, not asserted about it.
+#
+# `set_media_title` reads:
+#     self.send_command(['set_property', 'force-media-title', data])
+# `_playlist_step` reads:
+#     "Both of mpv's naming properties survive a `loadfile`, so stepping the
+#      playlist without renaming the player leaves the *previous* item's title
+#      on the window."
+# and the AirPlay PLAY branch reads:
+#     "mpv keeps the name it was given across a `loadfile`, so a PLAY that only
+#      changes the address leaves the *previous* item's title on the window."
+# --------------------------------------------------------------------------
+print("\n=== Part 62: the player is named by whatever changes its address ===")
+
+import ast as _ast62  # noqa: E402
+import cherrypy as _cp62  # noqa: E402
+from macast import media_resolve as _mr62  # noqa: E402
+
+# Part 5 may have left a *stub* behind for this module (macast.py only needed the
+# symbol).  A stub answers every attribute with `object`, which would make all
+# of this pass while testing nothing, so drop it the way Part 14 does.
+for _n62 in ("macast_renderer.mpv", "macast_renderer"):
+    _st62 = sys.modules.get(_n62)
+    if _st62 is not None and getattr(_st62, "__file__", None) is None:
+        sys.modules.pop(_n62, None)
+import macast_renderer.mpv as _mpv62  # noqa: E402
+
+_tmp62 = _tempfile.mkdtemp(prefix="macast-part62-")
+_saved62 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+
+# `MPVRenderer.protocol` is a read-only property that does
+# `publish('get_protocol')` then `.pop()` -- the LAST subscriber wins.  So a fake
+# protocol has to be subscribed, and has to be the only one, for the reload
+# tests below.  The channels hold sets; both are saved and restored by value
+# without replacing the set objects, because `Bus` mutates them in place.
+_eng62 = _cp62.engine
+_saved62_ch = dict((ch, set(_eng62.listeners.get(ch, set())))
+                   for ch in ("get_protocol", "mpvipc_start"))
+
+_T62 = "第一集 · 正片"
+_RELAY62 = "http://192.168.1.5:58880/relay/Ab12Cd34Ef56Gh78/media"
+
+
+def _recorder62(target):
+    """Replace an instance's `send_command` with one that only records."""
+    seen = []
+
+    def _send(command):
+        seen.append(list(command))
+        return True
+
+    target.send_command = _send
+    return seen
+
+
+def _set62_names(keep_only):
+    return sorted(getattr(f, "__name__", "?")
+                  for f in _eng62.listeners.get(keep_only, set()))
+
+
+try:
+    utils.SETTING_DIR = _tmp62
+
+    # -- A. the naming seam itself -------------------------------------------
+    _m62 = _mpv62.MPVRenderer(path="mpv")
+    _cmds62 = _recorder62(_m62)
+    _m62.set_media_title(_T62)
+    check("Part 62: naming the player arms *both* properties -- `title` for the "
+          "OSC overlay and `force-media-title` for the window -- in that order, "
+          "with the same string, and nothing else. The report was 「media - mpv」 "
+          "because only the first of these two was ever sent",
+          _cmds62 == [['set_property', 'title', _T62],
+                      ['set_property', 'force-media-title', _T62]],
+          str(_cmds62))
+    check("Part 62: `self.title` -- the one place reload() re-arms from -- "
+          "follows the same value", _m62.title == _T62, str(_m62.title))
+    del _cmds62[:]
+    _m62.set_media_url(_RELAY62)
+    check("Part 62: changing the address names nothing. That is the caller's "
+          "job, which is why the invariant in group G is about call sites and "
+          "not about mpv.py",
+          not any(c[:2] == ['set_property', 'title']
+                  or c[:2] == ['set_property', 'force-media-title']
+                  for c in _cmds62)
+          and ['loadfile', _RELAY62, 'replace'] in _cmds62,
+          str(_cmds62))
+    check("Part 62: the symptom string, reproduced from the helper the call "
+          "sites fall back to -- a relay address is named "
+          "`media` by basename alone",
+          _mr62.title_for_uri(_RELAY62) == "media",
+          repr(_mr62.title_for_uri(_RELAY62)))
+    check("Part 62: and the rule is not 「always media」 -- an ordinary "
+          "address still names itself, including percent-encoded and raw CJK, "
+          "and an empty one says nothing",
+          _mr62.title_for_uri("https://example.com/%E7%AC%AC%E4%B8%80%E9%9B%86"
+                              ".mp4") == "第一集"
+          and _mr62.title_for_uri("https://example.com/第一集.mp4") == "第一集"
+          and _mr62.title_for_uri("") == "",
+          "%r %r %r" % (_mr62.title_for_uri(
+              "https://example.com/%E7%AC%AC%E4%B8%80%E9%9B%86.mp4"),
+              _mr62.title_for_uri("https://example.com/第一集.mp4"),
+              _mr62.title_for_uri("")))
+
+    # -- B. the user's own `--title` is not how we fix this -------------------
+    # One parse of the renderer, read by both B (what the command builder is
+    # allowed to touch) and C (who is allowed to name the player).
+    _mpv_src62 = os.path.join(REPO, "macast_renderer", "mpv.py")
+    with open(_mpv_src62, encoding="utf-8") as _fh62:
+        _mpv_tree62 = _ast62.parse(_fh62.read())
+    _funcs62 = dict((n.name, n) for n in _ast62.walk(_mpv_tree62)
+                    if isinstance(n, (_ast62.FunctionDef, _ast62.AsyncFunctionDef)))
+    # Verbs that would mean the builder touches the outside world. Deliberately
+    # *not* in here: `append` / `remove` / `update` -- those are how a pure
+    # function assembles a local list, and forbidding them would make this check
+    # red about the assertion instead of the code.
+    _spawns62 = {"Popen", "popen", "system", "fork", "spawn", "send_command",
+                 "start_mpv", "stop_mpv", "terminate", "kill", "publish",
+                 "subscribe", "connect", "mkdir", "unlink", "rename", "write",
+                 "save", "set", "unset"}
+    _params62 = _mpv62.MPVRenderer(path="mpv").build_mpv_params()
+    _joined62 = "\n".join(str(p) for p in _params62)
+    check("Part 62: `build_mpv_params()` writes no `--title` and no "
+          "`force-media-title`. `--title` is the user's option; the fix works "
+          "with the default template rather than over it, so a player started "
+          "before and after this change paints the same window title",
+          "--title" not in _joined62 and "force-media-title" not in _joined62,
+          _joined62[:200])
+    check("Part 62: `osc-title=${title}` is still there. This is the proof "
+          "that the overlay and the window read two different properties -- "
+          "with only `title` set the overlay was already right, which is why "
+          "nobody noticed for so long",
+          any("osc-title=${title}" in str(p) for p in _params62),
+          str([p for p in _params62 if "osc" in str(p)][:2]))
+    _again62 = _mpv62.MPVRenderer(path="mpv")
+    _twice62 = (_again62.build_mpv_params(), _again62.build_mpv_params())
+    _bp62 = _funcs62.get("build_mpv_params")
+    _walk62 = list(_ast62.walk(_bp62)) if _bp62 is not None else []
+    _writes62 = [t.attr for n in _walk62 if isinstance(n, _ast62.Assign)
+                 for t in n.targets
+                 if isinstance(t, _ast62.Attribute)
+                 and isinstance(t.value, _ast62.Name) and t.value.id == "self"]
+    _calls62 = [n.func.attr for n in _walk62 if isinstance(n, _ast62.Call)
+                and isinstance(n.func, _ast62.Attribute)]
+    check("Part 62: building the command line is still pure -- the same instance "
+          "asked twice answers the same, it assigns no attribute of `self`, and "
+          "it reaches for no process, socket, player command or config write, "
+          "because start_mpv retries it. Note the shape this question had to "
+          "take: the IPC socket name is random *per renderer instance* "
+          "(`mpv_rand`, mpv.py:59-61), so two new objects differ on purpose -- "
+          "comparing two instances asks about the machine, not about the code",
+          _bp62 is not None and _twice62[0] == _twice62[1]
+          and not _writes62
+          and not any(a in _spawns62 for a in _calls62)
+          and len(_twice62[0]) == len(_params62),
+          "len=%d same=%s self-writes=%r calls=%r" % (
+              len(_twice62[0]), _twice62[0] == _twice62[1],
+              _writes62, sorted(set(_calls62))))
+
+    # -- C. one owner of "how the player is named" ---------------------------
+    _force_sites62 = [n for n in _ast62.walk(_mpv_tree62)
+                      if isinstance(n, _ast62.Constant)
+                      and n.value == "force-media-title"]
+    check("Part 62: the string `force-media-title` is written exactly once in "
+          "the renderer, so there is no second place to forget",
+          len(_force_sites62) == 1, str(len(_force_sites62)))
+    _st62 = _funcs62.get("set_media_title")
+    check("Part 62: ...and that one place is inside `set_media_title` itself, "
+          "not in `start_mpv` or some other path that a later restart could "
+          "take around",
+          _st62 is not None and len(_force_sites62) == 1
+          and _st62.lineno <= _force_sites62[0].lineno <= _st62.end_lineno,
+          "set_media_title=%s site=%s" % (
+              getattr(_st62, "lineno", None),
+              [g.lineno for g in _force_sites62]))
+    _rl62 = _funcs62.get("reload")
+    _rl_calls62 = [n for n in _ast62.walk(_rl62) if isinstance(n, _ast62.Call)
+                   and getattr(n.func, "attr", "") == "set_media_title"] \
+        if _rl62 is not None else []
+    _rl_props62 = [n.value for n in _ast62.walk(_rl62)
+                   if isinstance(n, _ast62.Constant)
+                   and n.value in ("title", "force-media-title")] \
+        if _rl62 is not None else []
+    check("Part 62: `reload()` names the player by calling `set_media_title` "
+          "exactly once and never by writing a property literal of its own. "
+          "Both properties are gone after a restart, so reload has to restore "
+          "both -- and if it re-listed them here, the two lists would drift",
+          len(_rl_calls62) == 1 and not _rl_props62,
+          "calls=%d literals=%r" % (len(_rl_calls62), _rl_props62))
+
+    # -- D. reload() actually re-arms both, after the loadfile ---------------
+    class _Proto62:
+        def __init__(self, transport="PLAYING"):
+            self.transport = transport
+
+        def get_state_url(self):
+            return _RELAY62
+
+        def get_state_position(self):
+            return "00:00:12"
+
+        def get_state_transport_state(self):
+            return self.transport
+
+    _proto62 = _Proto62()
+    _eng62.listeners.get("get_protocol", set()).clear()
+    _get62 = lambda: _proto62
+    _get62.priority = 1
+    _eng62.subscribe("get_protocol", _get62)
+
+    _r62 = _mpv62.MPVRenderer(path="mpv")
+    _cmds_r62 = _recorder62(_r62)
+    _order_r62 = []
+    _r62.stop = lambda: _order_r62.append("stop")
+    _r62.start = lambda: _order_r62.append("start")
+    _r62.set_media_title(_T62)
+    del _cmds_r62[:]
+    _r62.reload()
+    check("Part 62: a reload of a PLAYING session arms the mpvipc_start "
+          "listener -- the restart races us, so the loadfile has to wait for "
+          "the IPC socket to come back",
+          _wait_until(lambda: _set62_names("mpvipc_start")
+                      and "loadfile" in _set62_names("mpvipc_start"), 10.0)
+          and _wait_until(lambda: _order_r62 == ["stop", "start"], 10.0),
+          "listeners=%r order=%r" % (_set62_names("mpvipc_start"), _order_r62))
+    del _cmds_r62[:]
+    _pub62 = _eng62.publish("mpvipc_start")
+    _idx62 = [i for i, c in enumerate(_cmds_r62) if c[:1] == ["loadfile"]]
+    check("Part 62: publishing it loads the address back with the reported "
+          "position, and the option string is `start=` -- the flag mpv "
+          "actually parses",
+          _idx62 == [0] and _cmds_r62[0] == ["loadfile", _RELAY62, "replace",
+                                             "start=00:00:12"],
+          "pub=%r cmds=%r" % (_pub62, _cmds_r62))
+    check("Part 62: ...then re-arms BOTH naming properties from `self.title`, "
+          "after the loadfile. A restart resets mpv to the default template, "
+          "so without this the window title is right until the user changes a "
+          "player setting and 「media - mpv」 comes back",
+          len(_cmds_r62) == 3 and _cmds_r62[1:] == [
+              ['set_property', 'title', _T62],
+              ['set_property', 'force-media-title', _T62]],
+          str(_cmds_r62))
+    check("Part 62: the listener removes itself, so a second publish cannot "
+          "reload the same address on top of itself. `Bus.publish` snapshots "
+          "the listener set (`sorted(...)`) before calling anything, so "
+          "unsubscribing from inside a publish neither raises nor skips a "
+          "peer -- measured, not assumed",
+          _eng62.publish("mpvipc_start") == [] and not _cmds_r62[3:]
+          and "loadfile" not in _set62_names("mpvipc_start"),
+          "second=%r cmds=%d listeners=%r" % (
+              _eng62.publish("mpvipc_start"), len(_cmds_r62),
+              _set62_names("mpvipc_start")))
+
+    _s62 = _mpv62.MPVRenderer(path="mpv")
+    _cmds_s62 = _recorder62(_s62)
+    _s62.stop = lambda: None
+    _s62.start = lambda: None
+    _proto62.transport = "STOPPED"
+    _s62.reload()
+    check("Part 62: an idle player subscribes nothing, so an idle reload "
+          "cannot push a stale URI back into mpv. The decision is made inline "
+          "in reload(), so there is nothing to wait for",
+          "loadfile" not in _set62_names("mpvipc_start")
+          and _eng62.publish("mpvipc_start") == [] and _cmds_s62 == [],
+          "listeners=%r cmds=%r" % (_set62_names("mpvipc_start"), _cmds_s62))
+
+    # -- E. stepping the playlist renames the player too ---------------------
+    class _Dlna62(protocol.DLNAProtocol):
+        @property
+        def renderer(self):
+            return self
+
+        def set_media_url(self, uri, start='0'):
+            _pushed62.append(("url", uri))
+
+        def set_media_title(self, title):
+            _pushed62.append(("title", title))
+
+    _dp62 = _Dlna62()
+    _u162 = "http://127.0.0.1:8010/one.mkv"
+    _u262 = "http://127.0.0.1:8010/第二集.mp4"
+    _dp62.playlist = [_u162, _u262]
+    _dp62.current_index = 0
+    _dp62.set_state("CurrentTrackTitle", "上一集的名字")
+    _pushed62 = []
+    _dp62.AVTransport_Next({})
+    _next_title62 = _mr62.title_for_uri(_u262)
+    check("Part 62: Next changes the address and then names the player -- in "
+          "that order, so a player that paints on the name change shows the "
+          "new item",
+          _pushed62 == [("url", _u262), ("title", _next_title62)],
+          str(_pushed62))
+    check("Part 62: and the new name is not the name it wore before. The "
+          "playlist stores URIs only, so the address is the honest answer -- "
+          "the same rule `cast_uri` applies",
+          _pushed62[-1][1] == _next_title62
+          and _pushed62[-1][1] != "上一集的名字", str(_pushed62[-1]))
+    _states_e62 = (_dp62.get_state("CurrentTrack"),
+                   _dp62.get_state("CurrentTrackURI"),
+                   _dp62.get_state("CurrentTrackTitle"),
+                   _dp62.get_state("TransportState"))
+    check("Part 62: the four states a control point polls follow the step -- "
+          "a window titled right but reporting the old track is a different "
+          "bug with the same shape. `CurrentTrack` is set as a number "
+          "(`set_state('CurrentTrack', idx + 1)`), so the state read answers an "
+          "int -- the string is a different value than the one a control point "
+          "gets",
+          _states_e62 == (2, _u262, _next_title62, "PLAYING"),
+          str(_states_e62))
+    del _pushed62[:]
+    _dp62.AVTransport_Previous({})
+    check("Part 62: Previous is the same contract backwards (it is the same "
+          "function with a different sign, so it must not be a different "
+          "answer), and `CurrentTrack` reads back as the number it was set as",
+          _pushed62 == [("url", _u162),
+                        ("title", _mr62.title_for_uri(_u162))]
+          and _dp62.current_index == 0
+          and _dp62.get_state("CurrentTrack") == 1,
+          "%r index=%r track=%r" % (_pushed62, _dp62.current_index,
+                                    _dp62.get_state("CurrentTrack")))
+    _dp62.current_index = 1
+    del _pushed62[:]
+    _dp62.AVTransport_Next({})
+    _dp62.current_index = 0
+    _dp62.AVTransport_Previous({})
+    _dp62_empty = _Dlna62()
+    _dp62_empty.AVTransport_Next({})
+    check("Part 62: past either end, and with no playlist at all, nothing is "
+          "pushed and the index is left alone -- stepping off the end must not "
+          "blank the title. The title compared against is the one the **last "
+          "accepted** step set (the in-range `Previous` above, which wrote "
+          "`one` over `第二集`), so this asks the product's own rule rather than "
+          "my observation order; a blank title or a step that rewrote it both "
+          "fail. The index is parked at each far edge *before* the recorder is "
+          "cleared, so an in-range neighbour is not mistaken for the thing "
+          "under test",
+          _pushed62 == [] and _dp62.current_index == 0
+          and _dp62.get_state("CurrentTrackTitle") == _mr62.title_for_uri(_u162)
+          and _dp62_empty.playlist == [],
+          "pushed=%r index=%r title=%r want=%r"
+          % (_pushed62, _dp62.current_index,
+             _dp62.get_state("CurrentTrackTitle"),
+             _mr62.title_for_uri(_u162)))
+
+    # -- E2. the caller's name, or the address -- but never nothing ------------
+    # Group G counts this site as "named"; a shape check alone cannot tell that
+    # the name handed to the player came from the caller, from the address, or
+    # not at all. Variant 4 -- delete the renderer naming line, keep the state
+    # write -- went red on exactly one case, and that case was the counter.
+    _hist62 = []
+
+    class _Cast62(_Dlna62):
+        def _add_history(self, uri, title=''):
+            # The real one writes SettingProperty.Play_History, which other Parts
+            # read, and `Setting.get` persists a default on a miss (§4.2's
+            # side-effect rule). History still gets asked for, as a value.
+            _hist62.append((uri, title))
+
+    def _cast62(uri, *args):
+        _c62 = _Cast62()
+        del _pushed62[:]
+        del _hist62[:]
+        _c62.cast_uri(uri, *args)
+        return _c62
+
+    _namedE62 = "第一部"
+    _addr_name62 = _mr62.title_for_uri(_u162)
+    _fresh62 = _Cast62()
+
+    _cast62(_u162, _namedE62)
+    check("Part 62: a cast that brings a name hands the player the address first "
+          "and the name second (a player that paints on the name change would "
+          "otherwise show the previous item), and the caller's name beats the one "
+          "the address spells. `第一部` and `one` are different words on purpose "
+          "-- were they the same, this case would pass while reading nothing",
+          _pushed62 == [("url", _u162), ("title", _namedE62)]
+          and _namedE62 != _addr_name62, str(_pushed62))
+    _cast62(_u262)
+    check("Part 62: a cast that brings no name still names the player, exactly "
+          "once, with what the address spells -- and not with the empty string, "
+          "which is the shape that leaves the *previous* item's title on the "
+          "window. This is the reported symptom's other half: the relay URL is "
+          "`/relay/<id>/media`, so the honest fallback is `media`, and `media` "
+          "is a word the player would otherwise have shown anyway",
+          _pushed62 == [("url", _u262), ("title", _mr62.title_for_uri(_u262))]
+          and _pushed62[-1][1] != "", str(_pushed62))
+    _cast62(_u162)
+    _default62 = list(_pushed62)
+    _cast62(_u162, '')
+    check("Part 62: leaving `title` out and passing `''` are the same cast. The "
+          "GET entry calls it with no third argument and a hand-written POST "
+          "sends `title=''`, so if those two answers ever split, one of the two "
+          "callers is silently naming the player and the other is not",
+          _default62 == _pushed62
+          and _pushed62 == [("url", _u162), ("title", _addr_name62)],
+          "%r then %r" % (_default62, _pushed62))
+    _cast62(_u162, "   ")
+    check("Part 62: a title of whitespace is a title that wasn't brought. The "
+          "string is truthy, so a `title or fallback` test alone would hand the "
+          "player three spaces -- a window titled with nothing visible is the "
+          "same bug the fallback exists to close",
+          _pushed62 == [("url", _u162), ("title", _addr_name62)],
+          str(_pushed62))
+    _cn62 = _cast62(_u162, _namedE62)
+    check("Part 62: the state a control point polls says the same word the "
+          "player was just given -- a window titled right while the device "
+          "reports the old name is a different bug with the same shape",
+          _cn62.get_state("CurrentTrackTitle") == _pushed62[-1][1] == _namedE62
+          and _cn62.get_state("CurrentTrackURI") == _u162
+          and _cn62.get_state("TransportState") == "PLAYING",
+          "state=%r pushed=%r" % (_cn62.get_state("CurrentTrackTitle"),
+                                  _pushed62))
+    _cu62 = _cast62(_u262)
+    check("Part 62: and the same for a cast that brings no name -- the state "
+          "carries the fallback, not the empty string the caller passed",
+          _cu62.get_state("CurrentTrackTitle") == _mr62.title_for_uri(_u262)
+          and _cu62.get_state("CurrentTrackTitle") != "",
+          "state=%r pushed=%r" % (_cu62.get_state("CurrentTrackTitle"),
+                                  _pushed62))
+    _ce62 = _cast62("")
+    check("Part 62: no address at all pushes nothing, records nothing, and left "
+          "every polled state exactly where a fresh instance has it -- compared "
+          "against a new object rather than against `''`, because some of these "
+          "states are ints and their default is the service XML's, not mine",
+          _pushed62 == [] and _hist62 == [] and _ce62.playlist == []
+          and all(_ce62.get_state(_k62) == _fresh62.get_state(_k62) for _k62 in
+                  ("CurrentTrackTitle", "CurrentTrackURI", "CurrentTrack",
+                   "NumberOfTracks", "TransportState")),
+          "pushed=%r hist=%r title=%r want=%r"
+          % (_pushed62, _hist62, _ce62.get_state("CurrentTrackTitle"),
+             _fresh62.get_state("CurrentTrackTitle")))
+    _cr62 = _Cast62()
+    _cr62.cast_uri(_u162)
+    del _pushed62[:]
+    _cr62.cast_uri(_u162, _namedE62)
+    check("Part 62: re-casting an address already in the playlist names the "
+          "player again -- the reported symptom is exactly this shape (the same "
+          "relay path pushed twice) -- and the playlist is not doubled while "
+          "doing it. `NumberOfTracks` reads back the int it was set as, so a "
+          "control point that counts tracks is not shown a string",
+          _pushed62 == [("url", _u162), ("title", _namedE62)]
+          and _cr62.playlist == [_u162]
+          and _cr62.get_state("NumberOfTracks") == 1,
+          "%r playlist=%r tracks=%r" % (_pushed62, _cr62.playlist,
+                                        _cr62.get_state("NumberOfTracks")))
+    _cast62(_u162)
+    check("Part 62: the history row keeps the title **as it was sent** (empty "
+          "stays empty) while the player got the fallback. The two answers are "
+          "different on purpose: history has a better thing to store than a "
+          "derived stem, and `_add_history` already falls back to the uri -- "
+          "renaming it here would make the same cast read two ways depending on "
+          "which list you are looking at",
+          _hist62 == [(_u162, '')]
+          and _pushed62[-1][1] == _addr_name62,
+          "hist=%r pushed=%r" % (_hist62, _pushed62))
+
+    # -- F. AirPlay's PLAY carries a URL and no title ------------------------
+    _ap_src62 = os.path.join(REPO, "macast", "protocol_airplay.py")
+    with open(_ap_src62, encoding="utf-8") as _fh62:
+        _ap_text62 = _fh62.read()
+    _ap_tree62 = _ast62.parse(_ap_text62)
+
+    def _play_branch62(node):
+        for n in _ast62.walk(node):
+            if isinstance(n, _ast62.If) and isinstance(n.test, _ast62.Compare) \
+                    and isinstance(n.test.left, _ast62.Name) \
+                    and n.test.left.id == "method" \
+                    and any(isinstance(c, _ast62.Constant) and c.value == "PLAY"
+                            for c in n.test.comparators):
+                yield n
+
+    _rtsp62 = [n for n in _ast62.walk(_ap_tree62)
+               if isinstance(n, _ast62.FunctionDef) and n.name == "_handle_rtsp"]
+    check("Part 62: `_handle_rtsp` is found wherever it lives. It is a method on "
+          "the protocol class, not a module-level function -- the first version "
+          "of this check only read the file's top-level body, raised "
+          "StopIteration, and since `check()` does not catch exceptions it hid "
+          "every case after it (so this question is asked *before* the ones that "
+          "depend on it, and answers red instead of raising)",
+          len(_rtsp62) == 1, "found=%d" % len(_rtsp62))
+    _plays62 = list(_play_branch62(_rtsp62[0])) if len(_rtsp62) == 1 else []
+    _urls62 = [c for n in _plays62 for c in _ast62.walk(n)
+               if isinstance(c, _ast62.Call)
+               and getattr(c.func, "attr", "") == "set_media_url"]
+    _titles62 = [c for n in _plays62 for c in _ast62.walk(n)
+                 if isinstance(c, _ast62.Call)
+                 and getattr(c.func, "attr", "") == "set_media_title"]
+    check("Part 62: the AirPlay PLAY branch has exactly one address change "
+          "and exactly one naming of it",
+          len(_urls62) == 1 and len(_titles62) == 1,
+          "urls=%d titles=%d" % (len(_urls62), len(_titles62)))
+    _targ62 = _titles62[0].args[0] if _titles62 and _titles62[0].args else None
+    check("Part 62: and the name is read off *the same address* the branch "
+          "just handed the player (AirPlay's ANNOUNCE carries a URL and no "
+          "title, so anything else would be invented)",
+          isinstance(_targ62, _ast62.Call)
+          and getattr(_targ62.func, "attr", "") == "title_for_uri"
+          and len(_targ62.args) == 1
+          and _urls62 and _ast62.unparse(_targ62.args[0])
+          == _ast62.unparse(_urls62[0].args[0]),
+          "title=%s url=%s" % (
+              _targ62 is not None and _ast62.unparse(_targ62),
+              _urls62 and _ast62.unparse(_urls62[0].args[0])))
+    check("Part 62: `media_resolve` is still imported at that file's module "
+          "scope -- a helper called inside a function is only reachable if "
+          "the import is, too",
+          any(isinstance(n, _ast62.ImportFrom) and n.level == 1
+              and any(a.name == "media_resolve" for a in n.names)
+              for n in _ap_tree62.body),
+          str([n.names for n in _ap_tree62.body
+               if isinstance(n, _ast62.ImportFrom)]))
+
+    # -- F2. what the *sender* called this item ------------------------------
+    # 「media - mpv」 has two halves: mpv must be named through the property that
+    # reaches the window (group A), and the name we hand it must be the one the
+    # sender gave us rather than the relay path that serves the bytes. Group G
+    # only asks whether a naming call *sits next to* an address change -- it
+    # cannot see where the name came from, so the first version of this pass
+    # shipped the sender half with no question asked of it: a mutation that
+    # deletes the metadata read went red on zero cases. These are those
+    # questions (AGENTS.md §4.13: 不提问的检查等于通过的检查).
+    _smt62 = getattr(cast, "sender_media_title", None)
+    check("Part 62: `sender_media_title` is found wherever it lives -- asked "
+          "*first*, because `check()` does not catch exceptions and a missing "
+          "helper would otherwise hide every case after it",
+          callable(_smt62), "found=%r" % (_smt62,))
+
+    def _ask62(media, url):
+        return None if not callable(_smt62) else _smt62(media, url)
+
+    _named62 = _ask62({"metadata": {"title": _T62}}, _RELAY62)
+    _fallback62 = _ask62({}, _RELAY62)
+    check("Part 62: a sender that names the item wins over the address we were "
+          "handed -- `media.metadata.title` is where Cast senders put the name, "
+          "and 「网页地址投屏」 fills it with the resolved page title when it "
+          "pushes a relay URL",
+          _named62 == _T62, repr(_named62))
+    check("Part 62: and that answer is really *different* from the address-only "
+          "one, so the case above is not a tautology about a name that was "
+          "already the fallback",
+          isinstance(_named62, str) and _named62 != _fallback62,
+          "named=%r fallback=%r" % (_named62, _fallback62))
+
+    # Every one of these is a shape the network can actually hand us.
+    _absent62 = [{}, {"metadata": {}}, {"metadata": None},
+                 {"metadata": "第一集"}, {"metadata": {"title": "   "}},
+                 {"metadata": {"title": 12345}}, "第一集"]
+    _answered62 = [(m, _ask62(m, _RELAY62)) for m in _absent62]
+    check("Part 62: a name that is absent in *any* of those shapes still gets "
+          "an answer, read off the address, and never a blank -- mpv's naming "
+          "properties survive a later `loadfile`, so silence would leave the "
+          "*previous* video's title on the window",
+          all(ans == _mr62.title_for_uri(_RELAY62) for _, ans in _answered62)
+          and bool(_mr62.title_for_uri(_RELAY62)),
+          str(_answered62))
+    check("Part 62: the sender's name is used *trimmed* -- senders pad, and a "
+          "stray space lands in the window title",
+          _ask62({"metadata": {"title": "  %s  " % _T62}}, _RELAY62) == _T62,
+          repr(_ask62({"metadata": {"title": "  %s  " % _T62}}, _RELAY62)))
+    _cap62 = getattr(_mr62, "TITLE_MAX_CHARS", 0)
+    _big62 = {"metadata": {"title": "标" * (_cap62 + 40)}}
+    check("Part 62: an over-long name is clamped to `media_resolve.TITLE_MAX_CHARS` "
+          "*characters* -- one cap for every naming path, so the menu, the "
+          "player and the state page all say the same thing",
+          isinstance(_cap62, int) and _cap62 > 0
+          and _ask62(_big62, _RELAY62) == "标" * _cap62,
+          "cap=%r got=%r" % (_cap62, _ask62(_big62, _RELAY62)))
+    check("Part 62: the address-only answer is not 「media」 for *every* address "
+          "-- that string was the symptom, and a fallback that always said it "
+          "would make the two checks above impossible to disprove",
+          _ask62({}, "https://example.com/%E7%AC%AC%E4%B8%80%E9%9B%86.mp4")
+          == "第一集",
+          repr(_ask62({}, "https://example.com/%E7%AC%AC%E4%B8%80%E9%9B%86"
+                           ".mp4")))
+
+    with open(os.path.join(MACAST, "protocol_cast.py"), encoding="utf-8") as _fh62:
+        _cast_tree_f262 = _ast62.parse(_fh62.read())
+
+    def _load_branch_f262(node):
+        for n in _ast62.walk(node):
+            if isinstance(n, _ast62.If) and isinstance(n.test, _ast62.Compare) \
+                    and isinstance(n.test.left, _ast62.Name) \
+                    and n.test.left.id == "msg_type" \
+                    and any(isinstance(c, _ast62.Constant) and c.value == "LOAD"
+                            for c in n.test.comparators):
+                yield n
+
+    _media_fns_f262 = [n for n in _ast62.walk(_cast_tree_f262)
+                      if isinstance(n, _ast62.FunctionDef)
+                      and n.name == "_on_media"]
+    check("Part 62: `_on_media` is found (it is a method -- the same trap group "
+          "F fell into, so the question comes before the ones that depend on "
+          "it and answers red instead of raising)",
+          len(_media_fns_f262) == 1, "found=%d" % len(_media_fns_f262))
+    _f2walk62 = [n for b in (_load_branch_f262(_media_fns_f262[0])
+                             if len(_media_fns_f262) == 1 else [])
+                 for n in _ast62.walk(b)]
+    _smt_calls_f262 = [n for n in _f2walk62 if isinstance(n, _ast62.Call)
+                       and isinstance(n.func, _ast62.Name)
+                       and n.func.id == "sender_media_title"]
+    check("Part 62: the LOAD branch asks the sender-name helper exactly once, "
+          "with the media dict and the address it just read off it",
+          len(_smt_calls_f262) == 1 and len(_smt_calls_f262[0].args) == 2
+          and [_ast62.unparse(a) for a in _smt_calls_f262[0].args]
+          == ["media", "url"],
+          "calls=%d args=%s" % (
+              len(_smt_calls_f262),
+              [_ast62.unparse(a) for a in
+               (_smt_calls_f262[0].args if _smt_calls_f262 else [])]))
+    _name_from62 = [n for n in _f2walk62 if isinstance(n, _ast62.Assign)
+                    and len(n.targets) == 1
+                    and isinstance(n.targets[0], _ast62.Name)
+                    and isinstance(n.value, _ast62.Call)
+                    and getattr(n.value.func, "id", "") == "sender_media_title"]
+    _f2_urls62 = [n for n in _f2walk62 if isinstance(n, _ast62.Call)
+                  and getattr(n.func, "attr", "") == "set_media_url"]
+    _f2_titles62 = [n for n in _f2walk62 if isinstance(n, _ast62.Call)
+                    and getattr(n.func, "attr", "") == "set_media_title"]
+    check("Part 62: one address change and one naming -- and the name handed the "
+          "player is the very value the helper computed, not a second, "
+          "independent read of the URL (which is how a sender name gets fetched "
+          "and then thrown away)",
+          len(_f2_urls62) == 1 and len(_f2_titles62) == 1
+          and len(_name_from62) == 1
+          and isinstance(_f2_titles62[0].args[0], _ast62.Name)
+          and _f2_titles62[0].args[0].id == _name_from62[0].targets[0].id
+          and _ast62.unparse(_f2_urls62[0].args[0]) == "url"
+          and [_ast62.unparse(a) for a in _name_from62[0].value.args]
+          == ["media", "url"],
+          "urls=%d titles=%d name_from=%d title_arg=%s" % (
+              len(_f2_urls62), len(_f2_titles62), len(_name_from62),
+              _f2_titles62 and _ast62.unparse(_f2_titles62[0].args[0])))
+    check("Part 62: `media_resolve` is imported at `protocol_cast`'s module scope "
+          "too -- the same reachability question group F asks of AirPlay, asked "
+          "here because the helper below the fold calls it",
+          any(isinstance(n, _ast62.ImportFrom) and n.level == 1
+              and any(a.name == "media_resolve" for a in n.names)
+              for n in _cast_tree_f262.body),
+          str([n.names for n in _cast_tree_f262.body
+               if isinstance(n, _ast62.ImportFrom)]))
+
+    _RELAY2_62 = "http://192.168.1.5:58880/relay/Zz9Yy8Xx7Ww6Vv5u/media"
+
+    def _drive_load_f262(media):
+        _CTX.renderer = MockRenderer()
+        proto = TestProtocol()
+        # The playback watch would otherwise sit on a daemon thread for the
+        # whole grace period; this case is about what reaches the player.
+        proto.LOAD_GRACE_SECONDS = 0.0
+        proto._on_message(FakeSock(), {
+            "source_id": "sender-0", "destination_id": "receiver-0",
+            "namespace": cast.NS_MEDIA, "payload_type": 0,
+            "payload_utf8": json.dumps({
+                "type": "LOAD", "requestId": 62, "currentTime": 0,
+                "media": media,
+            }), "payload_binary": b"",
+        })
+        return _CTX.renderer
+
+    _rec62 = _drive_load_f262({"contentId": _RELAY62,
+                               "contentType": "video/mp4",
+                               "metadata": {"title": _T62}})
+    check("Part 62: a real LOAD message leaves the *sender's* name on the player, "
+          "end to end -- this is exactly the message 「网页地址投屏」 sends when "
+          "it pushes a relay URL, and the report was a window reading "
+          "「media - mpv」 for that cast",
+          _rec62.last_arg("set_media_url") == _RELAY62
+          and _rec62.last_arg("set_media_title") == _T62,
+          "url=%r title=%r" % (_rec62.last_arg("set_media_url"),
+                               _rec62.last_arg("set_media_title")))
+    _rec2_62 = _drive_load_f262({"contentId": _RELAY2_62,
+                                "contentType": "video/mp4"})
+    check("Part 62: and a LOAD that carries no name still *speaks* -- it names "
+          "the player from the address instead of letting the item before it "
+          "stay on screen",
+          _rec2_62.last_arg("set_media_url") == _RELAY2_62
+          and _rec2_62.last_arg("set_media_title")
+          == _mr62.title_for_uri(_RELAY2_62)
+          and len([c for c in _rec2_62.calls if c[0] == "set_media_title"]) == 1,
+          "url=%r title=%r calls=%r" % (
+              _rec2_62.last_arg("set_media_url"),
+              _rec2_62.last_arg("set_media_title"),
+              [c for c in _rec2_62.calls if c[0] == "set_media_title"]))
+
+    # -- G. the whole repo, counted rather than asserted about ---------------
+    _files62 = []
+    for _root62 in ("macast", "macast_renderer"):
+        for _dir62, _sub62, _fs62 in os.walk(os.path.join(REPO, _root62)):
+            if "fixtures" in _dir62 or "__pycache__" in _dir62:
+                continue
+            _files62.extend(os.path.join(_dir62, f) for f in _fs62
+                            if f.endswith(".py"))
+
+    def _own_calls62(node, name):
+        """Calls of `name` inside `node`, not descending into nested defs."""
+        out = []
+        stack = list(_ast62.iter_child_nodes(node))
+        while stack:
+            n = stack.pop()
+            if isinstance(n, (_ast62.FunctionDef, _ast62.AsyncFunctionDef,
+                              _ast62.Lambda)):
+                continue
+            if isinstance(n, _ast62.Call) \
+                    and isinstance(n.func, _ast62.Attribute) \
+                    and n.func.attr == name:
+                out.append(n)
+            stack.extend(_ast62.iter_child_nodes(n))
+        return out
+
+    def _refs62(node, name):
+        return any((isinstance(n, _ast62.Name) and n.id == name)
+                   or (isinstance(n, _ast62.Attribute) and n.attr == name)
+                   for n in _ast62.walk(node))
+
+    _defs62, _push_list62 = [], []
+    for _path62 in _files62:
+        with open(_path62, encoding="utf-8") as _fh62:
+            _tree62 = _ast62.parse(_fh62.read())
+        _rel62 = os.path.relpath(_path62, REPO)
+        for n in _ast62.walk(_tree62):
+            if isinstance(n, (_ast62.FunctionDef, _ast62.AsyncFunctionDef)):
+                _defs62.append((_rel62, n))
+            if isinstance(n, _ast62.Call) \
+                    and isinstance(n.func, _ast62.Attribute) \
+                    and n.func.attr == "set_media_url" and n.args:
+                _push_list62.append((_rel62, n))
+
+    _kinds62, _violations62 = {}, []
+    for _rel62, _p62 in _push_list62:
+        _inside = [f for f in _defs62 if f[0] == _rel62
+                   and f[1].lineno <= _p62.lineno <= f[1].end_lineno]
+        _site62 = "%s:%d" % (_rel62, _p62.lineno)
+        if not _inside:
+            _violations62.append((_site62, "module-level"))
+            continue
+        # innermost enclosing function
+        _fn62 = min(_inside, key=lambda f: f[1].end_lineno - f[1].lineno)
+        if _fn62[1].name == "set_media_url":
+            _kind62 = "wrapper"      # the method itself; callers name around it
+        elif len([s for s in _fn62[1].body
+                  if not (isinstance(s, _ast62.Expr)
+                          and isinstance(s.value, _ast62.Constant))]) == 1 \
+                and isinstance(_fn62[1].body[-1], _ast62.Expr) \
+                and isinstance(getattr(_fn62[1].body[-1], "value", None),
+                               _ast62.Call):
+            _kind62 = "alias"        # one call, no logic: play_path -> set_media_url
+        elif _refs62(_p62.args[0], "playing_url"):
+            _kind62 = "re-push"      # the same address again, not a new item
+        elif _own_calls62(_fn62[1], "set_media_title"):
+            _kind62 = "named"
+        else:
+            _kind62 = None
+            _violations62.append((_site62, "%s()" % _fn62[1].name))
+        if _kind62:
+            _kinds62.setdefault(_kind62, []).append((_site62, _fn62[1].name))
+
+    _breakdown62 = sorted((k, len(v)) for k, v in _kinds62.items())
+    check("Part 62: every renderer-side address change in the repo is "
+          "accounted for. The counts are the ones measured on this tree, so "
+          "adding a 13th push without naming it -- or naming it and not "
+          "registering here -- turns this red",
+          len(_push_list62) == 12 and not _violations62
+          and _breakdown62 == [('alias', 1), ('named', 7), ('re-push', 1),
+                               ('wrapper', 3)],
+          "pushes=%d violations=%r kinds=%r" % (
+              len(_push_list62), _violations62, _breakdown62))
+    _named62 = set(n for site, n in _kinds62.get("named", []))
+    check("Part 62: the two sites this report fixed are counted as named by "
+          "*function*, not by count -- so the arithmetic above cannot be "
+          "satisfied by renaming something else",
+          ("macast/protocol.py", "_playlist_step") in [
+              (site.split(":")[0], n) for site, n in _kinds62["named"]]
+          and ("macast/protocol_airplay.py", "_handle_rtsp") in [
+              (site.split(":")[0], n) for site, n in _kinds62["named"]]
+          and "_playlist_step" in _named62,
+          str(sorted(_kinds62.get("named", []))))
+    _span62 = set(site.split(":")[0] for k in _kinds62
+                  for site, _n in _kinds62[k])
+    check("Part 62: and the scan is not reading one file and calling it the "
+          "repo -- it walked both packages and found sites in several of them",
+          len(_files62) > 20 and len(_span62) >= 4,
+          "files=%d sites in %d files" % (len(_files62), len(_span62)))
+except Exception as _e62:
+    check("Part 62 runs", False, "{}: {}".format(type(_e62).__name__, _e62))
+finally:
+    for _ch62, _was62 in _saved62_ch.items():
+        _now62 = _eng62.listeners.setdefault(_ch62, set())
+        for _cb62 in list(_now62 - _was62):
+            _eng62.unsubscribe(_ch62, _cb62)
+        _now62.clear()
+        _now62.update(_was62)
+    utils.Setting.setting, utils.Setting.setting_path = _saved62[0], _saved62[1]
+    utils.SETTING_DIR = _saved62[2]
+    _shutil.rmtree(_tmp62, ignore_errors=True)
 
 # --------------------------------------------------------------------------
 # The CI gate, applied (see `ci_gate` above for why the rule is this narrow).

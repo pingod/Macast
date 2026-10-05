@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 
+from . import media_resolve
 from .discovery import MDNSAdvertiser
 from .protocol import Protocol
 from .utils import Setting
@@ -248,6 +249,14 @@ class AirPlayProtocol(Protocol):
                 logger.warning("AirPlay PLAY without a prior ANNOUNCE url")
                 return 455, base, ""
             self.renderer.set_media_url(url)
+            # mpv keeps the name it was given across a `loadfile`, so a PLAY that
+            # only changes the address leaves the *previous* item's title on the
+            # window. AirPlay's ANNOUNCE carries a URL and no title, so the address
+            # is the honest answer. The one downgrade this can cause: if another
+            # protocol had already named the player for this exact URL, the nicer
+            # name is replaced -- which needs the sender to re-announce the same
+            # relay path, and those ids are random per session.
+            self.renderer.set_media_title(media_resolve.title_for_uri(url))
             base["Session"] = "{}".format(max(self._session, 1))
             base["Range"] = "npt=now-"
             base["RTP-Info"] = "seq=0;rtptime=0"

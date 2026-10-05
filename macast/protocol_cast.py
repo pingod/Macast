@@ -29,6 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .discovery import MDNSAdvertiser
 from .protocol import Protocol
+from . import media_resolve
 from .utils import Setting, SETTING_DIR
 
 logger = logging.getLogger("Chromecast")
@@ -74,6 +75,29 @@ def _app_namespaces():
     issue the LOAD -- the device is discovered but cannot be cast to.
     """
     return [{"name": ns} for ns in APP_NAMESPACES]
+
+
+def sender_media_title(media, url=''):
+    """What the sender called this item, or the address it handed us.
+
+    ``media.metadata.title`` is where Cast senders put the name, and 「网页地址投屏」
+    fills it with the resolved page title when it pushes a relay URL to us
+    (``cast_local_file.push_url_to``). We used to read only ``contentId``, so the
+    player kept its own default and a cast of a bilibili page showed the route
+    that served it -- ``/relay/<id>/media`` renders as ``media`` in mpv's title
+    bar. Answering even when the field is absent is the other half of the fix:
+    mpv's ``title`` property survives a later ``loadfile``, so an item that
+    brings no name would otherwise keep wearing the *previous* video's title.
+
+    A non-string title counts as absent -- this dict comes off the network.
+    """
+    metadata = media.get("metadata") if isinstance(media, dict) else None
+    if isinstance(metadata, dict):
+        raw = metadata.get("title")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()[:media_resolve.TITLE_MAX_CHARS]
+    return media_resolve.title_for_uri(url)
+
 
 # ---------------------------------------------------------------------------
 # Minimal protobuf codec (only the messages Cast v2 needs)
@@ -800,14 +824,17 @@ class ChromecastProtocol(Protocol):
         if msg_type == "LOAD":
             media = data.get("media", {})
             url = media.get("contentId") or media.get("contentUrl")
+            title = sender_media_title(media, url)
             # Log what the sender says it is about to serve. This is what makes
             # a "sound but no picture" report diagnosable from the log alone:
             # VLC announces `audio/x-matroska` when it has decided to send no
             # video at all, which is indistinguishable from a receiver bug
             # unless you record it (see docs/Cast-AirPlay-Testing.md 10.6).
+            # The title is logged too: "the player shows the wrong name" is
+            # otherwise a report about a field we never read.
             logger.info(
-                "Cast LOAD url=%s contentType=%s streamType=%s duration=%s tracks=%d",
-                url, media.get("contentType"), media.get("streamType"),
+                "Cast LOAD url=%s title=%s contentType=%s streamType=%s duration=%s tracks=%d",
+                url, title, media.get("contentType"), media.get("streamType"),
                 data.get("duration") or media.get("duration"),
                 len(media.get("tracks") or []))
             if not url:
@@ -826,6 +853,7 @@ class ChromecastProtocol(Protocol):
                 self._observed_transport = None
                 self._idle_reason = None
             self.renderer.set_media_url(url, start=str(int(self._position)))
+            self.renderer.set_media_title(title)
             self._send_media_status(sock, src, "BUFFERING", data.get("requestId"))
             # PLAYING is reported once the player confirms it, not blindly.
             self._start_playback_watch(sock, src, data.get("requestId"))

@@ -75,6 +75,12 @@ MAX_MEASURED = 8
 #: crowd out the other engine's only candidate.
 MAX_MEASURED_PER_HOST = 5
 
+#: How long a name we hand to a player or a DIDL `<dc:title>` may be. One owner
+#: because a name is read from four places (the page's `<title>`, yt-dlp's
+#: `title`, the address, and a Cast sender's `metadata.title`), and a limit that
+#: lives in only one of them is a limit the other three do not have.
+TITLE_MAX_CHARS = 120
+
 #: Containers that name a document listing segments, versus a file a reader can
 #: walk with byte offsets.
 SEGMENTED_SUFFIXES = ('.m3u8', '.mpd')
@@ -310,7 +316,7 @@ class _PageParser(HTMLParser):
         # The first non-empty <title> text is the page's; a site that animates the
         # tab title with a script would only be editing the same node.
         if self._in_title and not self.page_title and data.strip():
-            self.page_title = data.strip()[:120]
+            self.page_title = data.strip()[:TITLE_MAX_CHARS]
 
     def _take(self, values, where):
         for name in self.SRC_ATTRS + ('href',):
@@ -344,6 +350,41 @@ def _meta_og_video(body):
     return found
 
 
+#: A JSON string escape as PHP's `json_encode` writes it into an inline script.
+#: Three shapes only: an escaped backslash, an escaped slash, and an ASCII
+#: `\uXXXX`. A codepoint at or above 0x80 is left exactly as written -- it is
+#: somebody's prose, not part of an address, and rewriting it would make the
+#: scanned text differ from the page in a place nothing needs it to.
+_JSON_ESCAPE = re.compile(r'\\(?:[\\/]|u([0-9a-fA-F]{4}))')
+
+
+def _json_unescape(text):
+    r"""Undo the escapes a `json_encode`d player config puts on its own URLs.
+
+    `https:\/\/cdn.example\/a.m3u8` is a *valid* JSON string for that address, and
+    `json_encode` writes `\/` for every slash by default (`JSON_UNESCAPED_SLASHES`
+    is opt-in). The scan below cannot see such an address: the value of the
+    `file:` field is a run of characters, and the character class that stops a
+    literal URL at a quote or a space deliberately stops at a backslash too --
+    so the match restarts after each `\/`, begins at the `/` that follows it, and
+    reports `/a.m3u8`. `absolute_url` then resolves that against the page and the
+    card shows an address on the *site's own* host that no server has ever
+    served. This is what two reported pages were actually hitting.
+
+    One pass, non-overlapping, which is also JSON's rule: `\\/` is an escaped
+    backslash followed by a plain slash, and the first two characters are consumed
+    before the third can start a match.
+    """
+    def repl(match):
+        code = match.group(1)
+        if code is None:
+            return '\\' if match.group(0) == '\\\\' else '/'
+        point = int(code, 16)
+        return chr(point) if point < 0x80 else match.group(0)
+
+    return _JSON_ESCAPE.sub(repl, text)
+
+
 #: An address with a media suffix anywhere in the text, quoted or not. This is the
 #: half that catches a player configured by an inline script
 #: (`file: "https://cdn.example/a.mp4"`); it is *still* not JavaScript that builds
@@ -356,7 +397,15 @@ _LITERAL_URL = re.compile(
 
 
 def _literal_urls(body):
-    return [(match.group(1), 'literal') for match in _LITERAL_URL.finditer(body)]
+    """Every literal address in the text, read from its unescaped copy.
+
+    Scanning the decoded copy rather than the raw one is a superset, not a
+    trade-off: a match cannot contain a backslash (the character class says so),
+    so every address visible *before* decoding is still there verbatim after it,
+    and the escaped ones become visible too.
+    """
+    return [(match.group(1), 'literal')
+            for match in _LITERAL_URL.finditer(_json_unescape(body or ''))]
 
 
 def scrape_page(page_url, body=None, opener=None):
@@ -488,36 +537,119 @@ def ytdlp_candidates(page_url, binary=None, cookies=None, sink=None):
     return parse_ytdlp_json(completed.stdout)
 
 
+#: The browsers `yt-dlp --cookies-from-browser` knows, spelled the way the engine
+#: spells them (`SUPPORTED_BROWSERS` in `yt_dlp/cookies.py` is this exact set).
+#: The list lives here rather than with the settings because this is the layer that
+#: turns it into an argv element: a whitelist one file away from the argument it
+#: guards can drift from what that argument will actually accept.
+COOKIE_BROWSERS = ('brave', 'chrome', 'chromium', 'edge', 'firefox', 'opera',
+                   'safari', 'vivaldi', 'whale')
+
+#: Characters that must never appear in a value destined for one argv element. A
+#: newline cannot be part of a path on any platform we ship to, and it would also
+#: let one stored value read as two lines in every log and card that prints it.
+_SPEC_FORBIDDEN = ('\r', '\n', '\t')
+
+
+def cookie_browser_spec(value, browsers=COOKIE_BROWSERS):
+    """The engine's `BROWSER[:PROFILE]` grammar, either accepted whole or refused.
+
+    The profile half exists because a browser can keep several profiles and because
+    on Windows the profile *is* a path with a drive letter in it --
+    `vivaldi:C:\\Users\\Administrator\\AppData\\Local\\Vivaldi\\User Data` -- so the
+    value cannot be lowercased as a whole (that turns a path into a different path)
+    and cannot be split on every colon either. We split on the first one only.
+
+    What gets refused, and why each of these is a refusal rather than a feature
+    worth supporting:
+
+    * `chrome+GNOMEKEYRING` -- the engine's `+KEYRING` half fails as a **usage
+      error**, not an `ERROR:` line, so the card would read `Usage: yt-dlp [...]'`
+      and answer nothing. We never need it: the default keyring is what the browser
+      itself uses.
+    * `chrome::2` -- the `::CONTAINER` half, same usage-error shape, and a container
+      is Firefox-internal bookkeeping the user cannot name from a settings field.
+    * a name that is not on the whitelist, which covers a value starting with `-`
+      (that would be a new switch, not a browser) -- the same reason the whitelist
+      was written in the first place: this text is read back out of a hand-editable
+      JSON and handed to a subprocess.
+    * a profile starting with `-`, so a stored value cannot smuggle an option into
+      the second half of one argument.
+
+    Returns the spec to pass (`''` means "pass nothing"), with the profile kept
+    byte-for-byte as given. A trailing bare colon is the same as no profile.
+    """
+    text = str(value or '').strip()
+    if not text or any(ch in text for ch in _SPEC_FORBIDDEN):
+        return ''
+    name, _, tail = text.partition(':')
+    name = name.strip().lower()
+    if name not in browsers:
+        return ''
+    profile = tail.strip()
+    if not profile:
+        return name
+    if profile.startswith((':', '-')) or '::' in profile:
+        return ''
+    return '{}:{}'.format(name, profile)
+
+
 def cookie_arguments(cookies):
     """yt-dlp's cookie switches from the caller's dict; never a cookie value.
 
-    `{'file': path, 'browser': name}`, either half optional. The file wins when
+    `{'file': path, 'browser': spec}`, either half optional. The file wins when
     both are set, because a jar this app wrote is the one that accumulates the
     cookies the engine mints (yt-dlp saves the jar back), while a browser profile
     is somebody else's store we only borrow.
+
+    The browser half is re-checked through `cookie_browser_spec` *here*, on the way
+    to argv, and not only on the way in to storage: the value sits in a JSON the
+    user can edit by hand, so the gate that wrote it is not the gate that reads it.
+    A spec this function refuses produces no switch at all -- an anonymous resolve,
+    which is a real answer, rather than an argument the engine will read as something
+    else.
     """
     cookies = cookies or {}
     path = (cookies.get('file') or '').strip()
     if path:
         return ['--cookies', path]
-    browser = (cookies.get('browser') or '').strip().lower()
-    if browser:
-        return ['--cookies-from-browser', browser]
+    spec = cookie_browser_spec(cookies.get('browser'))
+    if spec:
+        return ['--cookies-from-browser', spec]
     return []
 
 
 def engine_note(completed, limit=200):
-    """The first line the engine actually complained about, in its own words.
+    """The line the engine actually complained about, in its own words.
 
     `--quiet` silences progress, not `ERROR:` -- which is the whole reason this is
-    worth reading. Truncated because a real stderr also carries tracebacks, and a
-    traceback on a settings page is not an explanation.
+    worth reading. Read the engine's own answer marker **first**, because
+    `--no-warnings` does not silence every warning: measured with this project's
+    argv and a jar holding one good line plus one junk line, the first line of
+    stderr is::
+
+        WARNING: skipping cookie file entry due to invalid length 1: ...
+
+    ahead of the real refusal. That sentence is about *our* cookie file and
+    contains the word `cookie`, so handed to `needs_cookies()` it becomes "the site
+    wants a session" -- the same wrong answer `COOKIE_PROBLEMS` below exists to
+    kill, arriving by a different door. Only fall back to the first line with
+    anything on it when the engine never wrote a marker. Truncated because a real
+    stderr also carries tracebacks, and a traceback on a settings page is not an
+    explanation.
     """
     text = (completed.stderr or '').strip()
+    first = ''
     for line in text.splitlines():
         line = line.strip()
-        if line:
+        if not line:
+            continue
+        if not first:
+            first = line
+        if line.startswith('ERROR:'):
             return line[:limit]
+    if first:
+        return first[:limit]
     if completed.returncode:
         return 'yt-dlp 退出码 {}'.format(completed.returncode)
     return 'yt-dlp 没有返回任何地址'
@@ -544,6 +676,109 @@ def needs_cookies(note):
     """Whether an engine's own refusal sentence is asking for a session."""
     text = (note or '').lower()
     return any(word in text for word in _COOKIE_WORDS)
+
+
+#: The four ways the engine can fail at **our** cookie source. This table exists
+#: because `needs_cookies` cannot do its job without it: the word `cookie` appears
+#: just as confidently in a site's「cookies to access this webpage」as in the engine
+#: telling us it could not open the store we pointed it at. Measured, not imagined
+#: (.68, Windows, browser set to vivaldi):
+#:
+#:     ERROR: could not find vivaldi cookies database in
+#:            "C:\Users\Administrator\AppData\Local\Vivaldi\User Data"
+#:
+#: contains "cookie", so before this table the card read that sentence as "the site
+#: wants a session" and sent the user to the very panel they had already configured,
+#: to fix a problem that was ours. So: ask this first, and only call the sentence a
+#: login request when no row here answered.
+#:
+#: The rows are verbatim fragments from `yt_dlp/cookies.py`, lower-cased to match,
+#: and the order is load-bearing -- **first match wins**, because
+#: `could not copy chrome cookie database` also contains a `not_found` fragment.
+#:
+#: Every fragment here was checked against the installed engine for the ways a
+#: plausible row becomes a row that never fires. **Two shapes are out because they
+#: do not abort the parse**: `cannot decrypt v10/v11 cookies` and `unknown cookie
+#: version` are per-entry notices inside a store that is otherwise opening fine, so
+#: the run keeps going and usually returns addresses -- a row that fires only when
+#: nothing else says anything would describe a successful resolve as a cookie
+#: failure. **Two are unreachable by construction**: `unknown browser:` and
+#: `unsupported keyring:` cannot reach argv, because `cookie_browser_spec` refuses
+#: an unknown name on the way in *and* on the way out, and the `+KEYRING` half never
+#: leaves this side of the code. A row that cannot be reached only makes the tests
+#: look covered.
+#:
+#: And one thing this paragraph used to claim is **wrong**, corrected here because a
+#: note that survives as a mechanism explanation is worse than no explanation: I had
+#: written that warning-level shapes are invisible since the engine runs with
+#: `--quiet`, which "silences `logger.warning`". It does not silence all of them --
+#: `cookies.py:1386` sends `WARNING: skipping cookie file entry due to invalid length
+#: N: ...` straight to `write_string`, which bypasses the logging machinery entirely
+#: and lands first on stderr (measured with this project's argv and a jar holding one
+#: good line plus one junk line). That sentence is about *our* file and contains the
+#: word `cookie`, so a reader that took the first line would call it a login request.
+#: `engine_note()` therefore reads the `ERROR:` marker line -- every row below is an
+#: ERROR-level sentence.
+COOKIE_PROBLEMS = ('locked', 'not_found', 'decrypt', 'bad_profile')
+
+_COOKIE_SOURCE_TABLE = (
+    # The browser is running and holds its own database open (Windows only: the
+    # engine reaches this from a sharing violation, errno 13).
+    ('locked', ('could not copy chrome cookie database',)),
+    # No file named `Cookies` under the root it looked at. Three spellings of this
+    # sentence, all ERROR level so all reachable: the Chrome family quotes the root
+    # it searched, Firefox prints it bare, and Safari prints neither a root nor an
+    # `in` at all. The singular form is here because it also sits inside `locked`'s
+    # sentence above -- which is what makes that row have to be checked first.
+    ('not_found', ('cookies database', 'cookie database')),
+    # The store was found and opened, but the key that decrypts it was not
+    # reachable: DPAPI, the login keyring, kwallet, or Chrome's `Local State`.
+    ('decrypt', ('failed to decrypt with dpapi', 'failed to read from keyring',
+                 'kwallet-query', 'could not find local state file',
+                 'no encrypted key in local state')),
+    # Opera keeps one profile and does not take this argument at all: it prints the
+    # refusal at ERROR level -- so that sentence is the line `engine_note()` brings
+    # back -- and then goes on to look for a database under a path it built out of
+    # the profile name. Saying "that browser has no profiles" beats reporting the
+    # not-found sentence that follows it.
+    ('bad_profile', ('does not support profiles',)),
+)
+
+
+def cookie_source_problem(note):
+    """Which of our cookie sources the engine's sentence says failed, or `''`.
+
+    Kept in the backend for the same reason as every other reading of somebody
+    else's prose: one owner the tests can pin, so the page only has to key a
+    sentence off the returned word.
+    """
+    text = (note or '').lower()
+    for problem, words in _COOKIE_SOURCE_TABLE:
+        if any(word in text for word in words):
+            return problem
+    return ''
+
+
+#: What an engine says when the page is not from a site it knows how to read at
+#: all. Deliberately *not* including `unable to extract`, which means an extractor
+#: it does have ran and came back empty: that is a real answer about this page, and
+#: re-labelling it as our limitation would send the user hunting for a different
+#: site when the honest sentence is the engine's own.
+_UNSUPPORTED_WORDS = ('unsupported url', 'no supported', 'not supported')
+
+
+def engine_says_unsupported(note):
+    """Whether the engine's refusal is "this is not a site I have a reader for"."""
+    text = (note or '').lower()
+    return any(word in text for word in _UNSUPPORTED_WORDS)
+
+
+#: The hole this feature admits, written as the sentence a user reads at the
+#: moment it costs them something. Part 44 requires this exact phrase in three
+#: places -- here, on the card, and in the help -- because a limit that only
+#: lives in a design document is a limit nobody can act on.
+JS_HOLE = ('需要 JavaScript 才能算出地址的站点本机解不出来：'
+           '地址不在 HTML 里，要页面自己的脚本再算一次')
 
 
 # ---------------------------------------------------------------------------
@@ -1061,6 +1296,27 @@ def resolve_target(text):
     return (found[0], len(found)) if found else ('', 0)
 
 
+def title_for_uri(uri, fallback=''):
+    """What to call a stream when nobody has told us its name.
+
+    The container suffix is stripped because ``movie.mp4`` is the file that was
+    chosen while ``movie`` is the thing that was meant. What remains is the
+    address itself: it is not a title, but a title that names a *different* video
+    is worse than one that says nothing -- and this is the only answer a receiver
+    can build from a URL, so it is also what stops the previous item's name from
+    surviving a cast that brought none.
+    """
+    stem = os.path.basename(urllib.parse.urlsplit(uri or '').path)
+    stem = urllib.parse.unquote(stem).strip()
+    for suffix in MEDIA_SUFFIXES:
+        if stem.lower().endswith(suffix):
+            stem = stem[:-len(suffix)].strip()
+            break
+    if stem:
+        return stem[:TITLE_MAX_CHARS]
+    return fallback or (uri or '')
+
+
 def display_title(candidate, fallback=''):
     """What to call this on the television.
 
@@ -1072,16 +1328,8 @@ def display_title(candidate, fallback=''):
     """
     title = (candidate.title or '').strip()
     if title:
-        return title[:120]
-    stem = os.path.basename(urllib.parse.urlsplit(candidate.url).path)
-    stem = urllib.parse.unquote(stem).strip()
-    for suffix in MEDIA_SUFFIXES:
-        if stem.lower().endswith(suffix):
-            stem = stem[:-len(suffix)].strip()
-            break
-    if stem:
-        return stem[:120]
-    return fallback or candidate.url
+        return title[:TITLE_MAX_CHARS]
+    return title_for_uri(candidate.url, fallback)
 
 
 def container_label(candidate):
@@ -1241,18 +1489,26 @@ class ResolveJob:
                                   len(pool)))
 
     def _why_empty(self):
-        """Why nothing came back, in whichever of the two voices actually spoke.
+        """Why nothing came back, in whichever of the four voices actually spoke.
 
-        A machine without yt-dlp and an engine that answered are different
-        sentences -- and the engine's own words are the only explanation a
-        cookie-walled site ever gives, which is the reason `ytdlp_candidates`
-        hands its first stderr line back instead of swallowing it.
+        A machine without yt-dlp, an engine that answered, and an engine that ran
+        and handed back nothing are three different sentences -- and the engine's
+        own words are the only explanation a cookie-walled site ever gives, which
+        is the reason `ytdlp_candidates` hands its first stderr line back instead
+        of swallowing it. The fourth distinction is the expensive one: an engine
+        that says "I have no reader for this site" is reporting *our* documented
+        hole, not the page's contents, and a user who reads the engine's sentence
+        alone will go looking for another video on a page that was never the
+        problem.
         """
-        if self.engine_note:
-            return '（yt-dlp 说：{}）'.format(self.engine_note)
+        note = self.engine_note
+        if note:
+            if engine_says_unsupported(note):
+                return '（yt-dlp 说：{}；{}）'.format(note, JS_HOLE)
+            return '（yt-dlp 说：{}）'.format(note)
         if find_command('yt-dlp') is None:
             return '（这台机器没有装 yt-dlp，只能抓 HTML 里写明的地址）'
-        return ''
+        return '（yt-dlp 这次也没有交出一个地址；{}）'.format(JS_HOLE)
 
     def status(self):
         """The dict `query=resolve-status` hands the page.
@@ -1275,10 +1531,17 @@ class ResolveJob:
                 'rejected': self.rejected,
                 'hidden_silent': self.hidden_silent,
                 'engine_note': self.engine_note,
+                # Which of *our* cookie sources the engine says failed ('' = none of
+                # them). Read before `needs_cookies`, and it gates it: the same word
+                # "cookie" is in the engine's sentence about our store and in a site's
+                # sentence about its session, and a card that reads only the word sends
+                # the user to the panel they already filled in.
+                'cookie_problem': cookie_source_problem(self.engine_note),
                 # Computed here and not in the page: which of an engine's many
                 # refusal sentences means "bring a session" is our guess at
                 # somebody else's wording, so it needs one owner the tests can pin.
-                'needs_cookies': needs_cookies(self.engine_note),
+                'needs_cookies': (needs_cookies(self.engine_note)
+                                  and not cookie_source_problem(self.engine_note)),
                 'error': self.error,
                 'candidates': [describe(c) for c in self.candidates],
             }

@@ -853,10 +853,34 @@
                             </span>
                         </div>
                         <!-- 引擎自己被源站挡住时说的原话。它和「这台机器没装 yt-dlp」是两句
-                             不同的话，而只有前者需要用户去做一件事（给 cookie）。 -->
+                             不同的话，而只有前者需要用户去做一件事（给 cookie）。
+                             但「原话里有 cookie 这个词」有两种完全不同的成因：站点自己要会话，
+                             和<b>我们自己没读到那台浏览器的 cookie</b>。这两种的下一步相反 ——
+                             前者是「去给一条 cookie」，后者是「把你已经给的那条路修好」。
+                             判定住在后端（`cookie_source_problem`），页面只照着它的值说话。 -->
                         <div v-if="resolve.engine_note && !resolve.from_ytdlp" class="hint">
                             yt-dlp 这一路说：<b>{{ resolve.engine_note }}</b>
-                            <span v-if="resolve.needs_cookies">
+                            <span v-if="resolve.cookie_problem === 'not_found'">
+                                —— 这句点的是<b>本机这一侧</b>，不是站点要不要登录：我们按那个目录去找
+                                cookie 库，里面没有 <code>Cookies</code> 文件。在下面那块「站点要登录态时」
+                                把它写成<b>名字:资料目录</b>（指到那个浏览器真正存 cookie 的目录），
+                                或者改用粘贴导出的 cookie 文件。
+                            </span>
+                            <span v-else-if="resolve.cookie_problem === 'locked'">
+                                —— 这句点的是<b>本机这一侧</b>：那个浏览器正开着，cookie 库被它锁住了，
+                                我们复制不出来。<b>完全退出那个浏览器</b>（不是关掉窗口）再解析一次，
+                                或者改用粘贴导出的 cookie 文件。
+                            </span>
+                            <span v-else-if="resolve.cookie_problem === 'decrypt'">
+                                —— 这句点的是<b>本机这一侧</b>：cookie 库读到了，但解密它的钥匙不在手边
+                                （钥匙串／密钥环没解锁）。解锁它再解析一次；或者改用粘贴导出的
+                                cookie 文件 —— 那条路不需要这把钥匙。
+                            </span>
+                            <span v-else-if="resolve.cookie_problem === 'bad_profile'">
+                                —— 这句点的是<b>本机这一侧</b>：那个浏览器不接受「:资料目录」这一半写法。
+                                把下面那块改成只写浏览器名字，冒号后面那半截去掉。
+                            </span>
+                            <span v-else-if="resolve.needs_cookies">
                                 —— 这通常是<b>站点要会话 cookie</b>，用下面那块「站点要登录态时」解决。
                             </span>
                         </div>
@@ -898,10 +922,17 @@
                             </div>
                         </div>
                         <div v-else-if="resolve.done" class="resolve-none">
-                            这个页面里没有能投出来的视频地址。两种可能，页面说的是哪一种就照哪一种办：
-                            ① 站点要先有会话 cookie 才交出地址（上面若有 yt-dlp 的原话，用下面那块解决）；
-                            ② 地址要 JavaScript 才算得出来（部分播放器页面）—— 这一版解不了，
-                            那要在这台机器上真开一个浏览器，代价是每个页面都得多养一个 Chrome 进程。
+                            <template v-if="resolve.cookie_problem">
+                                这个页面里没有能投出来的视频地址，而<b>上面那句原话点的是本机这一侧的
+                                cookie 来源</b> —— 它不是「站点不给匿名访客看」，是我们没能把你要的那台
+                                浏览器的 cookie 交到命令手上。照上面那句把它修好，再解析一次。
+                            </template>
+                            <template v-else>
+                                这个页面里没有能投出来的视频地址。两种可能，页面说的是哪一种就照哪一种办：
+                                ① 站点要先有会话 cookie 才交出地址（上面若有 yt-dlp 的原话，用下面那块解决）；
+                                ② 地址要 JavaScript 才算得出来（部分播放器页面）—— 这一版解不了，
+                                那要在这台机器上真开一个浏览器，代价是每个页面都得多养一个 Chrome 进程。
+                            </template>
                         </div>
                     </div>
 
@@ -947,7 +978,8 @@
                             </div>
                             <div class="install-row">
                                 <el-select v-model="cookie_browser" size="small" class="cookie-select"
-                                           placeholder="不读取" clearable
+                                           placeholder="不读取" clearable filterable allow-create
+                                           default-first-option
                                            @change="set_cookie_browser">
                                     <el-option v-for="b in (cookie_state ? cookie_state.browsers : [])" :key="b"
                                                :label="b" :value="b"></el-option>
@@ -955,6 +987,15 @@
                                 <span class="hint" style="margin:0;">
                                     Macast 不会自己打开你的浏览器数据：这个下拉是<b>关</b>的时候，那一路命令根本不带 cookie 参数。
                                 </span>
+                            </div>
+                            <div class="hint" style="margin-top:4px;">
+                                这一格还能写<b>名字:资料目录</b>（自己打进去就行，下拉里那九个是默认位置的浏览器）。
+                                需要它的场景就是上面那句原话点名了目录、而那个目录里并没有 cookie 库：
+                                便携版、第二个用户配置、或者这台机器的浏览器把数据放在别处。冒号后面那半截
+                                <b>原样交给解析命令</b>，所以它写的是那个浏览器自己的位置，不是 Macast 猜的；
+                                而「+钥匙串」和「::容器」这两段我们不给（写了会被拒绝，并说明为什么）——
+                                一个是这台机器的解锁方式，一个是浏览器 profile 里的容器编号，
+                                都不是这个页面该替用户决定的事。
                             </div>
                             <div v-if="cookie_state && !cookie_state.yt_dlp" class="hint" style="margin-top:8px;">
                                 顺带一句：这台机器现在<b>没有装 yt-dlp</b>，所以上面两种交法暂时都只影响不到解析结果 ——
@@ -1009,7 +1050,7 @@
                                 <div class="history-sub">{{ fmt_time(h.time) }}</div>
                             </div>
                             <el-button size="mini" type="primary" plain
-                                       icon="el-icon-video-play" @click="cast_history(h.uri)">重投</el-button>
+                                       icon="el-icon-video-play" @click="cast_history(h)">重投</el-button>
                         </div>
                     </div>
                 </div>
@@ -1714,9 +1755,23 @@
                     <li><strong>有些站点要先有一条会话 cookie 才交出地址，这不等于要你登录账号</strong>。
                         典型是抖音：浏览器里不登录也能看，因为页面自己铸了一条匿名 cookie，
                         而命令行的那一路没有浏览器替它铸。卡片会把 <code>yt-dlp</code> 的<strong>原话</strong>
-                        印出来（而不是笼统一句「解不出来」），并指出那是 cookie 这一类。
-                        解决它在下面那块「站点要登录态时」，两条路：粘贴 Netscape 格式的 cookie 文件，
-                        或者选一个浏览器让解析去读它的 cookie 库。</li>
+                        印出来（而不是笼统一句「解不出来」）。<strong>而「原话里有 cookie 这个词」有两种
+                        相反的成因</strong>，卡片分得清：<b>站点要会话</b>（那就去下面那块给一条 cookie），
+                        和<b>本机这一侧的 cookie 来源没读到</b>（你已经选过浏览器了，问题在我们这一路）。
+                        后者是四种，每一种的下一步都写在卡片上：那个目录里<strong>没有 cookie 库</strong>、
+                        那个浏览器<strong>正开着把库锁住了</strong>（要完全退出，不是关窗口）、
+                        库读到了但<strong>解密的钥匙不在手边</strong>（钥匙串／密钥环没解锁）、
+                        或者那个浏览器<strong>不接受「:资料目录」这一半写法</strong>。
+                        这四种的下一步是「把你已经给的那条路修好」，不是「再去给一条 cookie」——
+                        所以卡片在它们出现时不会说「站点要会话」。</li>
+                    <li><strong>解决它在下面那块「站点要登录态时」，两条路</strong>：粘贴 Netscape 格式的
+                        cookie 文件，或者选一个浏览器让解析去读它的 cookie 库。后者这一格<strong>还能写
+                        <code>名字:资料目录</code></strong>（自己打进去）—— 需要它的是便携版、第二个用户配置、
+                        或这台机器的浏览器把数据放在别处；冒号后面那半截<strong>原样交给解析命令</strong>，
+                        所以写的是那个浏览器自己的位置，不是 Macast 猜的。
+                        <strong>「+钥匙串」和「::容器」这两段不给</strong>（写了会拒绝并说明原因）——
+                        一个是这台机器的解锁方式，一个是 profile 里的容器编号，
+                        都不是这个页面该替用户决定的事。</li>
                     <li><strong>Macast 不代你登录</strong>：这里没有账号密码表单，也不会弹登录窗 ——
                         那要在这台机器上养一个真浏览器，代价与上面「JavaScript 那一类」是同一笔账。
                         cookie 是凭据，所以它只存在本机配置目录的一个文件里（<code>resolve_cookies.txt</code>，
@@ -2873,14 +2928,18 @@
                 document.body.removeChild(ta);
                 ok ? this.$message.success('已复制') : this.$message.warning('复制失败，请手动选中');
             },
-            cast_history(uri) {
+            cast_history(h) {
                 let fd = new window.FormData();
-                fd.append('cast-uri', uri);
+                fd.append('cast-uri', h.uri);
+                // The stored title goes back with the address. The row already
+                // shows it, so re-casting without it would name the item one
+                // thing in this list and another in the player's title bar.
+                if (h.title) fd.append('cast-title', h.title);
                 this.$http.post('/api', fd).then(res => {
                     if (res.data && res.data.code !== 0) {
                         this.$message.error(res.data.message || '重投失败');
                     } else {
-                        this.$notify({title: '已重新投屏', message: uri, duration: 2500});
+                        this.$notify({title: '已重新投屏', message: h.title || h.uri, duration: 2500});
                     }
                 }).catch(err => {
                     console.log(err);
@@ -2940,9 +2999,12 @@
                     if (data.status.done) {
                         this.stop_resolve_poll();
                         this.resolving = false;
-                        if (data.status.needs_cookies && !this.cookie_state) {
+                        if ((data.status.needs_cookies || data.status.cookie_problem)
+                            && !this.cookie_state) {
                             // 那句话把用户送去下面那块面板，就别让面板的标题行
                             // 在他点开之前是空的。这一支只在解析结束那一次跑到。
+                            // 「原话点的是本机这一侧」那四句走同一扇门：它们要用户改的
+                            // 正是那块面板里的读数，空着的标题行读不出当前选的是谁。
                             this.read_cookie_state();
                         }
                         // 同一支"只跑一次"：候选列表出来了，用户下一步就要选「投给谁」，

@@ -1503,8 +1503,17 @@ class Macast(App):
         uri = getattr(item, 'data', None)
         if not uri:
             return
+        # The URI alone is not enough. This row already knows what the item was
+        # called, and a nameless re-cast files the address in the history under
+        # its raw URI -- so the title is looked back up by URI, from the same
+        # source the menu below was built from.
+        title = ''
+        for entry in Setting.get(SettingProperty.Play_History, []) or []:
+            if isinstance(entry, dict) and entry.get('uri') == uri:
+                title = entry.get('title') or ''
+                break
         try:
-            self.service.protocol.cast_uri(uri)
+            self.service.protocol.cast_uri(uri, title)
         except Exception as e:
             logger.error("Re-casting %r failed: %s", uri, e)
             cherrypy.engine.publish('app_notify', _('Error'), _('Cast failed'))

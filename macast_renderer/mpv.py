@@ -120,6 +120,11 @@ class MPVRenderer(Renderer):
         """
         self.title = data
         self.send_command(['set_property', 'title', data])
+        # The window title is `${media-title} - mpv`, and media-title falls back
+        # to the filename -- which for a /relay/<id>/media URL is literally
+        # "media". `--title` is the user's option, so name the player by forcing
+        # the property instead; `title` alone only reaches the OSC overlay.
+        self.send_command(['set_property', 'force-media-title', data])
 
     def set_media_position(self, data):
         """ data : position, 00:00:00
@@ -496,7 +501,10 @@ class MPVRenderer(Renderer):
                 self.send_command(['loadfile', uri, 'replace', f'start={position}'])
             else:
                 self.send_command(['loadfile', uri, 'replace'])
-            self.send_command(['set_property', 'title', self.title])
+            # After a restart both properties are gone -- mpv came back with the
+            # default `--title` template -- so restore them from the one place
+            # that names the player, not just the OSC `title`.
+            self.set_media_title(self.title)
             cherrypy.engine.unsubscribe('mpvipc_start', loadfile)
 
         def restart():

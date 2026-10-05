@@ -61,6 +61,38 @@ env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 #    `selfcheck.py` 退回 `utf-8`），每个跑完整套件、还原后 md5 逐字节一致。
 #    **诚实的一句**：第一与第三个变异体的红法是**从中间截断**（`check()` 不捕异常，见 §4.14 末条），
 #    所以 7 与 4 是下限而不是全集 —— 截断本身也是红，`--ci` 照样拒绝。
+#    2026-10-05 应用 v0.24.0「两个站点的解析：一个是我们读错了，另一个是我们说错了」= 本机 **2351/2357**
+#    （Part 59 的 A 段 +2 条解转义、I 段 +4 条四句话的判决与词表、Part 44 的 JS 那句现在问**三遍**：
+#    帮助、页面、`media_resolve` 的源码里必须有 `JS_HOLE`）。v0.23.0 那两趟（分片 MP4 + 播放器见证，
+#    见 §4.14）没有把总数登记在这里 —— 这一行不是漏登，是那两次没在这里写过，别拿它当 v0.23 的数。
+#    四个定点变异体各自红 1/4/1/2 条且红集互不相交，逐条名单与"任何 ERROR 都算"那支为什么红 4 条，
+#    写在 §4.14 末的「v0.24.0 的两个报错站点」那一段。
+#    同一轮再应用 B「浏览器 cookie 的原话分类 + 那一栏读的是引擎的语法」= 本机 **2364/2370**
+#    （比上一趟多 13 条，都在 Part 59：R 段的混排 jar、Q 段的四条页面契约、`cookie_source_problem`
+#    的逐字词表与可达性、`cookie_browser_spec` 的语法两问 + `名字:资料目录` 逐字节往返 +
+#    `::CONTAINER` 两侧各自拒绝。红的仍然是 Part 34 那 6 条。
+#    这里的分组是按"这一轮加了哪一问"列的，不是每条的计数 —— 用例站点的净增减（+18/-3 个 `check(`）
+#    与 13 这个数对不上，因为有多条按参数循环的用例，也有改写措辞而不改判据的成对增删；
+#    **只报跑出来的总数，不报从 diff 里推的分组数**，见 §4.13 那条「一个没被机器问过的数字」）。
+#    B 的四个定点变异体各自红 2/3/2/1 条（`engine_note()` 的 `ERROR:` 标记改回「第一行就算」 /
+#    删掉 `bad_profile` 那一行并同步缩 `COOKIE_PROBLEMS` / 把 `not_found` 挪到 `locked` 前面 /
+#    从 `not_found` 的词表里删掉单数 `'cookie database'`），每个跑完整套件、还原后 md5 逐字节一致。
+#    第四个是这一轮学到的形状：**单数 `'cookie database'` 在整个已安装 `yt_dlp` 包里只出现一次，
+#    就在 `locked` 自己的那句话里**（`cookies.py:363`），所有 not-found 的raise 都用复数
+#    `cookies database` —— 所以那个碎片单独**从不决定任何事**，它的栖息地只在 `locked` 那句之内，
+#    而它存在的理由就是让**行序**承重。第一版用例只断言「文字里含有它」+ 结果，所以删掉它 0 红；
+#    现在那条用例同时要求**这个碎片必须真的出现在 `not_found` 那一行的词表里**（`any(... in words
+#    for problem, words in _COOKIE_SOURCE_TABLE ...)`），删碎片就红，而"行序承重"这句才真的被机器问过。
+#    同一轮再应用 D「mpv 投屏窗口的名字」= 本机 **2414/2420**（新增 Part 62 共 **50** 条：
+#    A 命名接缝 / B·C 命令行 / D reload / E 播放列表步进 / **E2 `cast_uri` 的行为** 9 条 /
+#    F AirPlay PLAY / **F2 发送端 LOAD 命名** 13 条 / G 全仓审计。分组只列**跑出来的**子计数）。
+#    六个定点变异体各自红 4/2/5/9/4/5 条，每个跑完整套件、还原后 md5 逐字节一致。
+#    **其中两支第一次是 0 红／形状红，这一格必须留在文档里**：第三支（把 `sender_media_title()`
+#    换成 `media_resolve.title_for_uri(url)`）在第一版**一条都不红** —— 用例比的是"有没有说话"，
+#    不是"说的是谁的名字"；第四支（删掉 `cast_uri` 的命名行、保留那次状态写入）只红在 G 段
+#    那个**计数器**上（1 条），也就是说全仓审计在替行为断言干活。补的是两条各自的接缝
+#    （F2 问真 LOAD 消息把谁写进播放器、E2 问 `cast_uri` 的命名行真的跑过），
+#    补完各自红 5 与 9 条。判据写在 §4.2 的「改播放器的地址，就必须改播放器的名字」。
 #    —— 红的永远是下面那 6 条；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
 #    8009/58880，甚至 8443 —— 那会把 Part 19 的 4 条 TLS 用例换成 2 条"端口被占就静默降级"）时真实 socket 的那几段没跑就是没跑，套件不会替它承认。所以先看总数，
 #    再信"全绿"；跑之前按 §4.2 杀干净实例。
@@ -351,6 +383,46 @@ docs/                     见 §7
   `Popen` 之后发出）加上 `_calls55['n'] == 1`；receipt 在 avfoundation 那一段仍被完全信任
   （同步探测 + 长寿 start），以及"绝不许出现的东西"（管道 token）也靠它。
   **偶尔真跑进来的那半行**必须仍然排在 avfoundation 探测之前，否则它描述的次序就不是这个故事的次序。
+- **改播放器的地址，就必须改播放器的名字**（2026-10-05，用户报「标题不对哦~」；症状是投完 bilibili
+  网页地址之后，本机 mpv 的窗口写着 `media - mpv`）。**这一格不是样式问题，是一条会复发的接缝**：
+  mpv 的默认 `--title` 模板是 `${?media-title:${media-title}}${!media-title:No file} - mpv`（mpv v0.41.0
+  实测逐字），而 `media-title` 的取法是「`force-media-title` 非空就用它，否则用文件的 `title` 标签，
+  否则用 `filename`」—— 而 **`filename` 对 URL 只报最后一段路径**。我们的中转地址是
+  `/relay/<随机 id>/media`，末段恰好是 `media`，于是窗口那个词就是它。**没有任何一处"写错了"：
+  是「换地址的那条路没人负责换名字」**。所以判据收在这句话上，落在 `macast/protocol.py`：
+  ① **`force-media-title` 是我们的接缝**（`MPVRenderer.set_media_title()` 同时写 `title` 与
+  `force-media-title`），**`--title` 永远是用户的选项，我们一个字都不写**；
+  ② **只有一个主人**：`reload()` 里那次 `loadfile` 之后要把名字重新交回 `set_media_title(self.title)`，
+  否则"重载就把标题冲掉"会长得像"mpv 又读回了文件名"；
+  ③ **每一条会换播放器地址的路都要命名** —— 这次数出来 12 个站点（7 个直接命名 + 3 个包装 +
+  1 个别名 + 1 个重投），`cast_uri` / `_post_cast_uri`（带 `cast-title`）/ `_playlist_step`（连播步进，
+  以前只换地址不说话）/ AirPlay 的 PLAY 分支 / Cast 的 LOAD（读发送端自己的
+  `media.metadata.title`，走 `protocol_cast.sender_media_title()`）/ 历史重投（带存下来的那个标题）
+  全在同一张表里。**G 段是一条全仓审计**（用 AST 数站点，不是按记忆点名），所以"以后又加了一条换地址的路
+  忘了命名"这件事会被机器抓住，而不是等到用户再报一次。
+  **四条只有真机才教得了的 mpv 读取事实**（都是我这轮的仪器先错后对的）：
+  空闲播放器上 `media-title` / `filename` / `duration` / `time-pos` 回的是
+  `{"error": "property unavailable", "data": null}`，而 `force-media-title` 回 `''` 且
+  `error: "success"` —— 所以**一次批量读取要按 `request_id` 是否凑齐来终止**，按"每条都 `error=='success'`"
+  筛就永远凑不齐，套接字直接超时（§5 那条「`{"error":"success"}` 是成功」在批量读取下还不够用）；
+  「在播的是哪一路流」要问 **`path`**（完整的交接地址），`filename` 注定是 `media`；
+  **「在播」判据是等 `time-pos` 真的变成一个数**，不是抓一瞬间的 `duration` —— 转封装那条路的文件
+  还在长的时候根本没有可信长度（§4.14），实测 `duration=None` 而 `time-pos` 从 0.96 走到 4.0，
+  这一格第一版把产品判成了坏；
+  窗口那个字串的**最后一格证据要留着当症状的见证**（`filename='media'` 打在仪器输出里而不是当成失败），
+  否则下一次"修好了"的判据会悄悄变成"我不再问那个属性"。
+  回归用例 **Part 62（50 条）**：A 命名接缝 / B·C 命令行 / D reload / E 播放列表步进 /
+  **E2 `cast_uri` 的行为** / F AirPlay PLAY / **F2 发送端 LOAD 命名** / G 全仓审计。
+  **两个覆盖率空洞是这一轮学到的形状，比数字更该留下**：六个定点变异体里
+  **第三支第一次 0 红**（把 `sender_media_title()` 换成 `media_resolve.title_for_uri(url)`）——
+  用例问的是"这条路上有没有说话"，**没问"说的是谁的名字"**，所以一个会说话的**错名字**照样全绿；
+  补法是 F2（13 条）：真的发一次 LOAD 消息，要求播放器收到的那个字串**就是发送端卡片给的那一个**，
+  并且第一次因为错误的原因通过的那条要一起换掉。**第四支第一次只红在 G 段的计数器上（1 条）**——
+  也就是删掉 `cast_uri` 的命名行之后，**行为断言一条都没响**，是全仓审计那个**计数**在替它们干活；
+  补法是 E2（9 条）：把 `cast_uri` 真的打一遍（`MockRenderer` 因此需要 `set_media_title`，
+  少这个方法当时是 `AttributeError` 而不是红），要求命名那一行真的跑过、且跑的是**传进来的那个**标题。
+  补完之后六支各自红 **4 / 2 / 5 / 9 / 4 / 5** 条，每个跑完整套件、还原后 md5 逐字节一致。
+  真实网络那一半在 §4.14 末（同一趟把整条产品路径打到本机 mpv，17 问 0 红）。
 
 ### 4.3 打包（v0.7.11 的产物曾经**全部无法启动**）
 
@@ -1309,10 +1381,21 @@ v0.19 在这一层上又加了四件：**DASH 音画合并**、**无声候选过
 | **排序与 castor 故意相反：直链排在清单之前** | 我们的中转能在直链上**翻译 Range**（观众能拖），清单只能转封装成"一直在变大的文件"（写完之前没有可信长度，所以拖不动）。castor 把 master 排前面是因为梯子是它那个引擎的**回退信号**，而我们自己供字节。改回顺序就必须同时改这两句话 |
 | **先合并，再过滤 —— 顺序是承重的** | 真站取证（2026-10-03，bilibili）：DASH 的梯子把**画面一条地址、声音另一条地址**分开交，于是页面上最高的那一条投出去**没有声音**。`plan()` 见到 `audio_url` 就答 `merge`，ffmpeg 把那条音轨当**第二个输入**（各自的请求头写在各自的 `-i` 前面），中转的**供流形状不变**；`Candidate.silent` 因此要求 `not probe.audio_codec` **且** `not self.audio_url`。**如果把过滤写在合并前面，bilibili 那张卡片会整段空掉** —— 每一行都"没有音轨"，而它们其实全都是可投的。剩下的真无声行仍然不进卡片（`visible()` 交回 `(rows, hidden)`，页面印「另外 N 条只有画面…」），因为把「投上去没声音」留成一条会播的按钮，就是这条功能当初的 bug 报告本身。**那个「这条没有音轨」的徽标是故意留着的第二道防线**：按今天的走法它永不出现（被过滤掉的行根本不到卡片），但它一旦哪天过滤放宽就必须立刻是对的 —— 而且它的 `v-if` **两个操作数都要在**：只写 `!c.audio_codec` 会把纯音频那条（`relay_reason()` 自己就明说这是有声投屏）标成坏视频。用例两条各问一次（"徽标按 `describe()` 的两个答案键控"与"无声行不进卡片"），少一条就会让另一条变成空话 |
 | **粘贴可以是整段分享文案，但"是不是地址"必须先问整段** | `looks_like_url()` 先看**整段**是不是一个地址（单字段 + scheme），只有它不是才用 `_SHARE_URL` 去**挖**里面的地址。顺序反过来会让 `https://example.com/a 后面那句话` 变成一次"看起来合法的"粘贴而把尾巴带进地址里。字符类**显式排除全角标点**（`，。、；：！？（）【】《》“”`）—— 抖音那句就是 `…https://v.douyin.com/iAbc/，复制打开抖音…`，半角 `.,;:!?` 靠 `rstrip` 收。**裸 host 规则照旧成立**：`extract_share_urls` 只回带 scheme 的东西，所以 `example.com/watch/7` 在那里仍然是"一个地址都没有"，由调用方用 `looks_like_url` 的原话拒绝。挖出多个时**第一条交给引擎、条数交给卡片**，多 P 主帖不许静默丢掉其余部分 |
-| **引擎自己的拒绝原话必须上卡片** | `engine_note()` 读 `stderr` 的**第一行**（`--quiet` 只关进度不关 `ERROR:`），截到 200 字符，因为真 stderr 后面还跟着 traceback，而"页面上出现 traceback"不是解释。**为什么不在页面判**：这是我们对**别人那句话**的读取，只能有一个主人能被测试钉住（同一理由决定了 `relay_reason()`、`plan()`、`describe()` 全部住在后端） |
+| **引擎自己的拒绝原话必须上卡片，而且读的必须是它的 `ERROR:` 标记行** | `engine_note()` **优先取第一条 `ERROR:`**，取不到才回落"第一条非空文本"，截到 200 字符，因为真 stderr 后面还跟着 traceback，而"页面上出现 traceback"不是解释。**第一行不是可取的**（2026-10-05 量到的）：一份**混排的 jar**（一条好行 + 一条坏行）过了我们的粘贴校验（它数的是**cookie 条数**，不是行数），于是引擎先打 `WARNING: skipping cookie file entry due to invalid length 1: …` —— 那句话里有 `cookie`，`needs_cookies()` 就把它读成「这通常是站点要会话 cookie」，把用户送去他**已经填过**的那块面板。`--no-warnings` **关不掉它**：那条警告走 `write_string`（`yt_dlp/cookies.py:1386`），**根本不经 logger**，所以它照旧落在 stderr 第一行。两句契约各一条用例，而且**两边都问**：警告在前时 `engine_note()` 交回 `ERROR:` 那一行（截断后仍然不含 `cookie` 那个词），以及没有任何标记时第一行**照样要说话**（这一路的前提就是"引擎自己的原话是答案"，只认 `ERROR:` 的读取器会把一句写了散文的 extractor 报成一个裸退出码）。**为什么不在页面判**：这是我们对**别人那句话**的读取，只能有一个主人能被测试钉住（同一理由决定了 `relay_reason()`、`plan()`、`describe()` 全部住在后端） |
 | **cookie 是凭据：只落 0600 的独立文件，永不进设置 JSON** | jar 在 `SETTING_DIR/resolve_cookies.txt`，`os.open(..., 0o600)` 写临时名再 `os.replace`（并发解析永不打开半份文件），**故意不备份旧的那份** —— 一个会主动覆盖它的功能不该留下副本。`macast_setting.json` 里只有 `Resolve_Cookie_Browser`（浏览器**名字**），因为那份文件人们会导出贴进 bug 报告。页面与日志**永远只报条数**。粘贴时先校验（`cookie_jar_state` 回 `(cookies, bad_lines)`，上限 `COOKIE_JAR_MAX_BYTES = 256 KiB`），因为**空/坏 jar 引擎根本不报错**，它只是匿名解出更少的地址，用户读到的下一句就是"这页没有视频" |
 | **jar 校验里 `#HttpOnly_` 那一行是 cookie，不是注释** | 浏览器导出的 Netscape jar 用这个前缀标记 HttpOnly 属性，而**会话 cookie 通常全都带它** —— 我们这边它是注释，于是整份导出被判成「没有一条能读懂的 cookie」而**拒绝粘贴**，正好是这块面板唯一要收的那份文件；混排的 jar 还会少报条数，「已保存 N 条 cookie」就成了谎。判据只有一个主人：**照 `http.cookiejar.MozillaCookieJar._really_load` 的顺序来** （先在原始行的 index 0 剥前缀，再跳空行与 `#`）。所以剥完之后还要再问一次注释 （`#HttpOnly_# …` 仍是注释），而缩进的 `  #HttpOnly_…` 对引擎也不是 cookie —— 把它算成一条就是许一个 yt-dlp 从来不会加载的登录态。**这一条本来早就被"覆盖"过**：唯一的旧用例喂的是 `'# HttpOnlyCookieJar'`（带空格的**头注释**），真实形状零覆盖 —— §4.2「假 ffmpeg 抄虚构格式」同族，只是这次抄的是**注释行的一个变体**。（2026-10-04 在写文档读这段代码时抓到，随 v0.19.0 一起发）
-| **`--cookies-from-browser` 的白名单每次读都复查** | `COOKIE_BROWSERS` 就是 yt-dlp 认识的那批名字；`_cookie_browser_name()` 在**取用的路上**再判一次（`Setting.get` 之后、进 argv 之前），因为那个值坐在**可手改的高级设置 JSON** 里 —— 它只有一个主人还不够，写它的门和读它的门都得认同一张表。默认是空＝不读；**文件优先于浏览器**（粘贴的那份是用户明确给的，浏览器那份是猜的）。没有登录表单也不弹窗：**Macast 不代用户登录**（那要在每台机器养一个真浏览器，而这里的解析靠命令行） |
+| **页面里的地址要先按 JSON 自己的规矩解一次转义** | PHP 站把播放器配置交给 `json_encode` 时，**默认把每一个 `/` 写成 `\/`**（`JSON_UNESCAPED_SLASHES` 要显式开），于是 `file":"https:\/\/vip...\/index.m3u8"` 是一份**合法 JSON** 的那个地址，而我们的字面扫描看不见它：URL 字符类为了不在引号或空格处截断，**同样会在反斜杠处截断** ⇒ 匹配从每个 `\/` 之后重新开始、从那个 `/` 起头、报出 `/index.m3u8` ⇒ `absolute_url` 把它按页面宿主解成一个**这台服务器的根路径**。2026-10-05 在报错的那页量到的正是这个：`route1Data` 里两条真 m3u8，交回来的是 `https://pomo.mom/index.m3u8`（404）。修法 `_json_unescape()` 只解三种形状（`\\`、`\/`、ASCII `\uXXXX`），**一趟、不重叠**（这也正是 JSON 的规矩：`\\/` 是转义反斜杠 + 一个普通 `/`），且 **0x80 以上的码点原样留着** —— 那是别人的标题，改写它只会让扫过的文本和页面不一样而没有任何好处。同一个 helper 也喂 `og:video` 与 `<source>`，所以不是"给某个站开的洞"。**这一格的价值在于它把「需要 JavaScript」这句话的适用边界收窄了**：这一路 `api.php?type=parse` 自己的答复就是 `code:500`，也就是说**它从来不是 JS 站**，只是我们把它的地址读丢了 |
+| **空结果要说清是哪一种空，而且是四句话** | `ResolveJob._why_empty()` 交回四种句子之一：① 引擎说「这不是我有读者能读的站」（`engine_says_unsupported`）⇒ 「页面里没有读到视频地址（yt-dlp 说：…；`JS_HOLE`）」；② 引擎说别的拒绝 ⇒ 只带它自己的原话；③ 这台机器没有 `yt-dlp` ⇒ 「只能抓 HTML 里写明的地址」，**并且不许出现 `JS_HOLE`**（那台机器上根本没跑过引擎，说"要 JS"是没有见证者的陈述）；④ 装了引擎却一个地址都没交回来 ⇒ 才说 `JS_HOLE`。**两张词表各自的主人不能互借答案**：`_COOKIE_WORDS`（`needs_cookies`）判的是"这站要会话"，`_UNSUPPORTED_WORDS`（`engine_says_unsupported`）判的是"我们没有这个站的读者"，把后者写成"任何 ERROR"就会把 500 和 cookie 墙都贴上 JS 那句，**而用户读到第二个解释就会去做错的那一件**（cookie 墙的正确动作是卡片下面的面板）。`unable to extract` **故意不在** `_UNSUPPORTED_WORDS` 里：那句话的意思是"引擎有这个 extractor 并且它回答了这页"，把它改标成我们的局限是这台分类器唯一能把人送去错地方的方式。`JS_HOLE` 是**唯一真值点**：卡片、帮助弹层与这条句子共用它，用例读常量而不是抄散文 |
+| **`--cookies-from-browser` 的白名单每次读都复查** | `COOKIE_BROWSERS` 就是 yt-dlp 认识的那批名字（`CHROMIUM_BASED_BROWSERS | {firefox, safari}` = 我们这九个，一字不差）；`_cookie_browser_spec()` 在**取用的路上**再判一次（`Setting.get` 之后、进 argv 之前），因为那个值坐在**可手改的高级设置 JSON** 里 —— 它只有一个主人还不够，写它的门和读它的门都得认同一张表。默认是空＝不读；**文件优先于浏览器**（粘贴的那份是用户明确给的，浏览器那份是猜的）。没有登录表单也不弹窗：**Macast 不代用户登录**（那要在每台机器养一个真浏览器，而这里的解析靠命令行） |
+| **那一栏读的是引擎的语法，不是"一个浏览器名字"，而且资料目录必须逐字节往返** | 这台行的症状（2026-10-05，`.68`）是 Vivaldi 把 cookie 库存在**非默认目录**里，而我们的白名单只认名字 ⇒ 除了"这台永远读不到"没有第二种答复。现在按 `__init__.py:397-415` 的**真文法**收：`BROWSER[+KEYRING][:PROFILE][::CONTAINER]`（`re.fullmatch`，Windows 盘符里的冒号在 `:PROFILE` 之内**合法**，靠 `:` 切第一段才不会把 `C:\Users\…` 切坏）。**`名字:资料目录` 是允许的形状**：存进去什么就交回什么（页面那个 `el-select` 因此要 `filterable allow-create` —— Element UI 的 `getOption(value)` 会退到 `label: value`，所以后端读回的 `vivaldi:C:\…` 照样渲染得出来），且 `.strip().lower()` **绝不能整段做**（那是他的路径，不是名字；名字半边单独 lower，profile 半边逐字节）。`::CONTAINER`（Firefox 多容器）**写和读两侧都拒**，并给一句自己的话 —— 引擎认识它，我们的白名单不该假装不认识；`+KEYRING` 同样不进这一栏（那是我们从不替他挑的东西，进了 argv 就是一条没人复核过的启动参数）。**没有 `os.path.isdir` 校验**：引擎那边 `:PROFILE` 既接受绝对路径也接受 `Default` 这种相对档案名（`_is_path` 只认 `os.path.sep`/`altsep`，因此**平台相关**），在这里判"存不存在"会把合法写法判成坏值 |
+| **「这句点的是本机这一侧」的四格，每一格都必须给自己的下一步** | 引擎那句拒绝里含 `cookie` 不等于"站点要会话"（上面那两条同一族）。`cookie_source_problem(note)` 把**我们这一侧**的失败归成 `COOKIE_PROBLEMS = ('locked','not_found','decrypt','bad_profile')` 四态，`status()` 里 `'needs_cookies': needs_cookies(note) and not cookie_source_problem(note)` —— **这一取反才是那张卡片不会把人送去装扩展的原因**，而页面只按 `resolve.cookie_problem` 的值说话。四个词表片段全部对着**本机装的 `yt_dlp/cookies.py` 逐条量过可达性**，这不是修饰：**一条永远烧不到的行会让用例看起来覆盖了**。被删掉的四条：`cannot decrypt v10/v11 cookies` 与 `unknown cookie version`（`cookies.py:482/489/515/542` 是**逐条目**的 `logger.warning`，那份库其余部分开得好好的 ⇒ 解析照旧返回地址，一条"只在该什么都不说时才烧"的行会把一次**成功**判成 cookie 故障），`unknown browser:`（:124）与 `unsupported keyring:`（:1159）（**按构造不可达**：名字进 argv 前后各查一次白名单，`+KEYRING` 那一半根本不从这个侧出来）。而**上面 `engine_note()` 那一格量到的 `write_string` 警告是这条规则的例外** —— 它不经 logger，所以 `--quiet` 拿它没办法，只能由读取侧跳过它。**`bad_profile` 是 Opera 专属的形状，且必须排在 `not_found` 之前**：它先把"这个浏览器不接受 `:资料目录`"打在 ERROR 级，再转身去找一个**用那个档案名拼出来的路径**里的库 —— 后面那句 `could not find … cookies database` 才是 not_found，而"这台没有档案"比"这里没有文件"可行动。**整张表的顺序都是承重的，而且是被量出来的**：`locked`
+必须排在 `not_found` 前面，因为 `Could not copy Chrome cookie database` 那句里**也含有**一个
+not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包里**只出现这一次**，就在 :363
+那句 locked 自己的话里；每一条 not-found 的 raise 用的都是复数 `cookies database`）。把 `not_found`
+挪到前面，一台**浏览器正开着**的 Windows 会被判成"找不到库"，卡片于是让用户去指一个**就在眼前的目录**
+而不是让他退出浏览器。这条嵌套由 Part 59 两用例守着：一条问顺序换过来会答错，一条要求那个单数碎片
+**必须真的还在 `not_found` 那一行的词表里** —— 因为删掉它之后，"这句里含有它"就变成一句关于文字的谎
+（第一版就是这样，删碎片 0 红）。**用例把卡片与分类器绑死**：Q 段读页面里那四个 `v-if`/`v-else-if` 分支的族名集合，要求它**恰好等于** `COOKIE_PROBLEMS`（加一态少一态都会红），并且每一句必须含它自己那个下一步（去哪个目录、要不要退出浏览器、钥匙串、把冒号后面去掉）—— §4.8 那条「每一条失败文案必须给出下一步」在这里的形状。**没有第五态**，因为纯垃圾 jar 在**粘贴那一刻**就被拦了（`cookie_jar_state` 数到 `cookies == 0` 就回 `code: 1` 并念出看不懂几行），它根本到不了引擎；可达的是混排那份，而它的修法在 `engine_note()` 上，不在词表上加一行 |
 | **`_COOKIE_WORDS` 是猜的，所以要写在后端** | 每个 extractor 说"要会话"的措辞都不同（bilibili 写 `cookies to access this webpage`、tiktok 写 `Fresh cookies (not necessarily logged in) are needed`），退出码**从不区分**它和"这站没有视频"。所以 `needs_cookies()` 按词判，且卡片上那句「这通常是站点要会话 cookie」只在它成立时出现 —— 反过来把不相关的拒绝也标成"要登录"，就是把用户送去装一个用不上的扩展 |
 | **设备列表第一行永远是「本机」，而且那一半是核心的** | `Handler._cast_targets()` 把 `[_local_target()] + 插件的 items` 拼出来，**插件不许自己塞这一行**（否则第二次读就是两个"本机"）。`id` 是 `local`，`name` 是**当前渲染器的标题**（`Setting.get(Macast_Renderer)`，和 `query=status` 报同一个值），因为「本机」不是一个东西：选 mpv 时它是这台 Mac 上的窗口，选 Local File Caster 时它是那个插件自己挑的设备。列表复用 `cast_local_file` 的 `target_state()` / `target_refresh()`（**mDNS + SSDP，异步刷新**），`refresh=1` 只回"搜索已启动"和缓存，**同步探三秒会按住一个 CherryPy worker 说一件下次轮询照样说的话**。协议代码一行没新增 |
 | **投给设备不改我们自己的播放态** | `target` 为空或 `local` → `_cast_url()`（今天的渲染器 `cast_uri`）；否则 → 插件的 `target_push()`，**不碰** `set_media_url` / `state` / `playing`。理由写在处理器的 docstring 里：卡片可以在另一台播放器正播着的时候往电视上推，两个主人会让状态页对两件事同时说「正在播放」。电视播多久、什么时候停，**由电视自己决定** |
@@ -1367,6 +1450,13 @@ detail 一律 `str(...)`（v0.18 那条 `None` 让后半 8 条根本没跑）。
 不弹登录窗；两条路都在卡片上：粘贴 Netscape jar，或允许从指定浏览器读 —— 后者默认关）·
 把中转链接当保密链接。**v0.19 从这一行划掉两件**：DASH 音画**合并**（现在合并了，只留下"多路音频只挑一条"
 这句代价）和"选一台设备投过去"（现在能选，且复用插件已有的发现与发送面）。
+**这一行的 JS 那一半在 v0.24 被收窄过一次，方向是"门还在那儿，但别把走错门的人算进来"**：
+用户报的第二个站点（`pomo.mom`）**从来不在 JS 这一类里** —— 它的两条真 m3u8 就写在 HTML 里，
+只是被 PHP 的 `json_encode` 转义成 `\/`，而我们的扫描把反斜杠当边界，于是从每个斜杠重新起扫、
+交回一个页面自己的根路径。修的是**读取**，不是新增"替页面跑一遍脚本"的能力；
+真 JS 形状的那个是 `xmfyy.com`（HTML 里零条媒体地址，`/js/play-router.js` 再去打
+`/api/play-url` 才拿得到），它现在**仍然**解不出，只是卡片会说出是哪一种解不出（见上面那行四句话）。
+**所以别把这次修复读成"JS 站点的支持开始了"**：那还是二阶段的决定，代价还是"每个页面多养一个浏览器进程"。
 
 **验证到什么程度**（2026-10-05 更新）：真站解析跑过**三趟**（v0.18 那趟对着 CLI，bilibili 6.5 秒走完四步，
 正是它暴露了无声 DASH 那一条；v0.19 那一趟对着**真设置页**从一段分享文案粘进去，6 秒 done、15 条候选、
@@ -1403,6 +1493,37 @@ mpv，十二问全绿：交出去的地址确实是 `http://192.168.1.5:<port>/r
 **局域网里另一个控制点**（这台机器上还有别处在跑 Macast），不是我们的代码 —— 复跑没有再现；
 判据也因此改成「位置取多次轮询的**最大值**」而不是抓一瞬间；
 ③ 这一格的见证者是**本机的 mpv（真播放器，但不是电视）**，所以下面那句欠账只改剩下的那一半。
+**2026-10-05 那一轮（v0.24.0 的两个报错站点）把这一格推到真站上重测了一遍，两个方向都量到了**：
+`scrape_page('https://pomo.mom/?plugin=plyr_player&gid=3683')` 交回 **3 条**候选
+（两条 `vip.dytt-network.com/…/index.m3u8` 加一条 `fengbao12.com/…/index.m3u8`），
+**「按页面自己的 host 编出来的地址」这一列实测是空列表** —— 修之前那一条是
+`https://pomo.mom/index.m3u8`，而服务器根本没有这个路径。另一侧 `resolve_now` 打在
+`https://www.xmfyy.com/vodplay/10277-qiyi-1.html` 上：候选 0 条、`engine_note` 是引擎自己的
+`ERROR: Unsupported URL: <那条地址>`，卡片读到的是**四句话里的第一句**
+（`页面里没有读到视频地址（yt-dlp 说：…；需要 JavaScript 才能算出地址的站点本机解不出来：…）`）。
+这一格的判据因此是**"两种解不出听起来不一样"**，不是"两个都解得出"。
+套件这一轮 **2351/2357**（红的仍是 §4.12 那 6 条 Part 34），`--ci` **PASSED**；
+四个定点变异体各自红 **1 / 4 / 1 / 2** 条且红集互不相交 —— 删掉 `_literal_urls` 那次解转义
+（假地址那条编造回来）；把 `engine_says_unsupported` 写成"任何 ERROR 都算"（**4 条**：一条 500 的原话
+被贴上 JS 那句、bilibili 的 cookie 墙被贴上 JS 那句、词表单元用例 `[('unsupported url', False), …]`、
+以及 R 段那条早就存在的 cookie 墙契约）；第三句（引擎在场却沉默）丢掉 `JS_HOLE`；
+第三句（这台机器没装 yt-dlp）**加上** `JS_HOLE` —— 最后一支同时红到 §4.2 那条
+「空结果要说清是哪一种空」的 `find_command` 打桩用例。四个都从 /tmp 备份还原、md5 逐字节一致。
+**同一轮再跑了一次上面那条「把见证从字节抬到了播放器」，这一次它同时是 §4.2 那条命名判据的见证者**
+（临时配置目录 + **58991** 的第二台实例，用户 58880 上的实例一个字节没动；仪器
+`/tmp/title_witness.py`，走**真产品路径** `resolve-page` → 轮 `resolve-status` → `cast-resolved`
+挑一条 **`remux`** 候选 → 从产品自己的日志行 `cast url from web endpoint: …` 读回交接地址 →
+按 `ppid` 认领**我们那个** mpv → 问它的 IPC）。**17 问 0 红**，逐格是：
+`title` / `media-title` / `force-media-title` **三个都读回卡片给的那个标题**
+（`【官方 MV】Never Gonna Give You Up - Rick Astley`），而 `filename` 仍然是 `'media'` ——
+这一格**故意留在输出里当作原症状的见证**（中转地址的末段被 mpv 当成名字，那正是 `media - mpv`
+的字面来源；「在播的是哪一路流」因此问 `path`，实测
+`http://192.168.1.5:64849/relay/f1CrNPfebdllNdlsh4NhrQ/media`）；`time-pos` 从 **0.96 走到 4.0**
+而 `duration` 是 `None`（转封装还在写，§4.14 那句「写完之前没有可信长度」在这里现形），
+`track-list` 交出 `['audio','video']`，日志里 **`end-file` 行数 0、带 `'error'` 的 0**；
+收尾 `SIGINT` 之后**只**收本次新增的那一个 mpv（69347），残留 `[]`，基线那 5 个一个没动。
+**这台机器上「在播」的判据必须是等 `time-pos` 变成一个数，不是抓一瞬间的 `duration`**，
+而一次批量 IPC 读取要按 `request_id` 凑齐来终止 —— 两条都是这一轮仪器的第一次红法（红的都不是产品）。
 **仍然欠着的两件**：**投给一台真电视没验过** —— 这个局域网里没有 Chromecast 设备，
 中转出去的流只在自家假设备、自家接收端，以及现在这一次的本机 mpv 上验过（§4.9 那一族的边界照旧适用：
 打桩能证明"交出去的只有 `/relay/<id>/media`"，字节复验与播放器复验都没有证明"一台真电视在转码还没完时
@@ -1607,7 +1728,12 @@ grep -aE "Cast LOAD|Cast connection|Cast handshake|Chromecast|AirPlay|mDNS|ERROR
 - **`Cast LOAD ... contentType=...`** 记录发送端自称要推什么。`audio/*` 就是实锤。
 - **问 mpv 到底拿到了什么轨**：从 `pgrep -fl mpv` 取 `--input-ipc-server=` 路径，发 IPC
   `get_property`：`track-list` / `video-codec` / `width` / `height` / `current-vo` / `core-idle`。
-  ⚠️ 返回 `{"error":"success"}` 是**成功**，别当失败处理。
+  ⚠️ 返回 `{"error":"success"}` 是**成功**，别当失败处理。**而且一次批量读取要按 `request_id`
+  是否凑齐来终止**：空闲播放器上 `media-title` / `filename` / `duration` / `time-pos` 回的是
+  `{"error":"property unavailable"}`（`force-media-title` 却回 `''` + `success`），
+  所以拿 `error == 'success'` 当筛条件就永远凑不齐，套接字直接超时（2026-10-05 实测，见 §4.2
+  「改播放器的地址，就必须改播放器的名字」末）。同理「在不在播」要**等 `time-pos` 变成一个数**，
+  别抓一瞬间的 `duration`。
 - **别把"端口在听"当证据**：`lsof ... LISTEN` + `socket.connect()` 成功都**不能**说明有人
   `accept()`。要区分就真的做一次 TLS 握手。
 - **环境里有代理会让本地网络测试假失败**：

@@ -952,10 +952,17 @@ class DLNAProtocol(Protocol):
             return {}
         self.current_index = idx
         uri = self.playlist[idx]
+        # Both of mpv's naming properties survive a `loadfile`, so stepping the
+        # playlist without renaming the player leaves the *previous* item's title on
+        # the window. The playlist holds URIs only, so the address is the honest
+        # answer -- the same rule `cast_uri` applies when a cast brings no name.
+        title = media_resolve.title_for_uri(uri)
         self.set_state_url(uri)
         self.renderer.set_media_url(uri)
+        self.renderer.set_media_title(title)
         self.set_state('CurrentTrack', idx + 1)
         self.set_state('CurrentTrackURI', uri)
+        self.set_state('CurrentTrackTitle', title)
         self.set_state('TransportState', 'PLAYING')
         self.set_state('TransportStatus', 'OK')
         return {}
@@ -965,14 +972,24 @@ class DLNAProtocol(Protocol):
 
         Used by the local-file-casting flow: the settings page uploads a file,
         Macast serves it from 127.0.0.1, and publishes 'cast_local_file' which
-        this method handles."""
+        this method handles.
+
+        `title` is optional at every call site -- the GET entry, a hand-written
+        POST, a re-cast of a history entry -- so the player is named here rather
+        than left alone. An empty `title` is passed on to `_add_history` as
+        empty: the *player* has to be renamed by something, while the history
+        has a better answer available (see there).
+        """
         if not uri:
             return
+        given = (title or '').strip()
+        # mpv's `title` property survives a later `loadfile`, so a cast that
+        # brings no name would otherwise keep wearing the *previous* item's
+        # title -- which is why the fallback always answers something.
         self.set_state_url(uri)
         self.renderer.set_media_url(uri)
-        if title:
-            self.renderer.set_media_title(title)
-            self.set_state('CurrentTrackTitle', title)
+        self.renderer.set_media_title(given or media_resolve.title_for_uri(uri))
+        self.set_state('CurrentTrackTitle', given or media_resolve.title_for_uri(uri))
         if uri not in self.playlist:
             self.playlist.append(uri)
         self.current_index = self.playlist.index(uri)
@@ -2103,9 +2120,10 @@ class Handler:
         ('cast-resolved', GATE_MANAGEMENT, '_post_cast_resolved'),
         # Cookies for the page resolver. Management-gated like the two above, and
         # for the same reason: neither writes anything that *runs*. The jar is data
-        # handed to yt-dlp as a file path this code chose, and the browser name is
-        # checked against `COOKIE_BROWSERS` before it reaches argv -- so this is not
-        # the `GATE_CODE` family (§4.7b), where a request hands us code to execute.
+        # handed to yt-dlp as a file path this code chose, and the browser value is
+        # put through `media_resolve.cookie_browser_spec` before it reaches argv --
+        # so this is not the `GATE_CODE` family (§4.7b), where a request hands us
+        # code to execute.
         ('resolve-cookies', GATE_MANAGEMENT, '_post_resolve_cookies'),
         ('resolve-cookies-clear', GATE_MANAGEMENT, '_post_resolve_cookies_clear'),
         ('resolve-cookie-browser', GATE_MANAGEMENT, '_post_resolve_cookie_browser'),
@@ -2517,13 +2535,15 @@ class Handler:
     #: the one place it grows must not be the one place that gets shared.
     COOKIE_JAR_NAME = 'resolve_cookies.txt'
 
-    #: The browser names yt-dlp's `--cookies-from-browser` accepts, in its own
-    #: words. A whitelist because the value is read from hand-editable settings and
-    #: then handed to a subprocess as an argument: a name starting with `-` would
-    #: be a new switch rather than a browser, and reading somebody's cookie store
-    #: is not something a string from disk gets to decide quietly.
-    COOKIE_BROWSERS = ('brave', 'chrome', 'chromium', 'edge', 'firefox',
-                       'opera', 'safari', 'vivaldi', 'whale')
+    #: The browser names yt-dlp's `--cookies-from-browser` accepts, in its own words.
+    #: An alias, not a copy: the same tuple is what `cookie_browser_spec` checks a
+    #: value against on its way out to argv, and a whitelist one file away from the
+    #: argument it guards drifts from what that argument actually accepts. A
+    #: whitelist at all because the value is read from hand-editable settings: a name
+    #: starting with `-` would be a new switch rather than a browser, and reading
+    #: somebody's cookie store is not something a string from disk gets to decide
+    #: quietly.
+    COOKIE_BROWSERS = media_resolve.COOKIE_BROWSERS
 
     def _cookie_jar_path(self):
         return os.path.join(SETTING_DIR, self.COOKIE_JAR_NAME)
@@ -2542,13 +2562,21 @@ class Handler:
             return ''
         return raw.decode('utf-8', 'replace')
 
-    def _cookie_browser_name(self):
-        """The browser the user pointed us at, or '' -- always a whitelisted name."""
+    def _cookie_browser_spec(self):
+        """The whole `--cookies-from-browser` value, or '' for "pass nothing".
+
+        Re-checked through `media_resolve.cookie_browser_spec` on *every* read, not
+        only on the way in: `Resolve_Cookie_Browser` sits in a JSON the user edits by
+        hand (高级设置), and the gate that wrote it is not the gate that reads it. The
+        result is always something this engine accepts as one argument -- a whitelisted
+        browser name, optionally with the profile directory the user pointed at -- and
+        anything else reads as "no browser", which is a real answer rather than a
+        switch the subprocess would interpret on its own.
+        """
         if not Setting.has(SettingProperty.Resolve_Cookie_Browser):
             return ''
-        name = str(Setting.get(SettingProperty.Resolve_Cookie_Browser, '')
-                   or '').strip().lower()
-        return name if name in self.COOKIE_BROWSERS else ''
+        return media_resolve.cookie_browser_spec(
+            Setting.get(SettingProperty.Resolve_Cookie_Browser, ''))
 
     def _cookie_settings(self):
         """The dict `media_resolve.cookie_arguments` wants; `''` halves dropped.
@@ -2560,7 +2588,7 @@ class Handler:
         cookies = {}
         if self._cookie_jar_text():
             cookies['file'] = self._cookie_jar_path()
-        browser = self._cookie_browser_name()
+        browser = self._cookie_browser_spec()
         if browser:
             cookies['browser'] = browser
         return cookies
@@ -2585,7 +2613,7 @@ class Handler:
             'cookies': cookies,
             'bad': bad,
             'path': self._cookie_jar_path(),
-            'browser': self._cookie_browser_name(),
+            'browser': self._cookie_browser_spec(),
             'browsers': list(self.COOKIE_BROWSERS),
             'max_bytes': media_resolve.COOKIE_JAR_MAX_BYTES,
             'yt_dlp': media_resolve.find_command('yt-dlp') is not None,
@@ -2812,33 +2840,47 @@ class Handler:
         except OSError as exc:
             return {'code': 1, 'message': '删除失败：{}: {}'.format(
                 type(exc).__name__, exc)}
-        browser = self._cookie_browser_name()
+        browser = self._cookie_browser_spec()
         return {'code': 0, 'message': '已清除 cookie 文件' + (
             '，下次解析改用 {}'.format(browser) if browser else '')}
 
     def _post_resolve_cookie_browser(self, kwargs):
-        """Turn browser-cookie reading on or off, by name.
+        """Turn browser-cookie reading on or off, by name, optionally + directory.
 
-        Off by default and this is the only switch: nothing here opens a cookie
-        store that the user has not pointed at, and the value is re-checked against
-        `COOKIE_BROWSERS` on every read (`_cookie_browser_name`), so editing the
-        settings JSON by hand cannot put a new argv switch in the parse command.
+        Off by default and this is the only switch: nothing here opens a cookie store
+        that the user has not pointed at. Accepted spellings are a whitelisted browser
+        name or `名字:资料目录` -- the two halves `--cookies-from-browser` can take that
+        we can hand over safely. The value is re-checked against `COOKIE_BROWSERS` on
+        every *read* (`_cookie_browser_spec`), so editing the settings JSON by hand
+        cannot put a new argv switch in the parse command; the keyring and container
+        segments are refused here because a spec we cannot describe is a spec we
+        cannot check on the way out either.
         """
-        name = str(kwargs.get('resolve-cookie-browser') or '').strip().lower()
-        if name in ('', '0', 'off', 'none', '关闭', '不用'):
+        text = str(kwargs.get('resolve-cookie-browser') or '').strip()
+        if text.lower() in ('', '0', 'off', 'none', '关闭', '不用'):
             Setting.unset(SettingProperty.Resolve_Cookie_Browser)
             return {'code': 0, 'message': '不再从浏览器读取 cookie'}
+        name = text.partition(':')[0].strip().lower()
         if name not in self.COOKIE_BROWSERS:
             return {'code': 1,
                     'message': '不认识「{}」这个浏览器，可选：{}'.format(
                         name, '、'.join(self.COOKIE_BROWSERS))}
-        Setting.set(SettingProperty.Resolve_Cookie_Browser, name)
+        spec = media_resolve.cookie_browser_spec(text)
+        if not spec:
+            # The name was fine and the rest was not, so say which half failed -- the
+            # sentence above would send the user looking for a browser called
+            # `vivaldi:C:\Users\…`.
+            return {'code': 1,
+                    'message': '「{}」我们只认到浏览器名字为止：后面可以跟一段'
+                               '「:资料目录」（那个浏览器存放 cookie 的目录），'
+                               '但不能是 +钥匙串、::容器，也不能以 - 开头'.format(text)}
+        Setting.set(SettingProperty.Resolve_Cookie_Browser, spec)
         if self._cookie_jar_text():
             # Saying this out loud is the whole point of the ordering rule in
             # `cookie_arguments`: otherwise the switch looks broken.
             return {'code': 0, 'message': '已设为 {}，但本机存过 cookie 文件，'
-                                          '解析仍以文件为准（清除文件后才会用浏览器）'.format(name)}
-        return {'code': 0, 'message': '下次解析会从 {} 读取 cookie'.format(name)}
+                                          '解析仍以文件为准（清除文件后才会用浏览器）'.format(spec)}
+        return {'code': 0, 'message': '下次解析会从 {} 读取 cookie'.format(spec)}
 
     def _post_clear_play_history(self, kwargs):
         try:
