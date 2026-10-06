@@ -59,7 +59,9 @@ pub enum Signal {
     Mute(Value),
     /// The two `set_state` calls track-list makes together.
     Tracks { current: i64, number: i64 },
-    /// `set_state_speed` / `set_media_subtitle` with the raw value.
+    /// `set_state_speed` / `set_state_subtitle` with the raw value — both are
+    /// renderer *state* setters (`macast/renderer.py:211` and `:214`), not the
+    /// IPC sends that `set_media_*` names.
     Speed(Value),
     Subtitle(Value),
     /// `cherrypy.engine.publish('renderer_av_stop')`.
@@ -114,9 +116,18 @@ impl PlayerState {
 
     /// Tell the player what the protocol currently says, before feeding it a line.
     pub fn with_protocol(mut self, transport_state: &str, current_url: &str) -> Self {
+        self.set_protocol(transport_state, current_url);
+        self
+    }
+
+    /// The same, for a player that is already running: the transport state and
+    /// the url it holds are read from the protocol side **inside every line's**
+    /// translation (`macast_renderer/mpv.py:317` and `:354` sit in
+    /// `update_state`, which the reader calls per message), because a `play` can
+    /// be told from the menu while that thread is blocked in `recv`.
+    pub fn set_protocol(&mut self, transport_state: &str, current_url: &str) {
         self.transport_state = transport_state.to_string();
         self.current_url = current_url.to_string();
-        self
     }
 
     pub fn playing(&self) -> bool {

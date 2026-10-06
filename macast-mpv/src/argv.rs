@@ -11,12 +11,19 @@
 //!   hand-edited into the "advanced settings" JSON on the settings page. That is
 //!   where the Python-semantics cases below come from — they are not hypothetical
 //!   input shapes, they are the shapes a hand-edit produces.
-//! - **a wrong value here does not fail loudly.** In the reference, a
-//!   `PlayerSize` that is not a number raises inside `build_mpv_params`, the
-//!   exception is swallowed one frame up by `start_mpv`'s `except Exception`, the
-//!   retry loop spends its three attempts the same way, and what the user reads
-//!   is "mpv cannot start" with a log full of a Python `TypeError`. The port
-//!   returns that case as [`BuildError`] so the caller can name the key.
+//! - **a wrong value here does not fail loudly, and it does not fail the way a
+//!   caller would guess.** `params = self.build_mpv_params()` sits at
+//!   `mpv.py:527`, which is **outside** the `try:` opened at `:532` — measured,
+//!   not inferred, by replaying that exact control flow on CPython 3.12.15: a
+//!   `PlayerSize` that is not a number lets the exception escape `start_mpv`
+//!   altogether, so the thread dies with `Exception in thread MPV_THREAD` on
+//!   stderr and **nothing** the loop guards ever runs. No 「mpv starting」, no
+//!   `publish('mpv_start')`, no retry, no three-attempt budget spent, no
+//!   「mpv cannot start」, no notify, no `stop_service()`. The log the user reads
+//!   is one traceback, not a log full of them — and `mpv_thread.is_alive()` is
+//!   then False, which is what ends the ipc loop too. The port returns that case
+//!   as [`BuildError`] so the caller can name the key, and `crate::player` logs it
+//!   and abandons the attempt, keeping the silence faithful.
 //!
 //! Everything the reference reaches for outside its own arguments — the setting
 //! file, `os.path.exists`, `os.listdir`, `sys.platform`, the socket path — is a
@@ -94,15 +101,25 @@ impl Default for Config {
 /// The command line plus the things the builder had to decide about it.
 ///
 /// A second return channel rather than a silent clamp: the reference would have
-/// raised, and a port that quietly fixes a user's bad value owes them a line
-/// saying it did.
+/// raised, or would have silently taken neither branch, and a port that quietly
+/// fixes a user's bad value owes them a line saying it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
     pub argv: Vec<String>,
     pub warnings: Vec<String>,
 }
 
-/// A knob whose stored value cannot be read as the number the branch needs.
+/// A knob whose stored value makes Python raise, which is only two of the three.
+///
+/// `PlayerHW` is deliberately **not** in this enum. `value == PlayerHW_Disable`
+/// and `value == PlayerHW_Force` are both simply `False` for a value Python
+/// cannot compare to an int, so the reference takes neither branch, leaves the
+/// `--hwdec=yes` it already built in place, and starts mpv. Reporting that as an
+/// error would give a person who hand-typed `null` into the advanced-settings
+/// JSON a player that never starts, where today they have a working one — so it
+/// is a [`Build::warnings`] entry instead, and the argument was had in the open
+/// because "the port refuses" is exactly the kind of improvement that reads as a
+/// regression at 3 a.m.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
     /// `player_position_data[value]` — Python's "list indices must be integers".
@@ -110,9 +127,6 @@ pub enum BuildError {
     /// `value <= PlayerSize_Large` — Python's "'<=' not supported between
     /// instances of 'str' and 'int'".
     Size(Value),
-    /// `value == PlayerHW_Disable` never raises in Python; it silently takes
-    /// neither branch. This port reports it instead, and the message says so.
-    Hw(Value),
 }
 
 impl BuildError {
@@ -121,7 +135,6 @@ impl BuildError {
         match self {
             BuildError::Position(_) => "PlayerPosition",
             BuildError::Size(_) => "PlayerSize",
-            BuildError::Hw(_) => "PlayerHW",
         }
     }
 
@@ -138,19 +151,14 @@ impl BuildError {
                 pyops::py_repr(v),
                 pyops::type_name(v)
             ),
+            // Python names no type for the left operand here — it asks for one and
+            // fails, which is why the message quotes its error instead of naming a
+            // type the way the `Position` arm can.
             BuildError::Size(v) => format!(
                 "PlayerSize is not a number: {} \u{28}Python: '<=' not supported between instances \
                  of '{}' and 'int'\u{29}",
                 pyops::py_repr(v),
                 pyops::type_name(v)
-            ),
-            // Python names no type here because it never asks for one: `"x" == 0`
-            // and `"x" == 2` are both False, so the `--hwdec=yes` that is already in
-            // the list simply stays.
-            BuildError::Hw(v) => format!(
-                "PlayerHW is not a number: {} \u{28}Python: silently ignored, leaving hardware \
-                 decoding on\u{29}",
-                pyops::py_repr(v)
             ),
         }
     }
@@ -209,7 +217,7 @@ pub fn build(config: &Config) -> Result<Build, BuildError> {
         params.push("--macos-app-activation-policy=accessory".to_string());
     }
 
-    push_hw_args(config, &mut params)?;
+    push_hw_args(config, &mut params, &mut warnings);
 
     Ok(Build {
         argv: params,
@@ -298,8 +306,20 @@ fn push_size_args(config: &Config, params: &mut Vec<String>) -> Result<(), Build
 }
 
 /// The hardware knob, which **removes** an option rather than setting one.
-fn push_hw_args(config: &Config, params: &mut Vec<String>) -> Result<(), BuildError> {
-    let hw = pyops::as_int(&config.hw).ok_or(BuildError::Hw(config.hw.clone()))?;
+///
+/// A value `as_int` cannot read is a warning here rather than a [`BuildError`],
+/// because Python's `==` never raises: `null == 0` and `null == 2` are both
+/// `False`, so the reference simply starts mpv with the `--hwdec=yes` the base
+/// list already gave it. The port has to keep that player startable.
+fn push_hw_args(config: &Config, params: &mut Vec<String>, warnings: &mut Vec<String>) {
+    let Some(hw) = pyops::as_int(&config.hw) else {
+        warnings.push(format!(
+            "PlayerHW {} is not a number; neither hardware branch runs, so --hwdec=yes stays \
+             \u{28}Python: both comparisons are False, and it says nothing\u{29}",
+            pyops::py_repr(&config.hw)
+        ));
+        return;
+    };
     if hw == 0 {
         // `params.remove('--hwdec=yes')` — and `list.remove` raises if the value
         // is not in the list. It always is here: the base list is built above and
@@ -312,7 +332,6 @@ fn push_hw_args(config: &Config, params: &mut Vec<String>) -> Result<(), BuildEr
     } else if hw == 2 {
         params.push("--macos-force-dedicated-gpu=yes".to_string());
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -543,15 +562,29 @@ mod tests {
         let err = build(&Config { size: json!("Large"), ..config() }).unwrap_err();
         assert_eq!(err.key(), "PlayerSize");
         assert!(err.message().contains("not supported between instances of 'str' and 'int'"), "{}", err.message());
-        // The `None` case names Python's type, not ours: a reader searching the
-        // old log wants `NoneType`.
-        let err = build(&Config { hw: json!(null), ..config() }).unwrap_err();
-        assert!(err.message().contains("not a number: None"), "{}", err.message());
-        assert!(err.message().contains("silently ignored"), "{}", err.message());
-        // A string a person typed for a number is *not* an error here, which is
-        // the other half of the same divergence: Python's `"0" == 0` is False and
-        // so turned hardware decoding off-by-accident; `int()` would have read it
-        // as off, and so do we.
-        assert!(!build(&Config { hw: json!("0"), ..config() }).unwrap().argv.contains(&"--hwdec=yes".to_string()));
+        // Hardware is the third knob, and it is **not** in this list: `null == 0`
+        // and `null == 2` are both False in Python, so the reference starts mpv
+        // with the `--hwdec=yes` the base list already gave it. The port owes that
+        // case a line, not a dead player.
+        let built = build(&Config { hw: json!(null), ..config() }).unwrap();
+        assert!(built.argv.contains(&"--hwdec=yes".to_string()));
+        assert_eq!(built.warnings.len(), 1, "{:?}", built.warnings);
+        assert!(
+            built.warnings[0].starts_with("PlayerHW None is not a number"),
+            "{}",
+            built.warnings[0]
+        );
+        assert!(
+            built.warnings[0].contains("both comparisons are False"),
+            "{}",
+            built.warnings[0]
+        );
+        // A string a person typed for a number is the documented divergence, and
+        // the direction matters: Python's `"0" == 0` is False, so the **reference
+        // keeps** `--hwdec=yes`; `int("0")` is 0, so this port drops the flag —
+        // which is what the person who typed `"0"` meant. See `pyops::as_int`.
+        let built = build(&Config { hw: json!("0"), ..config() }).unwrap();
+        assert!(!built.argv.contains(&"--hwdec=yes".to_string()));
+        assert!(built.warnings.is_empty(), "{:?}", built.warnings);
     }
 }

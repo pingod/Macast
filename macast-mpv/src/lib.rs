@@ -1,10 +1,10 @@
-//! The player half of Macast: everything this crate does, it does without
-//! touching a socket or a process.
+//! The player half of Macast: mpv's command line, its JSON IPC, and the one
+//! process and one socket those need.
 //!
 //! mpv is driven over its JSON IPC, which is a line protocol on a Unix socket
-//! (or a named pipe on Windows). Two of its three moving parts are therefore
-//! *pure* — the command we intend to send and the meaning of the line that came
-//! back — and only the transport is not. This crate holds the pure halves:
+//! (or a named pipe on Windows). Most of it is *pure* — the command we intend to
+//! send and the meaning of the line that came back — and only the transport is
+//! not. This crate holds both halves:
 //!
 //! - [`command`] — every `loadfile` / `set_property` / `seek` shape the renderer
 //!   ever sends, the per-file option dictionary that makes a live stream play
@@ -21,6 +21,17 @@
 //!   Rust's, kept in one module so the divergences are countable instead of
 //!   scattered. (How many there are is that module's own business; restating the
 //!   number here is how it goes stale.)
+//! - [`link`] — the connected socket, and the words the reference uses when it
+//!   is not there. `#[cfg(unix)]`: Windows named pipes are not implemented, and
+//!   the reason is in that module.
+//! - [`player`] — the transport as the reference does it: spawn mpv, retry with
+//!   a three-attempt budget, connect the IPC socket, read lines under one
+//!   [`Feed`], write commands under one lock, and stop in an order that has
+//!   reasons. `#[cfg(unix)]` with it. This is the only module here that talks to
+//!   anything outside the process, and it does so through a [`player::Host`]
+//!   trait — the event bus and the settings live in `src-tauri`, which has not
+//!   been written yet, so the crate defines the seam and its tests are the only
+//!   implementations of it for now.
 //!
 //! Why the split is worth a crate of its own: AGENTS.md records a family of
 //! defects that all have the same shape — *a contract that only a real player or
@@ -32,11 +43,20 @@
 //! those is now a unit test with nothing on the other end of the pipe, because
 //! the shapes are computed here.
 //!
-//! The transport half (spawning mpv, connecting, the retry loop with its
-//! three-attempt budget) is deliberately *not* here: it belongs with the process
-//! supervision of `src-tauri`, where it can be written once against real
-//! platform APIs instead of twice against a mock.
+//! The ordering in [`player`] is the same kind of claim, and it was earned the
+//! same way. Two examples that are *not* style: the command line is built
+//! **outside** the retry loop's `try`, so a knob Python cannot compare escapes
+//! the thread as a traceback instead of spending a retry and printing
+//! 「mpv cannot start」; and the socket is assigned **before** `connect()`, so a
+//! failed connect leaves an unconnected socket in the slot and the next command
+//! hears 「[Errno 57] Socket is not connected」 rather than an `AttributeError`.
+//! Both are recorded in that module, with what the reference therefore never
+//! does.
 
+#[cfg(unix)]
+pub mod link;
+#[cfg(unix)]
+pub mod player;
 pub mod argv;
 pub mod command;
 pub mod ipc;
@@ -50,5 +70,9 @@ pub mod state;
 // between one command and the next).
 pub use argv::{build, Build, BuildError, Config};
 pub use command::{live_load_options, loadfile, Liveness};
-pub use ipc::{Close, Failure, Feed, Received};
+#[cfg(unix)]
+pub use link::Link;
+#[cfg(unix)]
+pub use player::{Host, Player, StateCall, Timings};
 pub use state::{PlayerState, Signal};
+pub use ipc::{Close, Failure, Feed, Received};
