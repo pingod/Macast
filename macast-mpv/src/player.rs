@@ -1076,8 +1076,18 @@ mod tests {
         }
     }
 
-    fn wait_until(label: &str, mut pred: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+    fn wait_until(label: &str, pred: impl FnMut() -> bool) {
+        wait_until_within(label, Duration::from_secs(5), pred)
+    }
+
+    /// The same poll, with the budget given by the caller.
+    ///
+    /// The five seconds above is right for a shell script that answers the moment it
+    /// is asked. It is not right for a real player, which probes the media it was
+    /// just handed before it says anything about it — so every wait that sits behind
+    /// a genuine mpv reads the longer number instead.
+    fn wait_until_within(label: &str, limit: Duration, mut pred: impl FnMut() -> bool) {
+        let deadline = Instant::now() + limit;
         while !pred() {
             if Instant::now() > deadline {
                 panic!("timed out waiting for: {}", label);
@@ -2627,6 +2637,648 @@ mod tests {
             "lines: {:?}",
             host.lines()
         );
+    }
+
+    // --- real-player differential witnesses --------------------------------------
+    //
+    // Everything above is witnessed against a `/bin/sh` script that answers with the
+    // bytes the test wrote into it. Five facts this port reproduces are not of that
+    // kind: AGENTS.md §4.2's 「只有真机才教得了的 mpv 读取事实」 and §5's 「一次批量读取要按
+    // `request_id` 是否凑齐来终止」 describe what a genuine player *says*. These ask the
+    // real binary through the product's own seams and assert only what was measured on
+    // this machine (mpv v0.41.0 at `/opt/homebrew/bin/mpv`). Gated on
+    // `MACAST_RUST_MPV_E2E=1`; each prints `SKIPPED:` with its reason instead of
+    // pretending when mpv or ffmpeg is not here.
+    //
+    // **Teeth, measured one mutation at a time** (each run was the whole crate, and each
+    // file was restored and md5-verified before the count was read):
+    //
+    // | mutant | red |
+    // |---|---|
+    // | the settle-wait never waits | 1 — `ask_real`'s one-row-per-command count |
+    // | one pinned live option wrong (`audio-buffer 0.0`→`0.1`) | 1 |
+    // | the no-`data`-key assertion inverted | 1 |
+    // | the expected `property unavailable` text changed | 1 |
+    // | the fixture built under its requested extension-less name | 1 — and it prints ffmpeg's own refusal, which is the vacuous-green shape this block used to have |
+    // | `set_media_url` stops passing the resume position | 4 — 3 unit + 「the player really sits at twelve seconds」 |
+    // | expect a volume the machine never reported | 1 — times out at 30 s |
+    // | **delete** `ask_real`'s count assertion | **0** |
+    //
+    // That last row is the honest one, and it is kept rather than removed: see
+    // [`ask_real`].
+
+    const REAL_MPV_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// The reply rows the reader logged, in arrival order.
+    ///
+    /// `state.rs::apply`'s silent third branch is the only witness channel for
+    /// anything read back from a real player: a reply we asked for is logged at
+    /// **Debug** as the Python repr of a dict that always has an `error` key, an event
+    /// is logged at **Info**, and a command we wrote is logged at Debug as
+    /// `send command: […]`. The `"'error'"` needle is chosen against those Debug lines
+    /// and not loosely: `send command: ['get_property', 'duration']` never has a quoted
+    /// `error` in it, `update duration 0:00:20` has no quotes at all, and an event row's
+    /// `'file_error'` has an underscore before `error` *and* is an Info line.
+    fn reply_lines(host: &TestHost) -> Vec<String> {
+        host.at(Level::Debug)
+            .into_iter()
+            .filter(|line| line.contains("'error'"))
+            .collect()
+    }
+
+    /// Wait until the player has nothing more on the wire, and say how many replies
+    /// that is.
+    ///
+    /// "Nothing more" is two 60 ms samples with the same count: real mpv flushes an ack
+    /// asynchronously, and round 1's instrument read the *previous* entry's option
+    /// values exactly this way (AGENTS.md §4.2 「等那个事实，而不是抓一瞬间」). A run that
+    /// never settles is not a slow player but a broken witness, so it panics rather
+    /// than handing back a count nobody can trust.
+    fn wait_for_replies_to_settle(host: &TestHost) -> usize {
+        let deadline = Instant::now() + REAL_MPV_TIMEOUT;
+        let mut previous = reply_lines(host).len();
+        let mut settled = 0;
+        while settled < 2 {
+            std::thread::sleep(Duration::from_millis(60));
+            let now = reply_lines(host).len();
+            if now == previous {
+                settled += 1;
+            } else {
+                settled = 0;
+                previous = now;
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "the player is still answering after {} seconds",
+                    REAL_MPV_TIMEOUT.as_secs()
+                );
+            }
+        }
+        previous
+    }
+
+    /// Send one command to a running real player and hand back its reply row.
+    ///
+    /// `command::encode` never writes a `request_id`, so one connection carries one
+    /// in-order stream: exactly one new row per send — asserted, not assumed. Round 1's
+    /// instrument read one row too many because it never drained the ack for the
+    /// command before it, and that is the failure this shape forbids.
+    ///
+    /// **The count and the settle-wait are load-bearing in one direction only, and that
+    /// is measured, not assumed.** Deleting this `assert_eq!` is **0 red** on this
+    /// machine: with the settle-wait in place nothing ever interleaves a second row, so
+    /// no test can reach it. Deleting the *settle-wait* is 1 red and it is red **here**.
+    /// So this line's job is not to catch today's timing — it is to make weakening that
+    /// timing a red instead of a silently misread row, and an interleaved event
+    /// (`file-loaded` landing between the settle and the reply) trips it too. Removing it
+    /// would turn the first mutant green, which is why it stays despite the zero.
+    fn ask_real(player: &Player, host: &TestHost, command: &Value) -> String {
+        wait_for_replies_to_settle(host);
+        let cmds = command.as_array().expect("a command array").clone();
+        let before = reply_lines(host).len();
+        assert!(
+            player.send_command(&cmds),
+            "mpv is not reading the socket: {:?}",
+            command
+        );
+        let label = format!("a reply to {}", command::logged_command(&cmds));
+        wait_until_within(&label, REAL_MPV_TIMEOUT, || {
+            reply_lines(host).len() > before
+        });
+        let after = reply_lines(host);
+        assert_eq!(
+            after.len(),
+            before + 1,
+            "one reply per command, in order: {:?}",
+            &after[before..]
+        );
+        after[before].clone()
+    }
+
+    /// One field out of a reply row, as Python prints it — quotes and all.
+    ///
+    /// **Scalar rows only**: a `loadfile` ack is
+    /// `{'data': {'playlist_entry_id': 1}, 'error': 'success', …}` and that nested value
+    /// contains `', '`, which is this function's terminator. Acks are counted, never
+    /// parsed.
+    fn reply_field(line: &str, key: &str) -> Option<String> {
+        let marker = format!("'{}': ", key);
+        let at = line.find(&marker)? + marker.len();
+        let rest = &line[at..];
+        let stop = match (rest.find(", '"), rest.find('}')) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => rest.len(),
+        };
+        Some(rest[..stop].to_string())
+    }
+
+    /// The `data` of a scalar reply row, as a number.
+    fn reply_number(line: &str) -> f64 {
+        let raw = reply_field(line, "data").unwrap_or_else(|| panic!("no data in {}", line));
+        raw.trim_matches('\'')
+            .parse::<f64>()
+            .unwrap_or_else(|_| panic!("data is not a number: {}", line))
+    }
+
+    /// A real mpv, pointed at a private `MPV_HOME`, driven by the product's own
+    /// [`Player`].
+    ///
+    /// - `MPV_HOME` is **inside the temp directory**: our argv carries
+    ///   `--save-position-on-quit=yes` (`argv.rs`), so an unpinned home would write
+    ///   `watch_later/` into the user's real `~/.config/mpv` — AGENTS.md §10's first
+    ///   rule, and the one thing a differential test must not do to a sleeping machine.
+    /// - It is set by `exec env MPV_HOME=…` inside a wrapper script rather than by
+    ///   `std::env::set_var`, because these tests run concurrently in one process; and
+    ///   `exec` makes the pid we reap *be* mpv instead of a shell.
+    /// - `mpv.conf` asks for `vo=null` / `ao=null` / `force-window=no`: no window
+    ///   appears while the user sleeps. Measured here, that home is paced in real time —
+    ///   20.49 s of wall clock for a 20 s clip — so these witnesses do not race an
+    ///   unthrottled player.
+    /// - `platform` stays at [`Config`]'s default `linux` so `--ontop-level=system`
+    ///   never enters the argv; the darwin shapes are already measured in `argv.rs`.
+    ///
+    /// Field order is the reaping order: `_guard` stops the child before `temp` removes
+    /// the directory it was started from.
+    struct RealMpv {
+        _guard: Guard,
+        host: Arc<TestHost>,
+        player: Player,
+        temp: Temp,
+    }
+
+    impl RealMpv {
+        /// `Some(name)` builds a 20-second clip with that file name inside the temp
+        /// directory (and loads nothing yet, so these witnesses each decide when the
+        /// player starts); `None` leaves the player genuinely idle, which is what the
+        /// batch-read witness needs.
+        ///
+        /// **Which absence is a skip and which is red.** `None` — a printed `SKIPPED:`
+        /// and an `ok` — means only *this machine has no such tool*: the gate is off, or
+        /// there is no mpv, or there is no ffmpeg to make a clip with. A tool that is
+        /// **present and fails** panics. The difference is the whole point: a skip that
+        /// comes from our own fixture being wrong is AGENTS.md §4.2's 「不提问的检查」
+        /// wearing a green tick, and the first run of this harness produced exactly one
+        /// of those (see the `clip.mp4` detour below).
+        fn open(clip: Option<&str>) -> Option<RealMpv> {
+            if std::env::var("MACAST_RUST_MPV_E2E").unwrap_or_default() != "1" {
+                eprintln!("SKIPPED: set MACAST_RUST_MPV_E2E=1 to run this against real mpv");
+                return None;
+            }
+            let mpv = Path::new("/opt/homebrew/bin/mpv");
+            if !mpv.exists() {
+                eprintln!("SKIPPED: no mpv at {}", mpv.display());
+                return None;
+            }
+            let temp = Temp::new();
+            if let Some(name) = clip {
+                let ffmpeg = "/opt/homebrew/opt/ffmpeg/bin/ffmpeg";
+                if !Path::new(ffmpeg).exists() {
+                    eprintln!("SKIPPED: no ffmpeg at {} to make the clip", ffmpeg);
+                    return None;
+                }
+                // ffmpeg picks its muxer from the output **extension**, and the whole point
+                // of one witness below is a file with no extension at all — so everything is
+                // built as `.mp4` and moved to the requested name afterwards. Asking ffmpeg
+                // to write `/tmp/…/media` directly failed exactly the way it would on any
+                // other machine ("use a standard extension for the filename"), and because
+                // this `open` used to answer that with a skip, that witness printed `ok`
+                // while asking nothing. See `open`'s own doc comment for that rule.
+                let built = temp.path("clip.mp4");
+                let made = std::process::Command::new(ffmpeg)
+                    .args([
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "testsrc2=size=320x240:rate=25",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "sine=frequency=440:sample_rate=48000",
+                        "-t",
+                        "20",
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "ultrafast",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-c:a",
+                        "aac",
+                        "-shortest",
+                    ])
+                    .arg(&built)
+                    .output()
+                    .expect("run ffmpeg");
+                if !made.status.success() {
+                    let tail = String::from_utf8_lossy(&made.stderr);
+                    panic!(
+                        "the fixture clip could not be made (this is the instrument, not \
+                         mpv): {}",
+                        &tail[tail.len().saturating_sub(300)..]
+                    );
+                }
+                if name != "clip.mp4" {
+                    std::fs::rename(&built, temp.path(name))
+                        .expect("move the clip to the name the witness asks for");
+                }
+            }
+            let home = temp.path("home");
+            std::fs::create_dir_all(&home).expect("make the private MPV_HOME");
+            std::fs::write(
+                format!("{}/mpv.conf", home),
+                "vo=null\nao=null\nforce-window=no\n",
+            )
+            .expect("write the private mpv.conf");
+            let wrapper = temp.script(&format!("exec env MPV_HOME={} {} \"$@\"", home, mpv.display()));
+            let host = Arc::new(TestHost::new());
+            let player = Player::with_timings(
+                SharedHost(host.clone()),
+                Config {
+                    mpv_path: wrapper,
+                    ipc_socket: temp.path("s"),
+                    ..Config::default()
+                },
+                Timings {
+                    connect: Duration::from_millis(200),
+                    retry: Duration::from_millis(400),
+                    stop_wait: Duration::from_secs(2),
+                    poll: Duration::from_millis(20),
+                },
+            );
+            // A red run must not leave the user's player running: see `Guard`.
+            let _guard = Guard(player.shared.clone());
+            player.start();
+            wait_until_within(
+                "real mpv accepted the ipc connection",
+                REAL_MPV_TIMEOUT,
+                || player.ipc_once_connected(),
+            );
+            wait_until_within(
+                "the ten setup commands were written",
+                REAL_MPV_TIMEOUT,
+                || host.count_containing("send command: ") >= 10,
+            );
+            wait_for_replies_to_settle(&host);
+            Some(RealMpv {
+                _guard,
+                host,
+                player,
+                temp,
+            })
+        }
+
+        fn file(&self, name: &str) -> String {
+            self.temp.path(name)
+        }
+
+        /// How many times the player has said it loaded something. Every witness that
+        /// reads a media-dependent property waits on this and not on a clock: the load
+        /// is asynchronous, and a property read before it belongs to whatever was in
+        /// the player before.
+        fn loads(&self) -> usize {
+            self.host.count_containing("'file-loaded'")
+        }
+
+        /// Stop through the product's own `stop()`, prove the socket file is gone and
+        /// **our** child pid is reaped. The only pid this knows is the one `start()`
+        /// recorded, so it can never touch the mpv children of the user's running app.
+        fn shutdown(&self) {
+            let pid = self.player.player_pid().expect("mpv is our child");
+            self.player.stop();
+            assert!(
+                !Path::new(self.player.socket_path()).exists(),
+                "stop() removed the socket file mpv left behind"
+            );
+            wait_until_within("mpv is gone", REAL_MPV_TIMEOUT, || (unsafe {
+                libc::kill(pid as i32, 0)
+            }) != 0);
+            assert_eq!(
+                self.host.count_containing("mpv cannot start"),
+                0,
+                "lines: {:?}",
+                self.host.lines()
+            );
+        }
+    }
+
+    #[test]
+    fn an_idle_player_answers_a_batch_read_the_way_the_reference_reads_it() {
+        // AGENTS.md §5's 「一次批量读取要按 request_id 是否凑齐来终止」 is a rule about a
+        // real shape: on a player with nothing loaded, four of these five properties
+        // come back with **no `data` key at all** — which is precisely what
+        // `state.rs::present(res, 'data')` reads — while the one the port can set
+        // itself does answer. A reader that filtered on `error == 'success'` would wait
+        // forever for the other four, and that is how round 1's instrument timed out.
+        //
+        // Ask for the **fields**, not a prefix. The first version of this witness pinned
+        // `"{'error': 'property unavailable'…"` and real mpv v0.41.0 answered, verbatim,
+        //
+        //     {'request_id': 0, 'error': 'property unavailable'}
+        //     {'data': '', 'request_id': 0, 'error': 'success'}
+        //
+        // — and note that those two shapes do not even share an order: `request_id` leads
+        // the row that has no data, while `data` leads the one that does. `py_str` prints a
+        // decoded reply in exactly the order the wire had (the workspace enables serde_json's
+        // `preserve_order`), so no prefix could have been right for both, and nothing about
+        // the reference's reading depends on the order anyway. The other measured fact in
+        // those two rows is that `request_id` is there **even though we sent a bare array**
+        // with no request id of our own — mpv supplies `0`.
+        let Some(real) = RealMpv::open(None) else {
+            return;
+        };
+        for name in ["media-title", "filename", "duration", "time-pos"] {
+            let row = ask_real(&real.player, &real.host, &json!(["get_property", name]));
+            assert_eq!(
+                reply_field(&row, "error").as_deref(),
+                Some("'property unavailable'"),
+                "{} is the four that do not answer: {}",
+                name,
+                row
+            );
+            assert!(
+                !row.contains("'data'"),
+                "an unavailable property carries no data key, so `present(res, 'data')` \
+                 must not be reached: {}",
+                row
+            );
+        }
+        let named = ask_real(
+            &real.player,
+            &real.host,
+            &json!(["get_property", "force-media-title"]),
+        );
+        assert_eq!(
+            reply_field(&named, "error").as_deref(),
+            Some("'success'"),
+            "force-media-title is the one that answers: {}",
+            named
+        );
+        assert_eq!(
+            reply_field(&named, "data").as_deref(),
+            Some("''"),
+            "and it answers empty, not missing: {}",
+            named
+        );
+        real.shutdown();
+    }
+
+    #[test]
+    fn a_position_in_the_fifth_slot_resumes_the_real_player() {
+        // §4.2's 「`loadfile` 的第五格是选项字典，不是第三条字符串」, both halves: the
+        // dictionary really resumes the clip, and the positional that tries to say the
+        // same thing is mpv's playlist index instead.
+        let Some(real) = RealMpv::open(Some("clip.mp4")) else {
+            return;
+        };
+        let clip = real.file("clip.mp4");
+        real.player.note_media_live(None);
+        assert_eq!(
+            real.player.media_live(),
+            command::Liveness::Undeclared,
+            "no declaration is a third thing, not `false`"
+        );
+        let before = real.loads();
+        real.player.set_media_url(&clip, Some("12"));
+        wait_until_within("the clip has loaded", REAL_MPV_TIMEOUT, || {
+            real.loads() > before
+        });
+        let position = reply_number(&ask_real(
+            &real.player,
+            &real.host,
+            &json!(["get_property", "time-pos"]),
+        ));
+        assert!(
+            (11.5..20.0).contains(&position),
+            "start=12 means the player sits at twelve seconds, not at zero: {}",
+            position
+        );
+        let duration = reply_number(&ask_real(
+            &real.player,
+            &real.host,
+            &json!(["get_property", "duration"]),
+        ));
+        assert!(
+            (19.0..21.0).contains(&duration),
+            "the clip is twenty seconds long: {}",
+            duration
+        );
+        assert!(
+            real.host.states().iter().any(|state| matches!(
+                state,
+                StateCall::Position(p) if p != "0:00:00"
+            )),
+            "the position update reached the application: {:?}",
+            real.host.states()
+        );
+        let rejected = ask_real(
+            &real.player,
+            &real.host,
+            &json!(["loadfile", clip.as_str(), "replace", "start=12"]),
+        );
+        assert!(
+            rejected.contains("invalid parameter"),
+            "a fourth positional is the playlist index, so it cannot hold a start time: {}",
+            rejected
+        );
+        real.shutdown();
+    }
+
+    #[test]
+    fn the_live_options_are_replaced_by_the_next_bare_load() {
+        // §4.1's 「直播流被当成本地文件喂给播放器」 ends here: the ten options ride on the
+        // `loadfile` that declares the media live, and the next bare load must not
+        // inherit them. Nine of the ten are asked by name because that is how a reader
+        // sees them; `demuxer-lavf-o-add` is deliberately **not** — it is a list of
+        // appended strings whose printed shape I have not measured on this machine, and
+        // asserting a guess would be a witness that lies.
+        let Some(real) = RealMpv::open(Some("clip.mp4")) else {
+            return;
+        };
+        let clip = real.file("clip.mp4");
+        let read = |name: &str| -> String {
+            let row = ask_real(&real.player, &real.host, &json!(["get_property", name]));
+            reply_field(&row, "data").unwrap_or_else(|| {
+                panic!("{} answered with no data key: {}", name, row)
+            })
+        };
+        real.player.note_media_live(Some(true));
+        assert_eq!(real.player.media_live(), command::Liveness::Live);
+        let before = real.loads();
+        real.player.set_media_url(&clip, None);
+        wait_until_within("the live load has loaded", REAL_MPV_TIMEOUT, || {
+            real.loads() > before
+        });
+        for (name, want) in [
+            ("audio-buffer", "0.0"),
+            ("vd-lavc-threads", "1"),
+            ("cache-pause", "False"),
+            ("demuxer-lavf-probe-info", "'nostreams'"),
+            ("demuxer-lavf-analyzeduration", "0.1"),
+            ("video-sync", "'audio'"),
+            ("interpolation", "False"),
+            ("video-latency-hacks", "True"),
+            ("stream-buffer-size", "4096"),
+        ] {
+            assert_eq!(
+                read(name),
+                want,
+                "{} while the media is declared live",
+                name
+            );
+        }
+        real.player.set_media_stop();
+        assert_eq!(
+            real.player.media_live(),
+            command::Liveness::Undeclared,
+            "the verdict is a statement about the media that was in the player"
+        );
+        let before = real.loads();
+        real.player.set_media_url(&clip, None);
+        wait_until_within("the second load has loaded", REAL_MPV_TIMEOUT, || {
+            real.loads() > before
+        });
+        for (name, want) in [
+            ("audio-buffer", "0.2"),
+            ("cache-pause", "True"),
+            ("stream-buffer-size", "131072"),
+            ("vd-lavc-threads", "0"),
+            ("demuxer-lavf-analyzeduration", "0.0"),
+        ] {
+            assert_eq!(
+                read(name),
+                want,
+                "{} after a load that declared nothing",
+                name
+            );
+        }
+        real.shutdown();
+    }
+
+    #[test]
+    fn a_real_property_change_carries_the_id_the_dispatcher_keys_on() {
+        // `state.rs::apply` dispatches on `id` **before** it looks at `name`, and a stub
+        // hands back whichever key the test wrote. So the eight observed ids
+        // round-tripping through a genuine player is a fact only the player answers
+        // for. Four of them are silent in the log (time-pos, mute, track-list, and the
+        // two passthroughs write no line), which is why this is witnessed through the
+        // state calls they must produce rather than through rows.
+        let Some(real) = RealMpv::open(Some("clip.mp4")) else {
+            return;
+        };
+        let seen = |want: StateCall| {
+            let host = real.host.clone();
+            let label = format!("the player reports {:?}", want);
+            wait_until_within(&label, REAL_MPV_TIMEOUT, move || {
+                host.states().contains(&want)
+            });
+        };
+        // A fresh player's volume is already 100 and sub-visibility is already true, so
+        // nothing would be announced unless the test *changes* those two; the reference's
+        // defaults are the reason those values are not pinned at the top of the file.
+        real.player.set_media_volume(&json!(63));
+        seen(StateCall::Volume(63));
+        real.player.set_media_mute(&json!(true));
+        seen(StateCall::Mute(json!(true)));
+        real.player.set_media_speed(&json!(1.5));
+        seen(StateCall::Speed(json!(1.5)));
+        real.player.set_media_sub_show(&json!(false));
+        seen(StateCall::Subtitle(json!(false)));
+
+        let clip = real.file("clip.mp4");
+        let before = real.loads();
+        real.player.set_media_url(&clip, None);
+        wait_until_within("the clip has loaded", REAL_MPV_TIMEOUT, || {
+            real.loads() > before
+        });
+        // duration (id 5) publishes unprompted; track-list (id 6) answers with a
+        // current index and a count; time-pos (id 2) says the player is somewhere
+        // other than the start.
+        wait_until_within("a duration reached the bus", REAL_MPV_TIMEOUT, || {
+            real.host
+                .published()
+                .contains(&"mpv_update_duration".to_string())
+        });
+        let states = real.host.states();
+        assert!(
+            states.contains(&StateCall::CurrentTrack(1)),
+            "a loaded clip is track one of a list: {:?}",
+            states
+        );
+        assert!(
+            states
+                .iter()
+                .any(|state| matches!(state, StateCall::NumberOfTracks(_))),
+            "the same row carried a count: {:?}",
+            states
+        );
+        assert!(
+            states.iter().any(|state| matches!(
+                state,
+                StateCall::Position(p) if p != "0:00:00"
+            )),
+            "time-pos reached the application: {:?}",
+            states
+        );
+        // pause (id 3) answers only while the player is playing, which is `start-file`
+        // that set it — so both halves of that arm need a real load to be reachable.
+        real.player.set_media_pause();
+        seen(StateCall::Pause);
+        real.player.set_media_resume();
+        seen(StateCall::Play);
+        // 「Living media」 is **not** asserted here: [`TestHost`] pins
+        // `transport_state` to `"STOPPED"`, and that arm is witnessed by state.rs's own
+        // unit test, where the transport state is a fixture the test gets to choose.
+        real.shutdown();
+    }
+
+    #[test]
+    fn the_window_says_media_until_the_card_names_it() {
+        // AGENTS.md §4.2's 「改播放器的地址，就必须改播放器的名字」 in the player's own
+        // words: `filename` for an address whose last segment is `media` **is** `media`,
+        // and `media-title` falls back to it, so the window reads `media - mpv` until
+        // `force-media-title` says otherwise. The file here is named exactly that, for
+        // the same reason `MEDIA_URL` is a `/relay/<id>/media` shape.
+        let Some(real) = RealMpv::open(Some("media")) else {
+            return;
+        };
+        let clip = real.file("media");
+        let ask = |name: &str| -> String {
+            let row = ask_real(&real.player, &real.host, &json!(["get_property", name]));
+            reply_field(&row, "data").unwrap_or_else(|| {
+                panic!("{} answered with no data key: {}", name, row)
+            })
+        };
+        let before = real.loads();
+        real.player.set_media_url(&clip, None);
+        wait_until_within("the clip has loaded", REAL_MPV_TIMEOUT, || {
+            real.loads() > before
+        });
+        assert_eq!(ask("filename"), "'media'");
+        assert_eq!(ask("path"), format!("'{}'", clip));
+        assert_eq!(ask("media-title"), "'media'");
+        assert_eq!(ask("force-media-title"), "''");
+        // Both properties, in that order — and the second one is the seam that reaches
+        // the window, which is why `--title` is never written by this port.
+        real.player.set_media_title("Never Gonna Give You Up - Rick Astley");
+        wait_for_replies_to_settle(&real.host);
+        assert_eq!(ask("filename"), "'media'", "the address did not move");
+        assert_eq!(
+            ask("path"),
+            format!("'{}'", clip),
+            "and neither did the stream the player holds"
+        );
+        assert_eq!(
+            ask("media-title"),
+            "'Never Gonna Give You Up - Rick Astley'"
+        );
+        assert_eq!(
+            ask("force-media-title"),
+            "'Never Gonna Give You Up - Rick Astley'"
+        );
+        real.shutdown();
     }
 
     // --- the media control surface ----------------------------------------------
