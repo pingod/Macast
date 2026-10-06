@@ -175,6 +175,19 @@ pub fn pause(p: bool) -> Vec<Value> {
     set_property("pause", json!(p))
 }
 
+/// `set_media_stop`: mpv's bare `stop`, the one command on this surface that is
+/// **not** a `set_property`.
+///
+/// It takes no arguments — mpv empties the playlist and goes idle. The caller has
+/// more to do than send it: [`crate::player::Player::set_media_stop`] drops the
+/// live verdict first, because "this media was a live stream" is a statement about
+/// the media that just ended, and leaving it set means the *next* hand-off inherits
+/// it. AGENTS.md §4.1's three-state reading is only safe if whoever ends the media
+/// clears it.
+pub fn stop() -> Vec<Value> {
+    vec![json!("stop")]
+}
+
 /// Fullscreen is a `set_property`, **not** a per-file option on `loadfile`.
 ///
 /// It is a player-wide setting the user chose, not a statement about this one
@@ -411,6 +424,9 @@ mod tests {
         assert_eq!(mute(true), vec![json!("set_property"), json!("mute"), json!("yes")]);
         assert_eq!(mute(false)[2], json!("no"));
         assert_eq!(sub_show(false)[2], json!("no"));
+        // `stop` is a command of its own, one element long, with no argument.
+        assert_eq!(stop(), vec![json!("stop")]);
+        assert_eq!(stop().len(), 1);
         // Fullscreen is a player-wide property, sent before the load.
         assert_eq!(fullscreen()[1], json!("fullscreen"));
         assert_eq!(seek("0:01:00"), vec![json!("seek"), json!("0:01:00"), json!("absolute")]);

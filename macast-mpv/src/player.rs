@@ -157,6 +157,21 @@ pub enum StateCall {
 /// `f'Volume: {data}'` text: a value somebody hand-typed into the advanced
 /// settings JSON as a string therefore reaches mpv as a string, and the log says
 /// the string. Coercing here would be one more silent fix nobody asked for.
+///
+/// The three reads below serve the media control surface, and each is a
+/// deliberate shape rather than an accident:
+///
+/// - `friendly_name` is read **once**, when the player is built, and it seeds the
+///   title the window shows until the sender names the media (`mpv.py:113`).
+/// - `player_size` is read on **every** hand-off, not from [`Config`]. The
+///   reference calls `Setting.get` inside `set_media_url`, which is why changing
+///   that setting on the settings page takes effect on the next cast without a
+///   restart. `Config::size` is a different thing: it is the one value the command
+///   line was built from, and the command line only exists at spawn.
+/// - `current_position` is `publish('get_protocol')` followed by `.pop()` —
+///   **the last** protocol answers, and an empty list answers `None` rather than
+///   `Some("")`, because the reference binds `position = None` and passes that
+///   `None` to the loadfile builder.
 pub trait Host: Send + Sync + 'static {
     fn publish(&self, event: &str, args: &[Value]);
     fn stop_service(&self);
@@ -165,6 +180,9 @@ pub trait Host: Send + Sync + 'static {
     fn default_volume(&self) -> Value;
     fn set_state(&self, call: StateCall);
     fn log(&self, level: Level, text: &str);
+    fn friendly_name(&self) -> String;
+    fn player_size(&self) -> Value;
+    fn current_position(&self) -> Option<String>;
 }
 
 /// Hand one translated reply to the application, in the order the reference does.
@@ -215,6 +233,26 @@ struct Shared {
     mpv_thread: Mutex<Option<JoinHandle<()>>>,
     ipc_thread: Mutex<Option<JoinHandle<()>>>,
     state: Mutex<PlayerState>,
+    /// The name the player window carries. Seeded from
+    /// [`Host::friendly_name`] and replaced by every [`Player::set_media_title`],
+    /// which is also the value a `reload()` hands back after the restart — mpv
+    /// comes up with its default `--title` template, so both properties have to be
+    /// re-sent from the one place that names the player.
+    title: Mutex<String>,
+    /// `_media_live`: what the sender declared about the media that is in the
+    /// player. Three states, and `Undeclared` must never collapse into `Finite`
+    /// (AGENTS.md §4.1: `None` means "keep today's behaviour", which is the safe
+    /// side for anything we do not understand).
+    live: Mutex<command::Liveness>,
+    /// The `subscribe('mpvipc_start', loadfile)` of the reference, in the shape a
+    /// port can actually make one-shot: the url `reload()` read while the player
+    /// was still playing, waiting for the next connection to spend it.
+    ///
+    /// [`Shared::pending_reload`] is **taken**, not inspected, so the second
+    /// reconnect of the same session loads nothing — that take is the
+    /// `unsubscribe`. `Vec::pop` on the position and the live verdict happen later,
+    /// inside the reconnect, exactly as the closure deferred them.
+    pending_reload: Mutex<Option<String>>,
 }
 
 /// A renderer that owns an mpv process and its IPC socket.
@@ -235,12 +273,19 @@ impl Player {
     /// `/tmp/macast_mpvsocket{rand}` in `__init__`) and **written back into the
     /// stored config**, so the command line and the connect path are the same
     /// string by construction rather than by two calls agreeing.
+    ///
+    /// The title is read here too, before `host` moves into the `Arc`: it is the
+    /// `self.title = Setting.get_friendly_name()` of `__init__`, so a player that
+    /// has never been named by a sender still has a name to hand back on a
+    /// `reload()`. Nothing else in this constructor talks to the host — the
+    /// `PlayerSize` a hand-off needs is read per hand-off, not here.
     pub fn with_timings(host: impl Host, mut config: Config, timings: Timings) -> Self {
         if config.ipc_socket.is_empty() {
             config.ipc_socket =
                 command::ipc_socket_path(&config.platform, command::socket_random());
         }
         let socket_path = config.ipc_socket.clone();
+        let title = host.friendly_name();
         Player {
             shared: Arc::new(Shared {
                 host: Arc::new(host),
@@ -256,6 +301,9 @@ impl Player {
                 mpv_thread: Mutex::new(None),
                 ipc_thread: Mutex::new(None),
                 state: Mutex::new(PlayerState::new()),
+                title: Mutex::new(title),
+                live: Mutex::new(command::Liveness::Undeclared),
+                pending_reload: Mutex::new(None),
             }),
         }
     }
@@ -266,6 +314,16 @@ impl Player {
 
     pub fn socket_path(&self) -> &str {
         &self.shared.socket_path
+    }
+
+    /// The name currently on the player, which is what a `reload()` re-sends.
+    pub fn title(&self) -> String {
+        guard(&self.shared.title).clone()
+    }
+
+    /// The live verdict currently held for the media in the player.
+    pub fn media_live(&self) -> command::Liveness {
+        *guard(&self.shared.live)
     }
 
     pub fn is_running(&self) -> bool {
@@ -341,6 +399,224 @@ impl Player {
     /// every menu action write through.
     pub fn send_command(&self, command: &[Value]) -> bool {
         send_command(&self.shared, command)
+    }
+
+    // --- the media control surface ------------------------------------------------
+    //
+    // `mpv.py:116-249`. Every one of these composes through [`Player::send_command`]
+    // rather than touching the link, so the DEBUG-outside-the-lock contract, the
+    // `sendCommand: {e}` contract and the `NO_SOCKET` contract are each owned once
+    // and cannot be re-broken by a new action.
+
+    /// `note_media_live(declared)` — remember what the sender said about the media
+    /// about to be loaded.
+    ///
+    /// The three answers are stored as given, and only `Some(true)` changes the
+    /// command that goes out later. `None` must not be collapsed into
+    /// `Some(false)`: AGENTS.md §4.1 — "keep today's behaviour" and "this is a file
+    /// you may seek into" are different statements, and the second one hands mpv a
+    /// read-ahead for a stream that has no addressable prefix.
+    ///
+    /// The name is the reference's, and it is deliberately **not**
+    /// `set_media_live`: `Renderer.methods()` enumerates the `set_media_` prefix and
+    /// the plugin manager subscribes every name it enumerates to the bus, so a name
+    /// spelled that way would put a message nobody sends onto the bus and imply to
+    /// every built-in renderer that it should implement one (§4.2, Part 64's L arm).
+    pub fn note_media_live(&self, declared: Option<bool>) {
+        *guard(&self.shared.live) = command::Liveness::from_declaration(declared);
+    }
+
+    /// `set_media_stop`: mpv's bare `stop`, and the live verdict dropped first.
+    ///
+    /// The verdict is a statement about *the media that was in the player*. Clearing
+    /// it is not hygiene: a next hand-off that arrives with no declaration at all
+    /// would otherwise inherit this one's live options and quietly play an ordinary
+    /// file with no read-ahead.
+    pub fn set_media_stop(&self) {
+        *guard(&self.shared.live) = command::Liveness::Undeclared;
+        self.send_command(&command::stop());
+    }
+
+    /// `set_media_pause` — the property is a bool, the toast says `Pause`.
+    pub fn set_media_pause(&self) {
+        self.send_command(&command::pause(true));
+        self.set_media_message("Pause");
+    }
+
+    /// `set_media_resume`
+    pub fn set_media_resume(&self) {
+        self.send_command(&command::pause(false));
+        self.set_media_message("Resume");
+    }
+
+    /// `set_media_volume(data)` — `data` goes into the command **as it came in**.
+    ///
+    /// A `Value`, not an `i64`, for the same reason as [`Host::default_volume`]: a
+    /// string somebody hand-typed into the advanced settings JSON reaches mpv as a
+    /// string and the toast says the string. `f'Volume: {data}'` is Python's `str()`,
+    /// so the toast of the number `50` says `Volume: 50` and of `"50"`, `Volume: 50`
+    /// too — but of `50.0` it says `Volume: 50.0`, which is why this goes through
+    /// [`pyops::py_str`] and not `to_string`.
+    pub fn set_media_volume(&self, data: &Value) {
+        self.send_command(&command::volume(data.clone()));
+        self.set_media_message(&format!("Volume: {}", pyops::py_str(data)));
+    }
+
+    /// `set_media_mute(data)` — `"yes"`/`"no"` chosen by Python **truthiness**, and
+    /// the toast printing the value as it arrived.
+    ///
+    /// Both halves read the same incoming [`Value`] and neither normalises it to the
+    /// other: `"yes" if data else "no"` is truthiness (so `0`, `""`, `[]`, `null` and
+    /// `false` all mean unmuted), while `f'Mute: {data}'` is `str(data)` (so `1`
+    /// mutes and the toast says `Mute: 1`, not `Mute: True`). A port that took a
+    /// `bool` here would be inventing a coercion the reference never applies, and
+    /// would lose the only witness to what the caller actually passed.
+    pub fn set_media_mute(&self, data: &Value) {
+        self.send_command(&command::mute(pyops::truthy(data)));
+        self.set_media_message(&format!("Mute: {}", pyops::py_str(data)));
+    }
+
+    /// `set_media_speed(data)` — the property, and **no toast**.
+    ///
+    /// The reference sends `set_property speed` and stops; mpv's own OSC already
+    /// reports it. Inventing a `show-text` here would put a line on the user's screen
+    /// that the build they are comparing against never put there.
+    pub fn set_media_speed(&self, data: &Value) {
+        self.send_command(&command::speed(data.clone()));
+    }
+
+    /// `set_media_url(url, start)` — the hand-off, and the one place that reads
+    /// [`Host::player_size`].
+    ///
+    /// `start` is `None` for the reference's default `"0"`; both mean "no `start`
+    /// option", because the builder drops a position that is empty or literally `0`.
+    ///
+    /// Fullscreen is a player-wide choice the user made, so it stays a
+    /// `set_property` and does **not** join the per-file options on `loadfile` — a
+    /// per-file option would be forgotten by the next item that arrives with no
+    /// declaration, and the window would stop going full-screen on the second video.
+    /// The comparison is [`pyops::py_eq`] and not `==` on `Value`: the reference
+    /// compares against the enum's `4`, so the number `4.0` means fullscreen and the
+    /// string `"4"` does not.
+    pub fn set_media_url(&self, url: &str, start: Option<&str>) {
+        if pyops::py_eq(&self.shared.host.player_size(), &json!(4)) {
+            self.send_command(&command::fullscreen());
+        }
+        let live = self.media_live();
+        self.send_command(&command::loadfile(url, start, live));
+    }
+
+    /// `set_media_title(data)` — the name, remembered and then written twice.
+    ///
+    /// Both `title` and `force-media-title` are needed and the reason is in
+    /// AGENTS.md §4.2: mpv's default `--title` template falls back to `filename`, and
+    /// for a `/relay/<id>/media` address the last path segment is literally `media`.
+    /// `--title` belongs to the user so this port never writes it; forcing the
+    /// property is the seam that reaches the window.
+    ///
+    /// Storing the text is what makes [`Player::reload`] able to say it again — after
+    /// a restart both properties are gone, because mpv came back with the default
+    /// template.
+    pub fn set_media_title(&self, data: &str) {
+        *guard(&self.shared.title) = data.to_string();
+        for shaped in command::title(data) {
+            self.send_command(&shaped);
+        }
+    }
+
+    /// `set_media_position(data)` — `data` is a `00:00:00` clock string, and the
+    /// third argument is mpv's own `absolute`.
+    pub fn set_media_position(&self, data: &str) {
+        self.send_command(&command::seek(data));
+    }
+
+    /// `set_media_sub_file(data)` — `{'url': …, 'title': …}`, `select` in the middle.
+    ///
+    /// The reference reads `data['url']` and `data['title']` and lets a `KeyError`
+    /// escape to the bus that logged it. This logs instead: the exception would have
+    /// no bus to travel up to yet, and silence would be worse than either — the user
+    /// asked for a subtitle track. Nor does it send a `sub-add` with a `null` in it;
+    /// mpv rejects that, and the reader would then report mpv's rejection instead of
+    /// our own missing key.
+    pub fn set_media_sub_file(&self, data: &Value) {
+        let mut unusable: Vec<String> = Vec::new();
+        for key in ["url", "title"] {
+            match data.get(key) {
+                Some(Value::String(_)) => {}
+                Some(other) => unusable.push(format!("{} is {}", key, pyops::type_name(other))),
+                None => unusable.push(format!("{} is missing", key)),
+            }
+        }
+        if !unusable.is_empty() {
+            self.shared.host.log(
+                Level::Error,
+                &format!("set_media_sub_file: {}", unusable.join(", ")),
+            );
+            return;
+        }
+        // Both keys are known to be strings by the loop above.
+        let url = data["url"].as_str().unwrap_or_default();
+        let title = data["title"].as_str().unwrap_or_default();
+        self.send_command(&command::sub_add(url, title));
+    }
+
+    /// `set_media_sub_show(data)` — again Python truthiness, again `"yes"`/`"no"`, and
+    /// again no toast (the reference sends the property alone).
+    pub fn set_media_sub_show(&self, data: &Value) {
+        self.send_command(&command::sub_show(pyops::truthy(data)));
+    }
+
+    /// `set_media_text(data, duration)` — mpv's `show-text`, `duration` in ms.
+    pub fn set_media_text(&self, text: &str, duration_ms: i64) {
+        self.send_command(&command::show_text(text, duration_ms));
+    }
+
+    /// `set_media_text(data)` at the reference's default duration (1000 ms).
+    pub fn set_media_message(&self, text: &str) {
+        self.set_media_text(text, 1000);
+    }
+
+    /// `reload()`: stop, start, and if it was playing, play that again.
+    ///
+    /// Three orderings are the whole method, and none of them is decorative:
+    ///
+    /// 1. The url is read **now**, while the old player is still up, but the
+    ///    position and the live verdict are read **later**, on the reconnect — the
+    ///    reference's `uri = self.protocol.get_state_url()` is a plain statement at
+    ///    the top while `get_state_position()` lives inside the closure. Read the url
+    ///    late and it is whatever `stop()` left behind, which is not the media.
+    /// 2. The reload is armed **before** the restart thread starts, in this thread.
+    ///    The reference's `subscribe` is likewise in the caller, and the connect can
+    ///    happen fast: arm after the spawn and a quick reconnect misses it, which is
+    ///    a silent "reload did nothing".
+    /// 3. Only a player whose transport says `PLAYING` gets armed. Anything else
+    ///    reloads to an idle window, which is the reference's `else` branch.
+    ///
+    /// The thread is load-bearing, not tidiness: [`Player::stop`] joins the two
+    /// player threads, so a caller that *is* one of them would be joining itself.
+    pub fn reload(&self) {
+        let shared = self.shared.clone();
+        let url = shared.host.current_url();
+        if shared.host.transport_state() == "PLAYING" {
+            *guard(&shared.pending_reload) = Some(url);
+        }
+        let reloader = Player { shared };
+        if let Err(err) = Builder::new()
+            .name("MPV_RELOAD".to_string())
+            .spawn(move || {
+                reloader.stop();
+                reloader.start();
+            })
+        {
+            // The reference lets `Thread.start()` raise. There is no exception to
+            // hand a caller that is a plugin callback, so the failure says which
+            // thread could not start, in the same shape as `MPV_THREAD: {e}`, and
+            // leaves the player exactly as it was — which is at least a state a
+            // reader can act on, unlike a half reload.
+            self.shared
+                .host
+                .log(Level::Error, &format!("MPV_RELOAD: {}", err));
+        }
     }
 }
 
@@ -542,11 +818,45 @@ fn connect_once(shared: &Arc<Shared>, feed: &mut Feed) -> Result<(), String> {
     *guard(&shared.link) = Some(link.clone());
     link.connect(&shared.socket_path)?;
     shared.host.publish("mpvipc_start", &[]);
+    load_pending(shared);
     shared.host.publish("renderer_start", &[]);
     shared.ipc_once_connected.store(true, Ordering::SeqCst);
     set_observe(shared);
     feed.reconnect();
     Ok(())
+}
+
+/// The `subscribe('mpvipc_start', loadfile)` of the reference, run on the reconnect
+/// that [`Player::reload`] armed.
+///
+/// In the closure that subscription fires **inside** `publish('mpvipc_start')`, so
+/// the work happens after the socket exists and before `renderer_start` is
+/// announced; doing it here, between the two publishes, is observably the same
+/// because those two calls are the only events on either side of it, and a subscriber
+/// could not have depended on anything else in between.
+///
+/// The url leaves the slot by `take()` rather than by inspection: that single removal
+/// **is** the reference's `unsubscribe('mpvipc_start', loadfile)`. Read it twice and
+/// the second reconnect of the same session would replay a media the user has since
+/// stopped. Everything else the closure reads — the position and the live verdict —
+/// is read *here*, at reconnect time, not when the reload was requested; that is the
+/// half of `reload`'s ordering that [`Player::reload`] documents.
+fn load_pending(shared: &Arc<Shared>) {
+    let Some(url) = guard(&shared.pending_reload).take() else {
+        return;
+    };
+    shared.host.log(Level::Debug, "mpv loadfile");
+    let position = shared.host.current_position();
+    let live = *guard(&shared.live);
+    let player = Player {
+        shared: shared.clone(),
+    };
+    player.send_command(&command::loadfile(&url, position.as_deref(), live));
+    // The name has to be said again: mpv came back with its default `--title`
+    // template, so the window of the media we are restoring would otherwise read
+    // `media - mpv` — AGENTS.md §4.2's 「改播放器的地址，就必须改播放器的名字」.
+    let title = player.title();
+    player.set_media_title(&title);
 }
 
 /// How the inner `while self.ipc_running` loop ended.
@@ -620,14 +930,20 @@ fn apply_line(shared: &Arc<Shared>, line: &str) -> Result<(), String> {
 
 /// `set_observe`: **eight** separate `send_command` calls, then the default volume,
 /// then its `show-text`. Each one logs its own DEBUG line, as in the reference.
+///
+/// The last two go through [`Player::set_media_volume`] rather than being written out
+/// again here, so the string `Volume: ` has one owner. Both places announce the
+/// volume — this one on connect, the other when the user moves it — and a port that
+/// spells the sentence twice is a port where one of them will drift.
 fn set_observe(shared: &Arc<Shared>) {
     for observed in command::observe_all() {
         send_command(shared, &observed);
     }
     let volume = shared.host.default_volume();
-    let text = format!("Volume: {}", pyops::py_str(&volume));
-    send_command(shared, &command::volume(volume));
-    send_command(shared, &command::show_text(&text, 1000));
+    Player {
+        shared: shared.clone(),
+    }
+    .set_media_volume(&volume);
 }
 
 /// `send_command(command)`.
@@ -822,6 +1138,9 @@ mod tests {
         volume: Value,
         transport: String,
         url: String,
+        friendly: String,
+        size: Value,
+        position: Option<String>,
     }
 
     impl TestHost {
@@ -830,6 +1149,12 @@ mod tests {
                 volume: json!(100),
                 transport: "STOPPED".to_string(),
                 url: String::new(),
+                // The name a real install puts on the window before any media
+                // arrives, and the size the reference's default `PlayerSize` maps to
+                // — `Normal`, which is deliberately *not* the fullscreen answer.
+                friendly: "Test Player".to_string(),
+                size: json!(1),
+                position: None,
                 ..Default::default()
             }
         }
@@ -837,6 +1162,45 @@ mod tests {
         fn with_volume(volume: Value) -> TestHost {
             TestHost {
                 volume,
+                ..TestHost::new()
+            }
+        }
+
+        /// A player that is mid-media: the transport says `PLAYING`, the url and the
+        /// reported position are the ones `reload()` is supposed to put back.
+        fn playing(url: &str, position: &str) -> TestHost {
+            TestHost {
+                transport: "PLAYING".to_string(),
+                url: url.to_string(),
+                position: Some(position.to_string()),
+                ..TestHost::new()
+            }
+        }
+
+        /// Playing, and asked for a reload while the position was not readable yet.
+        /// A real player answers `None` for `time-pos` during the window between a
+        /// hand-off and the first decoded frame, so this is the shape a `reload()`
+        /// sees most often on a stream that has just been pushed.
+        fn playing_without_position(url: &str) -> TestHost {
+            TestHost {
+                transport: "PLAYING".to_string(),
+                url: url.to_string(),
+                ..TestHost::new()
+            }
+        }
+
+        /// The value `PlayerSize` answers with, which is what decides whether a
+        /// hand-off turns the window full-screen.
+        fn at_size(size: Value) -> TestHost {
+            TestHost {
+                size,
+                ..TestHost::new()
+            }
+        }
+
+        fn named(friendly: &str) -> TestHost {
+            TestHost {
+                friendly: friendly.to_string(),
                 ..TestHost::new()
             }
         }
@@ -902,6 +1266,18 @@ mod tests {
                 .unwrap()
                 .push((level, text.to_string()));
         }
+
+        fn friendly_name(&self) -> String {
+            self.friendly.clone()
+        }
+
+        fn player_size(&self) -> Value {
+            self.size.clone()
+        }
+
+        fn current_position(&self) -> Option<String> {
+            self.position.clone()
+        }
     }
 
     /// Is `want` a subsequence of `seen`? Lifecycle tests need this rather than an
@@ -951,14 +1327,40 @@ mod tests {
             let commands = Arc::new(Mutex::new(Vec::new()));
             let stop = Arc::new(AtomicBool::new(false));
 
-            let (l, conns2, readers2, commands2, stop2) = (
-                listener.try_clone().expect("clone listener"),
-                conns.clone(),
-                readers.clone(),
-                commands.clone(),
-                stop.clone(),
-            );
-            let accept_thread = Builder::new()
+            let mut fake = FakeMpv {
+                path,
+                listener: Some(listener),
+                accept_thread: None,
+                conns,
+                readers,
+                commands,
+                stop,
+            };
+            // Bound first: `FakeMpv` has a `Drop`, so neither functional record
+            // update nor a direct `field = self.method()` assignment is available.
+            let accept_thread = fake.accept_loop();
+            fake.accept_thread = Some(accept_thread);
+            fake
+        }
+
+        /// The accept half, spun out of `bind` so `rebind` can point a **fresh**
+        /// listener at the same recorded command log.
+        ///
+        /// It clones the listener because the struct keeps the original: `hang_up`
+        /// drops that handle to produce the EOF, and a loop holding the last `Arc`
+        /// of a socket would keep the peer open (see `drop_connections`).
+        fn accept_loop(&self) -> JoinHandle<()> {
+            let l = self
+                .listener
+                .as_ref()
+                .expect("the accept loop needs a listener")
+                .try_clone()
+                .expect("clone listener");
+            let conns2 = self.conns.clone();
+            let readers2 = self.readers.clone();
+            let commands2 = self.commands.clone();
+            let stop2 = self.stop.clone();
+            Builder::new()
                 .name("FAKE_MPV_ACCEPT".to_string())
                 .spawn(move || {
                     while !stop2.load(Ordering::SeqCst) {
@@ -1042,17 +1444,7 @@ mod tests {
                         }
                     }
                 })
-                .expect("spawn fake accept");
-
-            FakeMpv {
-                path,
-                listener: Some(listener),
-                accept_thread: Some(accept_thread),
-                conns,
-                readers,
-                commands,
-                stop,
-            }
+                .expect("spawn fake accept")
         }
 
         fn path(&self) -> &str {
@@ -1140,6 +1532,39 @@ mod tests {
             }
             self.listener.take();
         }
+
+        /// Hang up, then come back to life at the **same path** with the same
+        /// recorded command log.
+        ///
+        /// This exists because `Player::stop` is faithful about cleanup: its last
+        /// act is `remove_file(socket_path)` (`macast_renderer/mpv.py`'s
+        /// `os.remove(self.mpv_sock)` — see
+        /// `stop_runs_in_the_references_order_and_removes_the_socket`), so after a
+        /// `reload()` the fake's socket **file** is gone while its old
+        /// `UnixListener` still holds the unlinked inode. A restarted mpv would have
+        /// created that file again, and this is the half of restarting mpv the
+        /// fixture owes us.
+        ///
+        /// The player never gives up waiting for it: `error_time` lives in the
+        /// *player* thread and is only spent when the child exits (our harness child
+        /// is `exec sleep 30`, which does not), and the ipc loop retries `connect`
+        /// on every `timings.connect` with no budget at all. So a test that wants a
+        /// second session needs no retry gymnastics — one `rebind()` and the next
+        /// connect turn lands on a live listener.
+        fn rebind(&mut self) {
+            self.hang_up();
+            let _ = std::fs::remove_file(&self.path);
+            let listener = UnixListener::bind(&self.path).expect("rebind fake mpv");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            self.listener = Some(listener);
+            self.stop.store(false, Ordering::SeqCst);
+            // Bound first: assigning straight into the field would borrow `self`
+            // mutably for the place and immutably for the call.
+            let handle = self.accept_loop();
+            self.accept_thread = Some(handle);
+        }
     }
 
     impl Drop for FakeMpv {
@@ -1224,12 +1649,32 @@ mod tests {
         fn log(&self, level: Level, text: &str) {
             self.0.log(level, text)
         }
+        fn friendly_name(&self) -> String {
+            self.0.friendly_name()
+        }
+        fn player_size(&self) -> Value {
+            self.0.player_size()
+        }
+        fn current_position(&self) -> Option<String> {
+            self.0.current_position()
+        }
     }
 
     impl Harness {
+        /// Wait for the session's **ten setup commands**, not just for the connection.
+        ///
+        /// `ipc_once_connected` is stored before `set_observe` runs (see
+        /// `connect_once`), so the earlier, shorter wait let a test read the command
+        /// log while the ten observations were still on their way. That is fine for a
+        /// test that pushes an mpv line (`send_line` awaits the connection itself) and
+        /// fatal for one that asserts an exact tail — the first of those would race
+        /// the setup and report whichever subset had landed.
         fn start(&mut self) {
             self.player.start();
             wait_until("mpv connected", || self.player.ipc_once_connected());
+            wait_until("the session's ten observations", || {
+                self.fake.commands().len() >= 10
+            });
             self.pid = self.player.player_pid();
         }
 
@@ -1250,6 +1695,95 @@ mod tests {
             self.fake.hang_up();
             let _ = stopper.join();
         }
+
+        /// Run one media-control call and hand back exactly the commands it wrote.
+        ///
+        /// The count is snapshotted *before* the call because the fake's log is
+        /// append-only **across connections**: the ten observations from the session
+        /// that connected first are still in there, and a `reload()` will add ten
+        /// more. What every test on this surface wants is "what did that one call
+        /// put on the socket", and slicing the tail is how it gets that without
+        /// re-deriving the session's whole command list.
+        fn sent(&self, expect: usize, action: impl FnOnce(&Player)) -> Vec<Value> {
+            let before = self.fake.commands().len();
+            action(&self.player);
+            wait_until("the commands reach the socket", || {
+                self.fake.commands().len() >= before + expect
+            });
+            self.fake.commands()[before..].to_vec()
+        }
+
+        /// Snapshot, reload, wait for the shutdown line, hang up the fake, wait for
+        /// the unlink, rebind, wait for the restarted session's commands, tail back.
+        ///
+        /// The unlink cannot be waited for *before* the hang-up, and the reason is a
+        /// ported fact rather than a fixture quirk: `Link::recv_into` blocks in `read`
+        /// with **no timeout**, because the reference never calls `settimeout` on the
+        /// ipc socket (`macast_renderer/mpv.py` reads it bare). So the reader thread
+        /// only returns when the peer closes — and [`stop`] joins that thread before its
+        /// last act, `remove_file(socket_path)`. A predicate that demanded the file be
+        /// gone while the fake still held the connection open could never be satisfied:
+        /// the first draft of this helper did exactly that, and all seven reload tests
+        /// timed out at the same 5-second deadline.
+        ///
+        /// Both halves are still load-bearing, just in the honest order. The `["quit"]`
+        /// line is what proves the reload's `stop()` reached the socket *before* we cut
+        /// it; the file disappearing is what proves `stop()` finished, because a
+        /// rebind before then would hand the fresh listener's file to the old session's
+        /// unlink.
+        fn reloaded(&mut self, expect: usize) -> Vec<Value> {
+            let before = self.fake.commands().len();
+            self.player.reload();
+            wait_until("the reload's quit line", || {
+                self.fake.commands().len() >= before + 1
+            });
+            // The EOF is what lets the reader return so `stop()` can run its unlink.
+            self.fake.hang_up();
+            wait_until("the old session's unlink", || {
+                !Path::new(self.fake.path()).exists()
+            });
+            self.fake.rebind();
+            wait_until("the restarted player writes its commands", || {
+                self.fake.commands().len() >= before + expect
+            });
+            self.fake.commands()[before..].to_vec()
+        }
+    }
+
+    /// The index of the first command that begins with this verb.
+    ///
+    /// Panics with the whole tail in the message: a reload that loses a row is a
+    /// question about *which* row, and "position returned None" answers nothing.
+    fn first_index_of(verb: &str, seen: &[Value]) -> usize {
+        seen.iter()
+            .position(|row| {
+                row.as_array()
+                    .map_or(false, |cmd| cmd.first() == Some(&json!(verb)))
+            })
+            .unwrap_or_else(|| panic!("no `{}` command in {:?}", verb, seen))
+    }
+
+    /// The ten commands a session writes as soon as it connects: eight observations,
+    /// then the volume handoff, then the toast that announces it.
+    ///
+    /// Both of the last two rows are spelled as **text**, not recomputed from the
+    /// product's own helpers: this function is the witness that a reload put the
+    /// session back the way it started, and if it called `pyops::py_str` to build the
+    /// toast it would agree with the implementation no matter what the implementation
+    /// did. The default host reports volume `100` (see `TestHost::new`); the case where
+    /// the default is a *string*, and the toast has to follow it, belongs to
+    /// `a_string_default_volume_stays_a_string_everywhere`.
+    fn session_setup() -> Vec<Value> {
+        command::observe_all()
+            .iter()
+            .map(|cmd| json!(cmd))
+            .chain(std::iter::once(json!([
+                "set_property", "volume", 100
+            ])))
+            .chain(std::iter::once(json!([
+                "show-text", "Volume: 100", 1000
+            ])))
+            .collect()
     }
 
     /// Reaps the child a test spawned if that test ends before `stop()` — because
@@ -1331,7 +1865,6 @@ mod tests {
     fn set_observe_is_ten_separate_commands_in_order() {
         let mut h = harness(|_, _| {});
         h.start();
-        wait_until("ten commands", || h.fake.commands().len() >= 10);
         let seen = h.fake.commands();
         let expected: Vec<Value> = command::observe_all()
             .iter()
@@ -1413,7 +1946,6 @@ mod tests {
         let host = Arc::new(TestHost::with_volume(json!("70")));
         let mut h = harness_with(|_, _| {}, host);
         h.start();
-        wait_until("ten commands", || h.fake.commands().len() >= 10);
         let seen = h.fake.commands();
         assert_eq!(seen[8], json!(["set_property", "volume", "70"]));
         assert_eq!(
@@ -2095,6 +2627,760 @@ mod tests {
             "lines: {:?}",
             host.lines()
         );
+    }
+
+    // --- the media control surface ----------------------------------------------
+
+    /// The address every hand-off test pushes.
+    ///
+    /// A `/relay/<id>/media` shape on purpose: that is the address whose last path
+    /// segment is literally `media`, and therefore the one that made AGENTS.md §4.2's
+    /// 「改播放器的地址，就必须改播放器的名字」 a bug report instead of a footnote.
+    const MEDIA_URL: &str = "http://127.0.0.1:58880/relay/abc/media";
+
+    /// The options dictionary `loadfile` shipped in its fifth slot, and the shape
+    /// question that has to be asked **before** anything indexes it.
+    ///
+    /// `command::loadfile` has two shapes: the bare three-slot one when the player has
+    /// no opinion, and the five-slot one when it does. A test that reaches for `[4]`
+    /// before asking which shape arrived reports a panic that eats the rest of the
+    /// assertion and, in this binary, every test after it — the exact failure AGENTS.md
+    /// §4.2 records for the verify suite's Part 64, I arm. So the length question comes
+    /// first, and it comes with the verb and url checked, because an options
+    /// dictionary on some *other* command is not what this helper is for.
+    fn loadfile_options(row: &Value, url: &str) -> serde_json::Map<String, Value> {
+        let cmd = row
+            .as_array()
+            .unwrap_or_else(|| panic!("not a command array: {:?}", row));
+        assert!(
+            cmd.len() == 3 || cmd.len() == 5,
+            "loadfile ships 3 slots bare or 5 with options: {:?}",
+            cmd
+        );
+        assert_eq!(
+            &cmd[..3],
+            &[json!("loadfile"), json!(url), json!("replace")],
+            "{:?}",
+            cmd
+        );
+        assert_eq!(
+            cmd.len(),
+            5,
+            "loadfile must carry an options dictionary as its fifth slot: {:?}",
+            cmd
+        );
+        cmd[4]
+            .as_object()
+            .unwrap_or_else(|| panic!("the fifth slot is not an object: {:?}", cmd))
+            .clone()
+    }
+
+    #[test]
+    fn a_size_that_python_would_call_four_turns_the_window_fullscreen() {
+        // `if self.setting.PlayerSize.value == 4:` compares against an enum member, so
+        // `4.0` is four and the line goes out **first** — before the media, because a
+        // window that is full-screen after the file loads still flashes a bordered
+        // frame while it loads.
+        let cases: Vec<(Value, Option<&str>, Vec<Value>)> = vec![
+            (
+                json!(4),
+                None,
+                vec![
+                    json!(["set_property", "fullscreen", "yes"]),
+                    json!(["loadfile", MEDIA_URL, "replace"]),
+                ],
+            ),
+            (
+                json!(4),
+                Some("00:01:02"),
+                vec![
+                    json!(["set_property", "fullscreen", "yes"]),
+                    json!(["loadfile", MEDIA_URL, "replace", 0, {"start": "00:01:02"}]),
+                ],
+            ),
+            (
+                json!(4.0),
+                None,
+                vec![
+                    json!(["set_property", "fullscreen", "yes"]),
+                    json!(["loadfile", MEDIA_URL, "replace"]),
+                ],
+            ),
+        ];
+        for (size, start, want) in cases {
+            let mut h = harness_with(|_, _| {}, Arc::new(TestHost::at_size(size.clone())));
+            h.start();
+            let rows = h.sent(want.len(), |p| p.set_media_url(MEDIA_URL, start));
+            assert_eq!(rows, want, "fullscreen has to be the first line out");
+        }
+    }
+
+    #[test]
+    fn a_size_of_four_written_as_text_is_not_four() {
+        // `'4' == 4` is False in Python, and the port must not "helpfully" coerce the
+        // advanced-settings JSON into a number: a user who typed `"4"` there did not
+        // ask for a full-screen window on every cast.
+        let mut h = harness_with(|_, _| {}, Arc::new(TestHost::at_size(json!("4"))));
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_url(MEDIA_URL, None)),
+            vec![json!(["loadfile", MEDIA_URL, "replace"])],
+            "a string size is not the enum member"
+        );
+    }
+
+    #[test]
+    fn the_handoff_reads_the_size_from_the_application_not_the_command_line() {
+        // Two halves of one asymmetry, and it is deliberate: `mpv.py` reads
+        // `self.setting.PlayerSize.value`, the live setting, so the menu changes the
+        // next cast. `--player-size` on the argv is what the player process started
+        // with, and a window size the user picks after Macast started would otherwise
+        // take effect only after a restart.
+        let mut h = harness(|cfg, _| cfg.size = json!(4));
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_url(MEDIA_URL, None)),
+            vec![json!(["loadfile", MEDIA_URL, "replace"])],
+            "the argv is not where the hand-off looks"
+        );
+
+        let mut h = harness_with(|cfg, _| cfg.size = json!(1), Arc::new(TestHost::at_size(json!(4))));
+        h.start();
+        assert_eq!(
+            h.sent(2, |p| p.set_media_url(MEDIA_URL, None)),
+            vec![
+                json!(["set_property", "fullscreen", "yes"]),
+                json!(["loadfile", MEDIA_URL, "replace"]),
+            ],
+            "and the setting is not decoration either"
+        );
+    }
+
+    #[test]
+    fn volume_goes_out_as_it_arrived_and_comes_back_as_python_would_str_it() {
+        // The property carries the value unconverted; the toast is `f'Volume: {data}'`,
+        // which is `str()`. `str(50)` is `50`, `str(50.0)` is `50.0`, and `str("50")`
+        // is `50` — so `to_string()` on a `Value` gets the second one wrong, and the
+        // wrong answer is on the user's screen for a second after every volume key.
+        let rows = [
+            (json!(50), "Volume: 50"),
+            (json!(50.0), "Volume: 50.0"),
+            (json!("50"), "Volume: 50"),
+        ];
+        for (given, toast) in rows {
+            let mut h = harness(|_, _| {});
+            h.start();
+            let want = vec![
+                json!(["set_property", "volume", given.clone()]),
+                json!(["show-text", toast, 1000]),
+            ];
+            assert_eq!(
+                h.sent(2, |p| p.set_media_volume(&given)),
+                want,
+                "{:?}",
+                given
+            );
+        }
+    }
+
+    #[test]
+    fn mute_is_a_yes_or_no_string_and_the_toast_names_the_value_it_was_given() {
+        // Two independent readings of the same incoming value: the property is decided
+        // by truthiness, the toast by `str()`. `1` is truthy and says `Mute: 1`; the
+        // string `"false"` is truthy (Python: non-empty) and mutes.
+        let cases = [(json!(1), "yes", "Mute: 1"), (json!("false"), "yes", "Mute: false")];
+        for (given, want, toast) in cases {
+            let mut h = harness(|_, _| {});
+            h.start();
+            assert_eq!(
+                h.sent(2, |p| p.set_media_mute(&given)),
+                vec![
+                    json!(["set_property", "mute", want]),
+                    json!(["show-text", toast, 1000]),
+                ],
+                "{:?}",
+                given
+            );
+        }
+    }
+
+    #[test]
+    fn the_values_python_calls_falsy_all_unmute() {
+        // `false` too, but it is already covered by the type above; these five are the
+        // shapes a hand-edited settings JSON or a caller with no schema actually
+        // produces. A port that took a `bool` here could not answer for any of them.
+        let cases = [
+            (json!(0), "Mute: 0"),
+            (json!(""), "Mute: "),
+            (json!([]), "Mute: []"),
+            (json!(null), "Mute: None"),
+            (json!({}), "Mute: {}"),
+        ];
+        for (given, toast) in cases {
+            let mut h = harness(|_, _| {});
+            h.start();
+            assert_eq!(
+                h.sent(2, |p| p.set_media_mute(&given)),
+                vec![
+                    json!(["set_property", "mute", "no"]),
+                    json!(["show-text", toast, 1000]),
+                ],
+                "{:?}",
+                given
+            );
+        }
+    }
+
+    #[test]
+    fn speed_and_subtitle_visibility_send_one_command_each() {
+        // Neither has a toast. The reference sends the property and stops: mpv's own
+        // OSC reports a speed change, and the subtitle toggle is visible on screen by
+        // definition. Inventing a `show-text` here puts a line on the user's screen
+        // that the build they are comparing against never put there.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_speed(&json!(1.5))),
+            vec![json!(["set_property", "speed", 1.5])]
+        );
+
+        for (given, want) in [(true, "yes"), (false, "no")] {
+            let mut h = harness(|_, _| {});
+            h.start();
+            assert_eq!(
+                h.sent(1, |p| p.set_media_sub_show(&json!(given))),
+                vec![json!(["set_property", "sub-visibility", want])]
+            );
+        }
+    }
+
+    #[test]
+    fn pause_and_resume_are_real_booleans_with_their_own_words() {
+        // `pause` is the one property on this surface that mpv wants as a JSON bool
+        // rather than the `"yes"`/`"no"` strings — and the two toasts are different
+        // words, so a port that reused one message would say "Pause" while resuming.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(2, |p| p.set_media_pause()),
+            vec![
+                json!(["set_property", "pause", true]),
+                json!(["show-text", "Pause", 1000]),
+            ]
+        );
+
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(2, |p| p.set_media_resume()),
+            vec![
+                json!(["set_property", "pause", false]),
+                json!(["show-text", "Resume", 1000]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_message_keeps_the_duration_it_was_handed() {
+        // The two entry points differ only in the third argument: `set_media_text`
+        // passes the caller's duration, `set_media_message` uses the reference's
+        // default of 1000 ms. A port that let one call the other with a fixed number
+        // would silently shorten every "3.5 秒后继续" style countdown.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_text("3.5 秒后继续", 2500)),
+            vec![json!(["show-text", "3.5 秒后继续", 2500])]
+        );
+        assert_eq!(
+            h.sent(1, |p| p.set_media_message("3.5 秒后继续")),
+            vec![json!(["show-text", "3.5 秒后继续", 1000])]
+        );
+    }
+
+    #[test]
+    fn a_position_is_seeked_absolute_and_as_text() {
+        // `absolute` is mpv's own word for "this is a timestamp, not an offset", and it
+        // has to be present: the default is relative, so a control point that sends
+        // `H:MM:SS` twice would walk forward instead of returning to the spot.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_position("00:01:23")),
+            vec![json!(["seek", "00:01:23", "absolute"])]
+        );
+    }
+
+    #[test]
+    fn a_title_is_written_to_both_properties_and_remembered() {
+        // Three separate responsibilities in one call, and AGENTS.md §4.2 exists
+        // because the middle one was once nobody's job: `title` alone only reaches the
+        // OSC overlay, while the window's caption comes from `media-title`, which falls
+        // back to `filename` — and for `/relay/<id>/media` that is the literal word
+        // `media`. `--title` stays the user's option and this port never writes it.
+        // The store is what lets `reload()` give the name back after mpv comes up fresh.
+        let mut h = harness_with(|_, _| {}, Arc::new(TestHost::named("客厅的电视")));
+        h.start();
+        assert_eq!(
+            h.player.title(),
+            "客厅的电视",
+            "before anyone names the media, the window carries the friendly name"
+        );
+        let rows = h.sent(2, |p| p.set_media_title("某部片子"));
+        assert_eq!(
+            rows,
+            vec![
+                json!(["set_property", "title", "某部片子"]),
+                json!(["set_property", "force-media-title", "某部片子"]),
+            ],
+            "`title` alone only reaches the OSC overlay — AGENTS.md §4.2"
+        );
+        assert_eq!(h.player.title(), "某部片子");
+        assert_eq!(
+            h.host.count_containing("send command: "),
+            12,
+            "lines: {:?}",
+            h.host.lines()
+        );
+    }
+
+    #[test]
+    fn a_subtitle_request_without_a_url_is_refused_without_a_word_on_the_socket() {
+        // The reference reads `data['url']` and lets a `KeyError` escape to the bus that
+        // logged it. This logs instead, and sends nothing — not even a `sub-add` with a
+        // `null` in it, because then the user would read mpv's rejection instead of our
+        // own missing key. A refusal is not a command: neither the wire nor the DEBUG
+        // line may carry one, and the ten setup lines have to still be all there is.
+        let refusals = [
+            (
+                json!({"title": "中文"}),
+                "set_media_sub_file: url is missing",
+            ),
+            (
+                json!({}),
+                "set_media_sub_file: url is missing, title is missing",
+            ),
+        ];
+        let mut h = harness(|_, _| {});
+        h.start();
+        for (given, message) in refusals {
+            let before = h.fake.commands().len();
+            h.player.set_media_sub_file(&given);
+            std::thread::sleep(Duration::from_millis(120));
+            assert_eq!(
+                h.fake.commands().len(),
+                before,
+                "a refusal writes nothing: {:?}",
+                given
+            );
+            assert!(
+                h.host
+                    .at(Level::Error)
+                    .iter()
+                    .any(|line| line.contains(message)),
+                "refusal {:?} — lines: {:?}",
+                message,
+                h.host.lines()
+            );
+        }
+        assert_eq!(
+            h.host.count_containing("send command: "),
+            10,
+            "a refusal is not a command: {:?}",
+            h.host.lines()
+        );
+    }
+
+    #[test]
+    fn a_subtitle_url_that_is_not_text_is_named_the_way_python_names_it() {
+        // `url is int, title is list`, not "invalid type" and not a `TypeError` from
+        // somewhere downstream: the reader of this line is a user who just pasted a
+        // subtitle path into a field that took a number.
+        let mut h = harness(|_, _| {});
+        h.start();
+        let given = json!({"url": 5, "title": []});
+        let before = h.fake.commands().len();
+        h.player.set_media_sub_file(&given);
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(h.fake.commands().len(), before, "{:?}", given);
+        assert!(
+            h.host
+                .at(Level::Error)
+                .iter()
+                .any(|line| line.contains("set_media_sub_file: url is int, title is list")),
+            "lines: {:?}",
+            h.host.lines()
+        );
+    }
+
+    #[test]
+    fn a_subtitle_request_that_has_both_fields_selects_the_track() {
+        // `select` in the middle is mpv's own track-selection argument, and the title
+        // rides with it: two sidecar subtitles then land on the language the caller
+        // named rather than whichever one the player picked.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p
+                .set_media_sub_file(&json!({"url": "/tmp/s.vtt", "title": "中文"}))),
+            vec![json!(["sub-add", "/tmp/s.vtt", "select", "中文"])]
+        );
+    }
+
+    #[test]
+    fn a_declared_live_handoff_carries_the_ten_options_and_no_start() {
+        // The one place the sender's own declaration reaches the player. The verdict is
+        // stored, not sent — so nothing may leave the socket when only the verdict
+        // changed — and then it lands in `loadfile`'s fifth slot as the ten live-shape
+        // options, with **no** `start`: seeking a stream that has no addressable prefix
+        // is how a live cast breaks.
+        //
+        // The assertions below are spot checks against literals, deliberately not a copy
+        // of `command::live_load_options()`: `Value::Object` equality is order-insensitive,
+        // so a wholesale compare would pass while the dictionary arrived with the wrong
+        // insertion order (AGENTS.md §4.2 — mpv's option names are not a set). `command.rs`
+        // owns the list; this test owns the route it takes to get here.
+        let mut h = harness(|_, _| {});
+        h.start();
+        let before = h.fake.commands().len();
+        h.player.note_media_live(Some(true));
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            h.fake.commands().len(),
+            before,
+            "the verdict is a store, not a command"
+        );
+        assert_eq!(h.player.media_live(), command::Liveness::Live);
+        let rows = h.sent(1, |p| p.set_media_url(MEDIA_URL, Some("00:00:12")));
+        let options = loadfile_options(&rows[0], MEDIA_URL);
+        assert_eq!(options.len(), 10, "{:?}", options);
+        assert!(
+            !options.contains_key("start"),
+            "seeking a stream with no addressable prefix is how a live cast breaks: {:?}",
+            options
+        );
+        assert_eq!(options["audio-buffer"], json!("0"));
+        assert_eq!(options["cache-pause"], json!("no"));
+        assert_eq!(options["stream-buffer-size"], json!("4k"));
+    }
+
+    #[test]
+    fn a_handoff_nobody_declared_keeps_the_shapes_the_reference_shipped() {
+        // Five rows, and the point is the split between `None` and `Some(false)` — three
+        // slots with no dictionary at all when the player has no opinion, and a
+        // one-entry dictionary only when a position actually arrived.
+        //
+        // `"0"` and `"  "` both mean "no position" because the builder trims and then
+        // asks whether the text is literally `0`; `None` is the reference's own default
+        // argument `"0"`, so the two spellings must agree. And `start` is suppressed
+        // **only** for `Liveness::Live` — not for `Finite`, which is exactly the case
+        // where resuming at a reported offset is the whole point.
+        let rows: Vec<(Option<bool>, Option<&str>, Option<&str>)> = vec![
+            (None, None, None),
+            (None, Some("0"), None),
+            (None, Some("  "), None),
+            (None, Some("00:00:12"), Some("00:00:12")),
+            (Some(false), Some("00:00:12"), Some("00:00:12")),
+        ];
+        let mut h = harness(|_, _| {});
+        h.start();
+        for (decl, start, expected) in rows {
+            let sent = h.sent(1, |p| {
+                p.note_media_live(decl);
+                p.set_media_url(MEDIA_URL, start);
+            });
+            match expected {
+                None => assert_eq!(
+                    sent[0],
+                    json!(["loadfile", MEDIA_URL, "replace"]),
+                    "decl={:?} start={:?}",
+                    decl,
+                    start
+                ),
+                Some(position) => {
+                    let options = loadfile_options(&sent[0], MEDIA_URL);
+                    assert_eq!(options.len(), 1, "{:?}", options);
+                    assert_eq!(options["start"], json!(position));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_three_verdicts_are_stored_as_the_three_verdicts() {
+        // AGENTS.md §4.1: "keep today's behaviour" and "this is a file you may seek into"
+        // are different statements, and only `Some(true)` changes the command that goes
+        // out later. `loadfile` cannot witness that difference — `Undeclared` and `Finite`
+        // produce byte-identical rows there — so the verdict as *stored* is the only
+        // observable the split has. A `note_media_live(None)` that falls through to
+        // `Some(false)` would pass every socket-shape test in this file.
+        let h = harness(|_, _| {});
+        for (declared, want) in [
+            (Some(true), command::Liveness::Live),
+            (Some(false), command::Liveness::Finite),
+            (None, command::Liveness::Undeclared),
+        ] {
+            h.player.note_media_live(declared);
+            assert_eq!(
+                h.player.media_live(),
+                want,
+                "the sender said {:?} and the player must remember exactly that",
+                declared
+            );
+        }
+        // The fresh player reads `Undeclared` before anyone has said anything at all.
+        assert_eq!(
+            harness(|_, _| {}).player.media_live(),
+            command::Liveness::Undeclared
+        );
+    }
+
+    #[test]
+    fn stopping_the_media_forgets_the_live_verdict() {
+        // The verdict is a statement about *the media that was in the player*, so it
+        // goes when the media does. Leave it and the next hand-off — arriving with no
+        // declaration at all — inherits this one's live options and quietly plays an
+        // ordinary file with no read-ahead, which is the buffering complaint the
+        // declaration was introduced to answer.
+        let mut h = harness(|_, _| {});
+        h.start();
+        h.player.note_media_live(Some(true));
+        assert_eq!(h.player.media_live(), command::Liveness::Live);
+        assert_eq!(
+            h.sent(1, |p| p.set_media_stop()),
+            vec![json!(["stop"])],
+            "the one command on this surface that is not a `set_property`"
+        );
+        assert_eq!(h.player.media_live(), command::Liveness::Undeclared);
+        let rows = h.sent(1, |p| p.set_media_url(MEDIA_URL, Some("00:00:12")));
+        let options = loadfile_options(&rows[0], MEDIA_URL);
+        assert_eq!(options.len(), 1, "{:?}", options);
+        assert_eq!(options["start"], json!("00:00:12"));
+    }
+
+    // --- reload() ----------------------------------------------------------------
+
+    #[test]
+    fn a_reload_replays_the_media_that_was_playing() {
+        // The tail is fourteen rows, and their order is the reference's: `quit`, the
+        // media with its position, the name **twice**, then the ten setup commands.
+        // The name comes back before the observations because `load_pending` runs
+        // before `set_observe` on the new connection — and a window that got its media
+        // but not its name looks exactly like the bug AGENTS.md §4.2 was written for.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing(MEDIA_URL, "00:00:12")),
+        );
+        h.start();
+        let mut want = vec![
+            json!(["quit"]),
+            json!(["loadfile", MEDIA_URL, "replace", 0, {"start": "00:00:12"}]),
+            json!(["set_property", "title", "Test Player"]),
+            json!(["set_property", "force-media-title", "Test Player"]),
+        ];
+        want.extend(session_setup());
+        assert_eq!(h.reloaded(14), want);
+        h.stop();
+    }
+
+    #[test]
+    fn a_reload_on_an_idle_player_loads_nothing() {
+        // The reference's `else` branch: restart the window, do not resurrect media.
+        // Eleven rows — `quit` and the ten setup commands — and no `loadfile` anywhere
+        // in them, nor the DEBUG line that would announce one.
+        let mut h = harness(|_, _| {});
+        h.start();
+        let tail = h.reloaded(11);
+        assert_eq!(tail[0], json!(["quit"]));
+        assert_eq!(&tail[1..], &session_setup()[..], "{:?}", tail);
+        assert!(
+            !tail
+                .iter()
+                .any(|row| row.as_array().map_or(false, |c| c.first()
+                    == Some(&json!("loadfile")))),
+            "{:?}",
+            tail
+        );
+        assert_eq!(h.host.count_containing("mpv loadfile"), 0);
+        h.stop();
+    }
+
+    #[test]
+    fn the_replay_is_spent_once_the_session_has_read_it() {
+        // A one-shot, proved the only way a one-shot can be proved: let a *later*
+        // session read the pending slot and show that it has nothing left to say.
+        //
+        // The later session here is a third one, forced by hanging up on the second —
+        // `TestHost` is immutable, so a second `reload()` would re-arm the same url and
+        // prove nothing. The connection that follows the hang-up is a fresh
+        // `connect_once`, so if the take were missing it would load the media again and
+        // this assertion would see a `loadfile` inside those ten rows.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing(MEDIA_URL, "00:00:12")),
+        );
+        h.start();
+        let tail = h.reloaded(14);
+        assert_eq!(tail[1].as_array().unwrap()[0], json!("loadfile"));
+
+        let before = h.fake.commands().len();
+        h.fake.drop_connections();
+        wait_until("a third session writes its own setup", || {
+            h.fake.commands().len() >= before + 10
+        });
+        let added = h.fake.commands()[before..].to_vec();
+        assert_eq!(&added[..10], &session_setup()[..], "{:?}", added);
+        assert!(
+            !added
+                .iter()
+                .any(|row| row.as_array().map_or(false, |c| c.first()
+                    == Some(&json!("loadfile")))),
+            "the replay is spent: {:?}",
+            added
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn a_reload_without_a_readable_position_replays_the_start_of_the_media() {
+        // `get_state_position()` can answer nothing at all — the control point has not
+        // polled yet, or the media has no timeline. Then the hand-off is the bare
+        // three-slot shape and mpv starts from zero, which is the reference's `else`.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing_without_position(MEDIA_URL)),
+        );
+        h.start();
+        let tail = h.reloaded(14);
+        assert_eq!(
+            tail[1],
+            json!(["loadfile", MEDIA_URL, "replace"]),
+            "{:?}",
+            tail
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn a_reload_does_not_ask_a_live_stream_for_an_offset() {
+        // The verdict survives the restart, because `Player::stop()` deliberately does
+        // **not** clear it — only `set_media_stop()` does, and a reload is not the media
+        // ending. So the replay of a live stream carries the ten live options and no
+        // `start`, exactly as the original hand-off did: the same rule that keeps a live
+        // cast from seeking on the way in has to keep it from seeking on the way back.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing(MEDIA_URL, "00:00:12")),
+        );
+        h.start();
+        h.player.note_media_live(Some(true));
+        let tail = h.reloaded(14);
+        let options = loadfile_options(&tail[1], MEDIA_URL);
+        assert_eq!(options.len(), 10, "{:?}", options);
+        assert!(
+            !options.contains_key("start"),
+            "a reload must not seek a live stream: {:?}",
+            options
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn a_reload_gives_the_window_its_name_back() {
+        // After the restart both properties are gone because mpv came back with its
+        // default `--title` template, so the replay has to say the name again — and
+        // say it after the media, because a title set before the load is what the load
+        // overwrites. That ordering is the reason `title()` stores the text at all.
+        //
+        // The host has to be *playing* for this to have anything to check: `reload()`
+        // arms the pending replay only when the transport says `PLAYING`, so a bare
+        // harness would hand back the eleven-row idle tail and every index below
+        // would read the session setup as if it were the replay.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing(MEDIA_URL, "00:00:12")),
+        );
+        h.start();
+        h.sent(2, |p| p.set_media_title("某部片子"));
+        let tail = h.reloaded(14);
+        let load_at = first_index_of("loadfile", &tail);
+        let title_at = first_index_of("set_property", &tail);
+        assert!(
+            load_at < title_at,
+            "the name goes back after the media, not before: {:?}",
+            tail
+        );
+        assert_eq!(tail[2], json!(["set_property", "title", "某部片子"]));
+        assert_eq!(
+            tail[3],
+            json!(["set_property", "force-media-title", "某部片子"]),
+            "{:?}",
+            tail
+        );
+        assert_eq!(h.player.title(), "某部片子");
+        h.stop();
+    }
+
+    #[test]
+    fn a_reload_is_the_reference_two_publish_pairs_and_nothing_else() {
+        // The bus traffic of one reload, in order: `renderer_av_stop` from `stop()`,
+        // then `mpv_start` when the loop comes back, then `mpvipc_start` and
+        // `renderer_start` from the new connection.
+        //
+        // This asserts a subsequence plus two exact counts rather than `len == 4`
+        // on purpose: a state update that happens to be in flight is honest traffic and
+        // must not make the test flaky, while a *third* lifecycle event — the service
+        // being stopped, or the old session announced twice — is exactly the wrong
+        // shape and is caught by the name filter and the counts.
+        let mut h = harness_with(
+            |_, _| {},
+            Arc::new(TestHost::playing(MEDIA_URL, "00:00:12")),
+        );
+        h.start();
+        let before = h.host.published().len();
+        h.reloaded(14);
+        std::thread::sleep(Duration::from_millis(150));
+        let all = h.host.published();
+        let added = &all[before..];
+        assert!(
+            added.iter().all(|name| {
+                matches!(
+                    name.as_str(),
+                    "renderer_av_stop" | "mpv_start" | "mpvipc_start" | "renderer_start"
+                )
+            }),
+            "a reload publishes lifecycle only: {:?}",
+            added
+        );
+        assert!(
+            is_subsequence(
+                &[
+                    "renderer_av_stop".to_string(),
+                    "mpv_start".to_string(),
+                    "mpvipc_start".to_string(),
+                    "renderer_start".to_string()
+                ],
+                added
+            ),
+            "{:?}",
+            added
+        );
+        assert_eq!(
+            added
+                .iter()
+                .filter(|n| n.as_str() == "renderer_av_stop")
+                .count(),
+            1,
+            "{:?}",
+            added
+        );
+        assert_eq!(
+            added.iter().filter(|n| n.as_str() == "mpv_start").count(),
+            1,
+            "the loop publishes mpv_start once per start(): {:?}",
+            added
+        );
+        h.stop();
     }
 
     fn shell_quote(path: &str) -> String {
