@@ -125,10 +125,14 @@ env -u PYTHONPATH .venv/bin/python -m pyflakes <改动文件>
 #    以及 closer 里 `unsubscribe` 的 `KeyError` —— 那一条直接吃掉 H…L 全部），
 #    而产品代码一个字节都没错。重建后 234/234，十二支变异体对着它**重测一遍**，
 #    读数与上面那行逐字相同（8/12/4/13/24/7/5/7/11/2/2/1）；② 那个 harness 没有 CI 门也没有 `sys.exit`，
-#    所以判据是 `=== SUMMARY: N/M ===` 与 `[FAIL]` 行，**退出码永远是 0**；③ CI 的 ubuntu
-#    `verify --ci` 跑的是**全量**，而这一轮的 Part 64 没有在 Linux 上跑过（他裁掉了那一半），
-#    所以 tag 构建有 macOS 专属用例变红的真实风险，干净修法是把 tag 移走重发（见 §6 与
-#    memory 的 CI 读数一条），不是当场改产品代码。）
+#    所以判据是 `=== SUMMARY: N/M ===` 与 `[FAIL]` 行，**退出码永远是 0**；③ **这一轮裁掉的"跑 Linux"
+#    只是我这边不再为它单独起容器**：`push main` 本身就会跑那个 ubuntu `verify --ci` **全量** job，
+#    所以 Part 64 在 Linux 上到底认不认账，是推 main 之后读 job 日志问出来的，不是猜的 ——
+#    2026-10-06 实测 **2648/2654、`CI GATE: PASSED`**（红的仍是 Part 34 那 6 条，缺历史那一句照旧）。
+#    顺带记一条读数习惯：`--log` 里那批「the ledger is computable here / per-file rows are the
+#    ledger's own line counts」的清单是**门在解释它豁免了什么**，长得像 21 条新红，不是。
+#    （谁哪天把 verify 挪出 main push，这个"免费的一半 Linux 见证"就没了，那时上面那句
+#    "干净修法是把 tag 移走重发（见 §6 与 memory 的 CI 读数一条），不是当场改产品代码" 才重新成立。）
 #    —— 红的永远是下面那 6 条；**总数随环境伸缩**：场上有一个在跑的 Macast（占着
 #    8009/58880，甚至 8443 —— 那会把 Part 19 的 4 条 TLS 用例换成 2 条"端口被占就静默降级"）时真实 socket 的那几段没跑就是没跑，套件不会替它承认。所以先看总数，
 #    再信"全绿"；跑之前按 §4.2 杀干净实例。
