@@ -1,0 +1,58 @@
+# Macast for Rust — cargo workspace.
+#
+# Layering (mirrors the Python package layout; each crate is one migration
+# surface so a port can be verified without the others compiling):
+#
+#   macast-core     settings (BOM-tolerant load + corrupt quarantine), interface
+#                   selection + advertisability rules, proxy-stripped player env,
+#                   rotating per-module logs, tokens, trash, time formatting
+#   macast-mpv      mpv argv builder + JSON IPC renderer (the player half)
+#   macast-upnp     SSDP + DLNA MediaRenderer (description/SOAP/GENA/DIDL)
+#   macast-cast     Chromecast Cast v2 receiver (protobuf over TLS + setup HTTP)
+#   macast-airplay  AirPlay video-URL receiver (RTSP)
+#   src-tauri       tray + settings window; the only crate that knows about UI
+#
+# `src-tauri` stays a member so `cargo check` at the root proves the shell
+# against the same lockfile the core crates use.
+#
+# A member that does not exist on disk yet is not a "planned crate" to cargo —
+# it is a manifest load error, and that error kills *every* crate in the tree,
+# including the one being worked on. So the list below is exactly the set of
+# directories that exist, and each migration step adds its own member in the
+# commit that writes its `Cargo.toml`. Nothing here is a promise.
+[workspace]
+members = [
+    "macast-core",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/pingod/Macast"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+getrandom = "0.2"
+quick-xml = "0.36"
+# TLS for the Cast receiver: the listener is plaintext and each connection is
+# wrapped, exactly as in Python (AGENTS.md §4.1 — an ssl error on one connection
+# must never take the accept loop down).
+rustls = "0.23"
+rustls-pemfile = "2"
+rcgen = "0.13"
+
+macast-core = { path = "macast-core" }
+macast-mpv = { path = "macast-mpv" }
+macast-upnp = { path = "macast-upnp" }
+macast-cast = { path = "macast-cast" }
+macast-airplay = { path = "macast-airplay" }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true

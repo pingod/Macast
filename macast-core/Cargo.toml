@@ -1,0 +1,15 @@
+[package]
+name = "macast-core"
+description = "Settings, network selection, player environment, logging, and reversible file operations for the Rust Macast receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

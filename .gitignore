@@ -74,6 +74,20 @@ docs/_build/
 # PyBuilder
 target/
 
+
+# Rust / Tauri
+src-tauri/target/
+# The bundler's icon directory is *derived* from `macast/assets/` by
+# `src-tauri/build.rs` on every build. Committing a second copy of the artwork
+# would create two sources of truth for one logo — the same drift §4.3 of
+# AGENTS.md documents for dependency lists.
+src-tauri/icons/
+# tauri-build writes these JSON schemas on every build, and which ones appear
+# depends on the host (`macOS-schema.json` on a Mac, `linux-schema.json` on the
+# Linux job). Ignored rather than committed so a checkout doesn't carry a
+# stale, platform-shaped copy of them. `src-tauri/gen/` as a whole stays
+# trackable because mobile targets commit real files under it.
+src-tauri/gen/schemas/
 # Jupyter Notebook
 .ipynb_checkpoints
 
@@ -138,6 +152,9 @@ mpv-latest.tar.gz
 # state, not project source — keeping it out of the repo also keeps
 # `git status` clean after every build-and-verify session.
 .workbuddy/
+# Coding-agent session logs. Same reasoning as `.workbuddy/`, plus they record
+# raw tool output, which in this repo has included management tokens.
+.pi-traces/
 
 # macOS noise
 .DS_Store

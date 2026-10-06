@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Macast</title>
+    <style>
+      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      body { margin: 0; background: #111827; color: #e5e7eb; }
+      main { max-width: 960px; margin: 0 auto; padding: 48px 24px; }
+      h1 { margin: 0 0 8px; font-size: 36px; }
+      .muted { color: #9ca3af; }
+      .card { margin-top: 28px; padding: 24px; border: 1px solid #374151; border-radius: 14px; background: #1f2937; }
+      dl { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
+      dt { color: #9ca3af; }
+      dd { margin: 0; }
+      button { margin-top: 20px; padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
+      button:hover { background: #1d4ed8; }
+      #error { color: #fca5a5; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Macast</h1>
+      <p class="muted">Rust + Tauri 2 重构分支 · 并行迁移骨架</p>
+      <section class="card">
+        <h2>运行时状态</h2>
+        <dl>
+          <dt>后端</dt><dd id="backend">加载中…</dd>
+          <dt>版本</dt><dd id="version">加载中…</dd>
+          <dt>迁移策略</dt><dd id="migration">加载中…</dd>
+          <dt>状态</dt><dd id="status">加载中…</dd>
+        </dl>
+        <button id="mark-ready">标记骨架已就绪</button>
+        <p id="error"></p>
+      </section>
+    </main>
+    <script>
+      const invoke = window.__TAURI__?.core?.invoke;
+      async function refresh() {
+        if (!invoke) {
+          document.querySelector('#error').textContent = '请通过 Tauri 运行此页面。';
+          return;
+        }
+        const data = await invoke('runtime_status');
+        for (const key of ['backend', 'version', 'migration', 'status']) {
+          document.querySelector(`#${key}`).textContent = data[key];
+        }
+      }
+      document.querySelector('#mark-ready').addEventListener('click', async () => {
+        await invoke('set_status', { value: 'scaffold-ready' });
+        await refresh();
+      });
+      refresh().catch(error => { document.querySelector('#error').textContent = String(error); });
+    </script>
+  </body>
+</html>
