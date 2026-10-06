@@ -91,6 +91,26 @@ class Renderer:
         """
         pass
 
+    def note_media_live(self, live):
+        """What the sender declared about the media about to be handed over.
+
+        Called by ``PlaybackGuard`` immediately before ``set_media_url``, with
+        the answer the receiving protocol gave to ``media_is_live()``:
+        ``True`` live · ``False`` a file with an end · ``None`` no declaration.
+
+        A renderer that does not care can ignore it — which is why the base is a
+        no-op rather than an abstract method, and why the guard treats a missing
+        attribute as "play everything the old way". mpv is the one implementation
+        that acts on it: an ordinary file wants read-ahead, a live stream wants
+        the opposite, and the shipped command line can only be one of the two.
+
+        Deliberately *not* named ``set_media_live``: ``methods()`` enumerates the
+        ``set_media_`` prefix and ``MacastPluginManager`` subscribes every one of
+        those names onto the CherryPy bus, so a setter-shaped name here would
+        become a bus message nobody asked for.
+        """
+        pass
+
     def set_media_title(self, data):
         """ data : string
         """

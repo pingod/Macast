@@ -40,6 +40,42 @@ class ObserveProperty(Enum):
     sub = 8
 
 
+#: mpv per-file options for a stream the *sender* declared live.
+#:
+#: Measured on this machine (2026-10-06, /tmp/recv-lag: a real live stream served
+#: by screen_mirror, mpv asked over IPC for `time-pos` while wall clock ran):
+#: with the shipped command line the player sits **3.50 s** behind the live edge
+#: and the gap *creeps* (+0.87 s per 43 s; median playback rate 0.98 -- mpv's
+#: read-ahead buffer grows without bound and it never catches up). With these
+#: options: **0.38 s**, flat. So this is roughly three seconds of latency that
+#: lives in the player, not in the network or the encoder.
+#:
+#: They are sent as an option *set on the loadfile command*, never as mpv argv
+#: flags, and that choice is the whole point of the entry: a shipped command line
+#: can only be one shape, and an ordinary DLNA/Cast video wants mpv's default
+#: read-ahead (it is what makes seeking instant). Per-file options reset on the
+#: next bare load -- measured: `audio-buffer` 0.0 -> 0.2, `cache-pause`
+#: False -> True, `stream-buffer-size` 4k -> 131072 -- so the live shape cannot
+#: leak forward into the next item, which is exactly the direction a command-line
+#: flag would have leaked in.
+#:
+#: Keys are strings because that is the shape that was measured; `demuxer-lavf-o-add`
+#: (not `demuxer-lavf-o`) is the one that appends `fflags=+nobuffer` to the
+#: demuxer's own options instead of replacing the list.
+LIVE_LOAD_OPTIONS = {
+    "audio-buffer": "0",
+    "vd-lavc-threads": "1",
+    "cache-pause": "no",
+    "demuxer-lavf-o-add": "fflags=+nobuffer",
+    "demuxer-lavf-probe-info": "nostreams",
+    "demuxer-lavf-analyzeduration": "0.1",
+    "video-sync": "audio",
+    "interpolation": "no",
+    "video-latency-hacks": "yes",
+    "stream-buffer-size": "4k",
+}
+
+
 class MPVRenderer(Renderer):
     """
       When the DLNA client accesses, MPVRenderer will returns the state value
@@ -67,6 +103,14 @@ class MPVRenderer(Renderer):
         self.ipc_sock = None
         self.pause = False  # changed with pause action
         self.playing = False  # changed with start and stop
+        #: What the sender declared about the media *currently* in the player:
+        #: ``True`` live · ``False`` a file with an end · ``None`` nobody said.
+        #: Written by ``note_media_live`` (the ``PlaybackGuard`` calls it right
+        #: before every hand-off) and cleared by ``set_media_stop``, so it can
+        #: never describe an item that is no longer loaded. ``None`` is not a
+        #: shy ``False``: it means "no declaration", and no declaration keeps
+        #: today's command line.
+        self._media_live = None
         self.ipc_running = False
         self.ipc_once_connected = False
         # As long as IPC has been connected, the ipc_once_connected is True
@@ -77,6 +121,11 @@ class MPVRenderer(Renderer):
         self.renderer_setting = MPVRendererSetting()
 
     def set_media_stop(self):
+        # The verdict is about *the media currently in the player*, so stopping
+        # the player must drop it: otherwise the next hand-off that arrives with
+        # no declaration would inherit this one's live options and quietly play
+        # an ordinary file with no read-ahead.
+        self._media_live = None
         self.send_command(['stop'])
 
     def set_media_pause(self):
@@ -99,21 +148,70 @@ class MPVRenderer(Renderer):
         self.send_command(['set_property', 'mute', "yes" if data else "no"])
         self.set_media_text(f'Mute: {data}')
 
+    def note_media_live(self, live):
+        """Remember what the sender declared about the media about to be loaded.
+
+        ``PlaybackGuard`` calls this immediately before ``set_media_url``, so the
+        verdict is about *this* hand-off rather than the last one: it is
+        overwritten on every cast that comes through the guard, including the
+        ones whose answer is "no declaration".
+
+        The three answers are stored as given, and only ``True`` changes the
+        command. ``None`` must not be collapsed into ``False``, because "the
+        sender said nothing" keeps today's buffering behaviour, whereas
+        "the sender said this has an end" is a promise we could act on later.
+        """
+        self._media_live = live if live is True or live is False else None
+
+    def _loadfile_command(self, url, start=None, live=None):
+        """Build the one ``loadfile`` command this renderer ever sends.
+
+        Pure -- no settings, no player, no socket -- so the two places that load
+        media (``set_media_url`` and ``reload``) cannot drift apart, and a test
+        can ask what shape a given declaration produces with nothing on the
+        other end of the pipe.
+
+        Three answers, and the bare one is deliberate: media with no declaration
+        and no position must send exactly what this file sent before per-file
+        options existed, ``['loadfile', url, 'replace']``. That is what the
+        existing cases pin, and it is what keeps an ordinary video playing with
+        mpv's read-ahead.
+
+        ``start`` is honoured **only when the media is not declared live**. The
+        base class documents ``--start=`` semantics (relative, absolute,
+        percentages), so honouring it is restoring a documented contract, not
+        inventing one -- but a live declaration means there is no timeline to
+        jump into, and sending a position into that is precisely the seek the
+        sender asked us not to make.
+        """
+        options = {}
+        if live is True:
+            options.update(LIVE_LOAD_OPTIONS)
+        else:
+            position = "" if start is None else str(start).strip()
+            # "0" is where mpv already starts a file; sending it as an option
+            # would take the load out of the bare shape for no change in
+            # behaviour, and the bare shape is what the no-op case promises.
+            if position and position != "0":
+                options["start"] = position
+        if not options:
+            return ['loadfile', url, 'replace']
+        return ['loadfile', url, 'replace', 0, options]
+
     def set_media_url(self, url, start="0"):
         """ data : string
         """
         player_size = Setting.get(SettingProperty.PlayerSize,
                                   default=SettingProperty.PlayerSize_Normal.value)
         if player_size == SettingProperty.PlayerSize_FullScreen.value:
-            # mpv IPC 'loadfile' does NOT accept options as a 4th argument
-            # (that slot is the playlist index), so apply fullscreen as a
-            # separate property instead of bundling it into the loadfile cmd.
+            # Fullscreen stays a `set_property` rather than joining the per-file
+            # options on `loadfile`: it is a player-wide setting the user chose,
+            # not a statement about this one stream, and it must survive an item
+            # that arrives with no declaration at all.
             self.send_command(['set_property', 'fullscreen', 'yes'])
-        # mpv IPC signature: loadfile <url> [<flags> [<index>]].
-        # Passing a start= options string here made mpv reject the whole
-        # command with "invalid parameter", so DLNA media never played.
-        # mpv loads from the start by default, so a bare 'replace' is fine.
-        self.send_command(['loadfile', url, 'replace'])
+        # mpv's IPC signature is `loadfile <url> [<flags> [<index> [<options>]]]`:
+        # the 4th slot is the playlist index and the 5th is the option dictionary.
+        self.send_command(self._loadfile_command(url, start, self._media_live))
 
     def set_media_title(self, data):
         """ data : string
@@ -207,7 +305,15 @@ class MPVRenderer(Renderer):
                     sec = int(res['data'])
                     duration = '%d:%02d:%02d' % (sec // 3600, (sec % 3600) // 60, sec % 60)
                     cherrypy.engine.publish('mpv_update_duration', duration)
-                    logger.info("update duration " + duration)
+                    # DEBUG, not INFO: for a stream that is still growing (a
+                    # mirror, a transmuxed `/relay` file) mpv re-reports the
+                    # duration about once per second, so this line used to be
+                    # the loudest thing in the log while saying the least --
+                    # 505 of them in three hours on this machine, 464 of which
+                    # only restated the previous value. The state table below
+                    # still gets the update; `set_state` is what decides
+                    # whether a client needs to hear about it.
+                    logger.debug("update duration " + duration)
                     if self.protocol.get_state_transport_state() == 'PLAYING':
                         logger.debug("Living media")
                 self.set_state_duration(duration)
@@ -495,12 +601,21 @@ class MPVRenderer(Renderer):
         def loadfile():
             logger.debug("mpv loadfile")
             protocols = cherrypy.engine.publish('get_protocol')
-            if len(protocols) > 0:
-                protocol = protocols.pop()
-                position = protocol.get_state_position()
-                self.send_command(['loadfile', uri, 'replace', f'start={position}'])
-            else:
-                self.send_command(['loadfile', uri, 'replace'])
+            position = protocols.pop().get_state_position() if protocols else None
+            # One builder for both places that load media, so a reload cannot
+            # send a different command than the hand-off it is restoring -- and
+            # the same verdict travels with it, so reloading the player in the
+            # middle of a live mirror does not put the read-ahead back.
+            #
+            # Before this, the non-idle branch sent
+            # `['loadfile', uri, 'replace', 'start=00:00:12']`, and mpv answers
+            # that with `{"error": "invalid parameter"}` and **loads nothing**:
+            # the 4th slot of `loadfile` is the playlist index, not an option
+            # string. Measured on this machine (2026-10-06) against a real
+            # player over IPC -- the option dictionary in the 5th slot seeks to
+            # exactly the reported position (`time-pos` 12.0).
+            self.send_command(self._loadfile_command(uri, start=position,
+                                                     live=self._media_live))
             # After a restart both properties are gone -- mpv came back with the
             # default `--title` template -- so restore them from the one place
             # that names the player, not just the OSC `title`.

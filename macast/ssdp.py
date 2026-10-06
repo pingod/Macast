@@ -157,6 +157,30 @@ class SSDPServer:
                 and self.ssdp_thread.is_alive()):
             self.ssdp_thread.join()
 
+    def is_healthy(self):
+        """Can this server still answer a discovery request right now?
+
+        A deliberately stopped server answers "yes": ``running`` is False
+        because the user turned the service off (or because
+        ``update_ip()`` is mid-restart), and that is not a fault -- a caller
+        that treated it as one would restart us on every stop.
+
+        The reason this question exists at all is the recv-loop in ``run()``:
+        it only handles the timeouts it expects, so any *other* exception in
+        ``datagram_received`` kills the thread while ``running`` stays True
+        and UDP/1900 stays bound. From the outside that looks perfectly
+        healthy -- ``lsof`` still shows the port, TCP-style probes still
+        succeed -- but nothing ever answers an M-SEARCH again, and a renderer
+        that no one can discover is exactly the "searched for it, cast did
+        nothing" symptom. So a liveness poll (a thread check here, not a
+        socket write) is the only thing that can tell "idle" from "dead", and
+        it is what the periodic restart in ``server.Service.notify()`` now
+        asks before it tears the socket down.
+        """
+        if not self.running:
+            return True
+        return self.ssdp_thread is not None and self.ssdp_thread.is_alive()
+
     def run(self):
         # create UDP server
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

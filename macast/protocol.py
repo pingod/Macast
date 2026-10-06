@@ -93,6 +93,74 @@ def soap_fault(error_code, error_description, fault_code='s:Client'):
     return etree.tostring(root, encoding='UTF-8', xml_declaration=False)
 
 
+#: ``DLNA.ORG_OP`` is the one place a sender tells us how its stream behaves,
+#: and it is two hex digits, not one number: the high nibble is *byte*-range
+#: seeking, the low nibble is *time*-based seeking (UPnP AV 2.1.3 / the
+#: `protocolInfo` grammar both cast_local_file and screen_mirror emit).
+_ORG_OP_RE = re.compile(r'DLNA\.ORG_OP=([0-9a-fA-F]{2})')
+
+
+def live_from_protocol_info(text):
+    """Did the sender declare this as a live stream, from its ``protocolInfo``?
+
+    Returns ``True`` (live: a growing stream, no seek), ``False`` (a seekable
+    file), or ``None`` (the sender did not say). **``None`` is not ``False``**
+    — it means "keep today's behaviour", and today's behaviour is the safe one
+    for anything we do not know about.
+
+    This is a *reading of the sender's declaration*, not an inference from the
+    URL. Two of our own shapes prove why the distinction is load-bearing:
+    screen_mirror's "disguised as a file" target and the web-casting relay both
+    serve URLs that look finite and seekable while carrying an unbounded
+    timeline, and the ``protocolInfo`` they hand over is what says so —
+    ``ORG_OP=00`` + ``ORG_CI=1`` there, ``ORG_OP=01`` + ``ORG_CI=0`` for a real
+    file that cast_local_file can seek in. Guess from the path instead and the
+    player is handed read-ahead it must not have, or denied read-ahead it needs.
+    """
+    if not isinstance(text, str):
+        return None
+    match = _ORG_OP_RE.search(text)
+    if match is None:
+        return None
+    try:
+        value = int(match.group(1), 16)
+    except ValueError:  # pragma: no cover - the regex already constrains hex
+        return None
+    # Both halves zero => the device may not range-request at all => this is a
+    # live stream. Any bit set is an explicit "I will seek in this".
+    return value == 0
+
+
+def protocol_info_from_didl(meta):
+    """The first ``protocolInfo`` attribute a control point attached to a ``res``.
+
+    Returns ``''`` when there is none. Walking by **local name** rather than a
+    qualified path is deliberate: DIDL-Lite's namespace prefix is the sender's
+    choice (some apps emit a default namespace, some bind `didl:`), and a
+    namespace-strict `find()` would silently answer "the sender never said" for
+    every client that spells it differently from the one we happen to test
+    against. The same reason applies to taking the *first* `res` that carries
+    the attribute: a container may list a subtitle `res` before the media one,
+    and the field we want is the one describing what the player is about to read.
+    """
+    if meta is None:
+        return ''
+    for element in meta.iter():
+        tag = _local_name(element.tag)
+        if tag == 'res':
+            info = element.get('protocolInfo')
+            if info:
+                return info
+    return ''
+
+
+def _local_name(tag):
+    """`'{urn}res'` -> `'res'`; a bare `'res'` stays `'res'`."""
+    if isinstance(tag, str) and '}' in tag:
+        return tag.rsplit('}', 1)[1]
+    return tag if isinstance(tag, str) else ''
+
+
 class PlaybackGuard:
     """Transparent renderer wrapper that enforces one playback owner.
 
@@ -114,6 +182,35 @@ class PlaybackGuard:
         self._protocol = protocol
         self._renderer = renderer
 
+    def _note_media_live(self):
+        """Hand this protocol's liveliness verdict to the player.
+
+        One place, not one per call site: every protocol reaches the player
+        through this guard, so the *start of playback* is the only moment that
+        has to carry the declaration — and the moment before the URL is handed
+        over, because that is what the player is about to do with it.
+        """
+        try:
+            live = self._protocol.media_is_live()
+        except Exception as e:  # a protocol that cannot answer must not stop playback
+            logger.error("media_is_live failed on %s: %s",
+                         type(self._protocol).__name__, e)
+            live = None
+        if live is not None and not isinstance(live, bool):
+            # A protocol that answers with a truthy string would otherwise buy
+            # the player's low-latency shape by accident.
+            logger.error("media_is_live on %s answered %r, not True/False/None",
+                         type(self._protocol).__name__, live)
+            live = None
+        try:
+            self._renderer.note_media_live(live)
+        except AttributeError:
+            # A renderer that has no idea what liveliness means is a renderer
+            # that plays everything the old way. That is a valid answer.
+            pass
+        except Exception as e:
+            logger.error("note_media_live failed: %s", e)
+
     def set_media_url(self, *args, **kwargs):
         previous = PlaybackGuard.owner
         if previous is not None and previous is not self._protocol:
@@ -125,6 +222,7 @@ class PlaybackGuard:
                 logger.error("release_playback failed on %s: %s",
                              type(previous).__name__, e)
         PlaybackGuard.owner = self._protocol
+        self._note_media_live()
         return self._renderer.set_media_url(*args, **kwargs)
 
     def __getattr__(self, name):
@@ -178,6 +276,28 @@ class Protocol:
         point rather than being each protocol's problem.
         """
         pass
+
+    def media_is_live(self):
+        """Is the media this protocol is about to hand the player a live stream?
+
+        ``True`` live · ``False`` seekable file · ``None`` the sender never said,
+        so the player should do what it has always done.
+
+        The default is ``None``, and that is a real answer rather than a stub:
+        a protocol that does not read a liveliness field must not be the reason
+        a normal video stops buffering. What each protocol *does* read differs by
+        design — DLNA has ``protocolInfo`` in the DIDL a control point sends,
+        Chromecast has ``streamType`` in the media object — and both of those are
+        the *sender's own* declaration, which is the only witness worth trusting
+        here (see ``live_from_protocol_info`` for why we do not guess from URLs).
+
+        ``ProtocolGroup`` has to override this by *installing it on the instance*:
+        the base defines it, so the class attribute wins over ``__getattr__`` and
+        a grouped protocol would answer ``None`` even when the child that received
+        the cast knows better. AGENTS.md §4.2 documents this exact trap twice
+        already (`set_state_*` and `get_state_*`).
+        """
+        return None
 
     # The following methods are called by the renderer to set the playback status within the protocol,
     # which will be passed to the client (generally the mobile phone)
@@ -485,6 +605,13 @@ class DLNAProtocol(Protocol):
         self._init_sem = threading.Semaphore(20)  # bound init-event threads
         self.playlist = []          # cast playlist (list of uris)
         self.current_index = -1     # current playlist position
+        #: What the *sender* declared about the media currently in the player:
+        #: ``True`` live · ``False`` seekable · ``None`` not declared. Set from
+        #: the DIDL immediately before each hand-off to the player and cleared by
+        #: the paths that bring no DIDL at all (`cast_uri`, `_playlist_step`) —
+        #: otherwise a screen mirror's "this is live" would ride into the next
+        #: ordinary video and deny the player its read-ahead.
+        self._media_live = None
         self.init_services()  # create services handle function from xml file
         self.init_state()  # set default value
 
@@ -493,6 +620,32 @@ class DLNAProtocol(Protocol):
         if self._handler is None:
             self._handler = DLNAHandler()
         return self._handler
+
+    def media_is_live(self):
+        """The ``DLNA.ORG_OP`` answer from the DIDL we were handed for this item.
+
+        Read from ``_media_live`` rather than re-derived, because the moment that
+        matters is the one where the address was handed to the player; by the
+        time the player asks, the raw metadata may have been overwritten by a
+        later cast. See ``AVTransport_SetAVTransportURI`` for where it is set and
+        cleared.
+        """
+        return self._media_live
+
+    def release_playback(self):
+        """Another protocol took the player; drop our liveliness opinion.
+
+        DLNA keeps its own state (a control point may still be polling
+        ``GetTransportInfo`` for the item we handed over), but it must stop
+        answering "that stream is live": from this moment the player is playing
+        something this protocol never saw. ``PlaybackGuard`` calls this on the
+        *displaced* protocol before it asks the new owner for its declaration,
+        and ``ProtocolGroup`` searches its children for the first one that has an
+        opinion — so without this clear, a screen mirror's ``True`` would outvote
+        the ordinary video a second sender just started and deny the player its
+        read-ahead.
+        """
+        self._media_live = None
 
     def init_state(self):
         self.set_state('CurrentPlayMode', 'NORMAL')
@@ -848,16 +1001,38 @@ class DLNAProtocol(Protocol):
         :param value: state value
         :return:
         """
+        # Ask "did it change?" *first*, and let that one answer gate both halves.
+        #
+        # This used to put the value in the queue and wake the event thread
+        # regardless of it, then test the change only to decide whether to
+        # update the table -- so an unchanged value still produced a GENA
+        # LAST_CHANGE to every subscriber. That is not a theoretical cost: a
+        # live stream's duration is a growing number, so mpv re-reports
+        # `duration` about once per second, and `set_state_duration()` writes
+        # *two* observed states (`CurrentTrackDuration` +
+        # `CurrentMediaDuration`), `set_state_transport()` writes two more
+        # (`TransportState` + `TransportStatus`). Measured on this machine
+        # (2026-10-06, the user's own log, 3 h of sessions): 505 duration
+        # reports of which **464 were the same value as the report before it**
+        # -- 92% of those broadcasts said nothing had changed, once per second,
+        # for as long as a mirror ran. Each one is a synchronous HTTP POST to
+        # every control point on the LAN, from the thread that also has to
+        # deliver the notifications that *do* mean something.
+        #
+        # Note the lookup stays where it was: an unknown state name must still
+        # raise KeyError, silently ignoring it would let a typo in a renderer
+        # look like "the client just never heard about it".
+        changed = self.state_list[name].value != value
         # update states which will send to DLNA Client
-        if name in SERVICE_STATE_OBSERVED['AVTransport'] or \
-                name in SERVICE_STATE_OBSERVED['RenderingControl']:
+        if changed and (name in SERVICE_STATE_OBSERVED['AVTransport'] or
+                        name in SERVICE_STATE_OBSERVED['RenderingControl']):
             logger.debug("setState: {} {}".format(name, value))
             # When some states change, the DLNA client needs to be notified immediately
             # We put this kind of state into state_queue, waiting to be sent to client.
             self.state_queue.put((name, value))
             self._state_event.set()
         # update other states
-        if self.state_list[name].value != value:
+        if changed:
             self.state_list[name].value = value
 
     def get_state(self, name: str):
@@ -902,23 +1077,37 @@ class DLNAProtocol(Protocol):
     def AVTransport_SetAVTransportURI(self, data):
         uri = data['CurrentURI'].value
         logger.info(uri)
-        self.set_state_url(uri)
-        self.renderer.set_media_url(uri)
         title = Setting.get_friendly_name()
+        raw_meta = data['CurrentURIMetaData'].value
+        meta = None
+        metadata = None
+        meta_failed = False
         try:
             # Same tolerance as the SOAP body: a client that indents its
             # envelope indents the embedded DIDL-Lite metadata too, and a
             # leading newline before <?xml...?> would cost us the real title.
-            meta = etree.fromstring(
-                normalize_soap_body(data['CurrentURIMetaData'].value))
+            meta = etree.fromstring(normalize_soap_body(raw_meta))
             title_xml = meta.find('.//{{{}}}title'.format(meta.nsmap['dc']))
             if title_xml is not None and title_xml.text is not None:
                 title = title_xml.text
             metadata = etree.tostring(meta, encoding="UTF-8", xml_declaration=False)
         except Exception as e:
+            meta_failed = True
             logger.error(str(e))
-            logger.error(data['CurrentURIMetaData'].value)
-            self.set_state('CurrentTrackMetaData', data['CurrentURIMetaData'].value)
+            logger.error(raw_meta)
+        # The sender's own declaration about this stream has to be in place
+        # **before** the address reaches the player, because the player reads it
+        # when it decides how much to buffer. That is the only reason the parse
+        # moved up here: the previous order handed over the URL first and read
+        # the metadata afterwards, so the declaration could never have steered
+        # the load it describes. The state writes below keep their old sequence;
+        # only the two error lines about unreadable metadata now appear one step
+        # earlier in the log.
+        self._media_live = live_from_protocol_info(protocol_info_from_didl(meta))
+        self.set_state_url(uri)
+        self.renderer.set_media_url(uri)
+        if meta_failed:
+            self.set_state('CurrentTrackMetaData', raw_meta)
         else:
             self.set_state('CurrentTrackMetaData', metadata.decode())
         self.renderer.set_media_title(title)
@@ -957,6 +1146,10 @@ class DLNAProtocol(Protocol):
         # the window. The playlist holds URIs only, so the address is the honest
         # answer -- the same rule `cast_uri` applies when a cast brings no name.
         title = media_resolve.title_for_uri(uri)
+        # Stepping the playlist carries no DIDL, so nobody has declared anything
+        # about this address. Clear the record rather than let the previous
+        # item's declaration decide how the player buffers this one.
+        self._media_live = None
         self.set_state_url(uri)
         self.renderer.set_media_url(uri)
         self.renderer.set_media_title(title)
@@ -986,6 +1179,11 @@ class DLNAProtocol(Protocol):
         # mpv's `title` property survives a later `loadfile`, so a cast that
         # brings no name would otherwise keep wearing the *previous* item's
         # title -- which is why the fallback always answers something.
+        # Same reasoning for the stream declaration: a page cast or a
+        # local-file cast carries no `protocolInfo` at all, so the honest answer
+        # here is "unknown" (today's buffering) rather than the previous
+        # sender's.
+        self._media_live = None
         self.set_state_url(uri)
         self.renderer.set_media_url(uri)
         self.renderer.set_media_title(given or media_resolve.title_for_uri(uri))

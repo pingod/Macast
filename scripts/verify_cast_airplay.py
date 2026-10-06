@@ -30147,6 +30147,15 @@ try:
                    if isinstance(n, _ast62.Constant)
                    and n.value in ("title", "force-media-title")] \
         if _rl62 is not None else []
+    # The same parse answers a second question: does reload() *build* its
+    # command, or write one out?  `loadfile` literals it writes itself are the
+    # drift; a call to the builder `set_media_url` uses is the seam.
+    _rl_walk62 = list(_ast62.walk(_rl62)) if _rl62 is not None else []
+    _rl_loads62 = [n for n in _rl_walk62 if isinstance(n, _ast62.List)
+                   and n.elts and getattr(n.elts[0], "value", None) == "loadfile"]
+    _rl_builds62 = any(isinstance(n, _ast62.Call)
+                       and getattr(n.func, "attr", "") == "_loadfile_command"
+                       for n in _rl_walk62)
     check("Part 62: `reload()` names the player by calling `set_media_title` "
           "exactly once and never by writing a property literal of its own. "
           "Both properties are gone after a restart, so reload has to restore "
@@ -30193,11 +30202,32 @@ try:
     _pub62 = _eng62.publish("mpvipc_start")
     _idx62 = [i for i, c in enumerate(_cmds_r62) if c[:1] == ["loadfile"]]
     check("Part 62: publishing it loads the address back with the reported "
-          "position, and the option string is `start=` -- the flag mpv "
-          "actually parses",
+          "position, in the slot mpv actually reads: `loadfile <url> <flags> "
+          "<index> <options>` -- the position goes in the option dictionary at "
+          "index 4, with the playlist index `0` in front of it. **This sentence "
+          "used to claim the opposite**, pinning "
+          "`['loadfile', uri, 'replace', 'start=00:00:12']` as 「the flag mpv "
+          "actually parses」. Measured on this machine (2026-10-06, real mpv "
+          "over IPC): that shape is answered `{\"error\": \"invalid "
+          "parameter\"}` and **loads nothing** -- the 4th slot is an index, and "
+          "a string there is not an option. The option dictionary in the 5th "
+          "slot seeks to exactly the position asked for (`time-pos` 12.0). So "
+          "the assertion was green while the feature was broken: a test that "
+          "pins a command shape instead of asking the player what it did "
+          "cannot tell a working load from a rejected one",
           _idx62 == [0] and _cmds_r62[0] == ["loadfile", _RELAY62, "replace",
-                                             "start=00:00:12"],
+                                             0, {"start": "00:00:12"}],
           "pub=%r cmds=%r" % (_pub62, _cmds_r62))
+    check("Part 62: reload() **builds** its command with the same helper "
+          "`set_media_url` uses and writes no `loadfile` literal of its own, so "
+          "the two places that load media cannot drift. Read off the AST, not "
+          "off this fixture's answer: a second inline `loadfile` produces the "
+          "same three commands for a session with no declaration, and then "
+          "only live media -- where reload has to re-send the buffering "
+          "options too -- would reveal the split. The idle branch used to be "
+          "one of those literals; it is the builder too, with no position",
+          _rl_builds62 and not _rl_loads62,
+          "builder=%r literals=%d" % (_rl_builds62, len(_rl_loads62)))
     check("Part 62: ...then re-arms BOTH naming properties from `self.title`, "
           "after the loadfile. A restart resets mpv to the default template, "
           "so without this the window title is right until the user changes a "
@@ -30758,6 +30788,1980 @@ finally:
     utils.Setting.setting, utils.Setting.setting_path = _saved62[0], _saved62[1]
     utils.SETTING_DIR = _saved62[2]
     _shutil.rmtree(_tmp62, ignore_errors=True)
+
+# --------------------------------------------------------------------------
+# Part 64: media liveliness travels from the sender's own field to the player.
+#
+# What this Part refuses to let drift is one chain with five links:
+#   sender declares  ->  we read it  ->  the guard hands it over  ->
+#   the renderer stores it  ->  the player's command line changes shape.
+# Each link has a group here, and each group asks a *different* layer than the
+# one before it, so a mutation anywhere reds exactly one place:
+#   A `protocol_info_from_didl`/`live_from_protocol_info` -- the DLNA grammar,
+#   B the DIDL walk (namespaces, comments, the `res` short-circuit),
+#   C `live_from_stream_type` -- the Cast v2 field,
+#   D `launch_refusal` -- the appIds this receiver actually serves,
+#   E `PlaybackGuard` -- the only thing that can hand liveliness to a player,
+#   F `DLNAProtocol` -- where the declaration is *remembered* and *cleared*,
+#   G `ChromecastProtocol` -- same, plus the session clearing order,
+#   H `ProtocolGroup` -- the instance-attribute shadow (AGENTS.md 4.2 trap),
+#   I mpv -- the two command shapes and the option dict that makes the second,
+#   J `set_state` -- only an observed change may wake a GENA broadcast,
+#   K SSDP -- a periodic restart is gated on health, not on the clock,
+#   L the naming seam -- why this is `note_media_live` and never `set_media_live`.
+#
+# Three-valued, and the third value is load-bearing: True = live, False = a
+# seekable file, None = *nobody said*. `None` is not `False` -- treating an
+# absent declaration as "not live" would change every ordinary DLNA push, and
+# treating it as "live" would put the low-latency option dict behind a file the
+# viewer wants to drag. Both directions are asked here.
+#
+# Everything this Part needs it loads itself (`_load`, `import macast_renderer.mpv`),
+# so it runs both inside the suite and in a trimmed harness, and it restores every
+# global it touches: settings, `PlaybackGuard.owner`, the log levels/handlers,
+# `Setting.is_ip_changed`, `cherrypy.engine.publish`, and the bus listener sets.
+# --------------------------------------------------------------------------
+print("\n=== Part 64: media liveliness travels from the sender to the player ===")
+import ast as _ast64  # noqa: E402
+import logging as _logging64  # noqa: E402
+import cherrypy as _cp64  # noqa: E402
+
+# `macast_renderer.mpv` imports `macast.gui`, which imports `rumps` at module
+# scope on darwin. The plugin harness (Part 6) already defangs the toolkits, but
+# a Part that needs a real player class cannot inherit that from whichever Part
+# happened to run first: the stub also has to survive a suite re-order, and a
+# missing stub does not fail loudly -- it fails as "mpv is unimportable".
+class _AnyModule64(types.ModuleType):
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return object
+
+
+for _toolkit64 in ("rumps", "pystray"):
+    try:
+        __import__(_toolkit64)
+    except Exception:  # pystray raises DisplayNameError, not ImportError
+        sys.modules.setdefault(_toolkit64, _AnyModule64(_toolkit64))
+
+for _n64 in ("macast_renderer.mpv", "macast_renderer"):
+    _st64 = sys.modules.get(_n64)
+    if _st64 is not None and getattr(_st64, "__file__", None) is None:
+        sys.modules.pop(_n64, None)
+import macast_renderer.mpv as _mpv64  # noqa: E402
+
+_group64 = sys.modules.get("macast.protocol_group") or _load(
+    "protocol_group", "protocol_group.py")
+_ssdp64 = sys.modules.get("macast.ssdp") or _load("ssdp", "ssdp.py")
+_server64 = sys.modules.get("macast.server") or _load("server", "server.py")
+_renderer_mod64 = sys.modules.get("macast.renderer") or _load(
+    "renderer", "renderer.py")
+_plugin_mod64 = sys.modules.get("macast.plugin") or _load("plugin", "plugin.py")
+
+_tmp64 = _tempfile.mkdtemp(prefix="macast-part64-")
+_saved64 = (utils.Setting.setting, utils.Setting.setting_path, utils.SETTING_DIR)
+_saved_owner64 = protocol.PlaybackGuard.owner
+_saved_ipchanged64 = utils.Setting.__dict__.get("is_ip_changed")
+_saved_publish64 = _cp64.engine.publish
+
+
+class _Grab64(_logging64.Handler):
+    def __init__(self):
+        _logging64.Handler.__init__(self)
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append((record.levelno, record.getMessage()))
+
+
+_grabs64 = []
+_levels64 = {}
+
+
+def _grab64(logger_name):
+    """Attach a fresh in-memory handler to one real logger, save its level."""
+    lg = _logging64.getLogger(logger_name)
+    _levels64.setdefault(logger_name, lg.level)
+    lg.setLevel(_logging64.DEBUG)
+    grab = _Grab64()
+    lg.addHandler(grab)
+    _grabs64.append((lg, grab))
+    return grab
+
+
+def _said64(grab, needle, level=None):
+    """Did this logger emit `needle` (optionally at exactly this level)?"""
+    return any((level is None or lv == level) and needle in msg
+               for lv, msg in grab.lines)
+
+
+def _reset64(grabs):
+    utils.Setting.setting = {}
+    for grab in grabs:
+        del grab.lines[:]
+
+
+# --- the renderer that watches the handoff --------------------------------
+# One class, three shapes: it records the order of the two calls that matter,
+# keeps the last liveness answer it was handed, and can sample the protocol's
+# own state during a stop (group G needs exactly that).
+class _Rec64:
+    def __init__(self, order=None, samples=None, proto=None):
+        self.order = order if order is not None else []
+        self.samples = samples if samples is not None else []
+        self.samples_at = samples
+        self.proto = proto
+        self.live = "never-called"
+        self.live_calls = 0
+        self.urls = []
+        self.titles = []
+        self.stops = 0
+        self.volumes = []
+
+    def note_media_live(self, live):
+        self.order.append("note")
+        self.live = live
+        self.live_calls += 1
+
+    def set_media_url(self, url, start="0"):
+        self.order.append("url")
+        self.urls.append((url, start))
+        return True
+
+    def set_media_title(self, title):
+        self.order.append("title")
+        self.titles.append(title)
+        return True
+
+    def set_media_stop(self):
+        self.order.append("stop")
+        self.stops += 1
+        if self.proto is not None:
+            self.samples_at.append((self.proto._media, self.proto._media_live))
+        return True
+
+    def set_media_volume(self, volume):
+        self.volumes.append(volume)
+        return True
+
+    def set_media_pause(self):
+        self.order.append("pause")
+        return True
+
+    def set_media_resume(self):
+        # AVTransport_SetAVTransportURI ends with resume (protocol.py:1115), and
+        # PlaybackGuard.__getattr__ forwards it straight here. A recorder that
+        # does not answer would raise AttributeError inside group F -- check()
+        # does not catch exceptions, so one missing method would quietly end the
+        # Part right there instead of reporting a failure.
+        self.order.append("resume")
+        return True
+
+    def set_media_mute(self, muted):
+        self.volumes.append(("mute", muted))
+        return True
+
+    def set_media_position(self, position):
+        return True
+
+
+_lifecycle64 = []
+
+
+def _channel_only64(channel, value):
+    """Make `value` the only subscriber on a bus channel, remembering the rest.
+
+    cherrypy stores listeners in a **set**, so with two subscribers the order of
+    the results -- and therefore which renderer `Protocol.renderer` pops -- is
+    arbitrary. Part 64 cannot assert through a coin flip.
+
+    Both halves go through the bus's own ``subscribe``/``unsubscribe``: a
+    listener put into ``engine.listeners`` by hand is missing from the private
+    ``_priorities`` map, and ``publish`` reads that map for *every* member of the
+    set -- so the shortcut does not merely leak a bookkeeping entry, it makes the
+    next publish on that channel raise ``KeyError`` inside the product's own code
+    path. (This suite needs ``get_protocol`` to publish: ``mpv.reload()`` asks it.)
+    """
+    def _cb(*a, **k):
+        return value
+
+    previous = set(_cp64.engine.listeners.get(channel) or ())
+    _lifecycle64.append((channel, previous))
+    for _old64 in previous:
+        _cp64.engine.unsubscribe(channel, _old64)
+    _cp64.engine.subscribe(channel, _cb)
+    return _cb
+
+
+def _channel_empty64(channel):
+    """Take every subscriber off a bus channel, remembering them for the closer.
+
+    ``_channel_only64`` cannot produce this shape: a stand-in that answers
+    ``None`` still puts a member on the channel, and ``Protocol.renderer`` has
+    *two* exits -- the empty list logs "Unable to find an available renderer.",
+    while a single ``None`` result is popped and returned silently
+    (protocol.py:256-265). A witness about "nobody is there" therefore has to
+    remove everybody rather than install someone who says nothing.
+
+    An empty set is safe for ``publish`` -- it looks up ``_priorities`` once per
+    member, and there are none -- and the closer puts the originals back through
+    ``subscribe``, so their priority bookkeeping survives too.
+    """
+    previous = set(_cp64.engine.listeners.get(channel) or ())
+    _lifecycle64.append((channel, previous))
+    for _old64 in previous:
+        _cp64.engine.unsubscribe(channel, _old64)
+
+
+try:
+    utils.SETTING_DIR = _tmp64
+    utils.Setting.setting_path = os.path.join(_tmp64, "macast_setting.json")
+    utils.Setting.setting = {}
+    # The optional `set_property fullscreen` write in set_media_url would
+    # otherwise land in the recorder and look like a loadfile command.
+    # The key is mpv's *own* enum, not `utils.SettingProperty`: `Setting` stores
+    # by `property.name`, and the size constant mpv reads lives in
+    # `macast_renderer/mpv.py` (it deliberately shadows the name).
+    utils.Setting.set(_mpv64.SettingProperty.PlayerSize,
+                      _mpv64.SettingProperty.PlayerSize_Normal.value)
+
+    _lg_proto64 = _grab64("Protocol")
+    _lg_cast64 = _grab64("Chromecast")
+    _lg_server64 = _grab64("server")
+    _lg_ssdp64 = _grab64("SSDPServer")
+    # No grab for mpv: the loadfile path it exercises logs nothing, and a grab
+    # whose assertion can only pass is not a witness (it would read as one).
+
+    # ----------------------------------------------------------------------
+    # A -- the DLNA protocolInfo grammar, read exactly as declared
+    # ----------------------------------------------------------------------
+    _A64 = [
+        ("live", "http-get:*:video/mpeg:DLNA.ORG_OP=00;DLNA.ORG_CI=1", True),
+        ("seek bytes", "http-get:*:video/mp4:DLNA.ORG_OP=01", False),
+        ("seek time", "http-get:*:video/mp4:DLNA.ORG_OP=10", False),
+        ("seek both", "http-get:*:video/mp4:DLNA.ORG_OP=11", False),
+        ("low nibble only", "http-get:*:video/mp4:DLNA.ORG_OP=02", False),
+        ("upper case hex", "http-get:*:video/mp4:DLNA.ORG_OP=FF", False),
+        ("ff", "http-get:*:video/mp4:DLNA.ORG_OP=ff", False),
+        ("no ORG_OP at all", "http-get:*:video/mp4:DLNA.ORG_PN=MP4", None),
+        ("one nibble is not two", "http-get:*:video/mp4:DLNA.ORG_OP=0", None),
+        ("ORG_OPS is not ORG_OP", "http-get:*:video/mp4:DLNA.ORG_OPS=00", None),
+        ("the literal is case-sensitive",
+         "http-get:*:video/mp4:dlna.org_op=00", None),
+        ("first match wins",
+         "http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_OP=00", False),
+        ("empty string", "", None),
+    ]
+    for _label64, _text64, _want64 in _A64:
+        _got64 = protocol.live_from_protocol_info(_text64)
+        check("A: %s -> %s" % (_label64, _want64), _got64 is _want64,
+              "got %r for %r" % (_got64, _text64))
+    for _bad64 in (None, b"http-get:*:x:DLNA.ORG_OP=00", 0, ["a"]):
+        check("A: a non-string answer is not a declaration (%r)" % (_bad64,),
+              protocol.live_from_protocol_info(_bad64) is None,
+              "got %r" % (protocol.live_from_protocol_info(_bad64),))
+
+    # ----------------------------------------------------------------------
+    # B -- the DIDL walk: namespaces, comments, and the `res` short-circuit
+    # ----------------------------------------------------------------------
+    _DIDL_NS64 = ('xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+                  'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+                  'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/"')
+    _LIVE_INFO64 = "http-get:*:video/mpeg:DLNA.ORG_OP=00;DLNA.ORG_CI=1"
+    _SOUGHT_INFO64 = "http-get:*:video/mp4:DLNA.ORG_OP=01;DLNA.ORG_CI=0"
+
+    def _didl64(info, ns=True, extra=""):
+        _head = '<DIDL-Lite %s>' % (_DIDL_NS64 if ns else "")
+        return ('%s<item id="0" parentID="-1" restricted="1">'
+                '<dc:title>Mirror</dc:title>%s'
+                '<res protocolInfo="%s">http://127.0.0.1/x.mpg</res>'
+                '</item></DIDL-Lite>') % (_head, extra, info)
+
+    # Some control points send DIDL with no namespace declarations at all. That
+    # shape cannot be written with a `dc:` prefix -- lxml refuses to parse an
+    # undefined prefix, and the parse error would be *this fixture's* bug, not
+    # the product's. So the namespace-free form drops the prefixes too.
+    def _didl_plain64(info):
+        return ('<DIDL-Lite><item id="0" parentID="-1" restricted="1">'
+                '<title>Mirror</title>'
+                '<res protocolInfo="%s">http://127.0.0.1/x.mpg</res>'
+                '</item></DIDL-Lite>') % (info,)
+
+    _B64 = [
+        ("no metadata at all",
+         lambda: protocol.protocol_info_from_didl(None), ""),
+        ("default-ns DIDL",
+         lambda: protocol.protocol_info_from_didl(
+             protocol.etree.fromstring(_didl64(_LIVE_INFO64))), _LIVE_INFO64),
+        ("no-namespace DIDL",
+         lambda: protocol.protocol_info_from_didl(
+             protocol.etree.fromstring(_didl_plain64(_LIVE_INFO64))),
+         _LIVE_INFO64),
+        ("res without protocolInfo is skipped",
+         lambda: protocol.protocol_info_from_didl(protocol.etree.fromstring(
+             '<DIDL-Lite %s><item id="0"><res protocolInfo="">'
+             'http://h/a</res><res protocolInfo="%s">http://h/b</res>'
+             '</item></DIDL-Lite>' % (_DIDL_NS64, _SOUGHT_INFO64))),
+         _SOUGHT_INFO64),
+        ("protocolInfo on a non-res element is not a media declaration",
+         lambda: protocol.protocol_info_from_didl(protocol.etree.fromstring(
+             '<DIDL-Lite %s><item id="0" protocolInfo="%s">'
+             '<dc:title>x</dc:title></item></DIDL-Lite>'
+             % (_DIDL_NS64, _LIVE_INFO64))), ""),
+    ]
+    for _label64, _fn64, _want64 in _B64:
+        try:
+            _got64 = _fn64()
+        except Exception as _e64b:
+            _got64 = "%s: %s" % (type(_e64b).__name__, _e64b)
+        check("B: %s" % _label64, _got64 == _want64,
+              "got %r want %r" % (str(_got64), str(_want64)))
+
+    # A comment node's `.tag` is a factory object, not a str. Without
+    # `_local_name`'s non-str branch this is a TypeError inside a SOAP handler,
+    # and the sender reads it as "this receiver crashed".
+    _comment_meta64 = protocol.etree.fromstring(
+        _didl64(_LIVE_INFO64, extra="<!-- a control point left a note -->"))
+    try:
+        _info_comment64 = protocol.protocol_info_from_didl(_comment_meta64)
+        _comment_raised64 = None
+    except Exception as _e64c:
+        _info_comment64 = ""
+        _comment_raised64 = "%s: %s" % (type(_e64c).__name__, _e64c)
+    check("B: a commented DIDL does not raise", _comment_raised64 is None,
+          str(_comment_raised64))
+    check("B: a commented DIDL still answers",
+          _info_comment64 == _LIVE_INFO64, "got %r" % str(_info_comment64))
+    check("B: a commented DIDL is still live",
+          protocol.live_from_protocol_info(_info_comment64) is True,
+          "got %r" % (protocol.live_from_protocol_info(_info_comment64),))
+
+    for _tag64, _want64 in (("{urn:x}res", "res"), ("res", "res"),
+                            ("{urn:x}protocolInfo", "protocolInfo")):
+        check("B: _local_name(%r) -> %r" % (_tag64, _want64),
+              protocol._local_name(_tag64) == _want64,
+              "got %r" % str(protocol._local_name(_tag64)))
+    # The comment sits *inside* `<item>`, so it is a child of the item, not of the
+    # DIDL root. Find it by shape, and first prove the parser actually kept it:
+    # a tree that contains no comment would make both assertions below true for
+    # the wrong reason -- that is a witness that has quietly stopped witnessing.
+    _comment_nodes64 = [_n64t for _n64t in _comment_meta64.iter()
+                        if not isinstance(_n64t.tag, str)]
+    check("B: precondition -- the parsed tree really holds the comment node",
+          len(_comment_nodes64) == 1,
+          "found %d non-string tags" % len(_comment_nodes64))
+    _comment_tag64 = (_comment_nodes64[0].tag if _comment_nodes64
+                      else "no comment node in the tree")
+    check("B: a comment tag is not a string",
+          not isinstance(_comment_tag64, str),
+          "tag %r is a %s" % (str(_comment_tag64),
+                              type(_comment_tag64).__name__))
+    check("B: _local_name survives a factory tag",
+          isinstance(protocol._local_name(_comment_tag64), str)
+          and protocol._local_name(_comment_tag64) == "",
+          "got %r" % str(protocol._local_name(_comment_tag64)))
+
+    # ----------------------------------------------------------------------
+    # C -- the Cast v2 streamType field
+    # ----------------------------------------------------------------------
+    _C64 = [
+        ("LIVE", {"streamType": "LIVE"}, True),
+        ("live", {"streamType": "live"}, True),
+        ("padded", {"streamType": " Live "}, True),
+        ("tab/newline padded", {"streamType": "\tLIVE\n"}, True),
+        ("buffered", {"streamType": "buffered"}, False),
+        ("streamed", {"streamType": "streamed"}, False),
+        ("LIVESTREAM is not LIVE", {"streamType": "LIVESTREAM"}, False),
+        ("no field", {}, None),
+        ("no media", None, None),
+        ("a number is not a string", {"streamType": 1}, None),
+        ("a list is not a string", {"streamType": ["LIVE"]}, None),
+        ("media is not a dict", "LIVE", None),
+    ]
+    for _label64, _media64, _want64 in _C64:
+        _got64 = cast.live_from_stream_type(_media64)
+        check("C: %s -> %s" % (_label64, _want64), _got64 is _want64,
+              "got %r" % (_got64,))
+
+    # ----------------------------------------------------------------------
+    # D -- launch_refusal: which appIds this receiver serves
+    # ----------------------------------------------------------------------
+    check("D: the served appIds are the default receiver and the idle screen",
+          cast.SERVED_APP_IDS == (cast.DEFAULT_MEDIA_APP_ID, cast.APP_BACKDROP_ID),
+          "got %r" % str(cast.SERVED_APP_IDS))
+    for _served64 in cast.SERVED_APP_IDS:
+        check("D: %s is served, so nothing to refuse" % _served64,
+              cast.launch_refusal(_served64) is None,
+              "got %r" % str(cast.launch_refusal(_served64)))
+    for _blank64 in (None, "", 0, ["CC1AD845"]):
+        check("D: an unreadable appId means the default receiver (%r)" % (_blank64,),
+              cast.launch_refusal(_blank64) is None,
+              "got %r" % str(cast.launch_refusal(_blank64)))
+
+    # Reading a refusal's fields goes through a helper that answers for ``None``,
+    # so a product that stops refusing reds *these* cases instead of raising
+    # ``AttributeError`` on the line after the first one and hiding every group
+    # that comes later (AGENTS.md 4.14: Part 59's eighth mutant was caught
+    # reading a whole Part's remainder as one crash).
+    def _field64(msg, key):
+        return None if not isinstance(msg, dict) else msg.get(key)
+
+    _refused64 = cast.launch_refusal("0F5096E8", "req-7")
+    check("D: the mirroring app is refused", isinstance(_refused64, dict),
+          "got %r" % str(_refused64))
+    check("D: refusal type is LAUNCH_ERROR",
+          _field64(_refused64, "type") == "LAUNCH_ERROR",
+          "got %r" % str(_field64(_refused64, "type")))
+    check("D: the requestId is answered back",
+          _field64(_refused64, "requestId") == "req-7",
+          "got %r" % str(_field64(_refused64, "requestId")))
+    check("D: the refused appId is echoed", _field64(_refused64, "appId") == "0F5096E8",
+          "got %r" % str(_field64(_refused64, "appId")))
+    check("D: the reason is the sender's vocabulary",
+          _field64(_refused64, "reason") == "ERROR",
+          "got %r" % str(_field64(_refused64, "reason")))
+    _msg64 = _field64(_refused64, "message") or ""
+    check("D: the refusal names the app it refused", "0F5096E8" in _msg64,
+          "message %r" % str(_msg64))
+    check("D: the refusal gives the next step (which switch to move)",
+          "投屏方式" in _msg64, "message %r" % str(_msg64))
+    check("D: the refusal says what to switch away from",
+          "低延迟" in _msg64, "message %r" % str(_msg64))
+    _unknown64 = cast.launch_refusal("ABCDEF01")
+    check("D: an unknown app is echoed, not silently renamed",
+          _field64(_unknown64, "appId") == "ABCDEF01",
+          "got %r" % str(_field64(_unknown64, "appId")))
+    try:
+        json.dumps(_refused64)
+        _serial64 = None
+    except Exception as _e64s:
+        _serial64 = "%s: %s" % (type(_e64s).__name__, _e64s)
+    check("D: the refusal is sendable as JSON", _serial64 is None, str(_serial64))
+
+    # ----------------------------------------------------------------------
+    # E -- PlaybackGuard: the only thing that can hand liveliness to a player
+    #
+    # The guard is a *transparent wrapper*: it forwards whatever the protocol
+    # asks of the renderer, and its one addition is that the declaration gets
+    # handed over immediately *before* the address. Every group below asks the
+    # guard one thing it could otherwise get wrong silently: the order, the
+    # three-valued answer, the takeover bookkeeping, and what happens when a
+    # renderer or a protocol refuses to cooperate.
+    # ----------------------------------------------------------------------
+    class _Proto64(protocol.Protocol):
+        """A protocol whose only interesting behaviour is its declaration."""
+
+        def __init__(self, live=None, raise_live=False, raise_release=False,
+                     order=None):
+            protocol.Protocol.__init__(self)
+            self._live = live
+            self._raise_live = raise_live
+            self._raise_release = raise_release
+            self.order = order if order is not None else []
+            self.released = 0
+
+        def media_is_live(self):
+            if self._raise_live:
+                raise RuntimeError("the protocol fell over while answering")
+            return self._live
+
+        def release_playback(self):
+            self.released += 1
+            self.order.append("release")
+            if self._raise_release:
+                raise RuntimeError("the old owner refused to let go")
+
+    class _NoNote64(_Rec64):
+        """A recorder that has the seam and throws in it."""
+
+        def note_media_live(self, live):
+            raise RuntimeError("the recorder threw")
+
+    def _guard64(live=None, raise_live=False, raise_release=False,
+                 order=None, samples=None, rec=None, proto=None):
+        """One guard + recorder + protocol, with the global owner wiped first.
+
+        ``PlaybackGuard.owner`` is a *class* attribute, so it is the one piece of
+        state here that outlives a single witness; every builder resets it and
+        clears the log so a later group cannot inherit an "owner" from an earlier
+        one.
+        """
+        protocol.PlaybackGuard.owner = None
+        del _lg_proto64.lines[:]
+        if proto is None:
+            proto = _Proto64(live, raise_live, raise_release, order)
+        if rec is None:
+            rec = _Rec64(order=order, samples=samples)
+        return protocol.PlaybackGuard(proto, rec), rec, proto
+
+    check("E: a plain Protocol has no opinion about liveliness",
+          protocol.Protocol().media_is_live() is None,
+          "got %r" % (protocol.Protocol().media_is_live(),))
+
+    _order64 = []
+    _g64, _r64, _p64 = _guard64(live=True, order=_order64)
+    _url_ok64 = _g64.set_media_url("http://127.0.0.1/live.mpg")
+    check("E: the declaration is handed over before the address",
+          _order64 == ["note", "url"], "order %r" % (_order64,))
+    check("E: the player was told this media is live", _r64.live is True,
+          "got %r" % (_r64.live,))
+    check("E: exactly one handoff per load", _r64.live_calls == 1,
+          "got %d" % (_r64.live_calls,))
+    check("E: the guard remembers who owns playback", _g64.owner is _p64,
+          "got %r" % (_g64.owner,))
+    check("E: the forwarded call answer is the renderer's, not the guard's",
+          _url_ok64 is True, "got %r" % (_url_ok64,))
+
+    _order64 = []
+    _g64, _r64, _p64 = _guard64(live=False, order=_order64)
+    _g64.set_media_url("http://127.0.0.1/movie.mp4")
+    check("E: a seekable file is declared as such, not as a silence",
+          _r64.live is False, "got %r" % (_r64.live,))
+    check("E: the address still arrives with a False",
+          _order64 == ["note", "url"], "order %r" % (_order64,))
+
+    _order64 = []
+    _g64, _r64, _p64 = _guard64(live=None, order=_order64)
+    _g64.set_media_url("http://127.0.0.1/mystery")
+    check("E: 'nobody said' reaches the player as None, not as False",
+          _r64.live is None and _order64 == ["note", "url"],
+          "live %r order %r" % (_r64.live, _order64))
+
+    # A renderer written before this seam existed has no ``note_media_live`` at
+    # all. That must be a shrug ("play everything the old way"), not a crashed
+    # cast: the header's MockRenderer genuinely lacks the method.
+    _quiet64 = MockRenderer()
+    _g64, _r64, _p64 = _guard64(live=True, rec=_quiet64)
+    _g64.set_media_url("http://127.0.0.1/old-renderer.mpg")
+    check("E: a renderer without the seam still gets its media",
+          _quiet64.last_arg("set_media_url") == "http://127.0.0.1/old-renderer.mpg",
+          "got %r" % (_quiet64.last_arg("set_media_url"),))
+    check("E: and the mismatch is not an error the user has to read",
+          not _said64(_lg_proto64, "note_media_live"),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _g64, _r64, _p64 = _guard64(live=True, rec=_NoNote64(order=[]))
+    _g64.set_media_url("http://127.0.0.1/throwing.mpg")
+    check("E: a seam that throws does not stop the playback",
+          _r64.urls and _r64.urls[0][0] == "http://127.0.0.1/throwing.mpg",
+          "urls %r" % (_r64.urls,))
+    check("E: but it is written down, loudly",
+          _said64(_lg_proto64, "note_media_live failed", _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _g64, _r64, _p64 = _guard64(raise_live=True)
+    _g64.set_media_url("http://127.0.0.1/answering.mpg")
+    check("E: a protocol that falls over while answering means no declaration",
+          _r64.live is None, "got %r" % (_r64.live,))
+    check("E: and the media still plays", "url" in _r64.order,
+          "order %r" % (_r64.order,))
+    check("E: with the failure named at ERROR",
+          _said64(_lg_proto64, "media_is_live failed on", _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _g64, _r64, _p64 = _guard64(live="yes")
+    _g64.set_media_url("http://127.0.0.1/loose.mpg")
+    check("E: a truthy non-answer is not read as 'live'", _r64.live is None,
+          "got %r" % (_r64.live,))
+    check("E: and the loose answer is reported, not silently obeyed",
+          _said64(_lg_proto64, "not True/False/None", _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    # -- the takeover bookkeeping ------------------------------------------
+    _order64 = []
+    _first64 = _Proto64(live=False, order=_order64)
+    _g64, _r64, _p64 = _guard64(order=_order64, proto=_first64)
+    _g64.set_media_url("http://127.0.0.1/first.mp4")
+    del _order64[:]
+    _del_lg64 = _lg_proto64
+    _second64 = _Proto64(live=True, order=_order64)
+    _rec64b = _Rec64(order=_order64)
+    protocol.PlaybackGuard(_second64, _rec64b).set_media_url(
+        "http://127.0.0.1/second.mpg")
+    check("E: a new owner asks the previous one to let go", _first64.released == 1,
+          "released %d" % (_first64.released,))
+    check("E: the release happens before the new declaration is read",
+          _order64 == ["release", "note", "url"], "order %r" % (_order64,))
+    check("E: the takeover is in the log (a stolen player is not silent)",
+          _said64(_del_lg64, "Playback taken over from", _logging64.INFO),
+          "lines %r" % ([m for _, m in _del_lg64.lines],))
+    check("E: and the new owner is the one on record",
+          protocol.PlaybackGuard.owner is _second64,
+          "got %r" % (protocol.PlaybackGuard.owner,))
+
+    protocol.PlaybackGuard.owner = None
+    del _lg_proto64.lines[:]
+    _third64 = _Proto64(live=True)
+    _rec64c = _Rec64()
+    _guard64c = protocol.PlaybackGuard(_third64, _rec64c)
+    _guard64c.set_media_url("http://127.0.0.1/twice.mpg")
+    _rec64c.order = []
+    _guard64c.set_media_url("http://127.0.0.1/thrice.mpg")
+    check("E: re-casting from the same owner is not a takeover",
+          _third64.released == 0, "released %d" % (_third64.released,))
+    check("E: so nobody is logged as having lost the player",
+          not _said64(_lg_proto64, "Playback taken over from"),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _order64 = []
+    _sticky64 = _Proto64(live=False, raise_release=True, order=_order64)
+    _g64, _r64, _p64 = _guard64(order=_order64, proto=_sticky64)
+    _g64.set_media_url("http://127.0.0.1/first-sticks.mp4")
+    del _order64[:]
+    _fresh64 = _Proto64(live=True, order=_order64)
+    protocol.PlaybackGuard(_fresh64, _Rec64(order=_order64)).set_media_url(
+        "http://127.0.0.1/after-stuck.mpg")
+    check("E: an owner that refuses to let go does not hold playback hostage",
+          _order64 == ["release", "note", "url"], "order %r" % (_order64,))
+    check("E: the refusal is written down",
+          _said64(_lg_proto64, "release_playback failed on", _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    # -- the transparent half ----------------------------------------------
+    _channel_empty64("get_renderer")
+    _none64 = _Proto64(live=True)
+    del _lg_proto64.lines[:]
+    check("E: with nothing on the bus there is no renderer, not a crash",
+          _none64.renderer is None, "got %r" % (_none64.renderer,))
+    check("E: and that is said out loud",
+          _said64(_lg_proto64, "Unable to find an available renderer.",
+                  _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _g64, _r64, _p64 = _guard64(live=True)
+    _sentinel64 = "a recorder that happens to use the same name"
+    _r64.owner = _sentinel64
+    # `owner` is a *class* attribute on PlaybackGuard (protocol.py:179), so
+    # normal lookup finds it and `__getattr__` is never consulted -- which is
+    # exactly the transparency claim. Read the class's own value through
+    # `getattr` with a stand-in: if somebody deletes that declaration, this
+    # witness must turn red rather than raise AttributeError and take the rest
+    # of the Part with it (`check` catches nothing).
+    _class_owner64 = getattr(protocol.PlaybackGuard, "owner",
+                             "<<the class has no owner>>")
+    check("E: the guard is transparent: an attribute its own class declares is "
+          "never looked up on the wrapped renderer",
+          _g64.owner is _class_owner64 and _g64.owner != _sentinel64,
+          "guard %r class %r renderer %r" % (_g64.owner, _class_owner64,
+                                             _r64.owner))
+    _g64.set_media_volume(50)
+    check("E: anything the guard does not know about is forwarded",
+          _r64.volumes == [50], "volumes %r" % (_r64.volumes,))
+    _g64.set_media_mute(True)
+    check("E: including a call whose name is not on any list in this Part",
+          ("mute", True) in _r64.volumes, "volumes %r" % (_r64.volumes,))
+    protocol.PlaybackGuard.owner = None
+
+    # ----------------------------------------------------------------------
+    # F -- DLNAProtocol: where the declaration is *remembered* and *cleared*
+    #
+    # The sender's own field is ``protocolInfo`` on the ``res`` element. Group A
+    # read the grammar and group B walked the tree; this group asks the protocol
+    # what it *keeps* -- including the moments where keeping it would be wrong
+    # (a page cast, a playlist step, a re-cast).
+    # ----------------------------------------------------------------------
+    def _dlna64(order=None, samples=None):
+        """A real DLNAProtocol whose renderer is a recorder on the bus only.
+
+        ``TestProtocol`` from the suite header overrides the ``renderer``
+        property, so it *bypasses* ``PlaybackGuard`` entirely — a group that
+        wants to ask what the guard hands over has to build the real class. The
+        bus channel is narrowed to exactly one subscriber for the same reason:
+        cherrypy's listener container is a set, so with more than one
+        value-returning subscriber ``Protocol.renderer`` would be a coin flip.
+        """
+        protocol.PlaybackGuard.owner = None
+        del _lg_proto64.lines[:]
+        rec = _Rec64(order=order, samples=samples)
+        _channel_only64("get_renderer", rec)
+        proto = protocol.DLNAProtocol()
+        if samples is not None:
+            rec.proto = proto
+        return proto, rec
+
+    def _push64(proto, raw, uri="http://127.0.0.1/x.mpg"):
+        """One SetAVTransportURI, exactly as an UPnP worker would deliver it."""
+        proto.AVTransport_SetAVTransportURI({
+            "CurrentURI": types.SimpleNamespace(value=uri),
+            "CurrentURIMetaData": types.SimpleNamespace(value=raw)})
+
+    _order64 = []
+    _p64, _r64 = _dlna64(order=_order64)
+    check("F: the DLNA renderer really is the guarded one",
+          isinstance(_p64.renderer, protocol.PlaybackGuard),
+          "got %r" % (type(_p64.renderer).__name__,))
+    _push64(_p64, _didl64(_LIVE_INFO64))
+    check("F: a live DIDL is remembered by the protocol",
+          _p64._media_live is True, "got %r" % (_p64._media_live,))
+    check("F: and handed to the player", _r64.live is True,
+          "got %r" % (_r64.live,))
+    check("F: the declaration precedes the load, so the player can choose its "
+          "shape before it opens the address",
+          _order64[:2] == ["note", "url"], "order %r" % (_order64,))
+    check("F: a push that ends with resume still names the stream first",
+          _order64 == ["note", "url", "title", "resume"],
+          "order %r" % (_order64,))
+    check("F: the protocol answers through the base-class-shaped door",
+          _p64.media_is_live() is True, "got %r" % (_p64.media_is_live(),))
+
+    _order64 = []
+    _p64, _r64 = _dlna64(order=_order64)
+    _push64(_p64, _didl64(_SOUGHT_INFO64))
+    check("F: a seekable DIDL is remembered as False (not as a silence)",
+          _p64._media_live is False and _r64.live is False,
+          "protocol %r player %r" % (_p64._media_live, _r64.live))
+
+    _order64 = []
+    _p64, _r64 = _dlna64(order=_order64)
+    _push64(_p64, _didl64(""))
+    check("F: a res with no protocolInfo declared nothing",
+          _p64._media_live is None and _r64.live is None,
+          "protocol %r player %r" % (_p64._media_live, _r64.live))
+
+    _order64 = []
+    _p64, _r64 = _dlna64(order=_order64)
+    _broken64 = "this is not XML at all <<<"
+    _push64(_p64, _broken64)
+    check("F: unparseable metadata does not decide anything",
+          _p64._media_live is None, "got %r" % (_p64._media_live,))
+    check("F: but the media still plays", "url" in _r64.order,
+          "order %r" % (_r64.order,))
+    check("F: and the sender's own bytes are kept for the record",
+          _p64.state_list['CurrentTrackMetaData'].value == _broken64,
+          "got %r" % (_p64.state_list['CurrentTrackMetaData'].value,))
+    check("F: with the parse failure on ERROR, naming what it choked on",
+          _said64(_lg_proto64, _broken64, _logging64.ERROR),
+          "lines %r" % ([m for _, m in _lg_proto64.lines],))
+
+    _order64 = []
+    _p64, _r64 = _dlna64(order=_order64)
+    # The namespace-free form is the one a real control point sends; `_didl64`
+    # with `ns=False` would put a `dc:` prefix on an undeclared namespace, which
+    # lxml refuses to parse -- that is this fixture's bug, not the product's.
+    _nsless64 = _didl_plain64(_LIVE_INFO64)
+    _push64(_p64, _nsless64)
+    check("F: a namespace-less DIDL is still read for its declaration",
+          _p64._media_live is True, "got %r" % (_p64._media_live,))
+    check("F: and still stored as the sender sent it (the title lookup failed, "
+          "not the media)",
+          _p64.state_list['CurrentTrackMetaData'].value == _nsless64,
+          "got %r" % (_p64.state_list['CurrentTrackMetaData'].value[:40],))
+
+    _p64b, _r64b = _dlna64()
+    _push64(_p64b, _didl64(_LIVE_INFO64))
+    check("F: precondition -- the live declaration is in place",
+          _p64b._media_live is True and _r64b.live is True,
+          "protocol %r player %r" % (_p64b._media_live, _r64b.live))
+    # Measure the handoff `cast_uri` makes, not the recorder's whole history:
+    # the push above already left four entries in the list, and the previous
+    # version of this witness read the last *two* -- which is `url`, `title`,
+    # because `cast_uri` names the player after the address too
+    # (protocol.py:1189). Slicing from a mark asks the question that was meant.
+    _mark64b = len(_r64b.order)
+    _p64b.cast_uri("http://127.0.0.1/page.mp4", "A page")
+    check("F: a page cast carries no declaration, so the old one is dropped",
+          _p64b._media_live is None, "got %r" % (_p64b._media_live,))
+    check("F: and the player is told so before the address arrives",
+          _r64b.order[_mark64b:] == ["note", "url", "title"]
+          and _r64b.live is None,
+          "order %r live %r" % (_r64b.order[_mark64b:], _r64b.live))
+    _p64b._media_live = True
+    _p64b.cast_uri("")
+    check("F: an empty cast_uri is a no-op, not a wipe",
+          _p64b._media_live is True, "got %r" % (_p64b._media_live,))
+
+    _p64c, _r64c = _dlna64()
+    # Two *different* addresses: the playlist is keyed by URI (protocol.py:1118
+    # `if uri not in self.playlist`), so two pushes of the same address are one
+    # item and there is nothing to step back to.
+    _push64(_p64c, _didl64(_SOUGHT_INFO64), uri="http://127.0.0.1/first.mpg")
+    _push64(_p64c, _didl64(_LIVE_INFO64), uri="http://127.0.0.1/second.mpg")
+    check("F: precondition -- two items are in the playlist, the last is live",
+          _p64c.current_index == 1 and _p64c._media_live is True,
+          "index %d live %r" % (_p64c.current_index, _p64c._media_live))
+    _p64c.AVTransport_Previous({"x": 1})
+    check("F: stepping the playlist drops the previous item's declaration",
+          _p64c._media_live is None, "got %r" % (_p64c._media_live,))
+    check("F: and hands that silence to the player too", _r64c.live is None,
+          "got %r" % (_r64c.live,))
+
+    _p64d, _r64d = _dlna64()
+    _p64d._media_live = True
+    _step64 = _p64d._playlist_step(1)
+    check("F: stepping an empty playlist answers 'nothing happened'",
+          _step64 == {}, "got %r" % (_step64,))
+    check("F: and does not touch a declaration it never loaded",
+          _p64d._media_live is True, "got %r" % (_p64d._media_live,))
+    _p64d.release_playback()
+    check("F: letting go of playback lets go of the declaration",
+          _p64d._media_live is None, "got %r" % (_p64d._media_live,))
+    _p64d.set_state_url("http://127.0.0.1/state-only.mp4")
+    check("F: the address the state page reads is the one just set",
+          _p64d.state_list['CurrentTrackURI'].value
+          == "http://127.0.0.1/state-only.mp4",
+          "got %r" % (_p64d.state_list['CurrentTrackURI'].value,))
+    protocol.PlaybackGuard.owner = None
+
+    # ----------------------------------------------------------------------
+    # G -- ChromecastProtocol: same contract, reached through LOAD
+    #
+    # The Cast sender declares with ``media.streamType`` (group C read that
+    # field). Everything here is driven as a real CASTV2 frame pair, because the
+    # order the *session ledger* is cleared in is the thing that went wrong:
+    # the media namespace stops the player while the media is still on record,
+    # the receiver namespace clears it first.
+    # ----------------------------------------------------------------------
+    def _cast_msgs64(sock):
+        """Split ``sock.sent`` into parsed CASTV2 messages (framed by length)."""
+        msgs = []
+        buf = sock.sent
+        while len(buf) >= 4:
+            length = struct.unpack(">I", buf[:4])[0]
+            if len(buf) < 4 + length:
+                break
+            msg = cast.parse_cast_message(buf[4:4 + length])
+            if msg is not None:
+                msgs.append(msg)
+            buf = buf[4 + length:]
+        return msgs
+
+    def _cast_to64(proto, sock, ns, payload):
+        proto._on_message(sock, {
+            "source_id": "sender-0",
+            "destination_id": "receiver-0",
+            "namespace": ns,
+            "payload_type": 0,
+            "payload_utf8": json.dumps(payload),
+            "request_id": payload.get("requestId", 1),
+        })
+
+    def _payloads64(sock, ns):
+        out = []
+        for msg in _cast_msgs64(sock):
+            if msg.get("namespace") == ns:
+                try:
+                    out.append(json.loads(msg["payload_utf8"]))
+                except Exception:
+                    pass
+        return out
+
+    def _new_cc64(order=None, samples=None):
+        """A real ChromecastProtocol that never binds a socket.
+
+        ``start()`` and ``_start_setup_server()`` are the only paths that bind,
+        so they are never called; ``_start_playback_watch`` is replaced per
+        instance because LOAD arms it and it would spawn a thread that pokes the
+        bus every second for the rest of the suite.
+        """
+        protocol.PlaybackGuard.owner = None
+        del _lg_cast64.lines[:]
+        rec = _Rec64(order=order, samples=samples)
+        _channel_only64("get_renderer", rec)
+        proto = cast.ChromecastProtocol()
+        proto._start_playback_watch = lambda *a, **k: None
+        if samples is not None:
+            rec.proto = proto
+        return proto, rec
+
+    _order64 = []
+    _cc64, _rcc64 = _new_cc64(order=_order64)
+    _sock64 = FakeSock()
+    _cast_to64(_cc64, _sock64, cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-live",
+        "media": {"contentId": "http://127.0.0.1/stream.m3u8",
+                  "contentType": "application/vnd.apple.mpegurl",
+                  "streamType": "LIVE",
+                  "metadata": {"title": "Live match"}}})
+    check("G: a LOAD that says LIVE is remembered",
+          _cc64._media_live is True, "got %r" % (_cc64._media_live,))
+    check("G: and handed to the player before the address",
+          _rcc64.live is True and _rcc64.order[:2] == ["note", "url"],
+          "live %r order %r" % (_rcc64.live, _rcc64.order))
+    check("G: the sender's own title is what the player gets named",
+          _rcc64.titles == ["Live match"], "titles %r" % (_rcc64.titles,))
+    check("G: the LOAD line in the log says which field decided this",
+          _said64(_lg_cast64, "streamType=LIVE", _logging64.INFO),
+          "lines %r" % ([m for _, m in _lg_cast64.lines],))
+    check("G: the answer to LOAD is BUFFERING, not a claim that it already plays",
+          any(p.get("type") == "MEDIA_STATUS"
+              and p.get("status", [{}])[0].get("playerState") == "BUFFERING"
+              for p in _payloads64(_sock64, cast.NS_MEDIA)),
+          "payloads %r" % ([p.get("type") for p in
+                            _payloads64(_sock64, cast.NS_MEDIA)],))
+
+    _order64 = []
+    _cc64b, _rcc64b = _new_cc64(order=_order64)
+    _sock64b = FakeSock()
+    _cast_to64(_cc64b, _sock64b, cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-buffered",
+        "media": {"contentId": "http://127.0.0.1/movie.mp4",
+                  "contentType": "video/mp4", "streamType": "buffered",
+                  "metadata": {"title": "A file"}}})
+    check("G: a buffered LOAD is declared seekable, not silent",
+          _cc64b._media_live is False and _rcc64b.live is False,
+          "protocol %r player %r" % (_cc64b._media_live, _rcc64b.live))
+
+    _order64 = []
+    _cc64c, _rcc64c = _new_cc64(order=_order64)
+    _cast_to64(_cc64c, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-quiet",
+        "media": {"contentId": "http://127.0.0.1/nothing-said.mp4",
+                  "contentType": "video/mp4",
+                  "metadata": {"title": "Nobody declared"}}})
+    check("G: a LOAD with no streamType declared nothing",
+          _cc64c._media_live is None and _rcc64c.live is None,
+          "protocol %r player %r" % (_cc64c._media_live, _rcc64c.live))
+
+    _cc64d, _rcc64d = _new_cc64()
+    _cast_to64(_cc64d, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-resume",
+        "currentTime": 12,
+        "media": {"contentId": "http://127.0.0.1/resume.mp4",
+                  "streamType": "buffered", "metadata": {"title": "Mid-film"}}})
+    check("G: the sender's position arrives as the player's start offset",
+          _rcc64d.urls == [("http://127.0.0.1/resume.mp4", "12")],
+          "urls %r" % (_rcc64d.urls,))
+
+    _sock_nourl64 = FakeSock()
+    _cc64e, _rcc64e = _new_cc64()
+    _cast_to64(_cc64e, _sock_nourl64, cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-nourl",
+        "media": {"contentType": "video/mp4", "metadata": {"title": "Nothing"}}})
+    # The answer is the whole point of this branch ("tell the sender instead of
+    # failing silently"), so it has to be witnessed on the socket that actually
+    # carried the LOAD -- asking a fresh FakeSock would only ever prove that an
+    # empty socket is empty.
+    _failed64 = [p for p in _payloads64(_sock_nourl64, cast.NS_MEDIA)
+                 if p.get("type") == "LOAD_FAILED"]
+    check("G: a LOAD without an address is refused by name",
+          len(_failed64) == 1, "payloads %r" % ([p.get("type") for p in
+                                                _payloads64(_sock_nourl64,
+                                                            cast.NS_MEDIA)],))
+    check("G: and the refusal answers the request it refuses",
+          _failed64 and _failed64[0].get("requestId") == "r-nourl",
+          "refusal %r" % (_failed64,))
+    check("G: with nothing remembered about a media it never got",
+          _cc64e._media is None and _cc64e._media_live is None,
+          "media %r live %r" % (_cc64e._media, _cc64e._media_live))
+    check("G: and nothing was handed to the player",
+          _rcc64e.order == [], "order %r" % (_rcc64e.order,))
+
+    # -- the two STOP paths, in opposite orders ----------------------------
+    _samples64 = []
+    _cc64f, _rcc64f = _new_cc64(samples=_samples64)
+    _cast_to64(_cc64f, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-stop",
+        "media": {"contentId": "http://127.0.0.1/live2.m3u8",
+                  "streamType": "LIVE", "metadata": {"title": "Live 2"}}})
+    _cast_to64(_cc64f, FakeSock(), cast.NS_MEDIA,
+               {"type": "STOP", "requestId": "r-stop2"})
+    check("G: the media-namespace STOP stops a player that still knows its media",
+          _samples64 and _samples64[0][1] is True,
+          "samples %r" % (_samples64,))
+    check("G: and the declaration is gone the moment the answer is sent",
+          _cc64f._media_live is None, "got %r" % (_cc64f._media_live,))
+
+    _samples64 = []
+    _cc64g, _rcc64g = _new_cc64(samples=_samples64)
+    _cast_to64(_cc64g, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-quit",
+        "media": {"contentId": "http://127.0.0.1/live3.m3u8",
+                  "streamType": "LIVE", "metadata": {"title": "Live 3"}}})
+    _cast_to64(_cc64g, FakeSock(), cast.NS_RECEIVER, {"type": "STOP",
+                                                      "requestId": "r-quit2"})
+    check("G: the receiver-namespace STOP clears the session *first*",
+          _samples64 and _samples64[0] == (None, None),
+          "samples %r" % (_samples64,))
+    check("G: so the player it stops is already an idle one",
+          _rcc64g.stops == 1 and _cc64g._media is None,
+          "stops %d media %r" % (_rcc64g.stops, _cc64g._media))
+
+    _cc64h, _rcc64h = _new_cc64()
+    _cast_to64(_cc64h, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-clear",
+        "media": {"contentId": "http://127.0.0.1/live4.m3u8",
+                  "streamType": "LIVE", "metadata": {"title": "Live 4"}}})
+    check("G: clearing a session that exists says so and wipes it",
+          _cc64h._clear_session("test") is True
+          and _cc64h._media is None and _cc64h._media_live is None,
+          "media %r live %r" % (_cc64h._media, _cc64h._media_live))
+    check("G: clearing one that does not exist is not a change",
+          _cc64h._clear_session("again") is False, "got a second clearing")
+    _cast_to64(_cc64h, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-live5",
+        "media": {"contentId": "http://127.0.0.1/live5.m3u8",
+                  "streamType": "LIVE", "metadata": {"title": "Live 5"}}})
+    _cc64h.release_playback()
+    check("G: letting go of playback drops the declaration and keeps the media",
+          _cc64h._media_live is None and _cc64h._media is not None,
+          "live %r media %r" % (_cc64h._media_live, _cc64h._media))
+    check("G: and the answer it gives through the base-class door follows",
+          _cc64h.media_is_live() is None, "got %r" % (_cc64h.media_is_live(),))
+
+    # -- the declaration is read once, at LOAD ------------------------------
+    _cc64i, _rcc64i = _new_cc64()
+    _cast_to64(_cc64i, FakeSock(), cast.NS_MEDIA, {
+        "type": "LOAD", "requestId": "r-derive",
+        "media": {"contentId": "http://127.0.0.1/live6.m3u8",
+                  "streamType": "LIVE", "metadata": {"title": "Live 6"}}})
+    with _cc64i._lock:
+        _cc64i._media = {"contentId": "http://127.0.0.1/live6.m3u8",
+                         "streamType": "buffered"}
+    check("G: the answer never gets re-derived from a mutated media dict",
+          _cc64i.media_is_live() is True, "got %r" % (_cc64i.media_is_live(),))
+
+    # -- the launcher half: what this receiver serves ----------------------
+    _cc64j, _rcc64j = _new_cc64()
+    _sock64j = FakeSock()
+    _cast_to64(_cc64j, _sock64j, cast.NS_RECEIVER,
+               {"type": "LAUNCH", "requestId": "r-mirror",
+                "appId": "0F5096E8"})
+    _launch64 = [p for p in _payloads64(_sock64j, cast.NS_RECEIVER)
+                 if p.get("type") == "LAUNCH_ERROR"]
+    check("G: the mirroring app is refused on the wire, not silently ignored",
+          len(_launch64) == 1, "payloads %r" % (_payloads64(_sock64j,
+                                                           cast.NS_RECEIVER),))
+    check("G: the refusal answers the requestId back",
+          _launch64 and _launch64[0].get("requestId") == "r-mirror",
+          "got %r" % (_launch64,))
+    check("G: and a refused launch opens no session",
+          _cc64j._session_id is None, "got %r" % (_cc64j._session_id,))
+    check("G: the refusal is written down (so a 10s timeout elsewhere is "
+          "traceable to this line)",
+          _said64(_lg_cast64, "Cast LAUNCH refused", _logging64.INFO),
+          "lines %r" % ([m for _, m in _lg_cast64.lines],))
+
+    _cc64k, _rcc64k = _new_cc64()
+    _sock64k = FakeSock()
+    _cast_to64(_cc64k, _sock64k, cast.NS_RECEIVER,
+               {"type": "LAUNCH", "requestId": "r-default",
+                "appId": cast.DEFAULT_MEDIA_APP_ID})
+    _status64 = [p for p in _payloads64(_sock64k, cast.NS_RECEIVER)
+                 if p.get("type") == "RECEIVER_STATUS"]
+    check("G: the served app is launched (this is the positive control)",
+          len(_status64) == 1 and _cc64k._session_id,
+          "statuses %d session %r" % (len(_status64), _cc64k._session_id))
+
+    _cc64l, _rcc64l = _new_cc64()
+    _sock64l = FakeSock()
+    _cast_to64(_cc64l, _sock64l, cast.NS_RECEIVER,
+               {"type": "GET_APP_AVAILABILITY", "requestId": "r-avail",
+                "appId": ["CC1AD845", "0F5096E8"]})
+    _avail64 = [p for p in _payloads64(_sock64l, cast.NS_RECEIVER)
+                if p.get("type") == "GET_APP_AVAILABILITY"]
+    _avail_map64 = (_avail64[0].get("availability") or {}) if _avail64 else {}
+    check("G: the availability answer lists the apps this receiver really serves",
+          all(app_id in _avail_map64 for app_id in cast.SERVED_APP_IDS),
+          "map %r" % (_avail_map64,))
+    check("G: and says so about the mirroring receiver it does not",
+          _avail_map64.get("0F5096E8") == "UNAVAILABLE"
+          or "0F5096E8" not in _avail_map64,
+          "map %r" % (_avail_map64,))
+    protocol.PlaybackGuard.owner = None
+
+# --- Group H: the composite protocol still shadows the base-class no-ops -----
+#
+# AGENTS.md §4.2 records this trap twice: ``Protocol`` itself declares
+# ``set_state_*`` and ``get_state_*`` as empty methods, so a group that only
+# installs some of them silently answers the rest from the class. These cases
+# ask, for every member of that family, "did the *instance* win", and then
+# "what happens to the instance attributes when a child leaves".
+    _lg_group64 = _grab64("ProtocolGroup")
+
+    class _Leaf64(protocol.Protocol):
+        """A child that reports everything we ask it to report.
+
+        Declares neither ``uses_ssdp`` nor ``handler_priority`` on purpose: then
+        ``primary`` is deterministically the first-inserted child on every
+        machine, instead of whichever protocol the runner happens to have.
+        """
+
+        def __init__(self, ret="leaf", answer="", live=None):
+            protocol.Protocol.__init__(self)
+            self.ret = ret
+            self.answer = answer
+            self.live = live
+            self.writes = []
+            self.states = []
+            self.boom = False
+            self.key_boom = False
+            self.calls = 0
+
+        def set_state_volume(self, data):
+            if self.boom:
+                raise RuntimeError("this child fell over while being written")
+            self.writes.append(data)
+            return self.ret
+
+        def set_state_play(self):
+            self.calls += 1
+
+        def set_state(self, name, value):
+            self.states.append((name, value))
+
+        def get_state_title(self):
+            if self.key_boom:
+                raise KeyError("CurrentTitle")
+            if self.boom:
+                raise RuntimeError("this child fell over while being read")
+            return self.answer
+
+        def media_is_live(self):
+            if self.boom:
+                raise RuntimeError("this child fell over while answering")
+            return self.live
+
+    class _NonCallable64(protocol.Protocol):
+        """A child whose ``set_state_volume`` is a string, not a method."""
+
+        set_state_volume = "not a method"
+
+    _leaf_loud64 = _Leaf64(ret="loud")
+    _leaf_quiet64 = _Leaf64(ret="quiet")
+    _grp64 = _group64.ProtocolGroup([("loud", _leaf_loud64),
+                                     ("quiet", _leaf_quiet64)])
+    # The action runs *before* the assertion that reads its side effects. When
+    # the two are written in the other order the witness reads an empty
+    # `writes` list and reads as a product failure; the same trap is why the
+    # liveliness-throwing case below calls first and checks after.
+    _grp64.set_state_volume(33)
+    check("H: a write reaches every child that has it",
+          _leaf_loud64.writes == [33] and _leaf_quiet64.writes == [33],
+          "%r %r" % (_leaf_loud64.writes, _leaf_quiet64.writes))
+    check("H: the write came back as one value, not a list",
+          _grp64.set_state_volume(34) == "loud",
+          "the group answered %r after %r %r"
+          % (_grp64.set_state_volume(34),
+             _leaf_loud64.writes, _leaf_quiet64.writes))
+    check("H: the fan-out is installed on the instance, not inherited",
+          "set_state_volume" in vars(_grp64)
+          and _grp64.set_state_volume is not protocol.Protocol.set_state_volume,
+          "vars=%r" % ("set_state_volume" in vars(_grp64),))
+    check("H: the generic set_state write is routed too",
+          "set_state" in vars(_grp64),
+          "instance attrs: %r" % (sorted(vars(_grp64)),))
+    _leaf_loud64.states.clear()
+    _leaf_quiet64.states.clear()
+    _grp64.set_state("Volume", 44)
+    check("H: and a bare set_state reaches every child",
+          _leaf_loud64.states == [("Volume", 44)]
+          and _leaf_quiet64.states == [("Volume", 44)],
+          "%r %r" % (_leaf_quiet64.states, _leaf_quiet64.states))
+    # Reads: the first child that actually knows something wins.
+    _read_first64 = _Leaf64(ret="first", answer="")
+    _read_second64 = _Leaf64(ret="second", answer="Song")
+    _grp_read64 = _group64.ProtocolGroup([("first", _read_first64),
+                                          ("second", _read_second64)])
+    check("H: a silent primary does not answer for the group",
+          _grp_read64.get_state_title() == "Song",
+          repr(_grp_read64.get_state_title()))
+    _grp_silent64 = _group64.ProtocolGroup([
+        ("a", _Leaf64(answer="")), ("b", _Leaf64(answer=None))])
+    check("H: when nobody spoke, the read is an empty string",
+          _grp_silent64.get_state_title() == "",
+          repr(_grp_silent64.get_state_title()))
+    _boom_key64 = _Leaf64(ret="primary", answer="")
+    _boom_key64.key_boom = True
+    _grp_key64 = _group64.ProtocolGroup([("primary", _boom_key64),
+                                         ("second", _Leaf64(answer="Song"))])
+    del _lg_group64.lines[:]
+    check("H: a child whose ledger has no such name still lets the next one answer",
+          _grp_key64.get_state_title() == "Song",
+          repr(_grp_key64.get_state_title()))
+    check("H: and that is a DEBUG note, not an error",
+          _said64(_lg_group64, "does not track", _logging64.DEBUG)
+          and not _said64(_lg_group64, "raised in get_state_title", _logging64.ERROR),
+          "lines=%r" % (_lg_group64.lines,))
+    _write_boom64 = _Leaf64(ret="loud")
+    _write_boom64.boom = True
+    _write_survivor64 = _Leaf64(ret="quiet")
+    _grp_boom_w64 = _group64.ProtocolGroup([("loud", _write_boom64),
+                                            ("quiet", _write_survivor64)])
+    del _lg_group64.lines[:]
+    _grp_boom_w64.set_state_volume(7)
+    check("H: a child that falls over during a write is named by its title",
+          _said64(_lg_group64, "Protocol loud raised in set_state_volume",
+                  _logging64.ERROR),
+          "lines=%r" % (_lg_group64.lines,))
+    check("H: and the other child still received the write",
+          _write_survivor64.writes == [7],
+          repr(_write_survivor64.writes))
+    _read_boom64 = _Leaf64(ret="loud")
+    _read_boom64.boom = True
+    _grp_boom_r64 = _group64.ProtocolGroup([("loud", _read_boom64),
+                                            ("quiet", _Leaf64(answer="Song"))])
+    del _lg_group64.lines[:]
+    check("H: a read that throws is answered by the next child",
+          _grp_boom_r64.get_state_title() == "Song",
+          repr(_grp_boom_r64.get_state_title()))
+    check("H: and the getter's error names the class, not the title",
+          _said64(_lg_group64, "Protocol _Leaf64 raised in get_state_title",
+                  _logging64.ERROR)
+          and not any(lv == _logging64.ERROR and "loud" in msg
+                      and "get_state_title" in msg for lv, msg in _lg_group64.lines),
+          "lines=%r" % (_lg_group64.lines,))
+    # Liveness is the one three-valued question: ``None`` means nobody said.
+    _live_none64 = _Leaf64(live=None)
+    _live_false64 = _Leaf64(live=False)
+    _grp_live64 = _group64.ProtocolGroup([("silent", _live_none64),
+                                          ("seekable", _live_false64)])
+    check("H: a declared False travels through a silent first child",
+          _grp_live64.media_is_live() is False,
+          repr(_grp_live64.media_is_live()))
+    _grp_live264 = _group64.ProtocolGroup([("live", _Leaf64(live=True)),
+                                           ("seekable", _Leaf64(live=False))])
+    check("H: and an earlier True beats a later False",
+          _grp_live264.media_is_live() is True,
+          repr(_grp_live264.media_is_live()))
+    _grp_live364 = _group64.ProtocolGroup([("a", _Leaf64(live=None)),
+                                           ("b", _Leaf64(live=None))])
+    check("H: nobody answering is None, never an empty string",
+          _grp_live364.media_is_live() is None,
+          repr(_grp_live364.media_is_live()))
+    _live_fresh_a64 = _Leaf64(live=True)
+    _live_fresh_b64 = _Leaf64(live=False)
+    _grp_fresh64 = _group64.ProtocolGroup([("a", _live_fresh_a64),
+                                           ("b", _live_fresh_b64)])
+    _ = _grp_fresh64.media_is_live()
+    _live_fresh_a64.live = None
+    check("H: the verdict is asked fresh, not cached",
+          _grp_fresh64.media_is_live() is False,
+          repr(_grp_fresh64.media_is_live()))
+    _live_boom64 = _Leaf64(live=True)
+    _live_boom64.boom = True
+    _grp_live_boom64 = _group64.ProtocolGroup([("loud", _live_boom64),
+                                               ("seekable", _Leaf64(live=False))])
+    del _lg_group64.lines[:]
+    # Ask first, then read the ledger: the ERROR line only exists once the
+    # delegator has actually walked the children, so a check that puts the call
+    # inside its own condition reads `lines` a step too early.
+    _live_boom_answer64 = _grp_live_boom64.media_is_live()
+    check("H: a child that throws while answering liveliness is named",
+          _said64(_lg_group64, "Protocol _Leaf64 raised in media_is_live",
+                  _logging64.ERROR)
+          and _live_boom_answer64 is False,
+          "answer=%r lines=%r" % (_live_boom_answer64, _lg_group64.lines))
+    # One member of this family is deliberately *not* asserted: a group that
+    # lists itself as a child. The closure self-skip in `_delegate_getter` and
+    # `_delegate_liveness` sits behind `ordered = [self.primary] + ...`, and
+    # `primary` evaluates `getattr(p, "uses_ssdp", True)` for every child with
+    # no self-guard -- for a self-containing group that property re-enters its
+    # own `any(...)` and the recursion surfaces outside every per-child
+    # `except`, killing the whole Part. Macast never builds that shape (a
+    # `ProtocolGroup`'s children are protocol instances, never the group), so
+    # this records the limit rather than working around it. Group-in-group
+    # *reads*, which is the shape that does occur, are the next two cases.
+    check("H: liveliness is shadowed on the instance too, not inherited as a stub",
+          "media_is_live" in vars(_grp64)
+          and _grp64.media_is_live is not protocol.Protocol.media_is_live,
+          "instance attrs: %r" % ("media_is_live" in vars(_grp64),))
+    _inner64 = _group64.ProtocolGroup([("nested", _Leaf64(answer="Nested"))])
+    _grp_nest64 = _group64.ProtocolGroup([("silent", _Leaf64(answer="")),
+                                          ("inner", _inner64)])
+    check("H: and a group inside a group still surfaces its child's answer",
+          _grp_nest64.get_state_title() == "Nested",
+          repr(_grp_nest64.get_state_title()))
+    check("H: liveliness travels through nesting too",
+          _group64.ProtocolGroup([
+              ("silent", _Leaf64(live=None)),
+              ("inner", _group64.ProtocolGroup([("live", _Leaf64(live=True))]))
+          ]).media_is_live() is True,
+          repr(_grp_nest64.media_is_live()))
+    # Membership leaving: the cleanup loop is the whole difference between
+    # "this child no longer gets writes" and "writes fall back to a stub".
+    _gone_leaf64 = _Leaf64(ret="loud")
+    _grp_remove64 = _group64.ProtocolGroup([("loud", _gone_leaf64)])
+    _returned64 = _grp_remove64.remove("loud")
+    check("H: remove hands back the protocol it took out",
+          _returned64 is _gone_leaf64, repr(_returned64))
+    check("H: removing the only child uninstalls the writes nobody declares",
+          "set_state_volume" not in vars(_grp_remove64),
+          "instance attrs: %r" % (sorted(vars(_grp_remove64)),))
+    check("H: while reads, the generic write and liveliness stay installed",
+          "media_is_live" in vars(_grp_remove64)
+          and "get_state_title" in vars(_grp_remove64)
+          and "set_state" in vars(_grp_remove64),
+          "instance attrs: %r" % (sorted(vars(_grp_remove64)),))
+    check("H: and the orphaned write is the base-class no-op, not a crash",
+          _grp_remove64.set_state_volume(3) is None
+          and _grp_remove64.media_is_live() is None
+          and _grp_remove64.get_state_title() == "",
+          "%r" % (_grp_remove64.set_state_volume(3),))
+    _names64 = _grp64.methods()
+    check("H: methods() is the deduplicated union over the children",
+          len(_names64) == len(set(_names64))
+          and set(_names64) == set(_leaf_loud64.methods())
+          and "set_state_volume" in _names64
+          and "set_state" not in _names64,
+          "names=%r" % (_names64,))
+    _grp_empty64 = _group64.ProtocolGroup()
+    check("H: an empty group has no primary and needs no SSDP",
+          _grp_empty64.primary is None and _grp_empty64.uses_ssdp is False,
+          "primary=%r uses_ssdp=%r" % (_grp_empty64.primary, _grp_empty64.uses_ssdp))
+    _missing_err64 = None
+    try:
+        _grp_empty64.some_attribute_nobody_has
+    except AttributeError as _e64m:
+        _missing_err64 = str(_e64m)
+    check("H: an unknown attribute says which half of the story is missing",
+          _missing_err64 is not None
+          and "no protocol is enabled to delegate to" in _missing_err64,
+          repr(_missing_err64))
+    check("H: an unknown set_state_* still fans out and answers nothing",
+          callable(_grp64.set_state_teleport)
+          and _grp64.set_state_teleport(1) is None,
+          repr(getattr(_grp64, "set_state_teleport", None)))
+    _skip_leaf64 = _Leaf64(ret="real")
+    _grp_skip64 = _group64.ProtocolGroup([("muted", _NonCallable64()),
+                                          ("real", _skip_leaf64)])
+    del _lg_group64.lines[:]
+    _grp_skip64.set_state_volume(9)
+    check("H: a child whose attribute is not callable is skipped, silently",
+          _skip_leaf64.writes == [9]
+          and not _said64(_lg_group64, "set_state_volume", _logging64.ERROR),
+          "writes=%r lines=%r" % (_skip_leaf64.writes, _lg_group64.lines))
+
+# --- Group I: the live verdict reaches the player's command line -------------
+#
+# The shipped mpv command line sat 3.50 s behind the live edge and crept.
+# Everything below asks one question in five shapes: when the sender declared
+# live media, is the ``loadfile`` command the low-latency one, and when it did
+# not, is the command byte-for-byte what this file sent before the feature
+# existed? The pre-fix symptom -- a position shoved into the 4th slot as
+# ``'start=00:00:12'`` -- is what the seek cases are really pinning.
+    # Same remedy group D needed: a wrong load shape is short (three slots, no
+    # option dictionary), so reading slot 4 directly raises ``IndexError`` one
+    # case into the group and hides every group that comes after it. These two
+    # helpers answer for a missing slot so the damage stays inside group I.
+    def _options64(cmd):
+        if isinstance(cmd, list) and len(cmd) > 4 and isinstance(cmd[4], dict):
+            return cmd[4]
+        return {}
+
+    def _first_cmd64(mpv):
+        return mpv.cmds[0] if mpv.cmds else []
+
+    class _Mpv64(_mpv64.MPVRenderer):
+        """``MPVRenderer`` with the socket replaced by a command recorder.
+
+        ``MPVRenderer.__init__`` starts nothing but builds ``MPVRendererSetting``
+        and ``send_command`` writes to a real IPC socket, so this skips both and
+        keeps the two pure methods (``_loadfile_command``, ``note_media_live``)
+        exactly as shipped.
+        """
+
+        def __init__(self):
+            self.title = "untitled"
+            self._media_live = None
+            self.cmds = []
+            self.hooks = []
+            self.stops = 0
+            self.starts = 0
+
+        def send_command(self, command):
+            for hook in self.hooks:
+                hook(self, list(command))
+            self.cmds.append(list(command))
+
+        def set_media_text(self, data, duration=1000):
+            pass
+
+        def stop(self):
+            self.stops += 1
+
+        def start(self):
+            self.starts += 1
+
+    class _ProtoState64(protocol.Protocol):
+        """The protocol side of ``reload()``: url, position, transport state."""
+
+        def __init__(self, url="", position="00:00:12", transport="STOPPED"):
+            protocol.Protocol.__init__(self)
+            self._url = url
+            self._position = position
+            self._transport = transport
+
+        def get_state_url(self):
+            return self._url
+
+        def get_state_position(self):
+            return self._position
+
+        def get_state_transport_state(self):
+            return self._transport
+
+    _mp_i64 = _Mpv64()
+    _statep_i64 = _ProtoState64(url="http://127.0.0.1/relay/x/media")
+    _channel_only64("get_protocol", _statep_i64)
+    _URL_I64 = "http://127.0.0.1:58000/media"
+    _bare_i64 = _mp_i64._loadfile_command(_URL_I64)
+    check("I: media nobody declared loads bare, exactly as before",
+          _bare_i64 == ["loadfile", _URL_I64, "replace"],
+          repr(_bare_i64))
+    _live_i64 = _mp_i64._loadfile_command(_URL_I64, live=True)
+    check("I: a live declaration loads as a per-file option dictionary",
+          len(_live_i64) == 5 and _live_i64[:4] == ["loadfile", _URL_I64, "replace", 0]
+          and isinstance(_live_i64[4], dict),
+          repr(_live_i64))
+    _opts_i64 = _options64(_live_i64)
+    check("I: the dictionary is the shipped table, key for key",
+          _opts_i64 == _mpv64.LIVE_LOAD_OPTIONS,
+          "opts=%r" % (_opts_i64,))
+    check("I: every entry is a string, because that is the shape that was measured",
+          all(isinstance(k, str) and isinstance(v, str)
+              for k, v in _opts_i64.items()),
+          repr(_opts_i64))
+    check("I: no read-ahead and no buffering left in the player",
+          _opts_i64.get("audio-buffer") == "0"
+          and _opts_i64.get("cache-pause") == "no"
+          and _opts_i64.get("stream-buffer-size") == "4k"
+          and _opts_i64.get("video-latency-hacks") == "yes",
+          repr(_opts_i64))
+    check("I: the demuxer never blocks on a single-threaded decode",
+          _opts_i64.get("vd-lavc-threads") == "1", repr(_opts_i64))
+    check("I: fflags is appended to the demuxer's options, not replaced",
+          _opts_i64.get("demuxer-lavf-o-add", "").endswith("fflags=+nobuffer")
+          and "demuxer-lavf-o" not in _opts_i64,
+          repr(_opts_i64))
+    check("I: the probe is told what the stream is without scanning it",
+          _opts_i64.get("demuxer-lavf-probe-info") == "nostreams"
+          and _opts_i64.get("demuxer-lavf-analyzeduration") == "0.1",
+          repr(_opts_i64))
+    check("I: and the frame pacing is the audio clock without interpolation",
+          _opts_i64.get("video-sync") == "audio"
+          and _opts_i64.get("interpolation") == "no",
+          repr(_opts_i64))
+    check("I: the table carries no seek and no argv-shaped key",
+          len(_mpv64.LIVE_LOAD_OPTIONS) >= 8
+          and "start" not in _mpv64.LIVE_LOAD_OPTIONS
+          and not any(k.startswith("-") for k in _mpv64.LIVE_LOAD_OPTIONS),
+          repr(_mpv64.LIVE_LOAD_OPTIONS))
+    _opts_i64["audio-buffer"] = "999"
+    _opts_i64["invented"] = "yes"
+    check("I: a caller cannot poison the shipped table through the returned dict",
+          _mpv64.LIVE_LOAD_OPTIONS.get("audio-buffer") == "0"
+          and "invented" not in _mpv64.LIVE_LOAD_OPTIONS,
+          "table=%r" % (_mpv64.LIVE_LOAD_OPTIONS,))
+    _fresh_cmd_i64 = _mp_i64._loadfile_command(_URL_I64, live=True)
+    check("I: and the next live load is a fresh dictionary",
+          len(_fresh_cmd_i64) == 5
+          and _options64(_fresh_cmd_i64) is not _mpv64.LIVE_LOAD_OPTIONS
+          and _options64(_fresh_cmd_i64) == _mpv64.LIVE_LOAD_OPTIONS,
+          repr(_fresh_cmd_i64))
+    _seek_i64 = _mp_i64._loadfile_command(_URL_I64, start="00:00:12")
+    check("I: a reported position is the 5th slot's option dictionary",
+          _seek_i64 == ["loadfile", _URL_I64, "replace", 0,
+                        {"start": "00:00:12"}],
+          repr(_seek_i64))
+    check("I: and never a string in the playlist-index slot -- that is what loaded nothing",
+          not any(isinstance(_slot_i64, str) and _slot_i64.startswith("start=")
+                  for _slot_i64 in _seek_i64),
+          repr(_seek_i64))
+    check("I: a live declaration wins over the position",
+          _options64(_mp_i64._loadfile_command(_URL_I64, start="00:00:12",
+                                               live=True))
+          == _mpv64.LIVE_LOAD_OPTIONS,
+          repr(_mp_i64._loadfile_command(_URL_I64, start="00:00:12", live=True)))
+    check("I: zero, blank and absent positions all keep the bare shape",
+          all(_mp_i64._loadfile_command(_URL_I64, start=_v_i64) == _bare_i64
+              for _v_i64 in ("0", None, "  ", "")),
+          repr([_mp_i64._loadfile_command(_URL_I64, start=_v_i64)
+                for _v_i64 in ("0", None, "  ", "")]))
+    check("I: a numeric position is carried as the string mpv wants",
+          _options64(_mp_i64._loadfile_command(_URL_I64, start=12)) == {"start": "12"},
+          repr(_mp_i64._loadfile_command(_URL_I64, start=12)))
+    _notes_i64 = []
+    for _decl_i64 in (True, False, "yes", None):
+        _mp_i64.note_media_live(_decl_i64)
+        _notes_i64.append(_mp_i64._media_live)
+    check("I: the verdict is stored as given, and only True/False are answers",
+          _notes_i64 == [True, False, None, None], repr(_notes_i64))
+    _mp_i64.__init__()
+    _mp_i64.note_media_live(True)
+    _mp_i64.set_media_url(_URL_I64, "00:00:07")
+    check("I: the hand-off really sends the live shape",
+          len(_mp_i64.cmds) == 1
+          and _first_cmd64(_mp_i64)[:4] == ["loadfile", _URL_I64, "replace", 0]
+          and _options64(_first_cmd64(_mp_i64)) == _mpv64.LIVE_LOAD_OPTIONS,
+          repr(_mp_i64.cmds))
+    # The player-wide fullscreen setting is not a statement about this stream,
+    # so it goes in as its own command ahead of the load.
+    utils.Setting.set(_mpv64.SettingProperty.PlayerSize,
+                      _mpv64.SettingProperty.PlayerSize_FullScreen.value)
+    _mp_i64.__init__()
+    _mp_i64.set_media_url(_URL_I64)
+    check("I: fullscreen is a separate command, and the load keeps its own shape",
+          _mp_i64.cmds[0] == ["set_property", "fullscreen", "yes"]
+          and _mp_i64.cmds[1] == _bare_i64,
+          repr(_mp_i64.cmds))
+    utils.Setting.set(_mpv64.SettingProperty.PlayerSize,
+                      _mpv64.SettingProperty.PlayerSize_Normal.value)
+    _mp_i64.__init__()
+    _mp_i64.set_media_url(_URL_I64)
+    check("I: and with the ordinary size nothing precedes the bare load",
+          _mp_i64.cmds == [_bare_i64], repr(_mp_i64.cmds))
+    _mp_i64.__init__()
+    _mp_i64.note_media_live(True)
+    _samples_i64 = []
+    _mp_i64.hooks.append(lambda m, c: _samples_i64.append((c[0], m._media_live)))
+    _mp_i64.set_media_stop()
+    check("I: stopping clears the verdict before the command leaves",
+          _samples_i64 == [("stop", None)] and _mp_i64._media_live is None,
+          "samples=%r live=%r" % (_samples_i64, _mp_i64._media_live))
+
+    def _reload_once_i64(mpv, fire=True):
+        """Run ``reload()`` with ``mpvipc_start`` observable and then fire it.
+
+        ``mpv.py`` restarts the player unconditionally in a thread, so the
+        witness for the idle case cannot be "no restart happened" -- it is
+        "no subscriber was added and no load was issued".
+        """
+        _ls_i64 = _cp64.engine.listeners
+        _was_i64 = set(_ls_i64.get("mpvipc_start") or ())
+        _lifecycle64.append(("mpvipc_start", _was_i64))
+        if "mpvipc_start" in _ls_i64:
+            _ls_i64["mpvipc_start"].clear()
+        else:
+            _ls_i64["mpvipc_start"] = set()
+        _stops_i64 = mpv.stops
+        _starts_i64 = mpv.starts
+        del mpv.cmds[:]
+        mpv.reload()
+        _new_i64 = set(_ls_i64.get("mpvipc_start") or ()) - _was_i64
+        if fire:
+            _cp64.engine.publish("mpvipc_start")
+            _deadline_i64 = time.time() + 5.0
+            while (mpv.stops == _stops_i64 or mpv.starts == _starts_i64) \
+                    and time.time() < _deadline_i64:
+                time.sleep(0.02)
+        return _new_i64
+
+    _mp_i64.__init__()
+    _statep_i64._transport = "STOPPED"
+    _idle_new_i64 = _reload_once_i64(_mp_i64)
+    check("I: an idle player adds no reload subscriber and loads nothing",
+          len(_idle_new_i64) == 0 and _mp_i64.cmds == [],
+          "new=%r cmds=%r" % (_idle_new_i64, _mp_i64.cmds))
+    _mp_i64.__init__()
+    _mp_i64.title = "Rick"
+    _mp_i64.note_media_live(True)
+    _statep_i64._transport = "PLAYING"
+    _play_new_i64 = _reload_once_i64(_mp_i64)
+    check("I: a playing one subscribes exactly once",
+          len(_play_new_i64) == 1 and all(callable(_cb_i64) for _cb_i64 in _play_new_i64),
+          "new=%r" % (_play_new_i64,))
+    _reload_cmd_i64 = _mp_i64.cmds[0] if _mp_i64.cmds else []
+    check("I: the reload carries the live verdict into the same command",
+          _reload_cmd_i64[:4] == ["loadfile", _statep_i64._url, "replace", 0]
+          and _reload_cmd_i64[4] == _mpv64.LIVE_LOAD_OPTIONS
+          and not any(isinstance(_slot_i64, str)
+                      and _slot_i64.startswith("start=") for _slot_i64 in _reload_cmd_i64),
+          "cmds=%r" % (_mp_i64.cmds,))
+    check("I: and the reload names the player, not just the overlay",
+          _mp_i64.cmds[1:] == [["set_property", "title", "Rick"],
+                               ["set_property", "force-media-title", "Rick"]],
+          "cmds=%r" % (_mp_i64.cmds,))
+    check("I: the closure unsubscribes itself after firing",
+          not (_cp64.engine.listeners.get("mpvipc_start") or set()) & _play_new_i64,
+          "still there: %r" % (_cp64.engine.listeners.get("mpvipc_start"),))
+    _mp_i64.__init__()
+    _mp_i64.note_media_live(None)
+    _statep_i64._position = "00:00:12"
+    _reload_once_i64(_mp_i64)
+    check("I: an undeclared reload seeks to the reported position",
+          _first_cmd64(_mp_i64) == ["loadfile", _statep_i64._url, "replace", 0,
+                                    {"start": "00:00:12"}],
+          "cmds=%r" % (_mp_i64.cmds,))
+
+# --- Group J: GENA only fires when the ledger actually changed --------------
+#
+# Measured in the user's own log: 3 h, 505 duration reports, 464 of them
+# repeating the previous value. Each of those was a synchronous HTTP POST to
+# every control point on the LAN. The cases below ask, per state variable,
+# "did the event queue grow", and one of them is deliberately about ``Mute``'s
+# initial int 0 -- the shape where "unchanged" is not the same as "False".
+    # A freshly built receiver already has one report queued, and the event
+    # flag is already up: `init_state()` (protocol.py:650) writes nine state
+    # variables through this same `set_state`, and exactly one of them --
+    # TransportStatus, '' -> 'OK' -- sits in the two service lists the gate
+    # reads (`AVTransport` / `RenderingControl`). The three ConnectionManager
+    # names it also writes are in the table but not in that gate. So every
+    # question below is measured as *growth from that entry*, and the flag is
+    # cleared before each write: asking "did this write wake the event thread"
+    # without clearing would read somebody else's wake-up and pass for the
+    # wrong reason.
+    def _prime_j64(proto):
+        proto._state_event.clear()
+        return list(proto.state_queue.queue)
+
+    def _grew_j64(proto, before):
+        return list(proto.state_queue.queue)[len(before):]
+
+    _dlna_j64 = protocol.DLNAProtocol()
+    _before_j64 = _prime_j64(_dlna_j64)
+    check("J: a fresh receiver queues exactly the init-time status report",
+          [name for name, _v in _before_j64] == ["TransportStatus"]
+          and _dlna_j64._state_event.is_set() is False,
+          # names only: the value side is a 20 KB SinkProtocolInfo list, and a
+          # failure detail nobody can read is a failure detail nobody will act on.
+          "queued=%r" % ([name for name, _v in _before_j64],))
+    _dlna_j64.set_state("Volume", 42)
+    check("J: a changed value queues the event and wakes the thread",
+          _grew_j64(_dlna_j64, _before_j64) == [("Volume", 42)]
+          and _dlna_j64._state_event.is_set(),
+          "grew=%r" % (_grew_j64(_dlna_j64, _before_j64),))
+    _dlna_j64.set_state("Volume", 42)
+    check("J: and reporting the same value again queues nothing",
+          _grew_j64(_dlna_j64, _before_j64) == [("Volume", 42)]
+          and _dlna_j64.state_list["Volume"].value == 42,
+          "grew=%r" % (_grew_j64(_dlna_j64, _before_j64),))
+    _before_j64 = _prime_j64(_dlna_j64)
+    _dlna_j64.set_state("Mute", False)
+    check("J: the boolean that reads as unchanged from int 0 neither queues nor wakes",
+          _grew_j64(_dlna_j64, _before_j64) == []
+          and not _dlna_j64._state_event.is_set()
+          and _dlna_j64.state_list["Mute"].value == 0,
+          "grew=%r value=%r" % (_grew_j64(_dlna_j64, _before_j64),
+                                _dlna_j64.state_list["Mute"].value))
+    _dlna_j64.set_state("Mute", True)
+    check("J: while a real change does",
+          _grew_j64(_dlna_j64, _before_j64) == [("Mute", True)]
+          and _dlna_j64.state_list["Mute"].value is True
+          and _dlna_j64._state_event.is_set(),
+          "grew=%r" % (_grew_j64(_dlna_j64, _before_j64),))
+    _dlna_dur64 = protocol.DLNAProtocol()
+    _before_dur64 = _prime_j64(_dlna_dur64)
+    _dlna_dur64.set_state_duration("00:00:12")
+    _queued_dur64 = [name for name, _v in _grew_j64(_dlna_dur64, _before_dur64)]
+    _dlna_dur64.set_state_duration("00:00:12")
+    check("J: a duration write queues its two names once, in order",
+          _queued_dur64 == ["CurrentTrackDuration", "CurrentMediaDuration"],
+          "first write=%r" % (_queued_dur64,))
+    check("J: and repeating it does not double the traffic",
+          [name for name, _v in _grew_j64(_dlna_dur64, _before_dur64)] == _queued_dur64,
+          "after the repeat=%r" % ([n for n, _v in _grew_j64(_dlna_dur64, _before_dur64)],))
+    _dlna_pos64 = protocol.DLNAProtocol()
+    _before_pos64 = _prime_j64(_dlna_pos64)
+    _dlna_pos64.set_state_position("00:00:05")
+    check("J: position is polled, never pushed -- it is declared sendEvents=no",
+          _dlna_pos64.state_list["RelativeTimePosition"].value == "00:00:05"
+          and _grew_j64(_dlna_pos64, _before_pos64) == []
+          and not _dlna_pos64._state_event.is_set(),
+          "grew=%r event=%r" % (list(_grew_j64(_dlna_pos64, _before_pos64)),
+                                _dlna_pos64._state_event.is_set()))
+    _unknown_err64 = None
+    try:
+        _dlna_pos64.set_state("NotAStateVariable", 1)
+    except KeyError as _e64u:
+        _unknown_err64 = _e64u
+    check("J: an unknown name is still a programming error, not a silent no-op",
+          _unknown_err64 is not None, repr(_unknown_err64))
+    # `set_state_play()` is two writes (protocol.py:1277 -> 1291): TransportState
+    # and TransportStatus='OK'. The status one arrives *already satisfied* -- that
+    # is precisely the entry init_state() left behind -- so a play report is one
+    # event, not two, and the second, unchanged write is the sharpest no-op in the
+    # whole ledger: it is a write the code genuinely makes, on a name the gate
+    # genuinely watches, that genuinely must stay quiet.
+    _dlna_play64 = protocol.DLNAProtocol()
+    _before_play64 = _prime_j64(_dlna_play64)
+    _dlna_play64.set_state_play()
+    _queued_play64 = _grew_j64(_dlna_play64, _before_play64)
+    _dlna_play64.set_state_play()
+    _dlna_play64.set_state_play()
+    check("J: a play report queues its changed name once, three calls make one event",
+          [name for name, _v in _queued_play64] == ["TransportState"]
+          and _grew_j64(_dlna_play64, _before_play64) == _queued_play64,
+          "first=%r after=%r" % (_queued_play64,
+                                 _grew_j64(_dlna_play64, _before_play64)))
+    check("J: and the status write that was already true stays out of the queue",
+          _dlna_play64.state_list["TransportStatus"].value == "OK"
+          and _dlna_play64.state_list["TransportState"].value == "PLAYING"
+          and "TransportStatus" not in [name for name, _v in _queued_play64],
+          "queued=%r" % (_queued_play64,))
+    _dlna_vol64 = protocol.DLNAProtocol()
+    _before_vol64 = _prime_j64(_dlna_vol64)
+    for _v_j64 in (10, 20, 30):
+        _dlna_vol64.set_state_volume(_v_j64)
+    check("J: three different volumes are three events",
+          _grew_j64(_dlna_vol64, _before_vol64) == [("Volume", 10), ("Volume", 20),
+                                                    ("Volume", 30)],
+          "grew=%r" % (_grew_j64(_dlna_vol64, _before_vol64),))
+    _dlna_log64 = protocol.DLNAProtocol()
+    del _lg_proto64.lines[:]
+    _dlna_log64.set_state("Volume", 42)
+    _dlna_log64.set_state("Volume", 42)
+    check("J: and the debug line is written once per real change",
+          [msg for lv, msg in _lg_proto64.lines
+           if lv == _logging64.DEBUG and msg.startswith("setState:")]
+          == ["setState: Volume 42"],
+          "lines=%r" % (_lg_proto64.lines,))
+
+# --- Group K: the SSDP restart is asked about health, not on a timer --------
+#
+# The periodic reload used to fire every ~31 s and wrote about 49% of the whole
+# log file (6 ``Registering`` + 6 ``Un-registering`` per tick) while a 90 s
+# probe showed 349 polls and 349 answers, worst gap 0.0 s: it bought nothing.
+# It still has to happen when the receive loop is dead -- ``running`` stays True
+# and UDP/1900 stays bound -- so the question is ``is_healthy()``, and it is
+# asked only on the tick that reaches the budget.
+    _srv_none64 = _ssdp64.SSDPServer()
+    check("K: a server that never started is healthy",
+          _srv_none64.running is False and _srv_none64.is_healthy() is True,
+          "running=%r" % (_srv_none64.running,))
+    _srv_dead64 = _ssdp64.SSDPServer()
+    _srv_dead64.running = True
+    _srv_dead64.ssdp_thread = None
+    check("K: a running flag with no thread behind it is not",
+          _srv_dead64.is_healthy() is False, repr(_srv_dead64.ssdp_thread))
+    _ev_k64 = threading.Event()
+    _srv_live64 = _ssdp64.SSDPServer()
+    _srv_live64.running = True
+    _thr_k64 = threading.Thread(target=_ev_k64.wait)
+    _thr_k64.daemon = True
+    _thr_k64.start()
+    _srv_live64.ssdp_thread = _thr_k64
+    check("K: a live receive thread is the answer that means leave it alone",
+          _srv_live64.is_healthy() is True, repr(_srv_live64.ssdp_thread))
+    _ev_k64.set()
+    _thr_k64.join(5)
+    check("K: and once that thread exits, the same question says restart",
+          _srv_live64.is_healthy() is False,
+          "alive=%r" % (_thr_k64.is_alive(),))
+
+    class _SsdpK64(object):
+        """The health question, counted."""
+
+        def __init__(self, healthy=True):
+            self.healthy = healthy
+            self.asks = 0
+
+        def is_healthy(self):
+            self.asks += 1
+            return self.healthy
+
+    class _PluginK64(object):
+        def __init__(self, ssdp):
+            self.ssdp = ssdp
+
+    _pubs_k64 = []
+    _flag_k64 = [False]
+
+    def _pub_k64(channel, *args, **kwargs):
+        _pubs_k64.append(channel)
+        return []
+
+    _cp64.engine.publish = _pub_k64
+    _server64.Setting.is_ip_changed = lambda: _flag_k64[0]
+    _stand_k64 = _server64.Service.__new__(_server64.Service)
+    _stand_k64.ssdp_monitor_counter = 0
+    _stand_k64.ssdp_plugin = None
+    _TICKS_K64 = _server64.Service.SSDP_HEALTH_TICKS
+
+    def _tick_k64(healthy, ip_changed, counter, plugin_present=True):
+        _obj_k64 = _SsdpK64(healthy=healthy)
+        _stand_k64.ssdp_monitor_counter = counter
+        _stand_k64.ssdp_plugin = _PluginK64(_obj_k64) if plugin_present else None
+        _flag_k64[0] = ip_changed
+        del _pubs_k64[:]
+        _server64.Service.notify(_stand_k64)
+        return list(_pubs_k64), _stand_k64.ssdp_monitor_counter, _obj_k64.asks
+
+    check("K: the budget is a real number of ticks, read from the class",
+          isinstance(_TICKS_K64, int) and _TICKS_K64 > 1, repr(_TICKS_K64))
+    del _lg_server64.lines[:]
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(True, True, _TICKS_K64 - 1)
+    check("K: a changed address republishes without asking about health at all",
+          _pubs_k64_r == ["ssdp_update_ip", "ssdp_notify"] and _cnt_k64_r == 0
+          and _asks_k64_r == 0,
+          "pubs=%r counter=%r asks=%r" % (_pubs_k64_r, _cnt_k64_r, _asks_k64_r))
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(False, True, _TICKS_K64 - 1)
+    check("K: and that answer stands even if the listener is actually dead",
+          _pubs_k64_r == ["ssdp_update_ip", "ssdp_notify"] and _asks_k64_r == 0
+          and not _said64(_lg_server64, "not answering", _logging64.WARNING),
+          "pubs=%r asks=%r lines=%r" % (_pubs_k64_r, _asks_k64_r, _lg_server64.lines))
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(True, False, _TICKS_K64 - 2)
+    check("K: below the budget the tick only notifies and never asks",
+          _pubs_k64_r == ["ssdp_notify"] and _cnt_k64_r == _TICKS_K64 - 1
+          and _asks_k64_r == 0,
+          "pubs=%r counter=%r asks=%r" % (_pubs_k64_r, _cnt_k64_r, _asks_k64_r))
+    del _lg_server64.lines[:]
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(True, False, _TICKS_K64 - 1)
+    check("K: at the budget it asks exactly once, and a healthy listener is left alone",
+          _pubs_k64_r == ["ssdp_notify"] and _asks_k64_r == 1
+          and _cnt_k64_r == 0
+          and "ssdp_update_ip" not in _pubs_k64_r
+          and not _said64(_lg_server64, "not answering", _logging64.WARNING),
+          "pubs=%r counter=%r asks=%r lines=%r"
+          % (_pubs_k64_r, _cnt_k64_r, _asks_k64_r, _lg_server64.lines))
+    del _lg_server64.lines[:]
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(False, False, _TICKS_K64 - 1)
+    check("K: and an unhealthy one is restarted, with the reason in the log",
+          _pubs_k64_r == ["ssdp_update_ip", "ssdp_notify"] and _asks_k64_r == 1
+          and _cnt_k64_r == 0
+          and _said64(_lg_server64, "SSDP is not answering any more",
+                      _logging64.WARNING),
+          "pubs=%r counter=%r asks=%r lines=%r"
+          % (_pubs_k64_r, _cnt_k64_r, _asks_k64_r, _lg_server64.lines))
+    _pubs_k64_r, _cnt_k64_r, _asks_k64_r = _tick_k64(True, False, 7,
+                                                     plugin_present=False)
+    check("K: with no SSDP plugin the tick says nothing and leaves the counter alone",
+          _pubs_k64_r == [] and _cnt_k64_r == 7 and _asks_k64_r == 0,
+          "pubs=%r counter=%r" % (_pubs_k64_r, _cnt_k64_r))
+    _cp64.engine.publish = _saved_publish64
+    if _saved_ipchanged64 is None:
+        try:
+            del utils.Setting.is_ip_changed
+        except AttributeError:
+            pass
+    else:
+        utils.Setting.is_ip_changed = _saved_ipchanged64
+
+# --- Group L: the seam is named so the bus never learns about it -------------
+#
+# ``note_media_live`` is deliberately not ``set_media_live``:
+# ``Renderer.methods()`` enumerates the ``set_media_`` prefix and
+# ``MacastPluginManager`` subscribes every one of those names onto the CherryPy
+# bus, so a setter-shaped name would become a bus message nobody asked for.
+# A text grep would hit that sentence in a docstring, so this reads AST only.
+    _defs_l64 = {}
+    _strargs_l64 = {}
+    _parsed_l64 = []
+
+    def _get_name_l64(node):
+        if isinstance(node, _ast64.Name):
+            return node.id
+        if isinstance(node, _ast64.Attribute):
+            return node.attr
+        return ""
+
+    for _root_l64 in (MACAST, os.path.join(REPO, "macast_renderer")):
+        for _dirpath_l64, _dirnames_l64, _filenames_l64 in os.walk(_root_l64):
+            if "__pycache__" in _dirpath_l64:
+                continue
+            for _fname_l64 in sorted(_filenames_l64):
+                if not _fname_l64.endswith(".py"):
+                    continue
+                _full_l64 = os.path.join(_dirpath_l64, _fname_l64)
+                try:
+                    with open(_full_l64, "r", encoding="utf-8-sig") as _f_l64:
+                        _tree_l64 = _ast64.parse(_f_l64.read())
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+                _rel_l64 = os.path.relpath(_full_l64, REPO)
+                _parsed_l64.append(_rel_l64)
+                for _node_l64 in _ast64.walk(_tree_l64):
+                    if isinstance(_node_l64,
+                                  (_ast64.FunctionDef, _ast64.AsyncFunctionDef)):
+                        _defs_l64.setdefault(_node_l64.name, set()).add(_rel_l64)
+                    elif isinstance(_node_l64, _ast64.Call):
+                        _callee_l64 = _get_name_l64(_node_l64.func)
+                        _arg_l64 = _node_l64.args[0] if _node_l64.args else None
+                        if isinstance(_arg_l64, _ast64.Constant) \
+                                and isinstance(_arg_l64.value, str):
+                            _strargs_l64.setdefault(_callee_l64, set()).add(
+                                _arg_l64.value)
+    check("L: the scan really walked the package",
+          len(_parsed_l64) > 20,
+          "%d files parsed" % len(_parsed_l64))
+    check("L: the liveliness seam is defined in exactly the two places that own it",
+          _defs_l64.get("note_media_live") == {"macast/renderer.py",
+                                               "macast_renderer/mpv.py"},
+          "found in %r" % (sorted(_defs_l64.get("note_media_live", set())),))
+    check("L: and no setter-shaped twin of it exists anywhere",
+          "set_media_live" not in _defs_l64,
+          "defined in %r" % (sorted(_defs_l64.get("set_media_live", set())),))
+    check("L: nothing subscribes or publishes it as a bus channel either",
+          not any("set_media_live" in _names_l64 for _names_l64 in _strargs_l64.values()),
+          "call sites: %r" % ({k: v for k, v in _strargs_l64.items()
+                               if any("live" in n for n in v)},))
+    _base_rend_l64 = _renderer_mod64.Renderer.__new__(_renderer_mod64.Renderer)
+    _bus_names_l64 = _base_rend_l64.methods()
+    check("L: the enumeration itself does not see the seam",
+          "note_media_live" not in _bus_names_l64
+          and "set_media_url" in _bus_names_l64
+          and "set_media_stop" in _bus_names_l64,
+          "methods=%r" % (_bus_names_l64,))
+
+    class _BusL64(object):
+        """A stand-in for the CherryPy bus that only records channel names."""
+
+        def __init__(self):
+            self.subscribed = []
+            self.unsubscribed = []
+
+        def subscribe(self, channel, callback):
+            self.subscribed.append(channel)
+
+        def unsubscribe(self, channel, callback=None):
+            self.unsubscribed.append("uns:" + str(channel))
+
+    class _LoudL64(_renderer_mod64.Renderer):
+        """A renderer that answers the seam and the ordinary setters."""
+
+        def __init__(self):
+            self.title = ""
+            self.notes = []
+            self.urls = []
+
+        def note_media_live(self, live):
+            self.notes.append(live)
+
+        def set_media_url(self, url, start="0"):
+            self.urls.append((url, start))
+
+    _plug_l64 = _plugin_mod64.RendererPlugin.__new__(_plugin_mod64.RendererPlugin)
+    _bus_l64 = _BusL64()
+    _loud_l64 = _LoudL64()
+    _plug_l64.bus = _bus_l64
+    _plug_l64.renderer = _loud_l64
+    _plug_l64.start()
+    check("L: installing a plugin onto the bus subscribes the setter family",
+          {"set_media_url", "set_media_stop", "set_media_volume"}
+          <= set(_bus_l64.subscribed),
+          "subscribed=%r" % (_bus_l64.subscribed,))
+    check("L: and the seam never becomes a message somebody could send",
+          not any("live" in _ch_l64 for _ch_l64 in _bus_l64.subscribed),
+          "subscribed=%r" % (_bus_l64.subscribed,))
+    check("L: the plugin still hands out its renderer",
+          _plug_l64.get_renderer() is _loud_l64, repr(_plug_l64.get_renderer()))
+except Exception as _e64:
+    check("Part 64 runs", False, "{}: {}".format(type(_e64).__name__, _e64))
+finally:
+    protocol.PlaybackGuard.owner = _saved_owner64
+    _cp64.engine.publish = _saved_publish64
+    if _saved_ipchanged64 is None:
+        try:
+            del utils.Setting.is_ip_changed
+        except AttributeError:
+            pass
+    else:
+        utils.Setting.is_ip_changed = _saved_ipchanged64
+    _done_ch64 = set()
+    for _ch64, _was64 in _lifecycle64:
+        if _ch64 in _done_ch64:
+            continue
+        _done_ch64.add(_ch64)
+        _now64 = _cp64.engine.listeners.setdefault(_ch64, set())
+        for _cb64 in list(_now64 - _was64):
+            _cp64.engine.unsubscribe(_ch64, _cb64)
+        _now64.clear()
+        # ``subscribe`` and not a set update: taking a channel's real listeners out
+        # (which ``_channel_only64`` does through ``unsubscribe``, so that the bus
+        # keeps its own ``_priorities`` bookkeeping consistent) deletes *their*
+        # priority entries too. Re-adding them to the set by hand would leave a
+        # listener that ``publish`` cannot price -- the next subscriber to that
+        # channel, in someone else's Part, would raise ``KeyError`` inside cherrypy.
+        # Faithful because no subscription in this repo passes an explicit priority:
+        # ``subscribe`` re-derives it from ``getattr(callback, 'priority', 50)``.
+        for _cb64 in _was64:
+            _cp64.engine.subscribe(_ch64, _cb64)
+    for _lg64, _gr64 in _grabs64:
+        _lg64.removeHandler(_gr64)
+        _lg64.setLevel(_levels64.get(_lg64.name, _logging64.NOTSET))
+    utils.Setting.setting, utils.Setting.setting_path = _saved64[0], _saved64[1]
+    utils.SETTING_DIR = _saved64[2]
+    _shutil.rmtree(_tmp64, ignore_errors=True)
+
 
 # --------------------------------------------------------------------------
 # The CI gate, applied (see `ci_gate` above for why the rule is this narrow).

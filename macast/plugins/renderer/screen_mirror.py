@@ -5,7 +5,7 @@
 # <macast.title>Screen Mirror</macast.title>
 # <macast.renderer>ScreenMirrorRenderer</macast.renderer>
 # <macast.platform>darwin,win32,linux</macast.platform>
-# <macast.version>0.29</macast.version>
+# <macast.version>0.30</macast.version>
 # <macast.host_version>0.7</macast.host_version>
 # <macast.author>pingod</macast.author>
 # <macast.role>addon</macast.role>
@@ -150,7 +150,7 @@ DEVICE_AUTH_CHALLENGE = b"\x0a\x00"
 #: The version this file announces. One place, because the header the settings
 #: page shows and the `<macast.version>` manifest have to agree -- a regression
 #: test compares both against this constant.
-PLUGIN_VERSION = '0.29'
+PLUGIN_VERSION = '0.30'
 #: The receiver app that speaks Cast Streaming. Not the Default Media
 #: Receiver: mirroring lives on its own app id, its own namespace, and it never
 #: accepts a LOAD -- the media plane leaves TLS for UDP entirely.
@@ -7348,8 +7348,13 @@ class _CastSender(object):
             if data is None:
                 break
             if data.get("type") == "LAUNCH_ERROR":
-                raise RuntimeError('这台设备不接受镜像接收器（LAUNCH_ERROR: {}）'.format(
-                    data.get("reason") or "未提供原因"))
+                # `message` first, then `reason`: a real device ships only the
+                # enum name, while a Macast receiver on the other end of this
+                # socket says which app it will not run and which setting to
+                # change. This string is what lands on the mirroring page as
+                # 「回落原因」, so the sentence with a next step wins.
+                raise RuntimeError('这台设备不接受镜像接收器（{}）'.format(
+                    data.get("message") or data.get("reason") or "未提供原因"))
             for app in (data.get("status") or {}).get("applications") or []:
                 if app.get("appId") == app_id and app.get("transportId"):
                     self.transport_id = app["transportId"]

@@ -54,6 +54,59 @@ DEFAULT_MEDIA_APP_ID = "CC1AD845"  # Google's default media receiver
 DEFAULT_MEDIA_APP_NAME = "Default Media Receiver"
 APP_BACKDROP_ID = "E8C28D3C"       # backdrop / ambient screen
 
+#: The receiver apps this build will actually run. Both halves are load-bearing
+#: for different reasons, and a sender can tell us about either one:
+#:
+#: * ``CC1AD845`` is where a media LOAD lands.
+#: * ``E8C28D3C`` is the idle app that **pychromecast's ``quit_app()`` launches**
+#:   (``IDLE_APP_ID``, pychromecast/__init__.py:39). Refusing it would make
+#:   "close the cast" fail on every sender built on that library.
+#:
+#: The mirroring app (``0F5096E8``, Cast Streaming) is deliberately **not** in
+#: this list. It needs the device's own streaming receiver plus a UDP transport
+#: we never offer, so launching it is a promise we cannot keep -- and until this
+#: table existed, ``_on_receiver`` accepted *any* appId and answered with a
+#: ``RECEIVER_STATUS`` naming someone else's app with no matching transportId.
+#: Our own sender reads LAUNCH_ERROR as its capability probe
+#: (``screen_mirror.launch_mirroring``), so that non-answer cost it a full
+#: 10-second handshake timeout before it fell back to the LOAD channel -- on
+#: 2026-10-05 that was measured as a large part of what 「投屏延迟大」 read as.
+SERVED_APP_IDS = (DEFAULT_MEDIA_APP_ID, APP_BACKDROP_ID)
+
+
+def launch_refusal(app_id, request_id=None):
+    """The LAUNCH_ERROR for an app we do not serve, or ``None`` if we do.
+
+    Two fields, two readers, and the split is the whole design:
+
+    ``reason`` is the protocol-visible half. ``cast_channel.proto`` declares
+    ``LaunchError.Reason`` as an enum whose *names* are what senders put on the
+    wire and what pychromecast reads back (``ERROR_REASON = "reason"``);
+    ``ERROR`` is what a real device answers for an unknown app, and the other
+    values all describe a receiver-side story we cannot honestly tell.
+
+    ``message`` is the human half, and it is the one our own sender puts on the
+    mirroring page -- ``launch_mirroring`` reads ``message`` before ``reason``,
+    because 「LAUNCH_ERROR: ERROR」 tells the user nothing while this names the
+    app and the setting to change instead (§4.8: every refusal gives a next
+    step).
+
+    A missing, empty, or non-string appId means the default media receiver:
+    senders routinely LAUNCH it with no field at all, and refusing those would
+    break casting.
+    """
+    asked = app_id if isinstance(app_id, str) and app_id else DEFAULT_MEDIA_APP_ID
+    if asked in SERVED_APP_IDS:
+        return None
+    return {
+        "type": "LAUNCH_ERROR",
+        "requestId": request_id,
+        "appId": asked,
+        "reason": "ERROR",
+        "message": "这个接收端不运行应用 {app}（本机只接受默认媒体接收器与待机画面）。"
+                   "屏幕镜像请把「投屏方式」改成不带「低延迟」的那一档。".format(app=asked),
+    }
+
 # Cast v2 namespaces (see thibauts/node-castv2 protocol reference).
 NS_CONNECTION = "urn:x-cast:com.google.cast.tp.connection"
 NS_HEARTBEAT = "urn:x-cast:com.google.cast.tp.heartbeat"
@@ -97,6 +150,34 @@ def sender_media_title(media, url=''):
         if isinstance(raw, str) and raw.strip():
             return raw.strip()[:media_resolve.TITLE_MAX_CHARS]
     return media_resolve.title_for_uri(url)
+
+
+def live_from_stream_type(media):
+    """What the sender's own ``streamType`` says about this media object.
+
+    ``True`` live · ``False`` a file-shaped thing with an end · ``None`` the
+    descriptor has no opinion. Cast v2 puts the declaration in the media object
+    of the LOAD message: ``"LIVE"`` is an unbounded stream the receiver must not
+    seek in or buffer ahead of, while ``"buffered"`` / ``"streamed"`` promise
+    something with a length. This is the same contract ``DLNAProtocol`` reads from
+    ``DLNA.ORG_OP`` (see ``protocol.live_from_protocol_info``), in this protocol's
+    own dialect.
+
+    Only an explicit ``"LIVE"`` earns the player's low-latency shape. A guessed
+    one would strip read-ahead from an ordinary video, which is a worse
+    regression than the lag we are trying to remove — hence ``None``, and hence
+    the strict type checks: this dict comes off the network, and a sender that
+    writes ``streamType: 1`` is saying nothing we can act on.
+
+    Judgment lives here, not inside ``ChromecastProtocol.media_is_live``, so a
+    test can ask the reading of a descriptor it never had to hand to a player.
+    """
+    if not isinstance(media, dict):
+        return None
+    stream_type = media.get("streamType")
+    if not isinstance(stream_type, str):
+        return None
+    return stream_type.strip().upper() == "LIVE"
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +372,12 @@ class ChromecastProtocol(Protocol):
         self._senders = {}          # source_id -> socket (for broadcasts)
         self._session_id = None
         self._media = None          # current Cast media descriptor
+        # The liveliness the sender declared *for the media we handed the player*,
+        # read out of LOAD by ``live_from_stream_type``. Kept separate from
+        # ``_media`` on purpose: ``_media`` also feeds MEDIA_STATUS replies and
+        # survives a second sender taking the player over, and a stale "this is
+        # live" must not be what the next ordinary video plays as.
+        self._media_live = None
         self._media_session_id = 1
         self._position = 0.0
         # Receiver-level volume, as reported back in RECEIVER_STATUS and
@@ -344,6 +431,7 @@ class ChromecastProtocol(Protocol):
         with self._lock:
             self._session_id = None
             self._media = None
+            self._media_live = None
             self._watch_generation += 1
         if self._listen_socket is not None:
             # Closing the plain listener reliably wakes the blocked accept();
@@ -573,6 +661,18 @@ class ChromecastProtocol(Protocol):
         if msg_type in ("GET_STATUS", "PING"):
             self._send_receiver_status(sock, src, data.get("requestId"))
         elif msg_type == "LAUNCH":
+            refusal = launch_refusal(data.get("appId"), data.get("requestId"))
+            if refusal is not None:
+                # Refuse on this socket, with the requestId the sender is
+                # waiting on, in the same round trip that a real receiver uses.
+                # Silence here would be worse than the wrong answer we used to
+                # give: the sender's own timeout decides when the user learns
+                # that this channel is not available.
+                logger.info("Cast LAUNCH refused: appId=%s from %s",
+                            refusal["appId"], src)
+                self._send(sock, "receiver-0", src, NS_RECEIVER,
+                           json.dumps(refusal))
+                return
             with self._lock:
                 self._session_id = _random_session()
             self._send_receiver_status(sock, src, data.get("requestId"))
@@ -585,17 +685,23 @@ class ChromecastProtocol(Protocol):
             with self._lock:
                 self._session_id = None
                 self._media = None
+                self._media_live = None
                 self._observed_transport = None
                 self._idle_reason = None
                 self._watch_generation += 1
             self.renderer.set_media_stop()
             self._send_receiver_status(sock, src, data.get("requestId"))
         elif msg_type == "GET_APP_AVAILABILITY":
-            # Report the apps we can serve: the default media receiver only.
+            # Report the apps we can serve -- derived from the same table that
+            # decides LAUNCH, because a receiver that answers "available" for an
+            # app and then refuses to launch it is worse than one that never
+            # heard of it: the sender retries a handshake instead of falling
+            # back.
             self._send(sock, "receiver-0", src, NS_RECEIVER, json.dumps({
                 "type": "GET_APP_AVAILABILITY",
                 "requestId": data.get("requestId"),
-                "availability": {DEFAULT_MEDIA_APP_ID: "APP_AVAILABLE"},
+                "availability": {app_id: "APP_AVAILABLE"
+                                 for app_id in SERVED_APP_IDS},
             }))
         elif msg_type == "SET_VOLUME":
             self._apply_volume(data.get("volume") or {})
@@ -802,6 +908,7 @@ class ChromecastProtocol(Protocol):
                 return False
             self._session_id = None
             self._media = None
+            self._media_live = None
             self._observed_transport = None
             self._idle_reason = None
             # Stop a playback watcher from reporting on the session we just
@@ -815,6 +922,38 @@ class ChromecastProtocol(Protocol):
             except Exception as e:
                 logger.debug("Cast status broadcast failed for %s: %s", src, e)
         return True
+
+    def media_is_live(self):
+        """The ``streamType`` the sender declared for the media we handed the player.
+
+        Cast v2 puts the sender's declaration in the media object of the LOAD
+        message: ``"LIVE"`` means an unbounded stream the receiver must not try
+        to seek in or buffer ahead of, anything else (``"buffered"`` /
+        ``"streamed"``) is a file-shaped thing with an end. This is the same
+        contract ``DLNAProtocol.media_is_live`` answers from ``DLNA.ORG_OP``,
+        in this protocol's own dialect.
+
+        The reading lives in ``live_from_stream_type`` and the value is stored at
+        LOAD, not re-derived here. That distinction is the whole point: ``_media``
+        also feeds ``MEDIA_STATUS`` replies and deliberately survives a second
+        sender taking the player over, so a live re-read of it would keep this
+        protocol answering "live" for a stream that stopped playing minutes ago
+        — and ``ProtocolGroup`` would hand that stale opinion to the player for
+        the *next* cast, stripping read-ahead from an ordinary video.
+        """
+        return self._media_live
+
+    def release_playback(self):
+        """Another protocol took the player; drop our liveliness opinion.
+
+        ``_media`` stays (the sender may still be watching its own status), but
+        the opinion must not: from here on this protocol did not give the player
+        anything, so it has nothing to say about what the player is playing.
+        ``PlaybackGuard`` calls this on the *displaced* child before it asks the
+        new owner, which is what makes ``ProtocolGroup``'s "first protocol with an
+        opinion" search safe.
+        """
+        self._media_live = None
 
     def _on_media(self, sock, src, data, msg_type):
         """Media playback control (media namespace)."""
@@ -847,6 +986,7 @@ class ChromecastProtocol(Protocol):
             with self._lock:
                 self._session_id = _random_session()
                 self._media = media
+                self._media_live = live_from_stream_type(media)
                 self._position = float(data.get("currentTime", 0) or 0)
                 # A new LOAD starts a new observation window: whatever the
                 # previous media ended with must not leak into this one.

@@ -60,6 +60,11 @@ def _is_meaningful(value):
     return value is not None and value != ""
 
 
+#: The one protocol question whose answer is a three-valued flag rather than a
+#: piece of playback state. See ``ProtocolGroup._delegate_liveness``.
+_LIVENESS_GETTER = "media_is_live"
+
+
 class ProtocolGroup(Protocol):
     """A composite Protocol that runs several protocols concurrently.
 
@@ -111,8 +116,14 @@ class ProtocolGroup(Protocol):
         read. Leaving them to the inherited base-class no-ops made
         ``/api?query=status`` report an empty track, no volume and 0:00:00
         forever.
+
+        ``media_is_live`` belongs to this family for the same reason and needs
+        its *own* delegator, not ``_delegate_getter`` — see that method's
+        docstring for why "first meaningful answer" is the wrong rule here.
         """
-        for name in [n for n in self.__dict__ if n.startswith(("set_state", "get_state"))]:
+        stale = [n for n in self.__dict__
+                 if n.startswith(("set_state", "get_state")) or n == _LIVENESS_GETTER]
+        for name in stale:
             del self.__dict__[name]
         # `methods()` only enumerates `set_state_<something>`; the generic
         # `set_state(name, value)` write is a base-class no-op of the same
@@ -122,6 +133,7 @@ class ProtocolGroup(Protocol):
             setattr(self, name, self._fanout(name))
         for name in _STATE_GETTERS:
             setattr(self, name, self._delegate_getter(name))
+        setattr(self, _LIVENESS_GETTER, self._delegate_liveness())
 
     def get(self, title):
         for existing, protocol in self._children:
@@ -283,6 +295,58 @@ class ProtocolGroup(Protocol):
                 if _is_meaningful(value):
                     return value
             return ''
+
+        return call
+
+    def _delegate_liveness(self):
+        """Ask the children whether the current media is a live stream.
+
+        This is ``_delegate_getter``'s family with the *opposite* fall-through
+        rule, which is why it is a separate method instead of another name in
+        ``_STATE_GETTERS``:
+
+        * A state getter wants the first **meaningful** string. An empty answer
+          there means "nobody spoke", and the caller is a settings page that
+          renders ``—``.
+        * This one returns a three-valued flag: ``True`` live · ``False``
+          seekable · ``None`` "I have no declaration". ``False`` is a real
+          answer and must win — if the protocol that received the cast says
+          "this is a file", the player keeps its read-ahead. And there is no
+          sensible fallback at the end: answering ``''`` would be a truthy junk
+          value to the guard, so the no-opinion answer has to stay ``None``.
+
+        So: first child that has **an opinion** wins, ``None`` alone falls
+        through, and "nobody has one" is ``None`` rather than a guess. Guessing
+        here is what would strip read-ahead from an ordinary video.
+
+        ``primary`` is still asked first for consistency with the getters, but
+        the order is not what makes this correct — the staleness clears are.
+        When a second sender takes over playback, ``PlaybackGuard`` calls
+        ``release_playback()`` on the *displaced child*, and each child drops
+        its own liveliness there, so the only child left with an opinion is the
+        one that actually handed the media to the player.
+        """
+
+        def call():
+            ordered = [self.primary] + [p for _, p in self._children
+                                        if p is not self.primary]
+            for protocol in ordered:
+                if protocol is None:
+                    continue
+                method = getattr(protocol, _LIVENESS_GETTER, None)
+                # Installed on this group's instance, so a child that is itself
+                # a group would call back into this exact closure.
+                if not callable(method) or method is getattr(self, _LIVENESS_GETTER, None):
+                    continue
+                try:
+                    value = method()
+                except Exception as e:
+                    logger.error("Protocol %s raised in %s: %s",
+                                 type(protocol).__name__, _LIVENESS_GETTER, e)
+                    continue
+                if value is not None:
+                    return value
+            return None
 
         return call
 
