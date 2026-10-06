@@ -23,6 +23,7 @@
 [workspace]
 members = [
     "macast-core",
+    "macast-mpv",
     "src-tauri",
 ]
 resolver = "2"
@@ -35,7 +36,11 @@ repository = "https://github.com/pingod/Macast"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` is not a nicety: `LIVE_LOAD_OPTIONS` is a Python dict, so its
+# insertion order *is* the order those keys reach mpv in, and the log lines that
+# quote a decoded reply (`logger.info(res)`) print dict keys in the order the
+# server sent them. A BTreeMap-backed Map silently re-sorts both.
+serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 getrandom = "0.2"
 quick-xml = "0.36"

@@ -1,0 +1,15 @@
+[package]
+name = "macast-mpv"
+description = "mpv command line, JSON IPC protocol, and the renderer that drives them for the Rust Macast receiver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+macast-core = { workspace = true }
+serde_json = { workspace = true }
+getrandom = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

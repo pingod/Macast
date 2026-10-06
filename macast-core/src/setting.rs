@@ -60,6 +60,16 @@ pub enum Key {
     ApiToken,
     GithubCnMirror,
     ResolveCookieBrowser,
+    // The five keys `macast_renderer/mpv.py` owns. They are here rather than in
+    // that crate because this file is one table with one writer: a player key
+    // declared on the far side of the crate boundary would be a second source
+    // for its own JSON spelling, and the whole point of `name()` is that the
+    // spelling is not up for redecision.
+    PlayerHw,
+    PlayerSize,
+    PlayerPosition,
+    PlayerOntop,
+    PlayerDefaultVolume,
 }
 
 impl Key {
@@ -87,6 +97,11 @@ impl Key {
             Key::ApiToken => "Api_Token",
             Key::GithubCnMirror => "Github_CN_Mirror",
             Key::ResolveCookieBrowser => "Resolve_Cookie_Browser",
+            Key::PlayerHw => "PlayerHW",
+            Key::PlayerSize => "PlayerSize",
+            Key::PlayerPosition => "PlayerPosition",
+            Key::PlayerOntop => "PlayerOntop",
+            Key::PlayerDefaultVolume => "PlayerDefaultVolume",
         }
     }
 
@@ -96,7 +111,7 @@ impl Key {
     }
 
     /// Every key, in declaration order.
-    pub fn all() -> [Key; 21] {
+    pub fn all() -> [Key; 26] {
         [
             Key::Usn,
             Key::CheckUpdate,
@@ -119,6 +134,11 @@ impl Key {
             Key::ApiToken,
             Key::GithubCnMirror,
             Key::ResolveCookieBrowser,
+            Key::PlayerHw,
+            Key::PlayerSize,
+            Key::PlayerPosition,
+            Key::PlayerOntop,
+            Key::PlayerDefaultVolume,
         ]
     }
 }
@@ -615,11 +635,46 @@ mod tests {
                 "Api_Token",
                 "Github_CN_Mirror",
                 "Resolve_Cookie_Browser",
+                "PlayerHW",
+                "PlayerSize",
+                "PlayerPosition",
+                "PlayerOntop",
+                "PlayerDefaultVolume",
             ]
         );
         for name in names {
             assert!(Key::from_name(name).is_some(), "{name} has no member");
         }
+    }
+
+    #[test]
+    fn every_member_round_trips_through_its_json_name() {
+        // The hand-written list above can only prove the names it knows about.
+        // This one walks the enum itself, so it catches the two failures a
+        // copy-of-a-list cannot: a member whose `name()` is spelled twice (the
+        // reader would then resolve one JSON key to the wrong member), and a
+        // member added to `all()` without its mapping being thought about.
+        for key in Key::all() {
+            assert_eq!(Key::from_name(key.name()), Some(key), "{}", key.name());
+        }
+        // The player table is the five keys mpv.py writes, no more: a sixth
+        // here would be a name nothing persists, and one fewer would be a user
+        // setting the Rust build reads as absent (so it re-stores the default).
+        let player: Vec<&str> = Key::all()
+            .iter()
+            .map(|k| k.name())
+            .filter(|n| n.starts_with("Player"))
+            .collect();
+        assert_eq!(
+            player,
+            vec![
+                "PlayerHW",
+                "PlayerSize",
+                "PlayerPosition",
+                "PlayerOntop",
+                "PlayerDefaultVolume",
+            ]
+        );
     }
 
     #[test]
