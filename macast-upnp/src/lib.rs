@@ -29,6 +29,12 @@
 //! * [`device`] — the six USNs, the `LOCATION` that still contains a `{}` for
 //!   the sender to fill in, and the restart-under-a-lock that an IP change
 //!   needs.
+//! * [`scpd`] — the service descriptors: the flat state table and the action
+//!   lists that `macast/xml/*.xml` declare, read with lxml's navigation rules
+//!   because a control point's `GetStateVariables` answer is those rules.
+//! * [`description`] — the one document that is *filled in* rather than built:
+//!   `macast/xml/Description.xml` with eleven names substituted, byte for byte
+//!   the same file the shipped receiver serves.
 //!
 //! ## The one thing to know before editing
 //!
@@ -40,7 +46,9 @@
 //! in [`ssdp`] is therefore an ordered `Vec`, not a `HashMap`, and a "tidier"
 //! map would shuffle headers in a way no test on this machine can see.
 
+pub mod description;
 pub mod device;
+pub mod scpd;
 pub mod sock;
 pub mod ssdp;
 pub mod store;

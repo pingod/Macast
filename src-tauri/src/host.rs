@@ -70,13 +70,22 @@ const NOT_IMPLEMENTED: [&str; 5] = [
 
 /// Every `stateVariable` name declared by the three SCPDs, with the datatype the
 /// XML gives it. Read off `macast/xml/AVTransport.xml` (32),
-/// `ConnectionManager.xml` (10) and `RenderingControl.xml` (8) — 50 declarations,
+/// `RenderingControl.xml` (8) and `ConnectionManager.xml` (10) — 50 declarations,
 /// **48 unique names**: `LastChange` and `A_ARG_TYPE_InstanceID` are each declared
 /// twice, and because `DLNAProtocol.__init__` keeps one merged
 /// `self.state_list = {}` (`protocol.py:589`, written at `:708`) the second
 /// declaration simply overwrites the first. Both duplicates agree on value and
 /// type, so the collapse is harmless here; it is recorded because a Rust map that
 /// *refused* a duplicate would be a divergence from the reference, not a fix.
+///
+/// The **row order is `Description.xml`'s own `<serviceList>` order** — AVTransport,
+/// then RenderingControl, then ConnectionManager — because that is the order the
+/// reference loader walks (`init_services` iterates the description, not the
+/// filenames) and therefore the order the state page shows. `macast-upnp`'s
+/// `scpd.rs` compares this table against the table it builds **as an ordered
+/// list**, so grouping these rows by anything other than the description's order
+/// — alphabetically, or by the order someone opened the files in — is a real drift
+/// and turns that test red.
 ///
 /// `s` is the datatype's first letter: `string` boots to `''`, everything else
 /// (`boolean` / `i2` / `ui2` / `i4` / `ui4`) boots to the number `0`
@@ -114,6 +123,12 @@ const DECLARED: [(&str, char); 48] = [
     ("PossibleRecordStorageMedia", 's'),
     ("TransportStatus", 's'),
     ("TransportPlaySpeed", 's'),
+    ("A_ARG_TYPE_Channel", 's'),
+    ("Volume", 'u'),
+    ("Mute", 'b'),
+    ("PresetNameList", 's'),
+    ("A_ARG_TYPE_PresetName", 's'),
+    ("VolumeDB", 'i'),
     ("A_ARG_TYPE_ProtocolInfo", 's'),
     ("A_ARG_TYPE_ConnectionStatus", 's'),
     ("A_ARG_TYPE_AVTransportID", 'i'),
@@ -124,12 +139,6 @@ const DECLARED: [(&str, char); 48] = [
     ("SinkProtocolInfo", 's'),
     ("A_ARG_TYPE_Direction", 's'),
     ("CurrentConnectionIDs", 's'),
-    ("A_ARG_TYPE_Channel", 's'),
-    ("Volume", 'u'),
-    ("Mute", 'b'),
-    ("PresetNameList", 's'),
-    ("A_ARG_TYPE_PresetName", 's'),
-    ("VolumeDB", 'i'),
 ];
 
 /// The state table one DLNA receiver owns — `DLNAProtocol.state_list`, minus the

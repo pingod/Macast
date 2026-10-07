@@ -6,7 +6,8 @@
 //! seam that `PlaybackGuard` (`macast/protocol.py:164-260`) stands on.
 //!
 //! Why traits and not concrete types: the DLNA face must not own the playback
-//! state. In this workspace [`crate::Service`] is driven by `src-tauri`, whose
+//! state. In this workspace [`crate::scpd::Service`] is only the schema — the
+//! values a control point reads back are driven from `src-tauri`, whose
 //! `StateTable` is the single source for what the phone reads back, and whose
 //! `Player` is the only thing that talks to mpv. If the crate kept its own copy
 //! of either, the settings page and the GENA events would answer from different

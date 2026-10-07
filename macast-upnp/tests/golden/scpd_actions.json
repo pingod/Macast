@@ -1,0 +1,505 @@
+{
+ "AVTransport": {
+  "namespace": "urn:schemas-upnp-org:service:AVTransport:1",
+  "order": [
+   "GetCurrentTransportActions",
+   "GetDeviceCapabilities",
+   "GetMediaInfo",
+   "GetPositionInfo",
+   "GetTransportInfo",
+   "GetTransportSettings",
+   "Next",
+   "Pause",
+   "Play",
+   "Previous",
+   "Seek",
+   "SetAVTransportURI",
+   "SetPlayMode",
+   "Stop"
+  ],
+  "args": {
+   "GetCurrentTransportActions": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "Actions",
+      "CurrentTransportActions"
+     ]
+    ]
+   },
+   "GetDeviceCapabilities": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "PlayMedia",
+      "PossiblePlaybackStorageMedia"
+     ],
+     [
+      "RecMedia",
+      "PossibleRecordStorageMedia"
+     ],
+     [
+      "RecQualityModes",
+      "PossibleRecordQualityModes"
+     ]
+    ]
+   },
+   "GetMediaInfo": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "NrTracks",
+      "NumberOfTracks"
+     ],
+     [
+      "MediaDuration",
+      "CurrentMediaDuration"
+     ],
+     [
+      "CurrentURI",
+      "AVTransportURI"
+     ],
+     [
+      "CurrentURIMetaData",
+      "AVTransportURIMetaData"
+     ],
+     [
+      "NextURI",
+      "NextAVTransportURI"
+     ],
+     [
+      "NextURIMetaData",
+      "NextAVTransportURIMetaData"
+     ],
+     [
+      "PlayMedium",
+      "PlaybackStorageMedium"
+     ],
+     [
+      "RecordMedium",
+      "RecordStorageMedium"
+     ],
+     [
+      "WriteStatus",
+      "RecordMediumWriteStatus"
+     ]
+    ]
+   },
+   "GetPositionInfo": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "Track",
+      "CurrentTrack"
+     ],
+     [
+      "TrackDuration",
+      "CurrentTrackDuration"
+     ],
+     [
+      "TrackMetaData",
+      "CurrentTrackMetaData"
+     ],
+     [
+      "TrackURI",
+      "CurrentTrackURI"
+     ],
+     [
+      "RelTime",
+      "RelativeTimePosition"
+     ],
+     [
+      "AbsTime",
+      "AbsoluteTimePosition"
+     ],
+     [
+      "RelCount",
+      "RelativeCounterPosition"
+     ],
+     [
+      "AbsCount",
+      "AbsoluteCounterPosition"
+     ]
+    ]
+   },
+   "GetTransportInfo": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "CurrentTransportState",
+      "TransportState"
+     ],
+     [
+      "CurrentTransportStatus",
+      "TransportStatus"
+     ],
+     [
+      "CurrentSpeed",
+      "TransportPlaySpeed"
+     ]
+    ]
+   },
+   "GetTransportSettings": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "PlayMode",
+      "CurrentPlayMode"
+     ],
+     [
+      "RecQualityMode",
+      "CurrentRecordQualityMode"
+     ]
+    ]
+   },
+   "Next": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": []
+   },
+   "Pause": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": []
+   },
+   "Play": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Speed",
+      "TransportPlaySpeed"
+     ]
+    ],
+    "out": []
+   },
+   "Previous": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": []
+   },
+   "Seek": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Unit",
+      "A_ARG_TYPE_SeekMode"
+     ],
+     [
+      "Target",
+      "A_ARG_TYPE_SeekTarget"
+     ]
+    ],
+    "out": []
+   },
+   "SetAVTransportURI": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "CurrentURI",
+      "AVTransportURI"
+     ],
+     [
+      "CurrentURIMetaData",
+      "AVTransportURIMetaData"
+     ]
+    ],
+    "out": []
+   },
+   "SetPlayMode": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "NewPlayMode",
+      "CurrentPlayMode"
+     ]
+    ],
+    "out": []
+   },
+   "Stop": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": []
+   }
+  }
+ },
+ "RenderingControl": {
+  "namespace": "urn:schemas-upnp-org:service:RenderingControl:1",
+  "order": [
+   "GetMute",
+   "GetVolume",
+   "GetVolumeDB",
+   "GetVolumeDBRange",
+   "ListPresets",
+   "SelectPreset",
+   "SetMute",
+   "SetVolume"
+  ],
+  "args": {
+   "GetMute": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ]
+    ],
+    "out": [
+     [
+      "CurrentMute",
+      "Mute"
+     ]
+    ]
+   },
+   "GetVolume": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ]
+    ],
+    "out": [
+     [
+      "CurrentVolume",
+      "Volume"
+     ]
+    ]
+   },
+   "GetVolumeDB": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ]
+    ],
+    "out": [
+     [
+      "CurrentVolume",
+      "VolumeDB"
+     ]
+    ]
+   },
+   "GetVolumeDBRange": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ]
+    ],
+    "out": [
+     [
+      "MinValue",
+      "VolumeDB"
+     ],
+     [
+      "MaxValue",
+      "VolumeDB"
+     ]
+    ]
+   },
+   "ListPresets": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ]
+    ],
+    "out": [
+     [
+      "CurrentPresetNameList",
+      "PresetNameList"
+     ]
+    ]
+   },
+   "SelectPreset": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "PresetName",
+      "A_ARG_TYPE_PresetName"
+     ]
+    ],
+    "out": []
+   },
+   "SetMute": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ],
+     [
+      "DesiredMute",
+      "Mute"
+     ]
+    ],
+    "out": []
+   },
+   "SetVolume": {
+    "in": [
+     [
+      "InstanceID",
+      "A_ARG_TYPE_InstanceID"
+     ],
+     [
+      "Channel",
+      "A_ARG_TYPE_Channel"
+     ],
+     [
+      "DesiredVolume",
+      "Volume"
+     ]
+    ],
+    "out": []
+   }
+  }
+ },
+ "ConnectionManager": {
+  "namespace": "urn:schemas-upnp-org:service:ConnectionManager:1",
+  "order": [
+   "GetCurrentConnectionInfo",
+   "GetProtocolInfo",
+   "GetCurrentConnectionIDs"
+  ],
+  "args": {
+   "GetCurrentConnectionInfo": {
+    "in": [
+     [
+      "ConnectionID",
+      "A_ARG_TYPE_ConnectionID"
+     ]
+    ],
+    "out": [
+     [
+      "RcsID",
+      "A_ARG_TYPE_RcsID"
+     ],
+     [
+      "AVTransportID",
+      "A_ARG_TYPE_AVTransportID"
+     ],
+     [
+      "ProtocolInfo",
+      "A_ARG_TYPE_ProtocolInfo"
+     ],
+     [
+      "PeerConnectionManager",
+      "A_ARG_TYPE_ConnectionManager"
+     ],
+     [
+      "PeerConnectionID",
+      "A_ARG_TYPE_ConnectionID"
+     ],
+     [
+      "Direction",
+      "A_ARG_TYPE_Direction"
+     ],
+     [
+      "Status",
+      "A_ARG_TYPE_ConnectionStatus"
+     ]
+    ]
+   },
+   "GetProtocolInfo": {
+    "in": [],
+    "out": [
+     [
+      "Source",
+      "SourceProtocolInfo"
+     ],
+     [
+      "Sink",
+      "SinkProtocolInfo"
+     ]
+    ]
+   },
+   "GetCurrentConnectionIDs": {
+    "in": [],
+    "out": [
+     [
+      "ConnectionIDs",
+      "CurrentConnectionIDs"
+     ]
+    ]
+   }
+  }
+ }
+}

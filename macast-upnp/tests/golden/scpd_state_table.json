@@ -1,0 +1,592 @@
+[
+ {
+  "name": "CurrentPlayMode",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NORMAL",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NORMAL",
+   "REPEAT_ONE",
+   "REPEAT_ALL",
+   "SHUFFLE",
+   "SHUFFLE_NOREPEAT"
+  ]
+ },
+ {
+  "name": "RecordStorageMedium",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NOT_IMPLEMENTED",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NOT_IMPLEMENTED"
+  ]
+ },
+ {
+  "name": "LastChange",
+  "service": "RenderingControl",
+  "sendEvents": true,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "RelativeTimePosition",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "CurrentTrackTitle",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "DisplayCurrentSubtitle",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "boolean",
+  "value": "1",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "CurrentTrackURI",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "CurrentTrackDuration",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "CurrentRecordQualityMode",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NOT_IMPLEMENTED",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NOT_IMPLEMENTED"
+  ]
+ },
+ {
+  "name": "CurrentMediaDuration",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "AbsoluteCounterPosition",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "i4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "RelativeCounterPosition",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "i4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_InstanceID",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "ui4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "AVTransportURI",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "TransportState",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "STOPPED",
+   "PAUSED_PLAYBACK",
+   "PLAYING",
+   "TRANSITIONING",
+   "NO_MEDIA_PRESENT"
+  ]
+ },
+ {
+  "name": "CurrentTrackMetaData",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "NextAVTransportURI",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "PossibleRecordQualityModes",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NOT_IMPLEMENTED",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NOT_IMPLEMENTED"
+  ]
+ },
+ {
+  "name": "CurrentTrack",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "ui4",
+  "value": 0,
+  "value_type": "int",
+  "min": 0,
+  "max": 65535,
+  "allowed": null
+ },
+ {
+  "name": "AbsoluteTimePosition",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "NextAVTransportURIMetaData",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "PlaybackStorageMedium",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NONE",
+   "UNKNOWN",
+   "CD-DA",
+   "HDD",
+   "NETWORK"
+  ]
+ },
+ {
+  "name": "CurrentTransportActions",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "RecordMediumWriteStatus",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NOT_IMPLEMENTED",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NOT_IMPLEMENTED"
+  ]
+ },
+ {
+  "name": "PossiblePlaybackStorageMedia",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NONE",
+   "UNKNOWN",
+   "CD-DA",
+   "HDD",
+   "NETWORK"
+  ]
+ },
+ {
+  "name": "AVTransportURIMetaData",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "NumberOfTracks",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "ui4",
+  "value": 0,
+  "value_type": "int",
+  "min": 0,
+  "max": 65535,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_SeekMode",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "REL_TIME",
+   "TRACK_NR"
+  ]
+ },
+ {
+  "name": "A_ARG_TYPE_SeekTarget",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "PossibleRecordStorageMedia",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "NOT_IMPLEMENTED",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "NOT_IMPLEMENTED"
+  ]
+ },
+ {
+  "name": "TransportStatus",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "OK",
+   "ERROR_OCCURRED"
+  ]
+ },
+ {
+  "name": "TransportPlaySpeed",
+  "service": "AVTransport",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "0.5",
+   "0.75",
+   "1",
+   "1.25",
+   "1.5",
+   "2"
+  ]
+ },
+ {
+  "name": "A_ARG_TYPE_Channel",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "Master"
+  ]
+ },
+ {
+  "name": "Volume",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "ui2",
+  "value": 0,
+  "value_type": "int",
+  "min": 0,
+  "max": 100,
+  "allowed": null
+ },
+ {
+  "name": "Mute",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "boolean",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "PresetNameList",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "FactoryDefaults"
+  ]
+ },
+ {
+  "name": "A_ARG_TYPE_PresetName",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "FactoryDefaults"
+  ]
+ },
+ {
+  "name": "VolumeDB",
+  "service": "RenderingControl",
+  "sendEvents": false,
+  "datatype": "i2",
+  "value": 0,
+  "value_type": "int",
+  "min": -32767,
+  "max": 32767,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_ProtocolInfo",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_ConnectionStatus",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "OK",
+   "ContentFormatMismatch",
+   "InsufficientBandwidth",
+   "UnreliableChannel",
+   "Unknown"
+  ]
+ },
+ {
+  "name": "A_ARG_TYPE_AVTransportID",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "i4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_RcsID",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "i4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_ConnectionID",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "i4",
+  "value": 0,
+  "value_type": "int",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_ConnectionManager",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "SourceProtocolInfo",
+  "service": "ConnectionManager",
+  "sendEvents": true,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "SinkProtocolInfo",
+  "service": "ConnectionManager",
+  "sendEvents": true,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ },
+ {
+  "name": "A_ARG_TYPE_Direction",
+  "service": "ConnectionManager",
+  "sendEvents": false,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": [
+   "Input",
+   "Output"
+  ]
+ },
+ {
+  "name": "CurrentConnectionIDs",
+  "service": "ConnectionManager",
+  "sendEvents": true,
+  "datatype": "string",
+  "value": "",
+  "value_type": "str",
+  "min": null,
+  "max": null,
+  "allowed": null
+ }
+]
