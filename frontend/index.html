@@ -9,20 +9,28 @@
       body { margin: 0; background: #111827; color: #e5e7eb; }
       main { max-width: 960px; margin: 0 auto; padding: 48px 24px; }
       h1 { margin: 0 0 8px; font-size: 36px; }
+      h2 { margin: 0 0 16px; font-size: 20px; }
       .muted { color: #9ca3af; }
       .card { margin-top: 28px; padding: 24px; border: 1px solid #374151; border-radius: 14px; background: #1f2937; }
-      dl { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
+      dl { display: grid; grid-template-columns: 160px 1fr; gap: 12px; }
       dt { color: #9ca3af; }
-      dd { margin: 0; }
-      button { margin-top: 20px; padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
+      dd { margin: 0; overflow-wrap: anywhere; }
+      button { margin: 12px 8px 0 0; padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
       button:hover { background: #1d4ed8; }
+      button:disabled { background: #4b5563; cursor: default; }
+      input { padding: 9px 12px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; width: 100%; box-sizing: border-box; }
+      label { display: block; margin-top: 14px; color: #9ca3af; font-size: 13px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; }
+      .row > div { flex: 1 1 260px; }
       #error { color: #fca5a5; }
+      #events { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60px; }
     </style>
   </head>
   <body>
     <main>
       <h1>Macast</h1>
-      <p class="muted">Rust + Tauri 2 重构分支 · 并行迁移骨架</p>
+      <p class="muted">Rust + Tauri 2 重构分支 · 播放器已接入（mpv 子进程由本窗口持有）</p>
+
       <section class="card">
         <h2>运行时状态</h2>
         <dl>
@@ -34,24 +42,143 @@
         <button id="mark-ready">标记骨架已就绪</button>
         <p id="error"></p>
       </section>
+
+      <section class="card">
+        <h2>播放器</h2>
+        <dl>
+          <dt>mpv 进程</dt><dd id="running">加载中…</dd>
+          <dt>IPC</dt><dd id="ipc">—</dd>
+          <dt>pid</dt><dd id="pid">—</dd>
+          <dt>mpv 路径</dt><dd id="mpv_path">—</dd>
+          <dt>socket</dt><dd id="socket_path">—</dd>
+          <dt>窗口标题</dt><dd id="title">—</dd>
+          <dt>TransportState</dt><dd id="transport_state">—</dd>
+          <dt>当前地址</dt><dd id="current_url">—</dd>
+          <dt>位置 / 时长</dt><dd id="position">—</dd>
+          <dt>媒体形态</dt><dd id="media_live">—</dd>
+          <dt>播放列表</dt><dd id="playlist">—</dd>
+        </dl>
+
+        <div class="row">
+          <div>
+            <label for="uri">地址（URL 或本机文件路径）</label>
+            <input id="uri" placeholder="http://127.0.0.1:8010/clip.ts" />
+          </div>
+          <div>
+            <label for="title-in">标题（留空则按地址末段推断）</label>
+            <input id="title-in" placeholder="Never Gonna Give You Up" />
+          </div>
+        </div>
+        <button id="cast">投屏</button>
+        <button id="pause">暂停</button>
+        <button id="resume">继续</button>
+        <button id="stop">停止</button>
+        <button id="volume">音量 80</button>
+        <button id="snap">重新读取</button>
+
+        <label>事件（后端 publish 到页面的那几条）</label>
+        <div id="events">（还没有事件）</div>
+      </section>
     </main>
     <script>
-      const invoke = window.__TAURI__?.core?.invoke;
+      const core = window.__TAURI__?.core;
+      const invoke = core?.invoke;
+      const listen = window.__TAURI__?.event?.listen;
+      const out = (id, text) => { document.querySelector(`#${id}`).textContent = text; };
+
+      function note(text) {
+        const box = document.querySelector('#events');
+        if (box.textContent === '（还没有事件）') box.textContent = '';
+        const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+        box.textContent = `[${stamp}] ${text}\n` + box.textContent;
+        const lines = box.textContent.split('\n');
+        if (lines.length > 21) box.textContent = lines.slice(0, 21).join('\n');
+      }
+
       async function refresh() {
         if (!invoke) {
-          document.querySelector('#error').textContent = '请通过 Tauri 运行此页面。';
+          out('error', '请通过 Tauri 运行此页面。');
           return;
         }
         const data = await invoke('runtime_status');
-        for (const key of ['backend', 'version', 'migration', 'status']) {
-          document.querySelector(`#${key}`).textContent = data[key];
-        }
+        for (const key of ['backend', 'version', 'migration', 'status']) out(key, data[key]);
       }
+
+      async function snapshot() {
+        if (!invoke) return;
+        const s = await invoke('player_snapshot');
+        out('running', s.running ? '在跑' : '没起来');
+        out('ipc', `连着：${s.ipc_running} · 连过：${s.ipc_once_connected}`);
+        out('pid', s.pid === null || s.pid === undefined ? '—' : String(s.pid));
+        out('mpv_path', s.mpv_path);
+        out('socket_path', s.socket_path);
+        out('title', s.title || '（空）');
+        out('transport_state', s.transport_state || '（空）');
+        out('current_url', s.current_url || '（空）');
+        out('position', `${s.position || '—'} / ${s.duration || '—'}`);
+        out('media_live', s.media_live === null ? '未声明' : String(s.media_live));
+        out('playlist', s.playlist.length ? s.playlist.join(' · ') : '（空）');
+      }
+
       document.querySelector('#mark-ready').addEventListener('click', async () => {
         await invoke('set_status', { value: 'scaffold-ready' });
         await refresh();
       });
-      refresh().catch(error => { document.querySelector('#error').textContent = String(error); });
+      document.querySelector('#snap').addEventListener('click', snapshot);
+      document.querySelector('#cast').addEventListener('click', async () => {
+        const uri = document.querySelector('#uri').value.trim();
+        const title = document.querySelector('#title-in').value.trim();
+        if (!uri) { note('投屏：没有地址，后端不会动'); return; }
+        try {
+          const r = await invoke('cast_url', { uri, title: title || null });
+          note(`cast_url → ${JSON.stringify(r)}`);
+        } catch (e) {
+          note(`cast_url 失败：${e}`);
+        }
+        await snapshot();
+      });
+      // 后端那四个控制命令回的是「等过状态表」的答复，不是「mpv 照做了」的答复：
+      // `settled` 说的是我们有没有在 400 毫秒里读到那一句，参考实现（mpv.py:273-300）
+      // 只有在 mpv 自己上报 ObserveProperty 时才写表，播放器空闲时它根本不写，
+      // 所以 `settled:false` 是正常状态，不是故障 —— 页面必须把这一格说出口。
+      function ack(cmd, data) {
+        const text = JSON.stringify(data);
+        note(data && data.settled === false
+          ? `${cmd} → ${text}（没等到 mpv 认账；空闲播放器上参考实现也不写这一格）`
+          : `${cmd} → ${text}`);
+      }
+
+      for (const [id, cmd] of [['pause', 'pause'], ['resume', 'resume'], ['stop', 'stop_playback']]) {
+        document.querySelector(`#${id}`).addEventListener('click', async () => {
+          ack(cmd, await invoke(cmd));
+          await snapshot();
+        });
+      }
+      // 音量按钮交替发 80 / 60：一直发同一个数字时，状态表里可能早就坐着那个值，
+      // `settled:true` 就成了在替一次没有发生的变更说话。
+      let nextVolume = 80;
+      const volumeButton = document.querySelector('#volume');
+      volumeButton.addEventListener('click', async () => {
+        const value = nextVolume;
+        nextVolume = value === 80 ? 60 : 80;
+        volumeButton.textContent = `音量 ${nextVolume}`;
+        ack(`set_volume(${value})`, await invoke('set_volume', { value }));
+        await snapshot();
+      });
+
+      // payload 是 publish 的参数数组，所以读 payload[0]。
+      for (const name of ['mpv_start', 'mpvipc_start', 'renderer_start', 'app_notify',
+                          'mpv_update_duration', 'renderer_av_uri', 'renderer_av_stop']) {
+        if (listen) {
+          listen(name, ({ payload }) => note(`${name} ${JSON.stringify(payload ?? [])}`))
+            .catch((e) => note(`${name} 监听失败：${e}`));
+        }
+      }
+      if (!listen) note('window.__TAURI__.event 不可用：页面拿不到后端事件');
+
+      refresh().catch((e) => out('error', String(e)));
+      snapshot().catch((e) => note('读取播放器状态失败：' + e));
+      setInterval(() => snapshot().catch(() => {}), 1500);
     </script>
   </body>
 </html>

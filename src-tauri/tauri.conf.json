@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.pingod.macast",
   "build": {
-    "frontendDist": "../frontend",
-    "devUrl": "http://localhost:5173"
+    "frontendDist": "../frontend"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Macast",
@@ -24,6 +24,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png", "icons/icon.icns"]
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns"
+    ]
   }
 }

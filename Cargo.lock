@@ -1762,6 +1762,8 @@ dependencies = [
 name = "macast-tauri"
 version = "0.1.0"
 dependencies = [
+ "macast-core",
+ "macast-mpv",
  "serde",
  "serde_json",
  "tauri",
