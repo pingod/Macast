@@ -24,6 +24,7 @@
 members = [
     "macast-core",
     "macast-mpv",
+    "macast-upnp",
     "src-tauri",
 ]
 resolver = "2"
@@ -43,7 +44,15 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 getrandom = "0.2"
-quick-xml = "0.36"
+quick-xml = "0.42"
+# socket2 is what lets the SSDP receiver set its options **before** binding
+# UDP/1900 (`std::net` only hands you a socket by binding it), plus a `recv_from`
+# that fills an uninitialized buffer — see `macast-upnp/Cargo.toml`. It is already
+# in this graph at 0.6.5 through `tokio` and
+# `hyper-util` (Cargo.lock:1303 and :3394, one package row at :2850). Naming an
+# older socket2 would put a *second* copy of the same library in the tree to buy
+# one setsockopt, which is the mistake the windows-sys pin below exists to avoid.
+socket2 = "0.6.5"
 # Windows bindings for `macast-mpv`'s named-pipe transport. Pinned to **0.61**
 # because that is what this workspace already builds: `Cargo.lock` carries
 # 0.61.2 for ten packages on the src-tauri side (dbus, dirs-sys, mio, muda,
