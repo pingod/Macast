@@ -7,31 +7,80 @@
 //! [`Link`]'s docs and the tests at the bottom of this module, which assert the
 //! whole string, brackets and capitalisation included.
 //!
-//! Windows is not implemented here, and the reason is honest rather than lazy:
-//! the reference uses `_winapi.CreateFile` plus a `PipeConnection` wrapper for
-//! named pipes, and a named pipe cannot be exercised on this machine. So the whole
-//! module is `#[cfg(unix)]` — it does not compile there, which is a build error
-//! someone will see, rather than a mock that lets a test pass against code that
-//! has never run. `crate::player` is gated the same way.
+//! Both platforms the reference runs on are implemented here, and the split is
+//! honest about which half has seen a machine: the Unix side was measured twice
+//! (CPython and this module, on this Mac). The Windows side is a **port, not a
+//! measurement** — it calls the same `CreateFile` / `ReadFile` / `WriteFile` the
+//! reference's `_winapi` module does, and every sentence it can produce was read
+//! off CPython's `multiprocessing.connection.PipeConnection` source line by line,
+//! but no named pipe has been exercised here. Where the two sides genuinely
+//! disagree, the disagreement is written into the table below rather than smoothed
+//! over. Windows std ships **no** `named_pipe` module in this toolchain, so this
+//! backend goes to the operating system directly through `windows-sys`, which is
+//! also what CPython does.
 
+#[cfg(unix)]
 use std::io::{ErrorKind, Read, Write};
+#[cfg(unix)]
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::io::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+#[cfg(windows)]
+use std::sync::Mutex;
+// `PCWSTR` is not imported: it is a plain `*const u16`, so the names this module
+// builds are handed over as `Vec<u16>::as_ptr()` and naming the alias would be a
+// cast that says nothing the type does not already say.
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    GetLastError, CloseHandle, ERROR_BROKEN_PIPE, ERROR_MORE_DATA, ERROR_NO_DATA,
+    GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, HANDLE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, OPEN_EXISTING, ReadFile, WriteFile,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    FORMAT_MESSAGE_FROM_SYSTEM, FORMAT_MESSAGE_IGNORE_INSERTS, FormatMessageW,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
 /// The text `send_command` logs when the socket was never made.
 ///
 /// `self.ipc_sock` starts as `None` in `__init__`, so a command sent before the
 /// IPC thread's first `socket.socket(...)` raises
 /// `AttributeError: 'NoneType' object has no attribute 'sendall'`, which the
-/// `except Exception` arm turns into a line. Measured verbatim.
+/// `except Exception` arm turns into a line. Measured verbatim on macOS.
+///
+/// The method name differs per platform because the two platforms hold different
+/// objects there: `mpv.py` assigns `PipeConnection(handler)` on Windows and a raw
+/// `socket.socket` everywhere else, and `send_command` calls `send_bytes` on the
+/// first and `sendall` on the second (lines 367–386). So the Windows side of this
+/// constant names the method that was actually being asked for — read off
+/// `PipeConnection`'s own public surface, not measured here.
+#[cfg(unix)]
 pub const NO_SOCKET: &str = "'NoneType' object has no attribute 'sendall'";
+#[cfg(windows)]
+pub const NO_SOCKET: &str = "'NoneType' object has no attribute 'send_bytes'";
 
-/// `str(e)` for an `OSError` that carries an errno: `"[Errno 2] No such file or
-/// directory"`.
+/// `str(e)` for an `OSError` that carries an error number.
+///
+/// The signature is the same on both platforms; the prefix and the words' source
+/// are not. Unix prints `[Errno 2] No such file or directory`, reached through
+/// `strerror(3)`. Windows prints `[WinError 2] The system cannot find the file
+/// specified.`, reached through `FormatMessageW` — CPython's `OSError.__str__`
+/// prefers `[WinError %d]` whenever the exception has a `winerror`, and every
+/// `_winapi` failure arrives with one, because it is raised through
+/// `PyErr_SetFromWindowsErr`. The number itself is the same fact either way
+/// (`errno` on Unix, `GetLastError()` on Windows); only who words it differs.
 ///
 /// **No filename is ever appended**, and that is not an oversight: every socket
 /// failure measured below has `e.filename is None` — `connect()` does not put the
@@ -39,13 +88,25 @@ pub const NO_SOCKET: &str = "'NoneType' object has no attribute 'sendall'";
 /// name into its own (see [`crate::player`]'s spawn text). CPython's
 /// `OSError.__str__` only appends the filename when there is one, so appending it
 /// here would be quoting a file the error never named.
+///
+/// The Unix form is **measured**; the Windows form is read off CPython's text and
+/// has not been printed by a machine here, including how much trailing punctuation
+/// `FormatMessage` leaves on the sentence. So the Windows tests assert the
+/// `[WinError n] ` prefix and a non-empty remainder, never the words.
 pub fn errno_text(code: i32) -> String {
-    let message = strerror(code);
-    format!("[Errno {code}] {message}")
+    #[cfg(windows)]
+    {
+        format!("[WinError {code}] {}", message_of(code as u32))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("[Errno {code}] {}", strerror(code))
+    }
 }
 
 /// The operating system's own words for an errno — the same `strerror(3)` that
 /// CPython calls to build an `OSError`'s message.
+#[cfg(unix)]
 fn strerror(code: i32) -> String {
     let raw = unsafe { libc::strerror(code) };
     if raw.is_null() {
@@ -56,66 +117,282 @@ fn strerror(code: i32) -> String {
         .into_owned()
 }
 
+/// The operating system's own words for a `GetLastError()` code, which is what
+/// CPython puts after its `[WinError n]` prefix.
+///
+/// `FORMAT_MESSAGE_IGNORE_INSERTS` is not decoration: without it `FormatMessage`
+/// expands `%1`-style insert placeholders out of the `arguments` array, and this
+/// passes no arguments — the two choices belong together, so a message string can
+/// never steer what we print about an error. The buffer is ours (a stack array),
+/// not allocated by the system, so nothing needs freeing.
+///
+/// Trailing CR/LF is trimmed. `FormatMessage` ends its sentences with `\r\n`, and a
+/// log line that continues onto a second line is a different thing from the
+/// sentence CPython prints, whether or not CPython keeps those two characters.
+#[cfg(windows)]
+fn message_of(code: u32) -> String {
+    // Generous: no system message of the size we ask about comes near it, and a
+    // truncated one still reads, whereas a heap allocation for a log line would be
+    // the same cost paid twice.
+    const CAPACITY: usize = 512;
+    let mut wide = [0u16; CAPACITY];
+    // SAFETY: `wide` is a valid, adequately-sized `[u16]` we own, and its length is
+    // passed to the API in the same units the API documents (characters, not
+    // bytes). `lpsource` and `arguments` are null, which is what the
+    // FROM_SYSTEM + IGNORE_INSERTS combination requires. The API writes at most
+    // `CAPACITY` characters and reports how many, so the slice below never reads
+    // past what was written.
+    let written = unsafe {
+        FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            core::ptr::null(),
+            code,
+            0,
+            wide.as_mut_ptr(),
+            CAPACITY as u32,
+            core::ptr::null(),
+        )
+    };
+    if written == 0 {
+        return format!("Unknown error: {code}");
+    }
+    String::from_utf16_lossy(&wide[..written as usize])
+        .trim_end_matches(['\r', '\n'])
+        .to_string()
+}
+
+/// `str(e)` for the transport this process has already closed.
+///
+/// Unix: `[Errno 9] Bad file descriptor`, measured — what CPython raises when a
+/// closed descriptor is asked to send or receive.
+///
+/// Windows: the **bare** `handle is closed`, with no `[WinError n]` prefix at all.
+/// `multiprocessing.connection.PipeConnection._check_closed` raises
+/// `OSError("handle is closed")`, and `close()` nulls `_handle`, so the next
+/// `send_bytes` / `recv_bytes` / `poll` hits that check before it touches the pipe.
+/// An `OSError` built from a message alone has no errno and no `winerror`, so there
+/// is no prefix to print — the sentence *is* the whole of `str(e)`.
+///
+/// What is deliberately **not** here is the other `handle is closed` in that class,
+/// `[Errno 32] handle is closed`: `_send_bytes` raises it when an overlapped write
+/// comes back `ERROR_OPERATION_ABORTED`, i.e. when `_close()` cancelled a pending
+/// `WriteFile`. This port never issues an overlapped write, so that branch is
+/// unreachable — reaching for it would be quoting a state the code cannot be in
+/// (see the divergence notes in [`Link`]'s docs).
+pub fn closed_text() -> String {
+    #[cfg(windows)]
+    {
+        "handle is closed".to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        errno_text(libc::EBADF)
+    }
+}
+
 /// `str(e)` for the one socket failure that has no errno at all.
 ///
 /// A path that will not fit in `sockaddr_un` raises `OSError('AF_UNIX path too
 /// long')` before any syscall happens, so `errno` is `None` and there is no
 /// `[Errno n]` prefix to print. Measured verbatim.
+///
+/// There is no Windows twin, because there is nothing to be too long *for*: a named
+/// pipe has no fixed-size struct to overflow into — the name is a string handed to
+/// `CreateFileW`, and an over-long or malformed one simply fails with a
+/// `[WinError n]`, which [`errno_text`] already covers.
+#[cfg(unix)]
 pub const PATH_TOO_LONG: &str = "AF_UNIX path too long";
 
 /// One endpoint of the JSON IPC line protocol.
 ///
-/// The three states a Python socket can be in are all reachable here, and they
-/// are all different sentences:
+/// The states this transport can be in are all different sentences, and the two
+/// platforms do not have the same set of states — which is itself one of the
+/// findings, not an omission.
+///
+/// Unix, where a socket is *made* and then *connected* as two separate calls:
 ///
 /// | state | `send_all` | `recv_into` |
 /// |---|---|---|
 /// | never created | [`NO_SOCKET`] — the caller holds `None`, not a `Link` | (the reader loop is not running yet) |
-/// | created, not connected | `[Errno 57] Socket is not connected` | `[Errno 57] Socket is not connected` |
+/// | created, not connected | `[Errno 57] Socket is not connected` | macOS `[Errno 57]`; **Linux `[Errno 22] Invalid argument`** |
 /// | connected | `[Errno 32] Broken pipe` once mpv is gone | `Ok(0)` — a clean EOF |
 /// | closed by us | `[Errno 9] Bad file descriptor` | `[Errno 9] Bad file descriptor` |
 ///
-/// Every one of those was measured twice on this machine — once in CPython 3.12.15
-/// and once through this module — including the two shapes that look like they
-/// should differ but do not: a peer that dies while bytes sit **unread in our own
-/// receive queue** still answers `[Errno 32] Broken pipe` (not `ECONNRESET`, and
-/// the queued bytes stay readable), which is why the broken-pipe test below asserts
-/// exactly one sentence rather than accepting a set.
+/// Windows, where [`Link::connect`] is *both* calls at once — one `CreateFileW`
+/// makes the handle and reaches mpv — so no
+/// "created, not connected" middle state exists at all:
 ///
-/// The connect failures a real path produces are all mapped too, and each of them
-/// is a different diagnosis the user needs to hear: `[Errno 2] No such file or
-/// directory` (mpv has not made the socket yet), `[Errno 61] Connection refused`
-/// (the file is a socket but nothing is listening on it), and `[Errno 38] Socket
-/// operation on non-socket` (something else owns that path).
+/// | state | `send_all` | `recv_into` |
+/// |---|---|---|
+/// | never opened | [`NO_SOCKET`] | (the reader loop is not running yet) |
+/// | open, mpv gone | `[WinError 232] The pipe is being closed.` | `Ok(0)` — from `ERROR_BROKEN_PIPE` |
+/// | closed by us | `handle is closed` — bare, no prefix | `handle is closed` |
+///
+/// The Unix column was measured twice on this Mac — once in CPython 3.12.15 and
+/// once through this module — including the two shapes that look like they should
+/// differ but do not: a peer that dies while bytes sit **unread in our own receive
+/// queue** still answers `[Errno 32] Broken pipe` (not `ECONNRESET`, and the queued
+/// bytes stay readable), which is why the broken-pipe test below asserts exactly one
+/// sentence rather than accepting a set.
+///
+/// # The same errno table is not the same table on Linux
+///
+/// The Linux numbers were read off a real run of this module's own tests inside a
+/// glibc container, not inferred, and they are the reason the Unix table above
+/// carries a platform name on one row:
+///
+/// | fact | macOS | Linux |
+/// |---|---|---|
+/// | not connected, writing | `[Errno 57] Socket is not connected` | `[Errno 107] Transport endpoint is not connected` |
+/// | not connected, reading | the same sentence | **`[Errno 22] Invalid argument`** |
+/// | nothing listening | `[Errno 61] Connection refused` | `[Errno 111] Connection refused` |
+/// | something else owns the path | `[Errno 38] Socket operation on non-socket` | `[Errno 88] Socket operation on non-socket` — **but see below** |
+/// | no such path / broken pipe / closed fd | 2 / 32 / 9 | 2 / 32 / 9, identical |
+///
+/// Two of those are not just different numbers. First, `send` and `recv` **do not
+/// answer alike on Linux** — reading an unconnected socket gives `EINVAL`, a
+/// sentence this module never emits, because the reader thread only exists after a
+/// successful connect. So the "they answer alike" shape in the second row of the
+/// Unix table is a macOS fact, and the test that asserts it is gated accordingly.
+/// Second, a **regular file** sitting at the path is not the same diagnosis on both
+/// kernels: Linux answers `[Errno 111] Connection refused` — the *same sentence* as
+/// "nothing is listening" — while macOS answers "not a socket". The kernel gets
+/// there by a different road; the user hears one sentence either way, and on Linux
+/// it is the less specific one.
+///
+/// And a trap worth naming: `[Errno 57]` is not a foreign spelling of "not
+/// connected", it is **"Invalid slot"** on Linux. That is why
+/// `the_not_connected_sentence_is_the_measured_one` asserts the macOS literal and is
+/// gated to macOS rather than being loosened to "whatever this machine calls 57" —
+/// the point of that test is that a specific string reaches the log, and a portable
+/// assertion would stop making it.
+///
+/// # The Windows column is a port, not a measurement
+///
+/// Every Windows sentence above was read off CPython's
+/// `multiprocessing.connection.PipeConnection` and the Win32 API's own documented
+/// answers, line by line, and **no named pipe has been exercised on this machine** —
+/// there is no Windows host in this development setup that runs this crate. The tests
+/// for that half assert the shapes that need no operating system (the handle-less and
+/// closed states, `[WinError n] ` prefixes, the UTF-16 packing) and deliberately do
+/// **not** assert any English sentence the machine has not said here.
+///
+/// Four differences from the reference are written down rather than smoothed over:
+///
+/// 1. **A failed open lands on a different row.** The reference's `nt` branch calls
+///    `CreateFile` and only then assigns `self.ipc_sock = PipeConnection(handler)`,
+///    so the socket variable is never left half-made. A failed *first* connect
+///    therefore leaves `None` and the next command logs [`NO_SOCKET`]; a failed
+///    connect *after* an earlier session closed leaves that closed object in place
+///    and logs `handle is closed`. This module reproduces the first of those and
+///    notes the second as a narrow divergence: our slot is cleared, so a later
+///    attempt says `NO_SOCKET` where CPython would say `handle is closed`.
+/// 2. **Our `close()` cannot wake a parked reader.** See below.
+/// 3. **Two sentences the reference prints are bugs, and we do not quote them.** The
+///    reference's `_send_bytes` finishes with `assert err == 0`, so a write to a pipe
+///    mpv has already closed raises an `AssertionError` whose `str()` is **empty** —
+///    the log reads `mpv ipc socket reconnecting: `. We answer
+///    `[WinError 232] The pipe is being closed.` instead. Its `_recv_bytes` turns
+///    `ERROR_BROKEN_PIPE` into `raise EOFError`, also empty, and the reader loop has
+///    no arm for it, so EOF on a pipe is an unhandled exception in the reference
+///    where ours is the normal `Ok(0)`. Quoting a bug is not quoting a sentence.
+/// 4. **`FILE_FLAG_OVERLAPPED` is deliberately not passed.** `PipeConnection`'s own
+///    docstring says its handles *must* have been created with it, and the reference
+///    does; this backend issues synchronous `ReadFile`/`WriteFile` and needs no
+///    overlapped handle, which also removes the completion-port machinery — and the
+///    `ERROR_OPERATION_ABORTED` state that comes with it — from the set of things this
+///    module can report.
+///
+/// One argument this port copies without understanding its consequence: the reference
+/// opens with **share mode 0**. Whether that — rather than the pipe server's own
+/// instance bookkeeping — is what stops a second simultaneous open is something no
+/// machine in this repository can ask, so it is written as an open question and not as
+/// a reason. And no test here asks it either: the one server fixture in this file
+/// (`Server`, used by `a_connected_pipe_moves_bytes_in_both_directions_and_ends`) is
+/// created with `nMaxInstances = 1` and `FILE_FLAG_FIRST_PIPE_INSTANCE` and is handed
+/// exactly one client, while the Windows cases elsewhere never reach a pipe a server
+/// is standing on. So this backend's behaviour under a second simultaneous open is
+/// **untested**, and reading share mode 0 as a deliberate exclusion would be reading a
+/// consequence this module has not observed.
 ///
 /// # The one place this is not the operating system
 ///
-/// [`Link::close`] sets a flag rather than releasing the file descriptor, because
-/// `Arc<UnixStream>` cannot hand its fd out from behind a shared reference, and
-/// closing a descriptor two owners both believe they hold would be a bug in this
-/// port, not a fidelity win. The flag then produces the same
-/// `[Errno 9] Bad file descriptor` that CPython produces from a genuinely closed
-/// fd, so the log line matches; the difference is that Rust's fd is still open
-/// until the last owner drops it. Measured here (see
-/// `a_link_closed_by_another_owner_wakes_a_blocked_reader`): `shutdown(2)` on a
-/// macOS `AF_UNIX` stream wakes a thread parked in `read(2)` and hands it `ECONN`
-/// — `Ok(0)`, EOF — and that is true whether the waking side asks for `SHUT_RD` or
-/// `SHUT_RDWR`. Dropping a *non-final* handle, by contrast, wakes nothing.
+/// [`Link::close`] sets a flag rather than releasing the transport, on both
+/// platforms, because an `Arc` cannot hand its resource out from behind a shared
+/// reference, and closing something two owners both believe they hold would be a bug
+/// in this port, not a fidelity win. The flag then produces the same sentence
+/// CPython produces from a genuinely closed transport — `[Errno 9] Bad file
+/// descriptor` on Unix, `handle is closed` on Windows — so the log line matches; the
+/// difference is that the fd or handle stays live until the last owner drops it.
+///
+/// On macOS that difference is measurable and mostly harmless: `shutdown(2)` on an
+/// `AF_UNIX` stream *does* wake a thread parked in `read(2)` and hands it EOF, and
+/// that is true whether the waking side asks for `SHUT_RD` or `SHUT_RDWR`
+/// (`a_link_closed_by_another_owner_wakes_a_blocked_reader`). Dropping a *non-final*
+/// handle, by contrast, wakes nothing. On Windows the flag alone **cannot** wake a
+/// blocked reader: we never issue overlapped I/O, and `CancelIo` cancels only the
+/// calling thread's pending requests, so a reader parked in `ReadFile` stays parked.
+/// That test therefore stays `#[cfg(unix)]` — not because the Unix behaviour is
+/// universal, but because this is the one place the two sides genuinely differ.
 ///
 /// **None of that is what ends the reader in `stop()`.** The reference joins the
 /// player thread *before* it sets `ipc_running = False`, and its
 /// `self.ipc_sock.close()` sits at the bottom of the outer loop — code that only
-/// runs once the inner `recv` loop has already broken. So the session ends because
-/// **mpv exits, its half closes, and `recv` returns `b''`**. [`Link::close`]
-/// remains the right thing for a shutdown we start ourselves, but a caller must not
-/// design `stop()` around it; [`crate::player`] joins the player first for exactly
-/// this reason.
+/// runs once the inner read loop has already broken. So the session ends because
+/// **mpv exits, its half closes, and the read returns empty** — `b''` on Unix,
+/// `ERROR_BROKEN_PIPE` on Windows. [`Link::close`] remains the right thing for a
+/// shutdown we start ourselves, but a caller must not design `stop()` around it;
+/// [`crate::player`] joins the player first for exactly this reason.
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct Link {
     stream: Arc<UnixStream>,
     closed: AtomicBool,
 }
 
+/// Windows keeps the same three-state idea in a different container, because the
+/// thing it holds can appear and disappear *after* the object exists:
+/// `CreateFileW` either hands back a handle or hands back `INVALID_HANDLE_VALUE`,
+/// so the "created, not connected" row of the table above is an **empty slot**
+/// rather than a socket with nothing behind it.
+///
+/// `Mutex` rather than nothing, because a handle is a value we can install later,
+/// unlike a Unix descriptor that was there from the first line of the constructor.
+/// The lock is never held across `ReadFile` or `WriteFile` — see
+/// [`Link::current_handle`] — so a reader parked in a blocking read cannot hold up
+/// a sender, which is the same reason `send_command` and the IPC thread can share
+/// one `self.ipc_sock` in the reference.
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct Link {
+    pipe: Arc<Mutex<Option<Pipe>>>,
+    closed: AtomicBool,
+}
+
+/// A named-pipe handle that closes itself.
+///
+/// Stored as `isize` instead of `HANDLE` so the type is `Send + Sync` without an
+/// `unsafe impl`: `windows_sys`'s `HANDLE` is a raw pointer, and raw pointers are
+/// neither, even though a pipe handle is exactly as shareable between threads as
+/// the integer Windows uses to name it. Every call site casts, and nowhere else
+/// does the integer have a meaning.
+#[cfg(windows)]
+#[derive(Debug)]
+struct Pipe(isize);
+
+#[cfg(windows)]
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // SAFETY: a `Pipe` is only ever built from a `CreateFileW` return value
+        // that was checked against `INVALID_HANDLE_VALUE`, so this is a live handle
+        // belonging to this process, and it is dropped exactly once because the
+        // `Option` it lives in owns it. Closing the `-1`/`0` sentinels would return
+        // an error we would ignore anyway; never reaching them is the invariant.
+        let _ = unsafe { CloseHandle(self.0 as HANDLE) };
+    }
+}
+
+#[cfg(unix)]
 impl Link {
     /// `socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)` — the descriptor
     /// exists, nothing is connected.
@@ -134,20 +411,6 @@ impl Link {
             stream: Arc::new(unsafe { UnixStream::from_raw_fd(fd) }),
             closed: AtomicBool::new(false),
         })
-    }
-
-    /// A socket already connected to `path`, which is what a caller wants when it
-    /// does not care to keep the half-made object around.
-    ///
-    /// Note that the reference does *not* use this shape: `start_ipc` assigns
-    /// `self.ipc_sock` before calling `connect`, so a failed connect leaves an
-    /// unconnected socket in place — and a later `send_command` then logs
-    /// `[Errno 57]`, not the `AttributeError`. Use [`Link::created`] plus
-    /// [`Link::connect`] to reproduce that.
-    pub fn to(path: &str) -> Result<Self, String> {
-        let link = Self::created()?;
-        link.connect(path)?;
-        Ok(link)
     }
 
     /// `self.ipc_sock.connect(self.mpv_sock)`.
@@ -181,7 +444,7 @@ impl Link {
     /// `sendall(msg.encode())` — all bytes or nothing.
     pub fn send_all(&self, bytes: &[u8]) -> Result<(), String> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(errno_text(libc::EBADF));
+            return Err(closed_text());
         }
         (&*self.stream).write_all(bytes).map_err(|err| text_of(&err))
     }
@@ -193,7 +456,7 @@ impl Link {
     /// and the caller compares against it.
     pub fn recv_into(&self, buf: &mut [u8]) -> Result<usize, String> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(errno_text(libc::EBADF));
+            return Err(closed_text());
         }
         loop {
             match (&*self.stream).read(buf) {
@@ -218,15 +481,10 @@ impl Link {
         let _ = self.stream.shutdown(Shutdown::Both);
     }
 
-    /// Whether [`Link::close`] has run. `stop()` reads this to know whether the
-    /// reader thread has finished with the socket.
-    pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
-    }
-
     /// Whether this descriptor has a peer, asked of the kernel with
-    /// `getpeername(2)` — the same fact a failed write reports as
-    /// `[Errno 57] Socket is not connected`.
+    /// `getpeername(2)` — the same fact a failed write reports as `ENOTCONN`
+    /// (`[Errno 57] Socket is not connected` on macOS, `[Errno 107] Transport
+    /// endpoint is not connected` on Linux).
     ///
     /// A connection parked in a listener's **backlog** counts as having a peer: the
     /// three-way handshake is done from this side's point of view long before the
@@ -250,13 +508,249 @@ impl Link {
     }
 }
 
-impl Clone for Link {
-    /// Another handle for the same descriptor.
+#[cfg(windows)]
+impl Link {
+    /// The Windows shape of "`socket()` ran, `connect()` did not" is an **empty
+    /// slot**, because there is no call that makes a handle without also reaching
+    /// the server: `CreateFileW` on a named pipe both opens the handle and
+    /// completes the connection.
     ///
-    /// This is `self.ipc_sock` being read by the IPC thread and written by
-    /// `send_command` at the same time — one socket, two owners, which is what
-    /// `try_clone()` would *not* give us (a duplicated descriptor closing
-    /// independently would leave the other side's `recv` waiting forever).
+    /// Returns `Result` only so [`Link::to`] reads the same on both platforms. The
+    /// `Err` half is unreachable here — allocating an `Arc` and a `Mutex` does not
+    /// fail — whereas on Unix it answers for `socket(2)`. A caller that branches on
+    /// it is not wrong, just never taking that branch on Windows.
+    pub fn created() -> Result<Self, String> {
+        Ok(Self {
+            pipe: Arc::new(Mutex::new(None)),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// `CreateFileW` for the pipe, which is the reference's `_winapi.CreateFile`
+    /// call at `mpv.py:390` with two deliberate differences, both recorded in the
+    /// module doc:
+    ///
+    /// - **No `FILE_FLAG_OVERLAPPED`.** The reference passes it, and
+    ///   `PipeConnection` is built for that handle: its `_send_bytes` finishes every
+    ///   write with `ov.GetOverlappedResult(True)` and its `_recv_bytes` reads
+    ///   `ERROR_MORE_DATA` as "there is a whole message waiting, give me the rest".
+    ///   A synchronous handle cannot do either of those things, so the two calls are
+    ///   ours rather than CPython's, and the sentences they return on failure are
+    ///   ours too — see [`Link::send_all`] and [`Link::recv_into`].
+    /// - **Share mode `0`.** The reference's third argument, copied without changing it.
+    ///   What actually makes mpv's Windows IPC one client at a time is on mpv's side —
+    ///   it creates the pipe with a single instance — so no test here can tell these
+    ///   two explanations apart, and this port does not claim to.
+    pub fn connect(&self, path: &str) -> Result<(), String> {
+        let name = wide(path)?;
+        // SAFETY: `name` is a NUL-terminated UTF-16 buffer that outlives this call,
+        // and every pointer argument is either NULL or a null pointer of the type
+        // the API asks for. A null `lpSecurityAttributes` with `bInheritHandle`
+        // unset is what CPython passes too.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                core::ptr::null(),
+                OPEN_EXISTING,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            // The slot stays empty, which is how a failed reconnect keeps the
+            // reference's `None`-valued `ipc_sock`: the next `send_command` hears
+            // `NO_SOCKET` rather than something about a handle.
+            return Err(errno_text(unsafe { GetLastError() } as i32));
+        }
+        *self.slot() = Some(Pipe(handle as isize));
+        Ok(())
+    }
+
+    /// The reference's `sendall`, spelled out as the loop Windows does not give us
+    /// for free: `WriteFile` reports the bytes it accepted, and a pipe server that
+    /// is not reading can accept fewer than asked.
+    ///
+    /// A zero-byte "success" is answered rather than looped on forever. It should not
+    /// happen — `WriteFile` on a byte pipe either writes or fails — but the only
+    /// alternative to noticing is spinning here after mpv has gone, which is
+    /// [`ERROR_NO_DATA`]'s own words ("the pipe has been ended") in a shape no test
+    /// would catch.
+    pub fn send_all(&self, bytes: &[u8]) -> Result<(), String> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(closed_text());
+        }
+        let handle = match self.current_handle() {
+            Some(handle) => handle,
+            None => return Err(NO_SOCKET.to_string()),
+        };
+        let mut sent = 0usize;
+        while sent < bytes.len() {
+            let mut written = 0u32;
+            // SAFETY: the slice lives for the call, `written` is a live `u32` we
+            // read back, and a null `lpOverlapped` is required because this handle
+            // was opened without `FILE_FLAG_OVERLAPPED`.
+            let ok = unsafe {
+                WriteFile(
+                    handle,
+                    bytes[sent..].as_ptr(),
+                    (bytes.len() - sent) as u32,
+                    &mut written,
+                    core::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                return Err(errno_text(unsafe { GetLastError() } as i32));
+            }
+            if written == 0 {
+                return Err(errno_text(ERROR_NO_DATA as i32));
+            }
+            sent += written as usize;
+        }
+        Ok(())
+    }
+
+    /// One `ReadFile`, which is the whole of the reference's read side for a byte
+    /// pipe: mpv writes a line at a time and `start_ipc` reassembles by looking for
+    /// the trailing `\n`, so no framing belongs here.
+    ///
+    /// `Ok(0)` is the `b''` that breaks that loop — on Windows mpv's side of the pipe
+    /// going away is `ERROR_BROKEN_PIPE`, and translating it into `0` rather than an
+    /// error is what keeps `stop()` ending the reader the same way on both platforms.
+    pub fn recv_into(&self, buf: &mut [u8]) -> Result<usize, String> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(closed_text());
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let handle = match self.current_handle() {
+            Some(handle) => handle,
+            None => return Err(NO_SOCKET.to_string()),
+        };
+        let mut read = 0u32;
+        // SAFETY: as in [`Link::send_all`] — the buffer outlives the call, the count
+        // is a live `u32`, and no overlapped structure is passed.
+        let ok = unsafe {
+            ReadFile(
+                handle,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut read,
+                core::ptr::null_mut(),
+            )
+        };
+        if ok != 0 {
+            return Ok(read as usize);
+        }
+        let code = unsafe { GetLastError() };
+        if code == ERROR_BROKEN_PIPE {
+            return Ok(0);
+        }
+        if code == ERROR_MORE_DATA {
+            // Defensive arm, and it should never fire: `ERROR_MORE_DATA` is what a
+            // *message-mode* pipe returns when a read stops at a message boundary,
+            // and mpv's pipe is byte-mode. Kept because guessing wrong here would
+            // turn a partial read into an error the reader logs as a reconnect.
+            return Ok(read as usize);
+        }
+        Err(errno_text(code as i32))
+    }
+
+    /// Marks the session over. It does **not** `CloseHandle`, for the same reason the
+    /// Unix [`Link::close`] does not `close(fd)`: another owner may still be holding
+    /// this `Arc`, and the handle goes when the last of them drops.
+    ///
+    /// It also cannot wake a thread parked in `ReadFile`, because cancelling an
+    /// overlapped read is not available on a synchronous handle. That is the
+    /// documented cost in the module doc — the session ends when mpv exits, not when
+    /// this runs.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether this handle **was opened successfully**, which is not the same
+    /// question the Unix half asks. `PeekNamedPipe` is the cheapest way to ask the
+    /// pipe anything at all, and CPython's `PipeConnection._poll` uses the same call
+    /// — but it only fails once the handle is invalid, so a server that has closed
+    /// its end can still answer here, whereas Unix's `getpeername(2)` reports the
+    /// lost peer. Read it as "we have a connection to talk about".
+    ///
+    /// The byte count is asked for rather than passed as NULL because that is what
+    /// makes the call a read probe at all; the answer is deliberately discarded.
+    pub fn is_connected(&self) -> bool {
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        let handle = match self.current_handle() {
+            Some(handle) => handle,
+            None => return false,
+        };
+        let mut available = 0u32;
+        // SAFETY: three arguments are unused and given null pointers of their own
+        // types; the one output we do read is a live `u32`.
+        unsafe {
+            PeekNamedPipe(
+                handle,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+                &mut available,
+                core::ptr::null_mut(),
+            ) != 0
+        }
+    }
+
+    /// The lock, with poison forgiven: the only way to poison it is to panic while
+    /// installing or dropping a handle, and a reader on the other side of that panic
+    /// is better off seeing an empty slot than `unwrap`ing its way into the caller's
+    /// error string.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Pipe>> {
+        self.pipe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Copy the handle out and **release the lock before any syscall**. A reader
+    /// parked in `ReadFile` must not be able to hold up a sender, which is the whole
+    /// reason the two threads in the reference can share one `self.ipc_sock`.
+    fn current_handle(&self) -> Option<HANDLE> {
+        self.slot().as_ref().map(|pipe| pipe.0 as HANDLE)
+    }
+}
+
+/// The two methods that mean exactly the same thing on both platforms, so that
+/// neither platform gets to drift from the other's wording.
+impl Link {
+    /// A connection already made to `path`, for a caller that does not want to keep
+    /// the half-made object around.
+    ///
+    /// Note that the reference does *not* use this shape: `start_ipc` assigns
+    /// `self.ipc_sock` before connecting, so a failed connect leaves the published
+    /// object in place and the next `send_command` answers for it — `[Errno 57]` on
+    /// macOS, `[Errno 107]` on Linux, `NO_SOCKET` on Windows. Use [`Link::created`]
+    /// plus [`Link::connect`] to reproduce that; this helper discards the object on
+    /// failure, which is a different observable.
+    pub fn to(path: &str) -> Result<Self, String> {
+        let link = Self::created()?;
+        link.connect(path)?;
+        Ok(link)
+    }
+
+    /// Whether [`Link::close`] has run. `stop()` reads this to know whether the
+    /// reader thread has finished with the socket.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+}
+
+/// Another owner for the same socket: `self.ipc_sock` being read by the IPC thread
+/// and written by `send_command` at the same time. One object, two handles, which is
+/// what a duplicated descriptor would *not* give us — either copy closing
+/// independently would leave the other side's `recv` waiting forever.
+#[cfg(unix)]
+impl Clone for Link {
     fn clone(&self) -> Self {
         Self {
             stream: Arc::clone(&self.stream),
@@ -265,7 +759,22 @@ impl Clone for Link {
     }
 }
 
+/// The same idea one level removed: cloning shares the *slot*, so a `connect()` on
+/// one owner's [`Link`] becomes visible to the other, which is exactly how the
+/// reference's single `self.ipc_sock` behaves when `start_ipc` reassigns it after a
+/// failed read. The `closed` flag is deliberately **not** shared, matching Unix.
+#[cfg(windows)]
+impl Clone for Link {
+    fn clone(&self) -> Self {
+        Self {
+            pipe: Arc::clone(&self.pipe),
+            closed: AtomicBool::new(self.closed.load(Ordering::SeqCst)),
+        }
+    }
+}
+
 /// Turn an `io::Error` into the `str(e)` CPython would have.
+#[cfg(unix)]
 fn text_of(err: &std::io::Error) -> String {
     match err.raw_os_error() {
         Some(code) => errno_text(code),
@@ -275,6 +784,7 @@ fn text_of(err: &std::io::Error) -> String {
 
 /// The errno set by the libc call that just failed. Read immediately after the
 /// call, because anything in between can overwrite it.
+#[cfg(unix)]
 fn last_errno() -> i32 {
     std::io::Error::last_os_error()
         .raw_os_error()
@@ -286,6 +796,7 @@ fn last_errno() -> i32 {
 /// both. Reading them off the type is the only way not to hard-code either, and a
 /// wrong offset puts `sun_family` where the kernel reads `sun_len` — which fails
 /// with an errno no test would recognise as "my struct is shaped wrong".
+#[cfg(unix)]
 fn sun_layout() -> (usize, usize) {
     // SAFETY: `sockaddr_un` is a plain C struct of integers; all-zeroes is a
     // valid value, and we only ask a member for its size.
@@ -297,6 +808,7 @@ fn sun_layout() -> (usize, usize) {
 /// Whether a path would fit in `sockaddr_un` — used to tell a too-long path apart
 /// from a socket-level refusal, since only the first has no errno. CPython's own
 /// check is `len(path) + 1 <= sizeof(sun_path)`, so the NUL is counted.
+#[cfg(unix)]
 fn fits(path: &str) -> bool {
     let (_, capacity) = sun_layout();
     path.len() + 1 <= capacity
@@ -307,6 +819,7 @@ fn fits(path: &str) -> bool {
 /// The reference is not careful here — `socket.socket().connect(str)` goes through
 /// CPython, which does this same packing — so the layout is only reproduced to keep
 /// `connect(2)` honest about where the name ends.
+#[cfg(unix)]
 fn sockaddr_un(path: &str) -> Result<libc::sockaddr_un, String> {
     if !fits(path) {
         return Err(PATH_TOO_LONG.to_string());
@@ -324,12 +837,35 @@ fn sockaddr_un(path: &str) -> Result<libc::sockaddr_un, String> {
 /// The third argument to `connect(2)`: the family field plus the bytes the name
 /// actually uses, NUL included. Passing `sizeof(sockaddr_un)` instead would make
 /// the kernel read past the end of the name into padding.
+#[cfg(unix)]
 fn address_len(path: &str) -> libc::socklen_t {
     let (offset, _) = sun_layout();
     (offset + path.len() + 1) as libc::socklen_t
 }
 
-#[cfg(test)]
+/// UTF-16, NUL-terminated, for the `lpFileName` of a Windows pipe open.
+///
+/// Windows names are UTF-16 at the API boundary, so the portability cost of a pipe
+/// name is exactly this one conversion. An embedded NUL is refused with CPython's
+/// words rather than truncated: `CreateFileW` stops at the first one, so a name
+/// carrying it would silently open a *different* pipe than the caller asked for.
+/// In practice unreachable from our callers — `command::ipc_socket_path` builds the
+/// name from a fixed prefix and digits — but a silent redirect is the wrong failure.
+#[cfg(windows)]
+fn wide(path: &str) -> Result<Vec<u16>, String> {
+    if path.contains('\0') {
+        return Err("ValueError: embedded null byte".to_string());
+    }
+    let mut name: Vec<u16> = path.encode_utf16().collect();
+    name.push(0);
+    Ok(name)
+}
+
+/// Unix's behaviour, measured on the two platforms it can be measured on. The
+/// sentences are platform-specific *numbers*, so the cases below are split by
+/// number rather than by "which OS is this test running on": a Linux kernel that
+/// answers the same *words* as macOS must still be asked for its own errno.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -355,23 +891,48 @@ mod tests {
     fn an_unconnected_socket_says_it_is_not_connected() {
         // This is the state `start_ipc` leaves `self.ipc_sock` in when `connect`
         // raises, because the assignment happens first — so both the writer's
-        // `sendall` and the reader's `recv` have to answer, and they answer alike.
+        // `sendall` and the reader's `recv` have to answer. On macOS they answer
+        // alike. On Linux they do not: `recv` there gives EINVAL, because the
+        // socket has no address to read from at all, while `sendto` is the one the
+        // kernel can say "not connected" about. Measured 2026-10-07 in the glibc
+        // container (`/tmp/linux-baseline-3.txt`), not reasoned.
         let link = Link::created().expect("socket()");
         assert_eq!(
             link.send_all(b"{\"command\":[]}\n"),
             Err(errno_text(libc::ENOTCONN))
         );
         let mut buf = [0u8; 16];
-        assert_eq!(link.recv_into(&mut buf), Err(errno_text(libc::ENOTCONN)));
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                link.recv_into(&mut buf),
+                Err("[Errno 22] Invalid argument".to_string()),
+                "Linux answers the read half with EINVAL, not ENOTCONN"
+            );
+        } else {
+            assert_eq!(
+                link.recv_into(&mut buf),
+                Err("[Errno 57] Socket is not connected".to_string())
+            );
+        }
     }
 
     #[test]
     fn the_not_connected_sentence_is_the_measured_one() {
-        // 57 is macOS' ENOTCONN. It is written out rather than reached through
-        // `libc::ENOTCONN` above so that a platform with a different number cannot
-        // quietly redefine what the log says — this assertion is the machine asking
-        // the reference's sentence, not the port restating its own constant.
-        assert_eq!(errno_text(57), "[Errno 57] Socket is not connected");
+        // 57 is macOS' ENOTCONN, 107 is Linux'. Both are written out rather than
+        // reached through `libc::ENOTCONN` above so that a platform with a
+        // different number cannot quietly redefine what the log says — this
+        // assertion is the machine asking the reference's sentence, not the port
+        // restating its own constant. The two sentences are *not* the same words:
+        // macOS says "Socket is not connected", Linux says "Transport endpoint is
+        // not connected", and the reference's log line therefore differs by kernel.
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                errno_text(107),
+                "[Errno 107] Transport endpoint is not connected"
+            );
+        } else {
+            assert_eq!(errno_text(57), "[Errno 57] Socket is not connected");
+        }
     }
 
     #[test]
@@ -401,10 +962,14 @@ mod tests {
         drop(listen(&target));
         assert_eq!(
             Link::to(&target).err(),
-            Some("[Errno 61] Connection refused".to_string())
+            Some(errno_text(libc::ECONNREFUSED)),
+            "the refused sentence must come from this kernel's ECONNREFUSED"
         );
         // And the file is still there, still a socket: refusing is not the same as
         // absent, and the two sentences the user hears are different diagnoses.
+        // That second half is the load-bearing one on Linux, where ECONNREFUSED is
+        // 111 and a *regular* file at the path answers with the very same number —
+        // see `a_regular_file_at_the_path_is_not_a_socket`.
         assert!(std::path::Path::new(&target).exists());
     }
 
@@ -431,10 +996,30 @@ mod tests {
     fn a_regular_file_at_the_path_is_not_a_socket() {
         let target = path("regular");
         std::fs::write(&target, b"not a socket").expect("write");
-        assert_eq!(
-            Link::to(&target).err(),
-            Some("[Errno 38] Socket operation on non-socket".to_string())
-        );
+        if cfg!(target_os = "linux") {
+            // Linux gives ECONNREFUSED (111) here: `connect()` on an AF_UNIX socket
+            // whose path names an inode that is not a socket never reaches ENOTSOCK,
+            // because the kernel's first failure is "nothing is listening at that
+            // name". Measured, 2026-10-07.
+            //
+            // The consequence is a real one for whoever reads the log: on Linux the
+            // two diagnoses — "mpv left a dead socket behind" and "something that is
+            // not mpv's socket is sitting at that path" — collapse into the *same*
+            // sentence. macOS keeps them apart (61 vs 38). So the number alone is
+            // not a diagnosis on Linux, and this comment is the only place that says
+            // so in code; `a_socket_file_with_no_listener_refuses` above is the
+            // other half of the pair, and on Linux the two are indistinguishable
+            // from their replies alone.
+            assert_eq!(
+                Link::to(&target).err(),
+                Some("[Errno 111] Connection refused".to_string())
+            );
+        } else {
+            assert_eq!(
+                Link::to(&target).err(),
+                Some("[Errno 38] Socket operation on non-socket".to_string())
+            );
+        }
     }
 
     #[test]
@@ -568,19 +1153,46 @@ mod tests {
 
     #[test]
     fn errno_text_matches_every_measured_sentence() {
-        // The measured set, from CPython 3.12.15 on this machine, for the four
-        // connect shapes and the three I/O shapes.
-        let cases = [
+        // The measured set, for the four connect shapes and the three I/O shapes.
+        // Split by *whether the number is the same everywhere*, because that is the
+        // thing this function can get wrong on a second kernel: four of these codes
+        // are the same number and the same words on macOS and Linux, and three are
+        // not — so the three that differ are asked for their own platform's sentence
+        // rather than folded into one "close enough" literal.
+        //
+        // macOS words measured from CPython 3.12.15 on this machine; Linux words
+        // measured in the glibc container on 2026-10-07 (`/tmp/linux-baseline-3.txt`).
+        let common = [
             (libc::ENOENT, "[Errno 2] No such file or directory"),
             (libc::EACCES, "[Errno 13] Permission denied"),
-            (libc::ENOTSOCK, "[Errno 38] Socket operation on non-socket"),
             (libc::EPIPE, "[Errno 32] Broken pipe"),
             (libc::EBADF, "[Errno 9] Bad file descriptor"),
-            (libc::ENOTCONN, "[Errno 57] Socket is not connected"),
-            (libc::ECONNREFUSED, "[Errno 61] Connection refused"),
         ];
-        for (code, text) in cases {
+        for (code, text) in common {
             assert_eq!(errno_text(code), text, "errno {code}");
+        }
+        if cfg!(target_os = "macos") {
+            let macos = [
+                (libc::ENOTSOCK, "[Errno 38] Socket operation on non-socket"),
+                (libc::ENOTCONN, "[Errno 57] Socket is not connected"),
+                (libc::ECONNREFUSED, "[Errno 61] Connection refused"),
+            ];
+            for (code, text) in macos {
+                assert_eq!(errno_text(code), text, "errno {code}");
+            }
+        } else {
+            // Linux: 88 with *macOS' words for 38* would be a coincidence worth
+            // naming, and 57 there means "Invalid slot" — a different error
+            // entirely, which is why this branch writes 107 and not 57.
+            let linux = [
+                (libc::ENOTSOCK, "[Errno 88] Socket operation on non-socket"),
+                (libc::ENOTCONN, "[Errno 107] Transport endpoint is not connected"),
+                (libc::ECONNREFUSED, "[Errno 111] Connection refused"),
+            ];
+            for (code, text) in linux {
+                assert_eq!(errno_text(code), text, "errno {code}");
+            }
+            assert_eq!(errno_text(57), "[Errno 57] Invalid slot");
         }
     }
 
@@ -593,8 +1205,11 @@ mod tests {
     fn the_socket_address_is_packed_for_this_platform() {
         // The offset and the capacity are read from `libc::sockaddr_un` rather than
         // written here, so this test's job is to prove they are the numbers CPython
-        // uses: `sun_path` never starts at byte 0 on macOS (the `sun_len` byte is
-        // first), and the length passed to `connect` is the name, not the struct.
+        // uses: `sun_path` never starts at byte 0 (macOS puts a `sun_len` byte there,
+        // Linux puts the two-byte `sa_family_t` instead — the two kernels do not even
+        // agree on *why* it is not at 0), and the length passed to `connect` is the
+        // name, not the struct. Neither number is a literal in this file precisely
+        // because both differ between the platforms this module now claims to run on.
         let (offset, capacity) = sun_layout();
         assert!(offset > 0, "sun_path sits at {offset}");
         assert!(capacity >= 92, "sun_path capacity is {capacity}");
@@ -610,5 +1225,410 @@ mod tests {
         let name: Vec<u8> = address.sun_path[..short.len()].iter().map(|b| *b as u8).collect();
         assert_eq!(name, short.as_bytes());
         assert_eq!(address.sun_path[short.len()], 0, "the name is NUL-terminated");
+    }
+}
+
+/// The Windows half, and the honest heading matters more here than anywhere else in
+/// this file: **these cases have never run.** There is no Windows machine in this
+/// repository's test path — the crate is built and tested on macOS, and CI does not
+/// invoke cargo at all — so `cargo check --target x86_64-pc-windows-msvc
+/// --all-targets` is the whole of the local evidence, and it is evidence that this
+/// code *typechecks*, not that mpv's pipe answers the way [`Link`] says it does.
+///
+/// Two consequences shaped every assertion below.
+///
+/// 1. **Sentences this file writes itself are asserted in full** (`NO_SOCKET`,
+///    `closed_text`, the `[WinError n] ` prefix, `wide`'s rejection text), because a
+///    typechecking build can be asked about them. **Sentences the operating system
+///    writes are asserted as shape only** — prefix present, remainder non-empty —
+///    because the words are `FormatMessage`'s and this machine has never heard them.
+/// 2. **The pipe tests below are the part that would need a real Windows run.** They
+///    stand up a `CreateNamedPipeW` server where mpv's IPC server would be and move
+///    bytes through [`Link`], so on the first machine that executes them they answer
+///    the question this module doc can only pose: does a synchronous handle read and
+///    write mpv's byte pipe the way `PipeConnection` does with an overlapped one.
+///    Until then they are compiled, not believed.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
+    };
+    use windows_sys::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    };
+
+    /// The name mpv would have used, shaped like its own: a pipe on this machine,
+    /// and a per-process marker so two runs of this test file cannot collide.
+    fn pipe_name(marker: &str) -> String {
+        format!(r"\\.\pipe\macast-link-{}-{}", std::process::id(), marker)
+    }
+
+    /// A named-pipe server, standing where mpv's IPC server stands.
+    ///
+    /// Byte type and byte read mode because that is what mpv's pipe is: `start_ipc`
+    /// reassembles by looking for the trailing `\n`, which is a sentence about a byte
+    /// stream — a message-mode pipe would hand back whole messages and the reader
+    /// would never see a partial line. `PIPE_REJECT_REMOTE_CLIENTS` because nothing in
+    /// this crate should be reachable from another machine, and `PIPE_WAIT` because
+    /// this fixture has no buffer to poll: it wants to block until a client arrives.
+    struct Server {
+        name: String,
+        handle: HANDLE,
+    }
+
+    impl Server {
+        fn open(marker: &str) -> Self {
+            let name = pipe_name(marker);
+            // `wide` is the same helper [`Link::connect`] uses, so a name this
+            // fixture builds and a name the client reads back cannot drift apart.
+            let wide = wide(&name).expect("a pipe name has no embedded NUL");
+            // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the call,
+            // and a null `lpSecurityAttributes` is what an unshared, unnamed-security
+            // pipe takes. The two buffer sizes are ours, not mpv's, and only set how
+            // much can be in flight before the slower side blocks.
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    wide.as_ptr(),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_TYPE_BYTE
+                        | PIPE_READMODE_BYTE
+                        | PIPE_WAIT
+                        | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    4096,
+                    4096,
+                    0,
+                    core::ptr::null(),
+                )
+            };
+            assert_ne!(
+                handle,
+                INVALID_HANDLE_VALUE,
+                "CreateNamedPipeW({name}) failed: {}",
+                // SAFETY: `GetLastError` takes no arguments and reads this thread's
+                // own last failure, which the call above just set.
+                errno_text(unsafe { GetLastError() } as i32)
+            );
+            Self { name, handle }
+        }
+
+        /// Wait for the client to open the pipe.
+        ///
+        /// A client that arrived before this call is not a failure — `ConnectNamedPipe`
+        /// returns `FALSE` with `ERROR_PIPE_CONNECTED` for exactly that case, which is
+        /// why the two answers are treated as one rather than as a retry.
+        fn accept(&self) {
+            // SAFETY: a null `lpOverlapped` is required and correct because this
+            // handle was created without `FILE_FLAG_OVERLAPPED` — the same choice
+            // [`Link::connect`] makes on its side of the pipe.
+            let ok = unsafe { ConnectNamedPipe(self.handle, core::ptr::null_mut()) };
+            if ok == 0 {
+                // SAFETY: as above.
+                let code = unsafe { GetLastError() };
+                assert_eq!(
+                    code,
+                    ERROR_PIPE_CONNECTED,
+                    "ConnectNamedPipe({}) failed: {}",
+                    self.name,
+                    errno_text(code as i32)
+                );
+            }
+        }
+
+        /// The [`Link::send_all`] loop, run by the other end.
+        fn write(&self, bytes: &[u8]) {
+            let mut sent = 0usize;
+            while sent < bytes.len() {
+                let mut written = 0u32;
+                // SAFETY: as in [`Link::send_all`] — live buffer, live count, no
+                // overlapped structure on a synchronous handle.
+                let ok = unsafe {
+                    WriteFile(
+                        self.handle,
+                        bytes[sent..].as_ptr(),
+                        (bytes.len() - sent) as u32,
+                        &mut written,
+                        core::ptr::null_mut(),
+                    )
+                };
+                assert_ne!(
+                    ok,
+                    0,
+                    "server write failed: {}",
+                    // SAFETY: as above.
+                    errno_text(unsafe { GetLastError() } as i32)
+                );
+                assert_ne!(written, 0, "the pipe accepted nothing and did not fail");
+                sent += written as usize;
+            }
+        }
+
+        /// One `ReadFile`, which is the whole of the server's read side.
+        fn read(&self, buf: &mut [u8]) -> usize {
+            let mut read = 0u32;
+            // SAFETY: as in [`Link::recv_into`].
+            let ok = unsafe {
+                ReadFile(
+                    self.handle,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut read,
+                    core::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                // SAFETY: as above.
+                let code = unsafe { GetLastError() };
+                assert_eq!(
+                    code,
+                    ERROR_BROKEN_PIPE,
+                    "server read failed: {}",
+                    errno_text(code as i32)
+                );
+                return 0;
+            }
+            read as usize
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            // SAFETY: the handle is this fixture's own, created above and closed
+            // exactly once here; disconnecting first is what makes the client's next
+            // read see `ERROR_BROKEN_PIPE` rather than a connection that is still
+            // nominally open with nobody behind it.
+            unsafe {
+                DisconnectNamedPipe(self.handle);
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    /// The reassembly `start_ipc` does, because a byte pipe makes no promise that one
+    /// read hands back one line. Asserting against a whole line without this would be
+    /// testing the fixture's luck.
+    fn read_line(link: &Link) -> Vec<u8> {
+        let mut line = Vec::new();
+        let mut buf = [0u8; 64];
+        loop {
+            let read = link.recv_into(&mut buf).expect("a live pipe answers");
+            if read == 0 {
+                break;
+            }
+            line.extend_from_slice(&buf[..read]);
+            if line.ends_with(b"\n") {
+                break;
+            }
+        }
+        line
+    }
+
+    #[test]
+    fn a_handle_that_was_never_made_says_no_socket() {
+        let link = Link::created().expect("allocating a slot does not fail");
+        // The Windows `None`-valued `ipc_sock` is a *handle-less* link rather than a
+        // missing object, and the reference's `ipc_sock = None` path asks
+        // `send_bytes` of it — which is why this constant names that method and not
+        // `sendall`.
+        assert_eq!(NO_SOCKET, "'NoneType' object has no attribute 'send_bytes'");
+        assert_eq!(link.send_all(b"get_property time-pos\n"), Err(NO_SOCKET.to_string()));
+        let mut buf = [0u8; 16];
+        assert_eq!(link.recv_into(&mut buf), Err(NO_SOCKET.to_string()));
+        assert!(!link.is_connected(), "there is no handle to ask about");
+        assert!(!link.is_closed(), "having no handle is not the same as being done");
+    }
+
+    #[test]
+    fn a_closed_handle_says_the_reference_sentence_and_it_has_no_win_error() {
+        let link = Link::created().expect("created");
+        link.close();
+        assert!(link.is_closed());
+        // `_check_closed` raises `OSError("handle is closed")` — built from a message,
+        // so it carries no errno and no `winerror`, and there is no prefix to print.
+        // This is the one sentence in this module that must **not** look like the
+        // others: a `[WinError 32] handle is closed` would be quoting the overlapped
+        // path this port never takes.
+        assert_eq!(closed_text(), "handle is closed");
+        assert!(
+            !closed_text().starts_with("[WinError"),
+            "the closed sentence carries no error number: {}",
+            closed_text()
+        );
+        assert_eq!(link.send_all(b"x"), Err(closed_text()));
+        let mut buf = [0u8; 16];
+        assert_eq!(link.recv_into(&mut buf), Err(closed_text()));
+    }
+
+    #[test]
+    fn the_closed_verdict_is_asked_before_the_missing_handle() {
+        // Both conditions are true of this link, and the order decides which sentence
+        // the log line gets. `stop()` closes the session *and* leaves the slot for the
+        // reader, so a reader that wakes after `stop()` must say "handle is closed" —
+        // the reason `stop()` ran — rather than the "never made" sentence that would
+        // send someone to look for a missing socket.
+        let link = Link::created().expect("created");
+        link.close();
+        assert_eq!(link.send_all(b"x"), Err(closed_text()));
+        assert_eq!(link.send_all(b"x"), Err(closed_text()), "no handle was ever made");
+    }
+
+    #[test]
+    fn every_owner_hears_the_same_close() {
+        let link = Link::created().expect("created");
+        let reader = link.clone();
+        link.close();
+        // One session, two owners: `close()` marks the shared flag rather than
+        // reaching a handle, because the other owner may still be parked in `ReadFile`.
+        assert!(reader.is_closed());
+        assert_eq!(reader.send_all(b"x"), Err(closed_text()));
+    }
+
+    #[test]
+    fn an_empty_buffer_reads_nothing_without_touching_the_pipe() {
+        let link = Link::created().expect("created");
+        // The reference's reader never asks for zero bytes, and answering it with
+        // `NO_SOCKET` would be a lie about a read that did not need a socket at all.
+        let mut buf: [u8; 0] = [];
+        assert_eq!(link.recv_into(&mut buf), Ok(0));
+    }
+
+    #[test]
+    fn errno_text_names_the_number_and_leaves_the_words_to_the_system() {
+        // Four numbers this module can be asked about: the two that decide read
+        // behaviour (`ERROR_BROKEN_PIPE` becomes `Ok(0)`, `ERROR_MORE_DATA` is the
+        // defensive arm), the one that answers a zero-byte write
+        // (`ERROR_NO_DATA`), and `2` — which is what an absent pipe server gives
+        // `CreateFileW`, spelled as a number because no name in this file claims it.
+        // The words after each prefix are `FormatMessage`'s, and this machine has
+        // never heard them, so the assertions below stop at the shape.
+        for code in [
+            ERROR_BROKEN_PIPE as i32,
+            ERROR_NO_DATA as i32,
+            ERROR_MORE_DATA as i32,
+            2,
+        ] {
+            let text = errno_text(code);
+            assert!(
+                text.starts_with(&format!("[WinError {code}] ")),
+                "expected the prefix for {code}, got {text:?}"
+            );
+            assert!(
+                text.len() > format!("[WinError {code}] ").len(),
+                "code {code} was given no words at all: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_names_end_at_a_nul_and_reject_one() {
+        let name = r"\\.\pipe\macast-link-x";
+        // The local is not called `wide`: that name is the function under test, and a
+        // binding over it turns the last assertion in this test into a type error.
+        let units = wide(name).expect("no NUL here");
+        assert_eq!(units.last(), Some(&0), "the buffer is NUL-terminated");
+        assert_eq!(
+            units.len(),
+            name.encode_utf16().count() + 1,
+            "one UTF-16 unit per character, then the terminator"
+        );
+        // The pipe name is ASCII in every shape this crate produces, so a one-to-one
+        // character count is not a lucky case here — it is the claim being checked.
+        assert_eq!(
+            units[..units.len() - 1]
+                .iter()
+                .map(|u| *u as u8 as char)
+                .collect::<String>(),
+            name
+        );
+        assert_eq!(
+            wide("a\0b").err(),
+            Some("ValueError: embedded null byte".to_string()),
+            "the rejection is CPython's `str()` for the same call"
+        );
+    }
+
+    #[test]
+    fn a_pipe_nobody_is_serving_is_an_error_with_a_win_error() {
+        // Only the shape: whether an absent server answers `ERROR_FILE_NOT_FOUND` (2)
+        // or `ERROR_PIPE_BUSY` (231) depends on the server's instance bookkeeping, and
+        // guessing a number here would put a number in the test that no machine has
+        // offered. What must hold is that a failed open is an `Err`, that it is
+        // worded by the system, and that the slot stays empty so a later command says
+        // `NO_SOCKET` rather than something about a handle.
+        let absent = pipe_name("absent");
+        let error = Link::to(&absent).err().expect("nobody is serving that name");
+        assert!(
+            error.starts_with("[WinError "),
+            "a failed open must answer with the system's words, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_connected_pipe_moves_bytes_in_both_directions_and_ends() {
+        let server = Server::open("roundtrip");
+        // [`Link::connect`] blocks until this thread is listening, and
+        // [`Server::accept`] blocks until the client arrives, so the two cannot run in
+        // some order on one thread. The client goes on a second one; if `connect`
+        // fails, `accept` is still waiting and the panicking thread reports it, which
+        // is the honest failure shape for a fixture nobody has run yet.
+        let name = server.name.clone();
+        let client = std::thread::spawn(move || Link::to(&name));
+        server.accept();
+        let link = client
+            .join()
+            .expect("the client thread did not panic")
+            .expect("opening a pipe this fixture is serving");
+
+        assert!(
+            link.is_connected(),
+            "`PeekNamedPipe` should answer for a handle that was opened"
+        );
+
+        // Server to client: one whole mpv-shaped line, read back through the same
+        // reassembly the reader uses.
+        let sent = b"{\"error\":\"success\",\"data\":2.5,\"request_id\":7}\n";
+        server.write(sent);
+        assert_eq!(
+            read_line(&link),
+            sent.to_vec(),
+            "a line mpv writes at a time must arrive as that line"
+        );
+
+        // Client to server, and bytes in more than one call must not be glued together:
+        // this is the `sendall` loop Windows does not give us for free.
+        link.send_all(b"{\"command\":[\"")
+            .expect("first half of a command");
+        link.send_all(b"set_property\",\"time-pos\",0]}\n")
+            .expect("second half of a command");
+        let mut received = Vec::new();
+        let mut buf = [0u8; 32];
+        while !received.ends_with(b"\n") {
+            let read = server.read(&mut buf);
+            if read == 0 {
+                break;
+            }
+            received.extend_from_slice(&buf[..read]);
+        }
+        assert_eq!(
+            received,
+            b"{\"command\":[\"set_property\",\"time-pos\",0]}\n".to_vec(),
+            "two writes are one stream"
+        );
+
+        // And the end of the session: mpv's side of the pipe going away is
+        // `ERROR_BROKEN_PIPE`, which this module translates into the `b''` that breaks
+        // `start_ipc`'s loop — the same `Ok(0)` that a Unix socket returns when mpv
+        // closes, which is why `stop()` ends the reader the same way on both
+        // platforms.
+        drop(server);
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            link.recv_into(&mut buf),
+            Ok(0),
+            "the closed far end is EOF, not an error the reader logs as a reconnect"
+        );
     }
 }

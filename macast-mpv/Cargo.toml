@@ -13,3 +13,27 @@ getrandom = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+# `macast-core` deliberately refuses a `windows-sys` target dependency (its
+# `net.rs` says so: a Windows interface table without it is *harmless*, so
+# "return an empty table" beats "a half-written collector nobody compiled").
+# This crate has no such fallback. mpv's JSON IPC on Windows is a **named
+# pipe**, and this toolchain's Windows standard library ships no
+# `named_pipe` module — `std::os::windows::{fs, thread}` are all that resolve,
+# `named_pipe`/`pipe`/`handle` are E0432 — and the crate may not gain a pip
+# dependency either (AGENTS.md §4.3/§4.8: the default artefact carries
+# exactly what `requirements/*.txt` + the packaging tables declare, and one
+# more wheel is one more §4.3-shaped "builds fine, won't start"). So the pipe
+# calls go to the operating system directly, which means this feature list is
+# the product's Windows surface. Read `macast-mpv/src/link.rs` before adding
+# to it: every entry below is there because a *measured* CPython call needs it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+] }

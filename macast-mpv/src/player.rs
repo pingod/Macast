@@ -17,7 +17,11 @@
 //!   by breaking out of the loop with `error_time` still above zero.
 //! - `ipc_sock` is assigned **before** `connect`, so a failed connect leaves an
 //!   unconnected socket published in the slot and the next `send_command` hears
-//!   `[Errno 57] Socket is not connected` rather than the `AttributeError`.
+//!   the operating system's own words for "not connected" (`[Errno 57]` on macOS,
+//!   `[Errno 107]` on Linux) rather than the `AttributeError`. On Windows the same
+//!   ordering leaves a `Link` whose inner handle was never made, so the next
+//!   `send_command` hears [`crate::link::NO_SOCKET`] instead — see [`crate::link`]'s
+//!   divergence ①. Either way the failure is a sentence, not a crash.
 //! - the connect phase publishes `mpvipc_start` and `renderer_start`, then sets
 //!   `ipc_once_connected`, then calls `set_observe`, then resets the buffer —
 //!   `res = b''; msgs = None` is [`crate::ipc::Feed::reconnect`], and `msg`
@@ -986,9 +990,9 @@ fn stop(shared: &Arc<Shared>) {
 
     if let Some(pid) = child_pid(shared) {
         if !already_reaped(shared) {
-            // `proc.terminate()` — CPython's is `kill(pid, SIGTERM)`, and it
-            // returns silently once the status is cached, hence the guard above.
-            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+            // `proc.terminate()` — the graceful stage. CPython's returns silently
+            // once the status is cached, which is what the guard above reproduces.
+            terminate(pid);
         }
         let deadline = Instant::now() + shared.timings.stop_wait;
         let mut timed_out = true;
@@ -1012,9 +1016,9 @@ fn stop(shared: &Arc<Shared>) {
         if timed_out {
             // `except Exception: proc.kill()` — only on the timeout, and std's
             // `kill()` would reap (and fail on a child we already reaped), so the
-            // raw signal is the faithful call. No second wait: the player thread
-            // collects the status.
-            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            // call below goes to the kernel itself. No second wait: the player
+            // thread collects the status.
+            force_kill(pid);
         }
     }
 
@@ -1035,6 +1039,13 @@ fn stop(shared: &Arc<Shared>) {
     // `try: os.remove(self.mpv_sock) except OSError: pass` — mpv never removes its
     // own socket file, so this is the only cleanup there is, and a path that was
     // never created is not an error.
+    //
+    // On Windows `socket_path` is a pipe name (`\\.\pipe\…`), not a path in the
+    // filesystem namespace, and what `os.remove` says about one is something this
+    // machine cannot tell — the reference swallowed whatever it said, and so do
+    // we, which is the whole contract here. The name is not leaked either way:
+    // mpv closes its own pipe instance when it exits, so by this row there is
+    // nothing left for us to clean up in the pipe namespace.
     let _ = std::fs::remove_file(&shared.socket_path);
 }
 
@@ -1055,7 +1066,71 @@ fn already_reaped(shared: &Arc<Shared>) -> bool {
     }
 }
 
-#[cfg(test)]
+/// `proc.terminate()` — on Unix, `kill(pid, SIGTERM)`.
+#[cfg(unix)]
+fn terminate(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+}
+
+/// `proc.kill()` — on Unix, `kill(pid, SIGKILL)`. A different signal, so a
+/// different name, and the only place the two names mean different things.
+#[cfg(unix)]
+fn force_kill(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+}
+
+/// On Windows, CPython's `Popen.terminate()` **is** `TerminateProcess`: there
+/// is no graceful stage to lose, because there never was one. The graceful
+/// stage in this port is the `["quit"]` IPC command `stop()` sends before
+/// reaching either of these two calls — which is why both names are kept even
+/// though, here, they run the same three lines.
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    terminate_process(pid);
+}
+
+/// See [`terminate`]: `Popen.kill()` is the same API call again, so this is the
+/// same helper under the name the reference uses for the timeout branch.
+#[cfg(windows)]
+fn force_kill(pid: u32) {
+    terminate_process(pid);
+}
+
+/// `OpenProcess(PROCESS_TERMINATE, FALSE, pid)` → `TerminateProcess` →
+/// `CloseHandle`.
+///
+/// A null handle returns quietly: at this row a pid that already exited, a pid
+/// we never owned, and a security denial are the same shape, and all three are
+/// the answer the caller wants — nothing left to kill. The exit code is ours to
+/// invent (`TerminateProcess` demands one; CPython never had to choose, because
+/// the only kill it has here takes no argument), and it is `1` so that anyone
+/// reading the log can tell a killed player from one that quit on its own.
+#[cfg(windows)]
+fn terminate_process(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+// Why this module is Unix-only, and not split into a shared fixture: nearly
+// every case here drives a real child process, and the machinery that fakes one
+// is a `/bin/sh` script written to disk and `exec`ed (`Temp::script`, the
+// `trap '' TERM` fixture, the `FakeMpv` UnixListener, `a_real_mpv_serves_the_
+// socket_we_ask_for`, `PermissionsExt`). None of that has a Windows shape — a
+// named pipe cannot be faked by a shell script, and there is no `sh` to run.
+// The Windows cases that *are* expressible need no child at all, so they live
+// beside this module rather than inside it.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -2053,7 +2128,12 @@ mod tests {
     #[test]
     fn a_failed_connect_leaves_an_unconnected_socket() {
         // `self.ipc_sock = socket.socket(...)` is assigned **before** `.connect()`,
-        // so the follow-up sentence is `[Errno 57]`, not the `AttributeError`.
+        // so the follow-up sentence is the "not connected" one, not the `AttributeError`.
+        // Which of the two it is depends on the kernel, so both are written out — the
+        // same rule as `link::tests::the_not_connected_sentence_is_the_measured_one`:
+        // reaching them through `libc::ENOTCONN` would let a third platform redefine
+        // what this log line says. Measured 2026-10-07 in the glibc container
+        // (`/tmp/linux-baseline-3.txt`), where this case was the one player.rs red.
         let temp = Temp::new();
         let host = Arc::new(TestHost::new());
         let mut cfg = Config::default();
@@ -2066,11 +2146,14 @@ mod tests {
         });
         assert!(!player.send_command(&[json!("get_property"), json!("volume")]));
         let errors = host.at(Level::Error);
+        let expected: &str = if cfg!(target_os = "linux") {
+            "[Errno 107] Transport endpoint is not connected"
+        } else {
+            "[Errno 57] Socket is not connected"
+        };
         assert!(
-            errors
-                .iter()
-                .any(|line| line.ends_with("[Errno 57] Socket is not connected")),
-            "errors: {:?}",
+            errors.iter().any(|line| line.ends_with(expected)),
+            "errors: {:?}, expected one ending in {expected:?}",
             errors
         );
         let pid = player.player_pid();
@@ -4037,5 +4120,349 @@ mod tests {
 
     fn shell_quote(path: &str) -> String {
         format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
+// The Windows half of the cases above: three of them, all about a player with no
+// process and no pipe server — the only shape a Windows test can be written against
+// on a machine that has never run one.
+//
+// What is deliberately **not** here, in case that reads like an oversight:
+// `terminate`, `force_kill`, and `terminate_process` are compiled and never
+// exercised. Every way to test them has to name a pid. Spawning a child to own that
+// pid contradicts the premise of this module (there is no fake mpv on Windows — no
+// `/bin/sh` script to `exec`, and a named pipe is not something a shell hands out),
+// and calling them with a *synthetic* pid would be a live
+// `OpenProcess(PROCESS_TERMINATE)` plus `TerminateProcess` against whichever process
+// happens to hold that number on the machine that runs the test: a pid-reuse kill
+// wearing a test's clothes. So those three are believed exactly as far as the type
+// checker believes them, and nothing further. Case (b) below is as close as a
+// childless test can come — it witnesses that `stop()` reaches `child_pid` and finds
+// nothing to signal, which is the branch that keeps a double-click in the menu bar
+// from ever naming a pid at all.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// Same four numbers as the Unix fixture's `quick()`. Copied rather than shared,
+    /// because that one lives inside a module this machine cannot see and a `cfg`
+    /// boundary is not something a `use` reaches across.
+    fn quick() -> Timings {
+        Timings {
+            connect: Duration::from_millis(20),
+            retry: Duration::from_millis(20),
+            stop_wait: Duration::from_millis(300),
+            poll: Duration::from_millis(10),
+        }
+    }
+
+    /// A pipe name nobody is serving. The `marker` matters: `\\.\pipe\` is one flat
+    /// namespace with no per-user and no per-directory part, so two cases sharing a
+    /// name would collide for real rather than in a fixture.
+    fn windows_config(marker: &str) -> Config {
+        Config {
+            platform: "windows".to_string(),
+            ipc_socket: format!(r"\\.\pipe\macast-mpv-{}-{}", std::process::id(), marker),
+            ..Config::default()
+        }
+    }
+
+    /// The recorder `TestHost` is, plus `Clone`: `with_timings` takes the `Host` by
+    /// value, so a Windows test with no way to hold its own copy has no way to read
+    /// back a single line the player was told. `SharedHost` in the Unix module is
+    /// the same trick wearing a different name.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Inner>);
+
+    #[derive(Default)]
+    struct Inner {
+        logs: Mutex<Vec<(Level, String)>>,
+        events: Mutex<Vec<String>>,
+        stop_calls: AtomicUsize,
+    }
+
+    impl Recorder {
+        fn lines(&self) -> Vec<String> {
+            self.0
+                .logs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(_, text)| text.clone())
+                .collect()
+        }
+
+        fn at(&self, level: Level) -> Vec<String> {
+            self.0
+                .logs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|(l, _)| *l == level)
+                .map(|(_, text)| text.clone())
+                .collect()
+        }
+
+        fn count_containing(&self, needle: &str) -> usize {
+            self.lines().iter().filter(|t| t.contains(needle)).count()
+        }
+
+        fn published(&self) -> Vec<String> {
+            self.0
+                .events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+
+        fn stop_calls(&self) -> usize {
+            self.0.stop_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Host for Recorder {
+        fn publish(&self, event: &str, _args: &[Value]) {
+            self.0
+                .events
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(event.to_string());
+        }
+
+        fn stop_service(&self) {
+            self.0.stop_calls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn transport_state(&self) -> String {
+            "STOPPED".to_string()
+        }
+
+        fn current_url(&self) -> String {
+            String::new()
+        }
+
+        fn default_volume(&self) -> Value {
+            json!(100)
+        }
+
+        /// A no-op, and that is a claim rather than an omission: none of the three
+        /// cases below reaches a reply parse, so there is no `set_state` to record.
+        /// A case that does get written will add the `Vec` and the reader with it —
+        /// recording into a list nothing ever reads would only look like coverage.
+        fn set_state(&self, _call: StateCall) {}
+
+        fn log(&self, level: Level, text: &str) {
+            self.0
+                .logs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((level, text.to_string()));
+        }
+
+        fn friendly_name(&self) -> String {
+            "Test Player".to_string()
+        }
+
+        fn player_size(&self) -> Value {
+            json!(1)
+        }
+
+        fn current_position(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// Windows' own shape of the divergence the Unix cases call "an unconnected
+    /// socket": there is no socket call that makes a handle without also reaching the
+    /// server, so a failed open leaves a `Link` whose inner handle was never made —
+    /// and [`crate::link`]'s divergence ① says what the next command then hears.
+    ///
+    /// This is the *second* of the two ways Windows reaches that sentence, and the
+    /// one no Unix test can show: the slot is **not** empty here, so the word
+    /// `NoneType` comes from inside the `Link`, not from the player's socket slot.
+    /// Read together with case (b), where the slot *is* empty, the pair is both paths
+    /// to the same line — and the log line itself cannot tell them apart, which is
+    /// the point of asserting the slot's state rather than only the sentence.
+    #[test]
+    fn a_failed_pipe_open_keeps_a_handle_less_link_and_says_no_socket() {
+        let rec = Recorder::default();
+        let player = Player::with_timings(rec.clone(), windows_config("nobody-serving"), quick());
+        let mut feed = Feed::new();
+
+        let outcome = connect_once(&player.shared, &mut feed);
+        let text = match outcome {
+            Ok(()) => panic!("a pipe nobody is serving must not answer a connect"),
+            Err(text) => text,
+        };
+        // Only the shape, never the words: which number `CreateFileW` gives for an
+        // unopened pipe is that machine's answer, and 2 / 231 / 109 are all
+        // defensible readings of what a name with no server means. What *is*
+        // portable, and what `errno_text` promises, is that CPython's Windows prefix
+        // is there and that the system left something after it.
+        assert!(
+            text.starts_with("[WinError "),
+            "expected the Windows prefix, got: {text}"
+        );
+        let words = text
+            .split_once("] ")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        assert!(
+            !words.is_empty(),
+            "a prefix with nothing after it is a sentence nobody can act on: {text}"
+        );
+
+        // The assignment happens **before** the connect, exactly as
+        // `self.ipc_sock = socket.socket(...)` does on Unix. `created()` cannot fail
+        // on Windows, so this slot is always a `Link` here — and it is a `Link` with
+        // no handle, which is what the next assertion is really about.
+        assert!(
+            guard(&player.shared.link).is_some(),
+            "a failed connect must still leave the socket object in the slot"
+        );
+
+        // Nothing past the connect ran: no publishes, no once-connected flag.
+        assert!(rec.published().is_empty(), "published: {:?}", rec.published());
+        assert!(!player.ipc_once_connected());
+
+        // A *second* attempt — the reconnect row — lands in the same place. This is
+        // divergence ① stated as a test: CPython would still hold the closed
+        // `PipeConnection` from an earlier session and say `handle is closed`, while
+        // our slot is cleared on every `created()`, so a later attempt says
+        // `NO_SOCKET`. Repeating the failure is the only way to see that this port
+        // stays on the `NO_SOCKET` row rather than drifting into the other one.
+        let again = connect_once(&player.shared, &mut feed);
+        assert!(
+            again.is_err(),
+            "the reconnect attempt found a server that is not there"
+        );
+        assert!(guard(&player.shared.link).is_some());
+
+        assert!(!player.send_command(&[json!("quit")]));
+        assert_eq!(
+            rec.at(Level::Error),
+            vec![
+                // Both from `connect_once`, which the reference logs at ERROR.
+                "mpv ipc socket start connect".to_string(),
+                "mpv ipc socket start connect".to_string(),
+                format!("sendCommand: {}", NO_SOCKET),
+            ],
+            "errors: {:?}",
+            rec.at(Level::Error)
+        );
+        // The reason there is a `sendall`/`send_bytes` in that sentence at all. On
+        // Windows the words are about `send_bytes`, because that is the method
+        // `PipeConnection` has; `NO_SOCKET` carries the platform half, so this is the
+        // row and not a coincidence of the string.
+        assert!(
+            rec.at(Level::Error)[2].contains("NoneType"),
+            "expected the AttributeError sentence, got: {:?}",
+            rec.at(Level::Error)[2]
+        );
+    }
+
+    /// `stop()` on a player that never started. The Unix module proves the same
+    /// order against a live child; this proves the childless half, where the signal
+    /// block is skipped because there is no pid to name — and it is the only case in
+    /// this file that reaches the *empty-slot* half of `NO_SOCKET`, since
+    /// `connect_once` was never called and `shared.link` is still `None`.
+    #[test]
+    fn stop_without_start_logs_the_quit_and_never_names_a_pid() {
+        let rec = Recorder::default();
+        let player = Player::with_timings(rec.clone(), windows_config("never-started"), quick());
+
+        player.stop();
+
+        assert_eq!(rec.published(), vec!["renderer_av_stop".to_string()]);
+        assert_eq!(
+            rec.at(Level::Info),
+            vec!["stoping mpv and mpv ipc".to_string()]
+        );
+        // The three lines, in the order the reference emits them: the INFO above,
+        // then the DEBUG the command write prints before it takes the lock, then the
+        // ERROR that says the write never happened.
+        assert_eq!(
+            rec.lines(),
+            vec![
+                "stoping mpv and mpv ipc".to_string(),
+                "send command: ['quit']".to_string(),
+                format!("sendCommand: {}", NO_SOCKET),
+            ],
+            "lines: {:?}",
+            rec.lines()
+        );
+        // A literal, on purpose: `logged_command` is what produced this line, so
+        // comparing the log against `logged_command(['quit'])` again would be a test
+        // that cannot hear the function it quotes change. `pyops` is portable, which
+        // is what makes quoting the text here legal rather than macOS-only.
+        assert_eq!(rec.count_containing("send command: "), 1);
+
+        // The two paths to `NO_SOCKET` told apart where the log cannot tell them:
+        // here the player's slot is empty, and case (a) above holds a `Link`.
+        assert!(
+            guard(&player.shared.link).is_none(),
+            "a player that never connected has no socket object at all"
+        );
+
+        // The witness that no signal call is reachable from here: no pid, so
+        // `stop()` does not enter the block that would name one.
+        assert_eq!(child_pid(&player.shared), None);
+        assert_eq!(player.player_pid(), None);
+        assert!(guard(&player.shared.child).is_none());
+        assert!(guard(&player.shared.mpv_thread).is_none());
+        assert!(guard(&player.shared.ipc_thread).is_none());
+
+        assert!(!player.is_running());
+        assert!(!player.ipc_running());
+        // `stop_service` belongs to the retry budget in `run_player`, not to a
+        // `stop()` — a menu click must never take the service down.
+        assert_eq!(rec.stop_calls(), 0);
+    }
+
+    /// The reference makes `/tmp/macast_mpvsocket{rand}` in `__init__`; on Windows
+    /// that is a pipe name, and the same string has to end up in both
+    /// `--input-ipc-server` and the connect call.
+    #[test]
+    fn an_unnamed_socket_becomes_a_pipe_name_and_is_written_back() {
+        const PREFIX: &str = r"\\.\pipe\macast_mpvsocket";
+        let rec = Recorder::default();
+        let player = Player::with_timings(
+            rec.clone(),
+            Config {
+                platform: "windows".to_string(),
+                ..Config::default()
+            },
+            quick(),
+        );
+
+        let path = player.socket_path();
+        assert!(
+            path.starts_with(PREFIX),
+            "expected a pipe name, got: {path}"
+        );
+        assert!(
+            !path.starts_with("/tmp/"),
+            "the windows branch handed back the Unix shape: {path}"
+        );
+
+        // The random half is the reference's `randint(0, 9999)`. The bound is asserted
+        // on the parsed value rather than on the digit count, because "at most four
+        // digits" is only the same statement while the string happens to be plain
+        // decimal — and the number, not its spelling, is what the reference bounds.
+        let random = &path[PREFIX.len()..];
+        assert!(
+            !random.is_empty() && random.chars().all(|c| c.is_ascii_digit()),
+            "unexpected suffix: {path}"
+        );
+        assert!(
+            random.parse::<u32>().is_ok_and(|n| n <= 9_999),
+            "out of the reference's range: {path}"
+        );
+
+        // Written back, which is the half that matters: the argv and the connect read
+        // one stored string, so they cannot be told about two different pipes.
+        assert_eq!(player.config().ipc_socket, path);
     }
 }

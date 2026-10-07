@@ -44,6 +44,14 @@ serde_json = { version = "1", features = ["preserve_order"] }
 libc = "0.2"
 getrandom = "0.2"
 quick-xml = "0.36"
+# Windows bindings for `macast-mpv`'s named-pipe transport. Pinned to **0.61**
+# because that is what this workspace already builds: `Cargo.lock` carries
+# 0.61.2 for ten packages on the src-tauri side (dbus, dirs-sys, mio, muda,
+# softbuffer, socket2, tokio, tray-icon, winapi-util, window-vibrancy), while
+# 0.59.0 is reachable only through `winreg` and 0.45.0 only through `jni`.
+# Naming a version nobody else asks for would add a *second* copy of the same
+# bindings to the graph for no reason.
+windows-sys = "0.61"
 # TLS for the Cast receiver: the listener is plaintext and each connection is
 # wrapped, exactly as in Python (AGENTS.md §4.1 — an ssl error on one connection
 # must never take the accept loop down).

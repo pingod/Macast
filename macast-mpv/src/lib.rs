@@ -21,17 +21,25 @@
 //!   Rust's, kept in one module so the divergences are countable instead of
 //!   scattered. (How many there are is that module's own business; restating the
 //!   number here is how it goes stale.)
-//! - [`link`] — the connected socket, and the words the reference uses when it
-//!   is not there. `#[cfg(unix)]`: Windows named pipes are not implemented, and
-//!   the reason is in that module.
+//! - [`link`] — the connected transport, and the words the reference uses when it
+//!   is not there. Both halves are written: `AF_UNIX` on Unix, a named pipe on
+//!   Windows. They are not equally *known*: the Unix sentences were measured on
+//!   this Mac and read off a Linux run, while the Windows column is a port that no
+//!   machine here has exercised. That boundary, and the four places this port
+//!   diverges from the reference because of it, is stated in that module.
 //! - [`player`] — the transport as the reference does it: spawn mpv, retry with
 //!   a three-attempt budget, connect the IPC socket, read lines under one
 //!   [`Feed`], write commands under one lock, and stop in an order that has
-//!   reasons. `#[cfg(unix)]` with it. This is the only module here that talks to
-//!   anything outside the process, and it does so through a [`player::Host`]
-//!   trait — the event bus and the settings live in `src-tauri`, which has not
-//!   been written yet, so the crate defines the seam and its tests are the only
-//!   implementations of it for now.
+//!   reasons. The two things in it that are not transport are forked by platform
+//!   rather than gated away: sending a signal (`SIGTERM`/`SIGKILL` on Unix,
+//!   `TerminateProcess` on Windows — see the module's own note on why both names
+//!   survive there), and the tests that fake a player, which need a shell script
+//!   and a real socket and therefore live in a `#[cfg(unix)]` module, with the
+//!   Windows cases that need no child written beside it. This is the only module
+//!   here that talks to anything outside the process, and it does so through a
+//!   [`player::Host`] trait — the event bus and the settings live in `src-tauri`,
+//!   which has not been written yet, so the crate defines the seam and its tests
+//!   are the only implementations of it for now.
 //!
 //! Why the split is worth a crate of its own: AGENTS.md records a family of
 //! defects that all have the same shape — *a contract that only a real player or
@@ -49,13 +57,19 @@
 //! the thread as a traceback instead of spending a retry and printing
 //! 「mpv cannot start」; and the socket is assigned **before** `connect()`, so a
 //! failed connect leaves an unconnected socket in the slot and the next command
-//! hears 「[Errno 57] Socket is not connected」 rather than an `AttributeError`.
-//! Both are recorded in that module, with what the reference therefore never
-//! does.
+//! hears the kernel's own 「not connected」 rather than an `AttributeError`. Which
+//! kernel's words those are is not a detail: macOS says `[Errno 57] Socket is not
+//! connected`, Linux says `[Errno 107] Transport endpoint is not connected`, and on
+//! Linux 57 is 「Invalid slot」 — so the number is not the sentence's name, and the
+//! test that quotes it is gated to the machine that measured it.
+//! On Windows that state cannot be left behind at all: `CreateFileW` hands back a
+//! handle or hands back nothing, so a failed connect leaves the slot empty and the
+//! next command logs [`link::NO_SOCKET`]. That asymmetry is the first divergence
+//! written out in [`link`].
+//! Both examples are recorded in the modules they belong to, with what the
+//! reference therefore never does.
 
-#[cfg(unix)]
 pub mod link;
-#[cfg(unix)]
 pub mod player;
 pub mod argv;
 pub mod command;
@@ -70,9 +84,9 @@ pub mod state;
 // between one command and the next).
 pub use argv::{build, Build, BuildError, Config};
 pub use command::{live_load_options, loadfile, Liveness};
-#[cfg(unix)]
+// `Link` is exported on every platform this crate builds on: the type is the same
+// three-state question on all of them, only the container behind it differs.
 pub use link::Link;
-#[cfg(unix)]
 pub use player::{Host, Player, StateCall, Timings};
 pub use state::{PlayerState, Signal};
 pub use ipc::{Close, Failure, Feed, Received};
