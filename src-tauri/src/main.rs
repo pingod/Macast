@@ -377,6 +377,22 @@ pub fn run() {
             status: Mutex::new("scaffold".to_string()),
         })
         .setup(|app| {
+            // A menu-bar receiver does not own a Dock tile, and this is not a
+            // stylistic choice: the Python app's bundle says `LSUIElement = true`
+            // (scripts/setup_py2app.py) and every mpv child it spawns runs with
+            // `--macos-app-activation-policy=accessory`. `tauri.conf.json` declares
+            // a normal window, so without this line every `macast-tauri` run is a
+            // *foreground* app — and a bare Mach-O under `target/debug/` has no
+            // bundle of its own, so LaunchServices attributes it to its responsible
+            // process and paints the Dock with *that* app's icon. Verification runs
+            // that start and kill this binary several times an hour therefore
+            // accumulate tiles under somebody else's badge. Accessory is the same
+            // state the shipped product is in; `set_activation_policy` (not
+            // `set_dock_visibility`) because the latter goes through tao's
+            // DockHide/DockShow path, which is the one that leaves stale tiles
+            // behind when it cycles quickly (tao 0.37.1 dock.rs).
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
             let log = Logger::named("MPV");
             // logs/MPV.log inside whatever MACAST_SETTING_DIR points at. Claiming
