@@ -114,6 +114,34 @@ pub trait StateStore: Send + Sync {
     /// The playlist, in order. `_playlist_step` reads it and indexes it.
     fn playlist(&self) -> Vec<String>;
 
+    /// Which playlist entry was last handed to the player: a 0-based index, or
+    /// `-1` when nothing has been cast yet (`self.current_index = -1`,
+    /// `macast/protocol.py:613`).
+    ///
+    /// This is **not** `CurrentTrack - 1`, which is the obvious reading and
+    /// wrong. Those two state variables have a second writer that does not know
+    /// anything about our playlist: the player reports its own track list and
+    /// the renderer answers with `CurrentTrack = 0 if tracks == 0 else 1` and
+    /// `NumberOfTracks = tracks` (`macast_renderer/mpv.py:320-324`). Both names
+    /// are in `SERVICE_STATE_OBSERVED['AVTransport']`, so both writers also
+    /// broadcast GENA, and after a load that leaves mpv with one audio track the
+    /// table reads `1`/`1` whether or not the playlist holds one URI or nine.
+    ///
+    /// The collision is **kept, not fixed**. It is upstream behaviour that real
+    /// control points already live with, and the pair is only ever *displayed*
+    /// back to them — nothing of ours reads `CurrentTrack` to decide what to
+    /// play next. Deriving the index from the table would turn a cosmetic
+    /// disagreement into a wrong cast, which is the one outcome this trait exists
+    /// to prevent. It also would have looked safe at boot, where the default
+    /// `CurrentTrack` of `0` and `current_index` of `-1` agree by accident.
+    fn playlist_index(&self) -> i64;
+
+    /// Record the index [`Self::playlist_index`] should report. Every site that
+    /// swaps the played address sets it (`SetAVTransportURI`, `cast_uri`,
+    /// `_playlist_step`); a site that forgets leaves the next `Next`/`Previous`
+    /// stepping from the previous item's position.
+    fn set_playlist_index(&self, index: i64);
+
     /// `PlaybackGuard._add_history`: dedupe by URI, keep the newest 50, never
     /// raise. A play-history write is a convenience and must not be able to
     /// fail a cast.
@@ -147,7 +175,34 @@ pub trait Renderer: Send + Sync {
 
     fn set_media_url(&self, uri: &str);
     fn set_media_title(&self, title: &str);
-    fn set_media_position(&self, seconds: f64);
+
+    /// `Seek`'s `Target`, handed on **as the sender's text**.
+    ///
+    /// This took a number before, which was a misreading of both sides of the
+    /// seam. The reference passes `data['Target'].value` — the argument's text,
+    /// possibly `None` (macast/protocol.py:1238-1244) — and the sibling crate's
+    /// player already takes `&str` and writes `["seek", <text>, "absolute"]`
+    /// (`macast-mpv/src/player.rs:533`). Measured on this machine against mpv
+    /// v0.41.0 (private instance, `/tmp/seek_arg_probe.py`), where mpv's own
+    /// time parser is the thing on the other end of that command:
+    ///
+    /// * `["seek", "00:01:23", "absolute"]` → `error running command` — the
+    ///   argument was **accepted**, and it failed only because the player was
+    ///   idle with no file loaded;
+    /// * `["seek", "83", "absolute"]` and `["seek", 83, "absolute"]` → the same
+    ///   `error running command`, so a bare number in text or as JSON is also
+    ///   mpv's to interpret;
+    /// * `["seek", "not-a-time", "absolute"]` and `["seek", null, "absolute"]`
+    ///   → `invalid parameter`, which is mpv **rejecting the argument shape**.
+    ///
+    /// So `error running command` vs `invalid parameter` is the line between
+    /// "mpv understood and had nothing to do it to" and "this is not a seek".
+    /// A `f64` here would force this crate to parse the sender's clock string
+    /// before mpv gets to, and the two parsers would then disagree in
+    /// production while agreeing in every test on this machine — the same
+    /// shape AGENTS.md §4.2 keeps meeting ("假命令行工具的输出，必须是真工具在这台机器上的
+    /// 逐字输出"). The text goes through; what it means is mpv's call.
+    fn set_media_position(&self, target: &str);
     fn set_media_volume(&self, value: Value);
     fn set_media_mute(&self, value: Value);
     fn set_media_pause(&self);

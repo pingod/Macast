@@ -627,6 +627,11 @@ fn child_optional_text<'a>(
 /// contracts, not tidiness: the description template's placeholders ride on the
 /// attribute order of whatever a plugin injects as `{service_extra}`, and lxml's
 /// `.attrib` is an ordered dict too.
+///
+/// `prefixes` is where the declarations that `attrs` drops go, and it is what
+/// [`Dom::binding`] reads. A DOM that resolves names but cannot say what a prefix
+/// was bound to is fine for our four documents and useless for the one thing that
+/// reads a *sender's* XML — see [`Dom::binding`].
 /// `Debug` is derived because two tests hold a `Result<Dom, String>` and call
 /// `expect_err()` on it, and a type that cannot be printed turns a failure into
 /// "the test does not compile" — which is a worse witness than a failure.
@@ -634,6 +639,7 @@ fn child_optional_text<'a>(
 struct Node {
     tag: String,
     attrs: Vec<(String, String)>,
+    prefixes: Vec<(String, String)>,
     text: Option<String>,
     children: Vec<usize>,
 }
@@ -678,6 +684,44 @@ impl Dom {
             .map(|(_, v)| v.as_str())
     }
 
+    /// The namespace URI declared for `prefix` **on this element** — the default
+    /// namespace is `""`, and `None` means this element does not declare it.
+    ///
+    /// This is what lxml's `nsmap` answers for a *root*, and a root is the only
+    /// place it is ever asked: `macast/protocol.py:1090` reads `meta.nsmap['dc']`
+    /// on the DIDL-Lite root, and a root has no ancestors to inherit from, so
+    /// "declared here" and "in scope here" are the same set for it. A sender that
+    /// declares `xmlns:dc` on a *descendant* instead is answered differently by
+    /// accident of language — `KeyError` in Python (which lands in the same
+    /// `except Exception` as a broken envelope ⇒ `meta_failed`) and `None` here —
+    /// so the reader must treat both as "this document never told me where `dc`
+    /// is", not as a bug in one of them.
+    ///
+    /// Two differences from `nsmap` are recorded rather than smoothed over.
+    /// `xml` is implicit in lxml and never asked of this function; and a prefix
+    /// bound to empty is `None` in lxml's nsmap and `Some("")` here, because our
+    /// parser keeps the declared string. The reader passes it to `clark`, which
+    /// yields `{}` + local — a tag no node in the arena can have, since name
+    /// resolution refuses a prefix bound to nothing — so the answer stays "nothing
+    /// matched", exactly as `find('.//{None}title')` finds nothing in Python.
+    ///
+    /// The declarations shown here are the ones **this element** made, and nothing
+    /// else: `nsmap` is a per-element view in lxml too, but its view is the whole
+    /// inherited set, so a reader that wants lxml's answer has to walk up. The
+    /// `.rev()` is the scope rule's shape kept for the arena, not a promise about
+    /// input — `Dom::parse` cannot feed it a same-element redeclaration, because
+    /// quick-xml refuses a duplicated attribute outright (measured, and one of the
+    /// tests below says so). The redeclarations that do reach the arena are an
+    /// ancestor's and a descendant's, and those live on different nodes.
+    pub fn binding(&self, node: usize, prefix: &str) -> Option<&str> {
+        self.nodes[node]
+            .prefixes
+            .iter()
+            .rev()
+            .find(|(p, _)| p == prefix)
+            .map(|(_, uri)| uri.as_str())
+    }
+
     /// lxml's `.text`: characters before the first child element, `None` if there
     /// is one. No trimming — `<defaultValue> NORMAL </defaultValue>` is a
     /// five-character string in both languages.
@@ -687,6 +731,25 @@ impl Dom {
 
     pub fn children(&self, node: usize) -> &[usize] {
         &self.nodes[node].children
+    }
+
+    /// Every element in the subtree, `node` included, in document order, with no
+    /// tag filter. `iter_subtree` answers "who is called X"; this answers "walk
+    /// everything", which is what `macast/protocol.py:143`'s `meta.iter()` does
+    /// when it looks for the first `<res>` that has a `protocolInfo` — the local
+    /// name is compared *inside* the loop, against a name it cannot know in
+    /// advance (the same element may arrive as `res`, `{urn:...}res`, or with the
+    /// namespace spelled differently by a different sender).
+    pub fn iter_all(&self, node: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut stack = vec![node];
+        while let Some(i) = stack.pop() {
+            out.push(i);
+            for c in self.nodes[i].children.iter().copied().rev() {
+                stack.push(c);
+            }
+        }
+        out
     }
 
     /// `find(tag)` — direct children only, first in document order.
@@ -873,6 +936,7 @@ fn make_node(
 ) -> Result<(usize, Vec<(String, String)>), String> {
     let raw_tag = start.name().0.to_owned();
     let mut scopes = inherited.to_vec();
+    let mut prefixes: Vec<(String, String)> = Vec::new();
 
     for attr in start.attributes() {
         let attr = attr.map_err(|e| format!("<{raw_tag}> has a malformed attribute: {e}"))?;
@@ -883,13 +947,14 @@ fn make_node(
             // silent, because none of our four documents ever produce it.
             Some(quick_xml::name::PrefixDeclaration::Default)
             | Some(quick_xml::name::PrefixDeclaration::Named("")) => {
-                scopes.push((
-                    String::new(),
-                    value_of(&attr, &raw_tag)?,
-                ));
+                let uri = value_of(&attr, &raw_tag)?;
+                scopes.push((String::new(), uri.clone()));
+                prefixes.push((String::new(), uri));
             }
             Some(quick_xml::name::PrefixDeclaration::Named(prefix)) => {
-                scopes.push((prefix.to_owned(), value_of(&attr, &raw_tag)?));
+                let uri = value_of(&attr, &raw_tag)?;
+                scopes.push((prefix.to_owned(), uri.clone()));
+                prefixes.push((prefix.to_owned(), uri));
             }
             None => {}
         }
@@ -913,6 +978,7 @@ fn make_node(
     nodes.push(Node {
         tag,
         attrs,
+        prefixes,
         text: None,
         children: Vec::new(),
     });
@@ -1619,6 +1685,164 @@ mod tests {
             .collect();
         assert_eq!(names, ["{urn:p}one", "two", "three"]);
         assert_eq!(dom.nodes[dom.root].attrs[0].1, "1");
+    }
+
+    #[test]
+    fn binding_answers_what_a_prefix_was_declared_to_on_this_element() {
+        crate::pin_test_dir();
+        // The shape `SetAVTransportURI` actually meets: a DIDL-Lite root that binds
+        // `dc`, plus a root that binds nothing because its sender put the
+        // declaration somewhere else.
+        let dom = Dom::parse(
+            r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/"><item><dc:title>首</dc:title></item></DIDL-Lite>"#,
+        )
+        .unwrap();
+        let root = dom.root();
+        assert_eq!(dom.binding(root, "dc"), Some("http://purl.org/dc/elements/1.1/"));
+        assert_eq!(
+            dom.binding(root, ""),
+            Some("urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"),
+            "the default namespace is readable under the empty prefix, as in nsmap"
+        );
+        assert_eq!(dom.binding(root, "nope"), None);
+        // The declaration is on the root, so it is in scope for the item, and yet
+        // `binding` answers `None` for the item — the difference from lxml's `nsmap`
+        // that the method doc records. It costs nothing here because the only
+        // question ever asked of a binding is asked of a root.
+        let item = dom.find(root, "{urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/}item").unwrap();
+        assert_eq!(dom.binding(item, "dc"), None);
+        // …and a sender that declares `dc` only on a descendant leaves the root's
+        // answer as `None`, which is what the reader treats as "never told", not as
+        // a parse failure.
+        let lower = Dom::parse(
+            r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>次</dc:title></item></DIDL-Lite>"#,
+        )
+        .unwrap();
+        assert_eq!(lower.binding(lower.root(), "dc"), None);
+        let lower_item = dom_tag(&lower, "item");
+        assert_eq!(
+            lower.binding(lower_item, "dc"),
+            Some("http://purl.org/dc/elements/1.1/"),
+            "the element that declares it can be asked"
+        );
+    }
+
+    #[test]
+    fn a_redeclared_prefix_is_answered_at_the_element_that_redeclared_it() {
+        crate::pin_test_dir();
+        // The reachable shape of "a later declaration wins": an inner element that
+        // re-binds a prefix an ancestor already bound. `make_node` copies the
+        // parent's scopes and then overwrites, so a name inside resolves against
+        // the *new* URI — while each element's own answer is only its own
+        // declaration, which is why the root's stays the old one.
+        let dom = Dom::parse(
+            r#"<r xmlns:p="urn:one"><m xmlns:p="urn:two"><p:leaf>3</p:leaf></m></r>"#,
+        )
+        .unwrap();
+        assert_eq!(
+            dom.tag(dom_tag(&dom, "leaf")),
+            "{urn:two}leaf",
+            "the innermost declaration is the one in scope for the name it prefixes"
+        );
+        assert_eq!(dom.binding(dom.root(), "p"), Some("urn:one"));
+        assert_eq!(
+            dom.binding(dom.find(dom.root(), "m").unwrap(), "p"),
+            Some("urn:two"),
+            "and the element that redeclared it is the one that can be asked"
+        );
+        // A same-element redeclaration never reaches this rule through the parser:
+        // quick-xml refuses a duplicated attribute before `make_node` sees a second
+        // `xmlns:p`. The wording is recorded here because the method doc used to
+        // promise the opposite, and it is the arena, not the XML, that allows it.
+        let err = Dom::parse(r#"<r xmlns:p="urn:one" xmlns:p="urn:two"></r>"#)
+            .expect_err("a duplicated attribute is refused, not last-wins");
+        assert!(err.contains("duplicated attribute"), "{err}");
+        // An explicit unbind is a declaration with an empty URI. lxml's `nsmap`
+        // shows `None` for it; here it is `Some("")` because the parser keeps what
+        // was written, and the caller that turns it into a tag gets one no node can
+        // have — name resolution refuses a prefix bound to nothing.
+        let unbind = Dom::parse(r#"<r xmlns:p="urn:one"><c xmlns:p=""></c></r>"#).unwrap();
+        let c = unbind
+            .find(unbind.root(), "c")
+            .expect("<c> is bare, the unbind has no bearing on its own name");
+        assert_eq!(unbind.binding(c, "p"), Some(""));
+        assert_eq!(
+            clark(unbind.binding(c, "p").unwrap(), "title"),
+            "{}title",
+            "an empty binding makes a tag that cannot match anything"
+        );
+        assert!(unbind.find(c, "{}title").is_none());
+    }
+
+    #[test]
+    fn iter_all_walks_the_whole_subtree_in_document_order_including_self() {
+        crate::pin_test_dir();
+        let dom = Dom::parse(r#"<r><a><b/><c><d/></c></a><e/></r>"#).unwrap();
+        let tags: Vec<&str> = dom.iter_all(dom.root()).iter().map(|i| dom.tag(*i)).collect();
+        assert_eq!(tags, ["r", "a", "b", "c", "d", "e"]);
+        // A walk that starts in the middle starts at that node, so a caller asking
+        // "is there a `res` under here" cannot miss the node it was handed.
+        let a = dom.find(dom.root(), "a").unwrap();
+        let c = dom.find(a, "c").unwrap();
+        let sub: Vec<&str> = dom.iter_all(c).iter().map(|i| dom.tag(*i)).collect();
+        assert_eq!(sub, ["c", "d"]);
+        let leaf = dom.find(a, "b").unwrap();
+        assert_eq!(dom.iter_all(leaf), vec![leaf]);
+    }
+
+    #[test]
+    fn iter_all_finds_a_res_whatever_namespace_it_arrives_wrapped_in() {
+        crate::pin_test_dir();
+        // This is why `protocol_info_from_didl` compares a *local* name inside the
+        // loop instead of asking for a tag: two senders spell the same element
+        // differently, and neither spelling is wrong.
+        let plain = Dom::parse(
+            r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"><item><res protocolInfo="http-get:*:video/mp4:*">u</res></item></DIDL-Lite>"#,
+        )
+        .unwrap();
+        let bare = Dom::parse(
+            r#"<DIDL-Lite><item><res protocolInfo="dlna-org:*:mp4">u</res></item></DIDL-Lite>"#,
+        )
+        .unwrap();
+        let named = |dom: &Dom| -> Vec<usize> {
+            dom.iter_all(dom.root())
+                .into_iter()
+                .filter(|i| local_of(dom.tag(*i)) == "res")
+                .collect()
+        };
+        assert_eq!(named(&plain).len(), 1, "the namespaced spelling is a res");
+        assert_eq!(named(&bare).len(), 1, "the bare spelling is the same res");
+        assert_eq!(
+            plain.attr(named(&plain)[0], "protocolInfo"),
+            Some("http-get:*:video/mp4:*")
+        );
+        assert_eq!(bare.attr(named(&bare)[0], "protocolInfo"), Some("dlna-org:*:mp4"));
+        // The attribute is read by its bare name on both shapes: `protocolInfo`
+        // carries no prefix in any sender's DIDL that we have seen, and a reader
+        // that asked for a namespaced attribute would answer `None` — which the
+        // caller reads as "no protocolInfo" rather than "no res".
+        assert_eq!(
+            plain.attr(named(&plain)[0], "{urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/}protocolInfo"),
+            None
+        );
+    }
+
+    /// The tag with its `{namespace}` stripped — the same question
+    /// `macast/protocol.py`'s `_local_name` answers.
+    fn local_of(tag: &str) -> &str {
+        match tag.rfind('}') {
+            Some(i) => &tag[i + 1..],
+            None => tag,
+        }
+    }
+
+    /// First node under the root whose local name is `local`, whatever namespace it
+    /// arrived in.
+    fn dom_tag(dom: &Dom, local: &str) -> usize {
+        *dom.iter_all(dom.root())
+            .iter()
+            .find(|i| local_of(dom.tag(**i)) == local)
+            .expect("no such element")
     }
 
     #[test]
