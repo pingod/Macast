@@ -3,8 +3,9 @@
 //!
 //! Python counterparts: `macast/ssdp.py` (the announcement socket),
 //! `macast/plugin.py::SSDPPlugin` (the six USNs a MediaRenderer advertises),
-//! and — in the modules that are not written yet — `macast/protocol.py`
-//! (description, SCPD, SOAP, GENA).
+//! `macast/protocol.py` (description, SCPD, and the SOAP dispatcher in
+//! `DLNAHandler.call`). GENA eventing is the one face still unwritten —
+//! [`store::Broadcast`] is the seam that is waiting for it.
 //!
 //! ## What this crate owns, and what it deliberately does not
 //!
@@ -13,9 +14,9 @@
 //! with control points we do not control and cannot debug from this machine.
 //!
 //! It does **not** own playback state or the player. Those arrive through the
-//! three traits in [`store`] — [`store::StateStore`], [`store::Renderer`],
-//! [`store::Hooks`] — implemented by `src-tauri` over its own `StateTable` and
-//! `Player`. The reason is AGENTS.md §4.8's oldest lesson: two places that each
+//! four traits in [`store`] — [`store::StateStore`], [`store::Renderer`],
+//! [`store::Hooks`], [`store::Broadcast`] — implemented by `src-tauri` over its
+//! own `StateTable` and `Player`. The reason is AGENTS.md §4.8's oldest lesson: two places that each
 //! keep a copy of the same number will eventually disagree in front of a user,
 //! and a receiver whose settings page and whose `<LastChange>` answer from
 //! different tables is a bug report that reads as "the TV is lying".
@@ -35,6 +36,11 @@
 //! * [`description`] — the one document that is *filled in* rather than built:
 //!   `macast/xml/Description.xml` with eleven names substituted, byte for byte
 //!   the same file the shipped receiver serves.
+//! * [`soap`] — the action dispatcher: read the envelope the way lxml reads it,
+//!   write the state variables the SCPD's `<argumentList>` says to write, answer
+//!   with `<u:{Action}Response>`, and refuse with a real SOAP fault. It hands
+//!   the media to [`store::Renderer`] and the changed values to
+//!   [`store::Broadcast`]; it never keeps a copy of either.
 //!
 //! ## The one thing to know before editing
 //!
@@ -49,6 +55,7 @@
 pub mod description;
 pub mod device;
 pub mod scpd;
+pub mod soap;
 pub mod sock;
 pub mod ssdp;
 pub mod store;
@@ -103,7 +110,7 @@ pub use device::{
 };
 pub use ssdp::{SsdpServer, SSDP_ADDR, SSDP_PORT};
 pub use store::{
-    is_observed, observed_for, wire, SharedHooks, SharedRenderer, SharedStore, StateStore,
-    Renderer, Hooks, AVTRANSPORT_OBSERVED, CONNECTION_MANAGER_OBSERVED, OBSERVED,
-    RENDERING_CONTROL_OBSERVED,
+    is_observed, observed_for, wire, Broadcast, SharedBroadcast, SharedHooks, SharedRenderer,
+    SharedStore, StateStore, Renderer, Hooks, AVTRANSPORT_OBSERVED, CONNECTION_MANAGER_OBSERVED,
+    OBSERVED, RENDERING_CONTROL_OBSERVED,
 };

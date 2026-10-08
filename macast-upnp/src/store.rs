@@ -109,7 +109,7 @@ pub trait StateStore: Send + Sync {
     /// Append a URI to the playlist if it is not already there, and return the
     /// pair the two state variables need: `(CurrentTrack, NumberOfTracks)` —
     /// i.e. 1-based index and total, exactly as
-    /// `macast/protocol.py:1130-1150` computes them.
+    /// `macast/protocol.py:1117-1122` computes them.
     fn playlist_push(&self, uri: &str) -> (i64, i64);
 
     /// The playlist, in order. `_playlist_step` reads it and indexes it.
@@ -117,7 +117,7 @@ pub trait StateStore: Send + Sync {
 
     /// Which playlist entry was last handed to the player: a 0-based index, or
     /// `-1` when nothing has been cast yet (`self.current_index = -1`,
-    /// `macast/protocol.py:613`).
+    /// `macast/protocol.py:607`).
     ///
     /// This is **not** `CurrentTrack - 1`, which is the obvious reading and
     /// wrong. Those two state variables have a second writer that does not know

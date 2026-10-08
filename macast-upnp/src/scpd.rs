@@ -1285,6 +1285,9 @@ mod tests {
         }
     }
 
+    /// The caps are the allowed value itself (`NOT_IMPLEMENTED`), so the name
+    /// quotes the wire rather than describing it in prose.
+    #[allow(non_snake_case)]
     #[test]
     fn an_allowed_value_list_containing_NOT_IMPLEMENTED_becomes_the_value() {
         crate::pin_test_dir();
