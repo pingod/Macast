@@ -1,5 +1,6 @@
-//! The two sides this crate is bolted to, plus the tables that say which
-//! state variables anybody is listening to.
+//! The four sides this crate is bolted to — the state table, the renderer, the
+//! app hooks, and the GENA queue — plus the tables that say which state
+//! variables anybody is listening to.
 //!
 //! Rust counterpart of `macast/protocol.py:29-45` (the `SERVICE_STATE_OBSERVED`
 //! literal), `macast/protocol.py:998-1043` (`set_state`), and the renderer
@@ -226,6 +227,31 @@ pub trait Hooks: Send + Sync {
     fn stop_service(&self);
 }
 
+/// The GENA broadcast queue, seen from the side that fills it.
+///
+/// Why this is a fourth seam instead of a method on [`StateStore`]: the trait
+/// above is explicitly forbidden from enqueueing (`write`'s doc names
+/// [`crate::eventing`] as the only place that knows the queue, the condvar and
+/// the subscriber table), and that prohibition is not decoration. A store
+/// implementation that also held a subscriber list would be two owners of one
+/// fact — the same shape as the settings-page-vs-`<LastChange>` disagreement
+/// this module's header is written around.
+///
+/// So the decision stays where Python put it: [`crate::soap`]'s `set_state`
+/// helper asks the store "did this change?", and *that call site* — the only one
+/// with both the boolean and the observed table in hand — decides whether to
+/// call this. `enqueue` is therefore contractually "only for a value that
+/// changed", and its argument is the caller's
+/// [`is_observed`], not something an implementation may re-check by ignoring the
+/// gate. An implementation that enqueued on every write would reintroduce the
+/// 92%: one user's log carried 505 duration reports, 464 of them for a number
+/// that had not moved (AGENTS.md §4.2, "状态变了才广播").
+pub trait Broadcast: Send + Sync {
+    /// A variable's value changed; the subscribers of the service that owns
+    /// this name should hear about it.
+    fn enqueue(&self, name: &str, value: &Value);
+}
+
 /// `str(value)` as CPython would produce it, for the bytes that go on the wire.
 ///
 /// Every SOAP response body, every `<LastChange val="...">`, and every
@@ -325,6 +351,58 @@ mod tests {
         assert!(observed_for("").is_empty());
         assert!(observed_for("AVTransport ").is_empty());
     }
+
+    /// The fourth seam is reachable through the same `Arc` alias as the other
+    /// three, and it hands the queue exactly what the caller passed.
+    ///
+    /// The *gate* — "only a value that changed, and only an observed name" — is
+    /// deliberately not asserted here. It lives at [`crate::soap`]'s `set_state`
+    /// call site, so re-implementing the condition in this file would make a test
+    /// that passes whatever the shipped code does; that is the shape of check AGENTS.md
+    /// §4.13 calls "不提问的检查". What this test can hold honestly is the two
+    /// halves that would break silently: `dyn Broadcast` must stay object-safe
+    /// behind [`SharedBroadcast`], and an implementation that dropped or rewrote
+    /// the value on the way to the queue would make every GENA event report a
+    /// number the control point never asked about.
+    #[test]
+    fn broadcast_carries_the_callers_value_verbatim() {
+        crate::pin_test_dir();
+
+        #[derive(Default)]
+        struct Recorder {
+            seen: std::sync::Mutex<Vec<(String, Value)>>,
+        }
+        impl Broadcast for Recorder {
+            fn enqueue(&self, name: &str, value: &Value) {
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), value.clone()));
+            }
+        }
+
+        let recorder = Arc::new(Recorder::default());
+        // The unsized coercion is the point: `src-tauri` hands the queue over as
+        // a trait object, exactly as it hands over the store and the renderer.
+        let bus: SharedBroadcast = recorder.clone();
+
+        for name in OBSERVED {
+            bus.enqueue(name, &Value::String(format!("v-{}", name)));
+        }
+        // A name this table does not observe is still carried, because the trait
+        // is the caller's mouth and not the caller's judge.
+        bus.enqueue("RelativeTimePosition", &serde_json::json!(1));
+
+        let seen = recorder.seen.lock().unwrap();
+        assert_eq!(seen.len(), OBSERVED.len() + 1);
+        for (index, name) in OBSERVED.iter().enumerate() {
+            assert_eq!(seen[index].0, *name);
+            assert_eq!(seen[index].1, Value::String(format!("v-{}", name)));
+        }
+        assert_eq!(seen[OBSERVED.len()].0, "RelativeTimePosition");
+        assert_eq!(seen[OBSERVED.len()].1, serde_json::json!(1));
+        assert!(!is_observed("RelativeTimePosition"));
+    }
 }
 
 /// Keep the trait objects' `Arc` in the same place so callers cannot hand a
@@ -332,3 +410,4 @@ mod tests {
 pub type SharedStore = Arc<dyn StateStore>;
 pub type SharedRenderer = Arc<dyn Renderer>;
 pub type SharedHooks = Arc<dyn Hooks>;
+pub type SharedBroadcast = Arc<dyn Broadcast>;
