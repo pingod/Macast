@@ -41,6 +41,14 @@
 //!   with `<u:{Action}Response>`, and refuse with a real SOAP fault. It hands
 //!   the media to [`store::Renderer`] and the changed values to
 //!   [`store::Broadcast`]; it never keeps a copy of either.
+//! * [`http`] — the TCP face those three documents are served over: the request
+//!   line and header parsing cherrypy does before it dispatches, the
+//!   pre-route refusals (411 beats 405 because it happens *before* dispatch),
+//!   the header order every witness row was measured in, and the four verbs
+//!   `DLNAHandler` implements — including the two `SUBSCRIBE`/`UNSUBSCRIBE`
+//!   shapes that are *deliberately* different from each other. It answers; the
+//!   subscriber table that [`http::Subscription`] points at is [`store`]'s and
+//!   the GENA loop that drives it is not written yet.
 //!
 //! ## The one thing to know before editing
 //!
@@ -54,6 +62,7 @@
 
 pub mod description;
 pub mod device;
+pub mod http;
 pub mod scpd;
 pub mod soap;
 pub mod sock;
