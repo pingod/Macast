@@ -13,14 +13,35 @@ repository.workspace = true
 # `app_namespaces()` below returns `[{"name": …}]` as `Value` for exactly that
 # reason — a `Vec<&str>` would be tidier and would not compile into a wire format.
 serde_json = { workspace = true }
-
-# Deliberately *dev-only* at this step: the codec in `proto.rs` is std plus
-# `serde_json`, and the only thing here that reaches for the core is the test
-# helper `pin_test_dir()`, which must redirect the settings/log directory before
-# any test writes. When the receiver itself arrives it needs `Logger::named`
-# ("Chromecast" is that log's module name, so the line goes in `[dependencies]`
-# in the same commit that writes the accept loop) — until then a dependency this
-# crate does not use would be a promise, and the root manifest says nothing here
-# is one.
-[dev-dependencies]
+# The receiver logs, and it logs under one name: `Logger::named("Chromecast")` is
+# the module the Python log line lives in, so a line written from this crate has
+# to land in the same `logs/Chromecast.log` it lands in today. This is the
+# promotion that the line below used to promise: "the line goes in
+# `[dependencies]` in the same commit that writes the accept loop".
 macast-core = { workspace = true }
+# Not a convenience import. The Cast face does **not** own playback state or the
+# transport tables: a Cast `LOAD` and a DLNA `SetAVTransportURI` are two doors
+# into one living room, so media is handed to `store::Renderer` and the state we
+# report back is read from `store::StateStore` — the same traits `macast-upnp`
+# defines and `src-tauri` implements over the one `StateTable`. Depending on the
+# traits is the whole point; depending on a second table would be the bug AGENTS.md
+# §4.8's oldest lesson says always shows up in front of a user.
+macast-upnp = { workspace = true }
+# TLS is why the root manifest has an opinion about crypto providers (see the long
+# note there): `ring` is enabled and `aws-lc-rs` is not, and exactly one provider
+# being enabled is what lets `ServerConfig::builder()` be written without naming
+# one. `tls12` is on because a Chromecast sender offers TLS 1.2.
+rustls = { workspace = true }
+# The cert is written to disk as PEM and read back through here, in that order,
+# because that is the shape Python has (`_ensure_self_signed_cert()` writes
+# `macast.crt`/`macast.key`, then `ssl.load_cert_chain(certfile, keyfile)` opens
+# them again), and because the reuse path — a machine that already has a
+# certificate from a previous run, or from the other channel — then goes through
+# the same reader as the fresh one instead of a second, less-tested path.
+rustls-pemfile = { workspace = true }
+# Generating the pair in-process is the difference between "the Cast receiver
+# comes up on a clean machine" and "the Cast receiver needs openssl on PATH".
+# See the note in `cert.rs`: on a fresh install the Python one had neither, and
+# the log line that explained the failure named the wrong suspect (AGENTS.md
+# §4.2, "写文件的代码要自己把目录建出来").
+rcgen = { workspace = true }

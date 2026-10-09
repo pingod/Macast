@@ -65,7 +65,21 @@ windows-sys = "0.61"
 # TLS for the Cast receiver: the listener is plaintext and each connection is
 # wrapped, exactly as in Python (AGENTS.md §4.1 — an ssl error on one connection
 # must never take the accept loop down).
-rustls = "0.23"
+#
+# `default-features = false` is the load-bearing half of this line. rustls 0.23's
+# default crypto provider is `aws-lc-rs`, which builds a C library and therefore
+# needs CMake plus a C toolchain on **every** machine that compiles Macast,
+# including a plain `cargo test` on a laptop. `ring` compiles here in 5.49 s and
+# is the provider `rcgen` already uses by default, so the two agree and no second
+# provider enters the graph. `tls12` stays on: a Chromecast sender offers
+# TLS 1.2, and dropping it would make the receiver undiscoverable-broken rather
+# than merely slower. Nothing else in `Cargo.lock` asked for rustls at all, so
+# this choice is not a feature *unification* — it is the only opinion in the graph.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
 rustls-pemfile = "2"
 rcgen = "0.13"
 

@@ -399,11 +399,14 @@ mod tests {
     /// Every `#[test]` in this crate must call `crate::pin_test_dir()` as its
     /// **first statement** — see the doc there for why `cfg(test)` in
     /// `macast-core` cannot protect a dependent crate's tests. The floor below
-    /// is this crate's own measured `#[test]` count; a test added without the
-    /// pin makes the audit ask for more than it finds, and a test deleted
-    /// silently makes this floor stale, which is the one thing the number is
-    /// here to catch.
-    const TESTS_IN_THIS_CRATE: usize = 18;
+    /// is this crate's own measured `#[test]` count — read from
+    /// `cargo test -p macast-cast --lib -- --list`, not from arithmetic on a
+    /// diff; a test added without the pin makes the audit ask for more than it
+    /// finds, and a test deleted silently makes this floor stale, which is the
+    /// one thing the number is here to catch. **A new module with tests moves
+    /// this number**, and 30 is the count with [`crate::cert`] in it plus the
+    /// test that asks whether a missing directory actually gets made.
+    const TESTS_IN_THIS_CRATE: usize = 30;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

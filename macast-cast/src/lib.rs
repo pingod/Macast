@@ -4,7 +4,8 @@
 //! Python counterpart: `macast/protocol_cast.py`. The reference is one file of
 //! 1298 lines that grew every lesson in AGENTS.md §4.1 and §4.9 into it, so this
 //! crate is ported in layers rather than all at once: [`proto`] is the envelope
-//! and the namespaces, then TLS/8009, then the setup faces on 8008 and 8443,
+//! and the namespaces, [`cert`] is the pair the TLS face runs on, then the
+//! channel on 8009, then the setup faces on 8008 and 8443,
 //! then the mDNS announcement.
 //!
 //! ## What this crate owns, and what it deliberately does not
@@ -35,7 +36,12 @@
 //!   `_field_bytes`, `_parse_fields`, `parse_cast_message`), the five
 //!   namespaces, `app_namespaces()`, the device-auth answers, and the
 //!   big-endian four-byte frame header.
-//! * *(next)* `cert` — the self-signed pair, generated in-process.
+//! * [`cert`] — the self-signed pair the TLS face runs on, generated
+//!   **in-process** (`Service._ensure_self_signed_cert()` plus
+//!   `ChromecastProtocol._ensure_cert()`): the `macast_cast.*` slot is adopted
+//!   when a pair already sits in it, the shared `macast.*` pair is what this
+//!   module writes, and neither is ever overwritten — a broken foreign pair is
+//!   reported by name and left in place.
 //! * *(next)* `channel` — TLS on 8009, the namespace-only dispatch, the sender
 //!   and session ledgers, volume, `LAUNCH_ERROR`, and the playback watcher.
 //! * *(next)* `setup` — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a
@@ -53,8 +59,13 @@
 //! strings is the single mistake that makes a device discoverable and
 //! uncastable (§4.1), and it produces no error on our side at all.
 
+pub mod cert;
 pub mod proto;
 
+pub use cert::{
+    ensure_in_setting_dir, ensure_pair, CertError, Pair, Source, CAST_CERT_FILE, CAST_KEY_FILE,
+    COMMON_NAME, SHARED_CERT_FILE, SHARED_KEY_FILE, SUBJECT_ALTERNATIVE_NAMES,
+};
 pub use proto::{
     app_namespaces, encode_auth_challenge, encode_auth_response, encode_cast_message, field_bytes,
     field_varint, frame_length, parse_cast_message, parse_fields, wrap_frame, CastMessage, Field,
