@@ -25,6 +25,7 @@ members = [
     "macast-core",
     "macast-mpv",
     "macast-upnp",
+    "macast-cast",
     "src-tauri",
 ]
 resolver = "2"

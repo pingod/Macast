@@ -1,0 +1,26 @@
+[package]
+name = "macast-cast"
+description = "Chromecast Cast v2 receiver for the Rust Macast receiver: protobuf envelope and the Cast namespaces, then TLS/8009, setup HTTP/8008 and HTTPS/8443"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The payload of every Cast message is a JSON document, and the two status faces
+# are built as JSON objects whose **key order is the answer a sender reads**.
+# `preserve_order` is what keeps that order (see the root manifest's note), and
+# `app_namespaces()` below returns `[{"name": …}]` as `Value` for exactly that
+# reason — a `Vec<&str>` would be tidier and would not compile into a wire format.
+serde_json = { workspace = true }
+
+# Deliberately *dev-only* at this step: the codec in `proto.rs` is std plus
+# `serde_json`, and the only thing here that reaches for the core is the test
+# helper `pin_test_dir()`, which must redirect the settings/log directory before
+# any test writes. When the receiver itself arrives it needs `Logger::named`
+# ("Chromecast" is that log's module name, so the line goes in `[dependencies]`
+# in the same commit that writes the accept loop) — until then a dependency this
+# crate does not use would be a promise, and the root manifest says nothing here
+# is one.
+[dev-dependencies]
+macast-core = { workspace = true }
