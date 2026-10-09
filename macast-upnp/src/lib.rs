@@ -4,8 +4,8 @@
 //! Python counterparts: `macast/ssdp.py` (the announcement socket),
 //! `macast/plugin.py::SSDPPlugin` (the six USNs a MediaRenderer advertises),
 //! `macast/protocol.py` (description, SCPD, and the SOAP dispatcher in
-//! `DLNAHandler.call`). GENA eventing is the one face still unwritten —
-//! [`store::Broadcast`] is the seam that is waiting for it.
+//! `DLNAHandler.call`). GENA eventing is [`eventing`]: the subscriber table,
+//! the init greeting, and the 250 ms fold that turns changes into NOTIFY.
 //!
 //! ## What this crate owns, and what it deliberately does not
 //!
@@ -46,9 +46,14 @@
 //!   pre-route refusals (411 beats 405 because it happens *before* dispatch),
 //!   the header order every witness row was measured in, and the four verbs
 //!   `DLNAHandler` implements — including the two `SUBSCRIBE`/`UNSUBSCRIBE`
-//!   shapes that are *deliberately* different from each other. It answers; the
-//!   subscriber table that [`http::Subscription`] points at is [`store`]'s and
-//!   the GENA loop that drives it is not written yet.
+//!   shapes that are *deliberately* different from each other. It answers.
+//! * [`eventing`] — the GENA loop [`http::Subscription`] hands subscribers to:
+//!   one table of SIDs, an init event that greets a fresh subscriber with the
+//!   values [`store`] holds at that moment, and the 250 ms fold that turns the
+//!   changes [`soap`] enqueued when it wrote the store into NOTIFY requests.
+//!   Routing is per subscriber — only the service whose [`store::observed_for`]
+//!   row names a variable hears about it — and [`store::Broadcast`] itself
+//!   gates nothing: [`soap`] already filtered what enters the queue.
 //!
 //! ## The one thing to know before editing
 //!
@@ -62,6 +67,7 @@
 
 pub mod description;
 pub mod device;
+pub mod eventing;
 pub mod http;
 pub mod scpd;
 pub mod soap;
@@ -117,6 +123,7 @@ pub use device::{
     SsdpPlugin, AVTRANSPORT_URN, CONNECTION_MANAGER_URN, RENDERING_CONTROL_URN, ROOTDEVICE,
     UPNP_DEVICE,
 };
+pub use eventing::Eventing;
 pub use ssdp::{SsdpServer, SSDP_ADDR, SSDP_PORT};
 pub use store::{
     is_observed, observed_for, wire, Broadcast, SharedBroadcast, SharedHooks, SharedRenderer,
