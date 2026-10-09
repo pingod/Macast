@@ -536,6 +536,14 @@ pub fn run() {
             let face = Face::new(
                 Arc::new(soap) as Arc<dyn Control>,
                 eventing.clone() as Arc<dyn Subscription>,
+                // The GET web-cast entry's hand on the player: another face on the
+                // same host + player pair, for the same reason `ShellRenderer` is —
+                // `cast_uri` has one implementation and two callers (the page's
+                // command and a `curl` on `/api?query=cast`).
+                Arc::new(host::ShellManagement {
+                    host: host.clone(),
+                    player: player.clone(),
+                }) as Arc<dyn macast_upnp::http::Management>,
                 setting.clone(),
             )?;
             let http = HttpServer::new(Arc::new(face));

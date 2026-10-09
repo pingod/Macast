@@ -813,6 +813,48 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
     }))
 }
 
+/// The [`macast_upnp::http::Management`] seam: the GET web-cast entry's hand on
+/// the player.
+///
+/// A newtype for the same reason [`ShellRenderer`] is one — the wording belongs
+/// to the HTTP face, not to [`Player`]. The trait answers with **sentences** and
+/// [`cast_uri`] answers with a JSON object, so this is the one place that turns
+/// "what happened" into the words a `curl` caller reads.
+///
+/// It runs **on an HTTP worker thread**, which is not a new situation for this
+/// shell: every [`ShellRenderer`] method the SOAP layer calls arrives on a worker
+/// thread too, and `cast_uri` touches only the state table and the player — no
+/// AppKit, no `AppHandle`. The reference's GET entry is the same shape (it is a
+/// CherryPy handler calling the same sequence), so no marshalling is added here.
+///
+/// `title` is handed over verbatim, including `None`: [`cast_uri`] falls back to
+/// [`title_for_uri`] when the caller said nothing, which is §4.2's
+/// 「改播放器的地址，就必须改播放器的名字」 rather than a default this struct gets
+/// to invent.
+pub struct ShellManagement {
+    pub host: TauriHost,
+    pub player: Player,
+}
+
+impl macast_upnp::http::Management for ShellManagement {
+    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String> {
+        let sent = cast_uri(
+            &self.host,
+            &self.player,
+            url,
+            title.unwrap_or(""),
+        )?;
+        let read = |key: &str| -> &str { sent.get(key).and_then(Value::as_str).unwrap_or("") };
+        Ok(format!(
+            "已投屏：{}（名字：{}，第 {}/{} 首）",
+            read("uri"),
+            read("title"),
+            sent["track"],
+            sent["total"],
+        ))
+    }
+}
+
 /// `media_resolve.title_for_uri` (`macast/media_resolve.py:1299-1317`), ported to
 /// the extent this shell needs it: strip a `#` fragment and a `?` query, drop the
 /// scheme and netloc, take the last path segment, percent-decode it, trim, cut one

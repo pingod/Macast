@@ -143,6 +143,30 @@ pub fn api_token(setting: &crate::setting::Setting) -> String {
     fresh
 }
 
+/// `hmac.compare_digest(a, b)` — compare two secrets without letting the answer
+/// come back early.
+///
+/// Two things are folded into the same accumulator: the length difference and
+/// every byte difference, and the pass runs to the **longer** of the two lengths
+/// so a short candidate costs less than a long one. Python's `token_hex` makes
+/// every one of our secrets fixed-width, so the length branch is not the
+/// interesting one; what matters is that a wrong first byte and a wrong last
+/// byte take exactly the same path through this function. Used for the
+/// management token read off a GET query string and, from
+/// [`crate::setting`]'s point of view, for anything else that is a secret
+/// rather than an identifier.
+pub fn secret_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let longest = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..longest {
+        let x = a.get(i).copied().unwrap_or(0) as usize;
+        let y = b.get(i).copied().unwrap_or(0) as usize;
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +215,29 @@ mod tests {
         for _ in 0..200 {
             assert!(seen.insert(token_hex(16)));
         }
+    }
+
+    #[test]
+    fn secret_eq_agrees_with_equality() {
+        // Every case where the two values are the same answers true, and every
+        // case where they are not answers false — including the two shapes a
+        // naive byte loop gets wrong: a length-only difference, and a
+        // difference in the *last* byte.
+        assert!(secret_eq("", ""));
+        assert!(secret_eq("a", "a"));
+        assert!(secret_eq("0123456789", "0123456789"));
+        let good = token_hex(16);
+        assert!(secret_eq(&good, &good));
+        let mut first = good.clone();
+        first.replace_range(0..1, if &good[0..1] == "0" { "1" } else { "0" });
+        assert!(!secret_eq(&good, &first), "wrong leading byte");
+        let last_byte = good.len() - 1;
+        let mut tail = good.clone();
+        tail.replace_range(last_byte.., if &good[last_byte..] == "0" { "1" } else { "0" });
+        assert!(!secret_eq(&good, &tail), "wrong trailing byte");
+        assert!(!secret_eq(&good, &good[..31]));
+        assert!(!secret_eq(&good[..31], &good));
+        assert!(!secret_eq("", "0"));
     }
 
     /// A scratch settings file, because `api_token` *persists* and the user's

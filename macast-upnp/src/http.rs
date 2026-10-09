@@ -46,7 +46,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
@@ -54,8 +54,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use macast_core::logging::Logger;
 use macast_core::paths;
-use macast_core::setting::{self, Setting};
+use macast_core::setting::{self, Key, Setting};
 use macast_core::timefmt;
+use macast_core::token;
 
 /// The refusal pages. CherryPy's own four bodies (1983, 1274, 1737, 1739 bytes
 /// in the witness set) are a traceback-shaped HTML with a `<pre>` of the
@@ -137,6 +138,67 @@ const POST_HELPER_PARAMS: [&str; 13] = [
 /// field name the dispatcher does not put in `kwargs`, so it is excluded from
 /// the "unrecognised fields" answer the same way the helpers are.
 const FILE_ROUTE_PARAMS: [&str; 1] = ["plugin-file"];
+
+/// Which `query=` values on `GET /api` are management actions, and what each
+/// one demands first.
+///
+/// The gate is a **string parsed at check time**, not an enum written in the
+/// table (AGENTS.md §4.7c: "门名不认识就拒绝（fail closed）"). A typo in our own
+/// table must therefore be a runtime refusal that a test can ask about, not a
+/// compile error that only proves the compiler was awake.
+struct GetRoute {
+    query: &'static str,
+    gate: &'static str,
+    action: Action,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    /// `query=cast&url=<绝对地址>`: hand a URL to the renderer.
+    Cast,
+    /// `query=cast-info`: the entry URL, **including the token**.
+    CastInfo,
+}
+
+/// The two answers this port implements out of the shipped management API's
+/// fifteen GET queries. Each is a **cumulative** check, not a choice: see
+/// [`Face::gate_refusal`].
+const GET_MANAGEMENT_ROUTES: [GetRoute; 2] = [
+    GetRoute {
+        query: "cast",
+        // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
+        // can issue `GET http://127.0.0.1:58880/api?query=cast&...` with an
+        // `<img>` or `fetch`, so trusting "this came from this machine" would
+        // let a random site start the player (AGENTS.md §4.7).
+        gate: "token",
+        action: Action::Cast,
+    },
+    GetRoute {
+        query: "cast-info",
+        // `GATE_MANAGEMENT`: loopback / HTTPS / token. This is the only place
+        // the token is *revealed*, and that gating is the whole defence — if it
+        // ever answers a LAN caller, the secret that guards `query=cast` is
+        // gone (AGENTS.md §4.7).
+        gate: "management",
+        action: Action::CastInfo,
+    },
+];
+
+/// How far an unrecognised `query=` value is echoed back to the caller. Ours.
+/// The head is already capped by [`MAX_HEAD_BYTES`], so this only keeps the
+/// log line and the JSON body a readable length.
+const QUERY_ECHO_MAX: usize = 120;
+
+/// The two refusals, shared by every route so one route cannot write its own
+/// apology (AGENTS.md §4.7c: "一条路由不能自己写拒绝文案，也不能不写"). Both name
+/// the way through, because a refusal that reads like a wrong password sends
+/// the user to the wrong settings field.
+const MANAGEMENT_REFUSAL: &str =
+    "管理接口只回答本机、HTTPS 或带管理令牌的请求。令牌在设置页「状态 → 网页投屏入口」，\
+     也可以在 Macast 所在的这台机器上访问。";
+const TOKEN_REFUSAL: &str =
+    "这个查询必须带 token=<管理令牌>，本机也不例外：任何网页都能向 127.0.0.1 发一个 GET。\
+     令牌在设置页「状态 → 网页投屏入口」。";
 
 /// The `GET /` answer.
 ///
@@ -335,6 +397,18 @@ pub struct Request {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub verb: Verb,
+    /// The peer address of the socket this request arrived on, as `ip.to_string()`
+    /// — **without** the port, and `""` when the socket could not say.
+    ///
+    /// This is the management gate's only piece of evidence about who is asking,
+    /// and it is a weak one by design: it is the *TCP peer*, which a proxy would
+    /// turn into the proxy's own address. There is no `X-Forwarded-For` reading
+    /// here, deliberately — trusting a header the client writes is the mistake
+    /// the gate exists to avoid.
+    ///
+    /// Empty means "unknown", and unknown is **not** loopback: a gate must fail
+    /// closed on a socket that cannot answer.
+    pub remote_ip: String,
 }
 
 impl Request {
@@ -365,6 +439,10 @@ impl Request {
             headers: head.headers,
             body,
             verb,
+            // A `Request` built from bytes alone has no socket to ask, so it
+            // carries "unknown" — which the gate reads as *not* loopback.
+            // `serve_stream` overwrites this with the real peer.
+            remote_ip: String::new(),
         }
     }
 
@@ -541,18 +619,21 @@ impl Response {
 
     /// Reason phrases come from two places, and the split matters for honesty.
     /// The five marked *measured* below are the exact strings in the witness
-    /// set's status lines. The three marked *ours* never appear there — 400
+    /// set's status lines. The four marked *ours* never appear there — 400
     /// because no head in the set was malformed, 405 because every request in
     /// the set used a known verb, 413 because nothing in the set was over our
-    /// (invented) cap — so those phrases are this port's choice, not a copy of
-    /// cherrypy's. An unknown status answers the empty string, which is a
-    /// broken status line; that is deliberate: a status we do not model should
-    /// fail loudly rather than invent a second label.
+    /// (invented) cap, 403 because the set's refusals are cherrypy's own
+    /// traceback pages, which this port does not reproduce — so those phrases
+    /// are this port's choice, not a copy of cherrypy's. An unknown status
+    /// answers the empty string, which is a broken status line; that is
+    /// deliberate: a status we do not model should fail loudly rather than
+    /// invent a second label.
     pub fn reason(status: u16) -> &'static str {
         match status {
             200 => "OK",                                // measured
             303 => "See Other",                         // measured
             400 => "Bad Request",                       // ours
+            403 => "Forbidden",                         // ours
             405 => "Method Not Allowed",                // ours
             411 => "Length Required",                   // measured
             412 => "Precondition Failed",               // measured
@@ -622,6 +703,43 @@ pub trait Subscription: Send + Sync {
     fn remove(&self, sid: &str) -> u16;
 }
 
+/// The management seam: the two things `GET /api?query=…` can ask of the
+/// player, and the only way this port reaches anything that *does* something.
+///
+/// It returns **sentences**, not a `serde_json::Value`, because the JSON shape
+/// is this file's business (the two-key `{code, message}` document, the 4-space
+/// indent, the `ensure_ascii` quoting) while the *content* of the sentence
+/// belongs to whoever drives the player. An `Err` is a refusal the caller
+/// should read, so it is a message too — never a status code.
+pub trait Management: Send + Sync {
+    /// Cast `url`, named `title` when the sender gave one (`cast-title`).
+    /// `Ok` is the sentence for `code: 0`, `Err` the sentence for `code: 1`.
+    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String>;
+}
+
+/// One name in [`GET_MANAGEMENT_ROUTES`]'s `gate` column, read at check time.
+enum Gate {
+    /// Loopback, or an HTTPS connection, or a request carrying the token.
+    Management,
+    /// The management check **and** the token.
+    Token,
+}
+
+impl Gate {
+    /// `None` for a name this port does not know — and `None` means refuse, not
+    /// "let through" (AGENTS.md §4.7c). A wrong string in our own table costs a
+    /// working endpoint, which is recoverable and loud; a right-by-accident
+    /// string on a fail-open reading is the shape of the bug that section was
+    /// written to prevent.
+    fn parse(name: &str) -> Option<Gate> {
+        match name {
+            "management" => Some(Gate::Management),
+            "token" => Some(Gate::Token),
+            _ => None,
+        }
+    }
+}
+
 /// How the SCPD route asks "when was this file last changed".
 ///
 /// Injectable because the answer is a property of the **machine**, not of the
@@ -676,6 +794,10 @@ pub struct Face {
     log: Arc<Logger>,
     control: Arc<dyn Control>,
     subscription: Arc<dyn Subscription>,
+    /// Drives the player for `GET /api?query=cast`. `Arc` because every worker
+    /// thread reads it, and because the shell behind it outlives the face's
+    /// handler calls.
+    management: Arc<dyn Management>,
     setting: Arc<Setting>,
     /// Built **once**, at startup. See [`Face::new`] for what a failure here
     /// means.
@@ -695,6 +817,7 @@ impl Face {
     pub fn new(
         control: Arc<dyn Control>,
         subscription: Arc<dyn Subscription>,
+        management: Arc<dyn Management>,
         setting: Arc<Setting>,
     ) -> Result<Face, String> {
         let description = crate::description::build_for(&setting)?;
@@ -705,6 +828,7 @@ impl Face {
             log: Logger::named("Protocol"),
             control,
             subscription,
+            management,
             setting,
             description,
             mtime: Arc::new(disk_mtime),
@@ -763,9 +887,182 @@ impl Face {
                 Response::new(200, crate::soap::SOAP_CONTENT_TYPE, self.description.clone())
             }
             Some("dlna") => self.scpd(req),
+            // The management face. `DLNAHandler.GET` binds `key = ''` as its
+            // first route parameter, so `/api` and `/api/` are the same call and
+            // `/api/anything-else` is a *different* one: it lands in the
+            // `elif key` chain, is not a known query route, and redirects — which
+            // is what the `_ =>` arm below already does.
+            Some("api") => self.api(req),
             None => Response::new(200, HTML_CONTENT_TYPE, ROOT_PAGE.as_bytes().to_vec()),
             _ => self.redirect(req),
         }
+    }
+
+    /// `GET /api?query=…` — the management face's two answers.
+    ///
+    /// The shape is the shipped one: the query name is looked up in
+    /// [`GET_MANAGEMENT_ROUTES`], an unknown name is **read back** rather than
+    /// 404'd, and a known name pays its gate *before* anything reaches the
+    /// player. Two ordering calls are **ours**, because this port has no POST
+    /// management face to copy:
+    ///
+    /// * No `query` (absent, or there and empty) is a 200/`code: 1` that names
+    ///   the missing parameter. In Python `GET()` binds `key=''`, the whole
+    ///   `elif` chain falls through to the base handler, and that handler's
+    ///   answer is the same "没有可执行的操作" document [`Face::fall_through`]
+    ///   writes — so this is the shipped answer plus the name of what was absent.
+    /// * An unknown `query` is answered **before** the gate. Hiding which names
+    ///   we know is worth less to a caller than fixing their typo, and the value
+    ///   comes back inside a JSON string, not inside markup
+    ///   ([`unknown_query`] says why that is safe).
+    fn api(&self, req: &Request) -> Response {
+        // An extra path segment is **a different call**. The shipped `GET` binds
+        // its first route parameter as `key`, so `/api/extra` arrives as
+        // `key='extra'`, is not a name the chain knows, and ends in the redirect
+        // — while this port takes the route name from `query=` and would
+        // otherwise answer it as if the extras were never typed.
+        if req.segments.len() > 1 {
+            return self.redirect(req);
+        }
+        let query = query_value(req, "query").unwrap_or_default();
+        if query.is_empty() {
+            return json_answer(200, 1, "没有可执行的操作：缺少 query 参数。");
+        }
+        let Some(route) = GET_MANAGEMENT_ROUTES
+            .iter()
+            .find(|route| route.query == query)
+        else {
+            return unknown_query(&query);
+        };
+        if let Some(refusal) = self.gate_refusal(route.gate, req) {
+            return refusal;
+        }
+        match route.action {
+            Action::Cast => self.cast_entry(req),
+            Action::CastInfo => self.cast_info(),
+        }
+    }
+
+    /// The gate that [`GET_MANAGEMENT_ROUTES`] names, resolved and paid.
+    ///
+    /// `None` means "answer it". The two checks are **cumulative and ordered**:
+    /// the token gate first pays the management check, so a LAN caller who typed
+    /// a token hears the *management* sentence rather than the token one. That is
+    /// what the shipped `_gate_refusal` does (AGENTS.md §4.7c) and what a reader
+    /// needs — "this answers 本机 / HTTPS / 带令牌" is the right correction for
+    /// "I did put a token in and it still refused".
+    ///
+    /// The order therefore chooses the **message**, never the verdict: swapping
+    /// the two branches refuses exactly the same set of requests.
+    fn gate_refusal(&self, gate: &str, req: &Request) -> Option<Response> {
+        let Some(parsed) = Gate::parse(gate) else {
+            // Fail closed. The caller gets the generic management sentence — a
+            // typo in our own table is not information to hand out — while the
+            // log gets the name, because the only person who can fix it is the
+            // one reading this file.
+            self.log.error(&format!(
+                "GET route gate {gate:?} is not a gate this port knows; refusing the request"
+            ));
+            return Some(json_answer(403, 1, MANAGEMENT_REFUSAL));
+        };
+        let token_ok = self.token_ok(req);
+        if !is_loopback(&req.remote_ip) && !token_ok {
+            return Some(json_answer(403, 1, MANAGEMENT_REFUSAL));
+        }
+        if matches!(parsed, Gate::Token) && !token_ok {
+            return Some(json_answer(403, 1, TOKEN_REFUSAL));
+        }
+        None
+    }
+
+    /// The token compared against the stored secret, in constant time.
+    ///
+    /// Reads with [`Setting::peek`], **never** [`macast_core::token::api_token`]:
+    /// that one generates *and saves* when there is no token, and a gate is asked
+    /// on every refused request. Two consequences, both wanted:
+    ///
+    /// * A machine with no token yet lets nobody through this gate. The secret is
+    ///   created by the single route that has to reveal it — `query=cast-info`,
+    ///   which the local settings page calls — and that is the shipped
+    ///   「首次使用时生成」, in the only place where generating it is also useful.
+    /// * A stored `Api_Token` that is not a non-empty string counts as absent: an
+    ///   empty secret must not authenticate anyone. Same reading as the generator.
+    fn token_ok(&self, req: &Request) -> bool {
+        let given = query_value(req, "token").unwrap_or_default();
+        if given.is_empty() {
+            return false;
+        }
+        let stored = self
+            .setting
+            .peek(Key::ApiToken)
+            .and_then(|value| value.as_str().map(String::from));
+        match stored {
+            Some(secret) => token::secret_eq(&given, &secret),
+            None => false,
+        }
+    }
+
+    /// `query=cast&url=<绝对地址>`. A shortcut, a bookmark, or `curl` — anything
+    /// that can open a URL but cannot speak DLNA (AGENTS.md §4.7).
+    ///
+    /// The URL is checked for **shape**, not scheme: a non-empty scheme and a
+    /// non-empty authority ([`is_absolute_url`]). A whitelist of `http`/`https`
+    /// would be this port inventing a rule the reference does not have, and would
+    /// refuse the rtsp and ftp addresses a renderer legitimately accepts. The
+    /// refused shapes answer **without** touching the shell — a bad URL must not
+    /// leave a half-change behind in the player's state.
+    ///
+    /// `cast-title` is passed through when present and non-empty; the shell owns
+    /// what it does with a name (AGENTS.md §4.2: change the address, change the
+    /// name), so an empty one here means "no opinion", not "call it nothing".
+    fn cast_entry(&self, req: &Request) -> Response {
+        let url = query_value(req, "url").unwrap_or_default();
+        if url.trim().is_empty() {
+            return json_answer(200, 1, "缺少参数 url：投屏入口需要一个完整的媒体地址。");
+        }
+        if !is_absolute_url(&url) {
+            return json_answer(
+                200,
+                1,
+                &format!(
+                    "{} 不是一个完整的媒体地址：需要带协议和主机的绝对地址，例如 http://主机/路径。",
+                    truncate_chars(url.trim(), QUERY_ECHO_MAX)
+                ),
+            );
+        }
+        let title = query_value(req, "cast-title")
+            .filter(|value| !value.is_empty());
+        match self.management.cast_url(&url, title.as_deref()) {
+            Ok(message) => json_answer(200, 0, &message),
+            Err(why) => json_answer(200, 1, &why),
+        }
+    }
+
+    /// `query=cast-info` — the entry URL, **with the token in it**.
+    ///
+    /// The only route allowed to call [`macast_core::token::api_token`], and the
+    /// only place the secret is ever revealed; that is why its gate is the
+    /// management one and why a LAN caller must not get here (AGENTS.md §4.7).
+    ///
+    /// **Deviation, ours**: the shipped answer is a dict of fields
+    /// (`{'code': 0, 'data': {...}}`-shaped), and this port's JSON writer emits
+    /// the measured two-key `{code, message}` document, so the entry template is
+    /// the **message**. Nothing on our side parses this body — the settings page
+    /// is a Tauri window that asks the shell directly — and a third-party sender
+    /// that did parse it would be reading a field name this branch never
+    /// measured. Inventing a `data` key to look compatible would be the worse
+    /// error: an unmeasured shape that reads like a witness.
+    fn cast_info(&self) -> Response {
+        let token = token::api_token(&self.setting);
+        json_answer(
+            200,
+            0,
+            &format!(
+                "http://127.0.0.1:{}/api?query=cast&url=<媒体地址>&token={}",
+                self.port(),
+                token
+            ),
+        )
     }
 
     /// `/dlna/<Service>.xml` — the SCPD documents.
@@ -888,17 +1185,32 @@ impl Face {
     ///
     /// In Python this is `return super(DLNAHandler, self).POST(...)`
     /// (`protocol.py:3164`) — the base `Handler.POST`, whose body is the
-    /// management API. That whole face is **not** ported (this branch has no
-    /// `macast_upnp` management endpoints; `grep -rn macast_upnp src-tauri/src/`
-    /// is empty, and the settings UI is a bundled window). So this answers what
-    /// the base handler answers for any request it does not recognise:
-    /// **HTTP 200**, not 501 — `protocol.py:2543-2551` builds
-    /// `{'code': 1, 'message': '没有可执行的操作…'}` and returns it, and cherrypy
-    /// turns a returned dict into a 200 with the JSON tool. A 501 here would be
-    /// a *better* HTTP answer and a **worse** port: the point of the shipped
-    /// shape is "the request arrived and nothing matched", and a code that also
-    /// means "I refuse to implement this" would read differently to a sender
-    /// that has already learned the 200/`code: 1` pair.
+    /// **POST** management API. That half of the management face is **not**
+    /// ported, and the reason is structural rather than a backlog item: this
+    /// face's only POST routes are `POST /<service>/action`, which the SOAP
+    /// layer claims, so there is no field-driven management endpoint for the
+    /// shipped table's §4.7c gates to be attached to. Two consequences worth
+    /// naming instead of leaving silent — `_same_site()` and
+    /// `_CODE_EXECUTION_PARAMS` (§4.7b) have **no target** here, and the
+    /// fall-through below is therefore reached by *every* POST this port does
+    /// not recognise, including a well-formed form body.
+    ///
+    /// The **GET** half, by contrast, *is* ported — see [`Face::api`]: the
+    /// web-cast entry and `cast-info`, with the same gate-is-data shape
+    /// (§4.7c) and the same fail-closed refusal. That asymmetry is the current
+    /// state of this port, and it is why the paragraph above says "no POST
+    /// management routes exist" rather than "the management API is missing".
+    ///
+    /// What this method answers is what the base handler answers for any request
+    /// it does not recognise: **HTTP 200**, not 501 — `protocol.py:2543-2551`
+    /// builds `{'code': 1, 'message': '没有可执行的操作…'}` and returns it, and
+    /// cherrypy turns a returned dict into a 200 with the JSON tool. A 501 here
+    /// would be a *better* HTTP answer and a **worse** port: the point of the
+    /// shipped shape is "the request arrived and nothing matched", and a code
+    /// that also means "I refuse to implement this" would read differently to a
+    /// sender that has already learned the 200/`code: 1` pair.
+    ///
+    /// [`Face::api`]: Face::api
     fn fall_through(&self, req: &Request) -> Response {
         let mut all = BTreeSet::new();
         for (name, _) in &req.query {
@@ -1164,6 +1476,146 @@ fn form_field_names(req: &Request) -> Vec<String> {
         .map(|(name, _)| name)
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// The first value a query parameter carries, or `None` when the name is absent.
+///
+/// **First** pair wins, and that is **our** choice, not a measurement. cherrypy
+/// merges the query string into `request.params` and a repeated key arrives
+/// there as a **list**; the shipped handler then compares that value against a
+/// string with `==`, which in Python never matches a list — so
+/// `?query=cast&query=cast-info` is a route-not-found there, for a reason no
+/// outside test can see. Neither reading has a witness, so the tie-break goes to
+/// the one that keeps a prefix-shaped value usable.
+fn query_value(req: &Request, name: &str) -> Option<String> {
+    req.query
+        .iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.clone())
+}
+
+/// A JSON answer in the one shape [`py_json_dumps_indented`] measures.
+///
+/// `code` is the shipped protocol's own field (`0` = it happened, `1` = nothing
+/// happened), and it is **not** the HTTP status: a management refusal is
+/// **403** *and* `code: 1`, while a "your request made no sense" answer is
+/// **200** *and* `code: 1`, because `200` is what the base handler returns when
+/// it falls through. Keeping the two arguments separate is what lets a caller
+/// say "refuse" without silently changing the status, or vice versa.
+fn json_answer(status: u16, code: i64, message: &str) -> Response {
+    Response::new(
+        status,
+        JSON_CONTENT_TYPE,
+        py_json_dumps_indented(code, message).into_bytes(),
+    )
+}
+
+/// The accepted peer's address, **without** its port, and `''` when the OS
+/// cannot say.
+///
+/// The port is dropped because [`is_loopback`] parses the result, and
+/// `127.0.0.1:52344` is not an `IpAddr`. `''` on failure is the matching
+/// choice: an unknown peer is **not** a loopback peer, so the management gate
+/// stays closed on a socket whose address could not be read.
+fn peer_ip(stream: &TcpStream) -> String {
+    stream
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_default()
+}
+
+/// Is this peer the machine this listener is on?
+///
+/// An empty or unparseable address answers **false**. Fail closed: the one thing
+/// this predicate is trusted with is keeping a LAN caller out of `cast-info`,
+/// and "I could not tell who this was" must never be the same answer as "this
+/// is us". `Request::remote_ip` is the socket peer with no port, so `''` really
+/// does mean "the peer address was unavailable".
+///
+/// There is deliberately **no** `X-Forwarded-For` reading. A header a browser
+/// cannot set is not a defence against a browser, and trusting one would reopen
+/// the hole this gate exists for (§4.7: any webpage can issue a GET to
+/// `127.0.0.1`).
+///
+/// **One arm of the shipped gate is absent, and that is a fact about this port,
+/// not an oversight**: the reference also passes when
+/// `request.scheme == 'https'`. This listener terminates no TLS — every request
+/// that reaches it is plain HTTP — and [`Request`] carries no `scheme` field for
+/// the arm to read. Implementing it would be dead code that reads like
+/// coverage, so it is recorded here instead.
+fn is_loopback(remote_ip: &str) -> bool {
+    remote_ip
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Does this string carry enough structure to be handed to the renderer?
+///
+/// Two questions, both **shape** rather than policy: a **non-empty scheme** in
+/// front of `://`, and a **non-empty authority** behind it (which ends at the
+/// first `/`, `?` or `#`). So `http://host/path` and `rtsp://1.2.3.4/live` pass,
+/// while `://only-a-separator`, `http://` (no host) and
+/// `http:///absolute-empty-host` are refused.
+///
+/// **No scheme whitelist**, and that is our own decision: the entry exists for
+/// callers that can only open a URL (shortcuts, bookmarks, `curl`), and the
+/// shipped one hands whatever arrives to the player without grading the
+/// protocol. Restricting it to `http`/`https` would break the file and stream
+/// paths that work today, and a whitelist we invent here is not something any
+/// sender was promised.
+///
+/// What this gate **is** for: a relative or empty value reaching the renderer
+/// produces an error the user cannot read (`Failed to open` for a string that
+/// was never an address), so refusing the shape at the door is the shorter
+/// sentence, and it is the one place a caller's typo can be named back to them.
+fn is_absolute_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    let Some(scheme_end) = trimmed.find("://") else {
+        return false;
+    };
+    if scheme_end == 0 {
+        return false;
+    }
+    let authority = &trimmed[scheme_end + 3..];
+    let authority_end = authority
+        .find(|c| matches!(c, '/' | '?' | '#'))
+        .unwrap_or(authority.len());
+    !authority[..authority_end].is_empty()
+}
+
+/// `fn truncate_chars` — cut to `max` **characters**, not bytes.
+///
+/// Byte-slicing a query value would panic on a UTF-8 boundary, and a query value
+/// is whatever a caller typed: `?query=投屏投屏投屏…` is a normal request from a
+/// Chinese-named shortcut, not a malformed one.
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// The answer to a `query=` value this face has no route for.
+///
+/// **200** with `code: 1`, echoing the offending value — the same shape as the
+/// POST fall-through's "unrecognised fields" answer, for the same reason
+/// (§4.7c): a `code: 0, message: success` on a request that did nothing is a
+/// lie the caller has no way to detect, and a mistyped `query=castt` would read
+/// as a successful cast.
+///
+/// The echo is a **reflection**, so its safety is stated rather than assumed:
+/// the value is written into a JSON **string** through [`py_json_quote`], whose
+/// `ensure_ascii` encoder escapes everything above U+007F and every control
+/// character, and the response carries `Content-Type: application/json`. There
+/// is no HTML context here for a browser to sniff, and there is no
+/// `text/html` anywhere on this path.
+fn unknown_query(value: &str) -> Response {
+    json_answer(
+        200,
+        1,
+        &format!(
+            "没有可执行的操作：query={} 不是这个接口认识的查询。",
+            truncate_chars(value, QUERY_ECHO_MAX)
+        ),
+    )
 }
 
 /// `json.dumps(obj, indent=4)` for the one two-key dict the base handler
@@ -1559,7 +2011,13 @@ impl HttpServer {
         } else {
             Vec::new()
         };
-        let request = Request::new(head, body);
+        let mut request = Request::new(head, body);
+        // The peer address is what every gate on the management face reads, and
+        // it is only knowable **here** — this is the one place the socket is in
+        // hand. [`Request::new`] is also what the tests build their requests
+        // with, so the field stays a plain assignment rather than a fifth
+        // argument to a constructor that has no use for one elsewhere.
+        request.remote_ip = peer_ip(&stream);
         let bytes = self.face.answer(&request).to_bytes();
         self.write(&stream, &bytes);
     }
@@ -1635,14 +2093,31 @@ mod tests {
         Arc::new(Setting::new(path))
     }
 
+    /// Every face this module builds gets its own recording management seam, so a
+    /// test that does not care about `query=cast` never has to think about it and
+    /// a test that does cares about **this** instance's call log.
+    fn face_built(
+        setting: Arc<Setting>,
+        control: Arc<dyn Control>,
+        subscription: Arc<dyn Subscription>,
+        management: Arc<FakeManagement>,
+    ) -> Arc<Face> {
+        Face::new(control, subscription, management as Arc<dyn Management>, setting)
+            .expect("face builds")
+            .into()
+    }
+
     fn face_for(
         name: &str,
         control: Arc<dyn Control>,
         subscription: Arc<dyn Subscription>,
     ) -> Arc<Face> {
-        Face::new(control, subscription, fresh_setting(name))
-            .expect("face builds")
-            .into()
+        face_built(
+            fresh_setting(name),
+            control,
+            subscription,
+            Arc::new(FakeManagement::new()),
+        )
     }
 
     fn harness(name: &str) -> (Arc<Face>, Arc<FakeControl>, Arc<FakeSubscription>) {
@@ -1655,10 +2130,26 @@ mod tests {
         )
     }
 
+    /// A face plus the seam it answers `query=cast` through, so a gate test can
+    /// ask the question the shipped face makes expensive: **did the player get
+    /// touched?** A refusal that casts anyway is the bug this whole table exists
+    /// to prevent, and only the call log can tell the two apart.
+    fn harness_management(name: &str) -> (Arc<Face>, Arc<FakeManagement>) {
+        let management = Arc::new(FakeManagement::new());
+        let face = face_built(
+            fresh_setting(name),
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            management.clone(),
+        );
+        (face, management)
+    }
+
     fn harness_probe(name: &str, probe: MtimeProbe) -> Arc<Face> {
         Face::new(
             Arc::new(FakeControl::soap_ok()),
             Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
             fresh_setting(name),
         )
         .expect("face builds")
@@ -1666,16 +2157,56 @@ mod tests {
         .into()
     }
 
-    fn face_on_port(name: &str, port: u16) -> Arc<Face> {
+    /// `ApplicationPort` is the key `cast-info` puts into the address it hands
+    /// out, so a port is not decoration here: it is the thing being asserted.
+    fn ported_setting(name: &str, port: u16) -> Arc<Setting> {
         let setting = fresh_setting(name);
         setting.set(setting::Key::ApplicationPort, serde_json::Value::from(i64::from(port)));
-        Face::new(
+        setting
+    }
+
+    fn face_on_port(name: &str, port: u16) -> Arc<Face> {
+        face_built(
+            ported_setting(name, port),
             Arc::new(FakeControl::soap_ok()),
             Arc::new(FakeSubscription::new()),
-            setting,
+            Arc::new(FakeManagement::new()),
         )
-        .expect("face builds")
-        .into()
+    }
+
+    fn face_on_port_management(name: &str, port: u16) -> (Arc<Face>, Arc<FakeManagement>) {
+        let management = Arc::new(FakeManagement::new());
+        let face = face_built(
+            ported_setting(name, port),
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            management.clone(),
+        );
+        (face, management)
+    }
+
+    /// A `GET /api?…` from a peer the caller names.
+    ///
+    /// `Request::remote_ip` is what [`serve_stream`] fills from the accepted
+    /// socket, and the gate reads **nothing else** about who is asking: no
+    /// `Host`, no `X-Forwarded-For`. So setting this one field is the whole of
+    /// "pretend to be the LAN", and a test that leaves it empty is a test of a
+    /// peer whose address could not be read — which the gate treats as not-us.
+    fn get_api(target: &str, remote: &str) -> Request {
+        let mut req = request("GET", target, &[]);
+        req.remote_ip = remote.to_string();
+        req
+    }
+
+    /// The body of a JSON answer, as the shipped writer puts it on the wire.
+    ///
+    /// Compared against [`py_json_dumps_indented`] rather than against the
+    /// sentence itself because `ensure_ascii` escapes every CJK character: a
+    /// `contains("已投屏")` on the body would be a test that **cannot** pass, and
+    /// a test that cannot pass is worse than no test — it gets deleted, and the
+    /// rule it was guarding goes with it.
+    fn json_body(code: i64, message: &str) -> Vec<u8> {
+        py_json_dumps_indented(code, message).into_bytes()
     }
 
     fn fixed_mtime() -> MtimeProbe {
@@ -1838,6 +2369,53 @@ mod tests {
         fn remove(&self, sid: &str) -> u16 {
             self.events.lock().expect("events").push(format!("remove {sid}"));
             self.remove_status.load(Ordering::SeqCst)
+        }
+    }
+
+    /// The management seam as a call log.
+    ///
+    /// It records the **(address, name) pair** rather than a sentence, because the
+    /// two things a caller can get wrong here are exactly the two things the log
+    /// can show: casting something that was refused, and changing the address
+    /// without changing the name (AGENTS.md §4.2). What it *answers* is a string
+    /// only this file reads, so a test that asserts on the answer is asserting on
+    /// the fake — the assertions below therefore check the **document** shape
+    /// (`code` 0 vs 1) and the log, not the wording.
+    struct FakeManagement {
+        refuses: AtomicBool,
+        calls: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl FakeManagement {
+        fn new() -> Self {
+            FakeManagement {
+                refuses: AtomicBool::new(false),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// The shell's refusal shape: a sentence, never a status code.
+        fn refusing() -> Self {
+            let fake = FakeManagement::new();
+            fake.refuses.store(true, Ordering::SeqCst);
+            fake
+        }
+
+        fn calls(&self) -> Vec<(String, Option<String>)> {
+            self.calls.lock().expect("calls").clone()
+        }
+    }
+
+    impl Management for FakeManagement {
+        fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push((url.to_string(), title.map(str::to_string)));
+            if self.refuses.load(Ordering::SeqCst) {
+                return Err("播放器拒绝了这次投屏".to_string());
+            }
+            Ok(format!("已投屏：{url}"))
         }
     }
 
@@ -2745,7 +3323,12 @@ mod tests {
         let setting = fresh_setting("description-bake");
         let control: Arc<dyn Control> = Arc::new(FakeControl::soap_ok());
         let subscription: Arc<dyn Subscription> = Arc::new(FakeSubscription::new());
-        let face = Face::new(control, subscription, setting.clone()).expect("face builds");
+        let face = face_built(
+            setting.clone(),
+            control,
+            subscription,
+            Arc::new(FakeManagement::new()),
+        );
         assert_eq!(
             face.description_bytes(),
             crate::description::build_for(&setting)
@@ -2753,5 +3336,540 @@ mod tests {
                 .as_slice()
         );
         assert_eq!(face.port(), setting::application_port(&setting));
+    }
+
+    // -- GET /api: the management face --------------------------------------
+
+    const CAST_TARGET: &str = "/api?query=cast&url=http://host/a.mp4";
+    const LOCAL: &str = "127.0.0.1";
+    const LAN: &str = "192.168.1.9";
+    const SECRET: &str = "deadbeefcafe0123";
+    const TEST_PORT: u16 = 58993;
+    const MISSING_URL: &str = "缺少参数 url：投屏入口需要一个完整的媒体地址。";
+    const NO_QUERY: &str = "没有可执行的操作：缺少 query 参数。";
+    const OK_DOC: &str = "{\n    \"code\": 0,\n    \"message\": \"";
+    const REFUSED_DOC: &str = "{\n    \"code\": 1,\n    \"message\": \"";
+
+    /// Store a secret, or store **nothing**. The second half is the point: a
+    /// helper that always wrote a value would leave `Api_Token` as `Some("")`,
+    /// and every "no token has been born yet" assertion below would then be
+    /// checking an empty string instead of an absent key.
+    fn store_token(setting: &Arc<Setting>, token: Option<&str>) {
+        if let Some(token) = token {
+            setting.set(setting::Key::ApiToken, serde_json::Value::from(token));
+        }
+    }
+
+    /// The shape-refusal sentence for one address, from the one template
+    /// [`Face::cast_entry`] writes. Tests compare whole documents rather than
+    /// grepping for a fragment, because a fragment passes for the wrong reason.
+    fn not_absolute(value: &str) -> String {
+        format!("{value} 不是一个完整的媒体地址：需要带协议和主机的绝对地址，例如 http://主机/路径。")
+    }
+
+    #[test]
+    fn loopback_does_not_exempt_the_cast_entry() {
+        crate::pin_test_dir();
+        // AGENTS.md §4.7, the whole reason this route has its own gate: any
+        // webpage can issue `GET http://127.0.0.1:58880/api?query=cast&...`, so
+        // "this came from this machine" buys nothing here.
+        let (face, management) = harness_management("cast-loopback");
+        let response = face.answer(&get_api(CAST_TARGET, LOCAL));
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body, json_body(1, TOKEN_REFUSAL));
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn cast_with_the_token_reaches_the_shell() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("cast-token");
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("{CAST_TARGET}&token={SECRET}");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 200);
+        assert!(
+            response.body.starts_with(OK_DOC.as_bytes()),
+            "a served cast is code 0: {}",
+            text(&response.body)
+        );
+        assert_eq!(
+            management.calls(),
+            vec![("http://host/a.mp4".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn a_lan_caller_with_a_wrong_token_hears_the_management_sentence() {
+        crate::pin_test_dir();
+        // Cumulative and ordered: the token route pays the management check
+        // **first**, so a LAN caller who typed a wrong token is told they are not
+        // allowed in, not that they mistyped the secret. Swapping the branches
+        // changes the message, never the verdict — this asks which message ships.
+        let (face, management) = harness_management("lan-wrong-token");
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("{CAST_TARGET}&token=not-the-secret");
+        let response = face.answer(&get_api(&target, LAN));
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body, json_body(1, MANAGEMENT_REFUSAL));
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn the_token_opens_the_gate_for_a_lan_peer() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("lan-right-token");
+        store_token(&face.setting, Some(SECRET));
+        assert!(!is_loopback(LAN), "the fixture peer must not be us");
+        let target = format!("{CAST_TARGET}&token={SECRET}");
+        let response = face.answer(&get_api(&target, LAN));
+        assert_eq!(response.status, 200);
+        assert_eq!(management.calls().len(), 1);
+    }
+
+    #[test]
+    fn every_refusal_shape_leaves_the_player_untouched() {
+        crate::pin_test_dir();
+        // The bug this table exists to prevent is a refusal that casts anyway.
+        // Only the call log can tell "we said no" from "we said no and played it".
+        let (face, management) = harness_management("refusal-shapes");
+        store_token(&face.setting, Some(SECRET));
+        let shaped = format!("{CAST_TARGET}&token=");
+        let longer = format!("{CAST_TARGET}&token={SECRET}x");
+        let hollow = String::new();
+        let refusals: [(&str, &str); 5] = [
+            (CAST_TARGET, LAN),
+            ("/api?query=cast-info", LAN),
+            (&shaped, LOCAL),
+            (&longer, LOCAL),
+            (CAST_TARGET, hollow.as_str()),
+        ];
+        for (target, remote) in refusals {
+            let response = face.answer(&get_api(&target, &remote));
+            assert_eq!(response.status, 403, "{target} from {remote:?}");
+            assert!(
+                response.body.starts_with(REFUSED_DOC.as_bytes()),
+                "a refusal is code 1: {}",
+                text(&response.body)
+            );
+            assert!(management.calls().is_empty(), "{target} cast anyway");
+        }
+        // Positive control: the same face does serve a legal request, so the
+        // loop above cannot be green because the route is unreachable.
+        let served = format!("{CAST_TARGET}&token={SECRET}");
+        assert_eq!(face.answer(&get_api(&served, LOCAL)).status, 200);
+        assert_eq!(management.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_lan_caller_never_hears_the_token() {
+        crate::pin_test_dir();
+        // `cast-info` is the only place the secret is revealed, so its gate being
+        // closed to the LAN is the whole defence for `query=cast`. And a gate that
+        // **generates** a secret on a refused request would let an unauthenticated
+        // caller flip the machine's state: `peek`, never `api_token`.
+        let (face, _) = harness_management("lan-no-cast-info");
+        let response = face.answer(&get_api("/api?query=cast-info", LAN));
+        assert_eq!(response.status, 403);
+        assert!(face.setting.peek(setting::Key::ApiToken).is_none());
+        let body = text(&response.body);
+        assert!(!body.contains("token="), "the refusal leaks the shape: {body}");
+        assert!(!body.contains("http://127.0.0.1:"));
+    }
+
+    #[test]
+    fn cast_info_mints_once_and_the_token_it_prints_opens_cast() {
+        crate::pin_test_dir();
+        let (face, management) = face_on_port_management("cast-info-mints", TEST_PORT);
+        let first = face.answer(&get_api("/api?query=cast-info", LOCAL));
+        let secret = face
+            .setting
+            .peek(setting::Key::ApiToken)
+            .expect("the reveal route generates the secret")
+            .as_str()
+            .expect("a string secret")
+            .to_string();
+        let expected = format!(
+            "http://127.0.0.1:{TEST_PORT}/api?query=cast&url=<媒体地址>&token={secret}"
+        );
+        assert_eq!(first.status, 200);
+        assert_eq!(first.body, json_body(0, &expected));
+        // The port in that address is `ApplicationPort`, not the default: this is
+        // the route that hands out a URL people paste into a shortcut.
+        let second = face.answer(&get_api("/api?query=cast-info", LOCAL));
+        assert_eq!(first.body, second.body, "the secret must stay stable");
+        let value: serde_json::Value =
+            serde_json::from_slice(&first.body).expect("the answer is JSON");
+        assert_eq!(value.as_object().expect("an object").len(), 2);
+        assert!(value.get("data").is_none(), "no invented field");
+        let with_secret = format!("{CAST_TARGET}&token={secret}");
+        assert_eq!(face.answer(&get_api(&with_secret, LOCAL)).status, 200);
+        assert_eq!(management.calls().len(), 1);
+    }
+
+    #[test]
+    fn cast_info_prints_the_secret_that_is_stored() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("cast-info-stored");
+        store_token(&face.setting, Some(SECRET));
+        let response = face.answer(&get_api("/api?query=cast-info", LOCAL));
+        assert_eq!(response.status, 200);
+        assert!(text(&response.body).contains(SECRET));
+    }
+
+    #[test]
+    fn an_empty_stored_secret_authenticates_nobody_and_is_replaced_on_reveal() {
+        crate::pin_test_dir();
+        // An empty `Api_Token` is a stored value that says nothing. It must not
+        // let anyone through, and the one route that has to print a secret
+        // replaces it — that is 「首次使用时生成」, not a repair.
+        let (face, management) = harness_management("empty-secret");
+        store_token(&face.setting, Some(""));
+        let target = format!("{CAST_TARGET}&token=x");
+        assert_eq!(face.answer(&get_api(&target, LOCAL)).status, 403);
+        assert!(management.calls().is_empty());
+        assert_eq!(face.answer(&get_api("/api?query=cast-info", LOCAL)).status, 200);
+        let now = face
+            .setting
+            .peek(setting::Key::ApiToken)
+            .expect("a secret")
+            .as_str()
+            .expect("a string")
+            .to_string();
+        assert!(!now.is_empty());
+    }
+
+    #[test]
+    fn a_token_that_is_not_a_string_is_absent() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("non-string-secret");
+        face.setting.set(setting::Key::ApiToken, serde_json::Value::from(42));
+        let target = format!("{CAST_TARGET}&token=42");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 403);
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn the_cast_entry_names_the_parameter_it_needed() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("cast-no-url");
+        store_token(&face.setting, Some(SECRET));
+        for target in [
+            format!("/api?query=cast&token={SECRET}"),
+            format!("/api?query=cast&url=&token={SECRET}"),
+        ] {
+            let response = face.answer(&get_api(&target, LOCAL));
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, json_body(1, MISSING_URL), "{target}");
+        }
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn query_values_arrive_exactly_as_typed() {
+        crate::pin_test_dir();
+        // Nothing on this path is percent-decoded, and that is the measured
+        // behaviour of the shipped receiver. `%2Fpath.mp4` therefore is **not** an
+        // address (a decoded slash would make it one), and `%20` survives
+        // `.trim()` — so both land on the shape refusal, not the missing-one.
+        let (face, management) = harness_management("no-decoding");
+        store_token(&face.setting, Some(SECRET));
+        for value in ["%2Fpath.mp4", "%20"] {
+            let target = format!("/api?query=cast&url={value}&token={SECRET}");
+            let response = face.answer(&get_api(&target, LOCAL));
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, json_body(1, &not_absolute(value)), "{value}");
+        }
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn a_relative_or_hollow_address_is_refused_before_the_player() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("bad-shapes");
+        store_token(&face.setting, Some(SECRET));
+        for value in [
+            "http://",
+            "file:///tmp/x",
+            "http:///absolute-empty-host",
+            "://only-a-separator",
+            "/relative/path.mp4",
+        ] {
+            let target = format!("/api?query=cast&url={value}&token={SECRET}");
+            let response = face.answer(&get_api(&target, LOCAL));
+            assert_eq!(response.status, 200);
+            assert_eq!(response.body, json_body(1, &not_absolute(value)), "{value}");
+        }
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn an_unusual_scheme_is_the_players_business_not_ours() {
+        crate::pin_test_dir();
+        // No scheme whitelist (our own decision, stated in the code): the entry
+        // exists for callers that can only open a URL, and the renderer already
+        // knows what it can play.
+        let (face, management) = harness_management("rtsp-scheme");
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("/api?query=cast&url=rtsp://1.2.3.4/live&token={SECRET}");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 200);
+        assert!(response.body.starts_with(OK_DOC.as_bytes()));
+        assert_eq!(
+            management.calls(),
+            vec![("rtsp://1.2.3.4/live".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn the_name_travels_with_the_address() {
+        crate::pin_test_dir();
+        // AGENTS.md §4.2: the route that changes the player's address must change
+        // its name too. `cast-title` is the sender's own name for the media; an
+        // empty one means "no opinion", not "call it nothing".
+        let (face, management) = harness_management("cast-title");
+        store_token(&face.setting, Some(SECRET));
+        let named = format!("{CAST_TARGET}&cast-title=名称&token={SECRET}");
+        assert_eq!(face.answer(&get_api(&named, LOCAL)).status, 200);
+        assert_eq!(
+            management.calls()[0].1,
+            Some("名称".to_string()),
+            "the title the caller gave"
+        );
+        let unnamed = format!("{CAST_TARGET}&cast-title=&token={SECRET}");
+        assert_eq!(face.answer(&get_api(&unnamed, LOCAL)).status, 200);
+        assert_eq!(management.calls()[1].1, None);
+    }
+
+    #[test]
+    fn the_players_refusal_is_handed_back_verbatim() {
+        crate::pin_test_dir();
+        // A second apology from this port ("投屏失败") would hide the reason the
+        // shell gave. The document shape changes (code 1), the sentence does not.
+        let fake = Arc::new(FakeManagement::refusing());
+        let face = face_built(
+            fresh_setting("shell-refusal"),
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            fake.clone(),
+        );
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("{CAST_TARGET}&token={SECRET}");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, json_body(1, "播放器拒绝了这次投屏"));
+        assert_eq!(fake.calls().len(), 1);
+    }
+
+    #[test]
+    fn api_without_a_query_names_the_missing_parameter() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("no-query");
+        for target in ["/api", "/api/", "/api?query=", "/api?query=&token=whatever"] {
+            let response = face.answer(&get_api(target, LOCAL));
+            assert_eq!(response.status, 200, "{target}");
+            assert_eq!(response.body, json_body(1, NO_QUERY), "{target}");
+        }
+        assert!(management.calls().is_empty());
+        // `/api/` is the same call as `/api` (the shipped `GET` binds `key=''`),
+        // so the segments must say so — `/api/extra` below is a different one.
+        assert_eq!(get_api("/api/", LOCAL).segments, vec!["api".to_string()]);
+    }
+
+    #[test]
+    fn an_unknown_query_is_answered_before_the_gate() {
+        crate::pin_test_dir();
+        // Ours, and it is a trade: hiding which names we know is worth less to a
+        // caller than fixing their typo. The value comes back inside a JSON
+        // string, never inside markup.
+        let (face, _) = harness_management("unknown-query");
+        let response = face.answer(&get_api("/api?query=castt", LAN));
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.body,
+            json_body(1, "没有可执行的操作：query=castt 不是这个接口认识的查询。")
+        );
+    }
+
+    #[test]
+    fn the_echo_is_cut_in_characters_not_bytes() {
+        crate::pin_test_dir();
+        // Byte-slicing a reflection would panic on a UTF-8 boundary, and a
+        // Chinese-named shortcut is a normal request here.
+        let (face, _) = harness_management("echo-cut");
+        let ascii = format!("/api?query={}", "x".repeat(150));
+        let body = text(&face.answer(&get_api(&ascii, LAN)).body);
+        assert_eq!(body.matches('x').count(), QUERY_ECHO_MAX);
+        let cjk = format!("/api?query={}", "投".repeat(150));
+        let body = text(&face.answer(&get_api(&cjk, LAN)).body);
+        assert_eq!(
+            body.matches("\\u6295").count(),
+            QUERY_ECHO_MAX,
+            "ensure_ascii escapes each character; the count is the cut"
+        );
+    }
+
+    #[test]
+    fn an_extra_path_segment_redirects_instead_of_answering() {
+        crate::pin_test_dir();
+        // `/api/extra` arrives to the shipped `GET` as `key='extra'`: unknown, and
+        // it ends in the redirect. This port takes the route name from `query=`,
+        // so without that guard it would answer as if the extra were never typed.
+        let face = face_on_port("api-extra-redirect", TEST_PORT);
+        let response = face.answer(&get_api("/api/extra?query=cast-info", LOCAL));
+        assert_eq!(response.status, 303);
+        let location = format!("http://127.0.0.1:{TEST_PORT}/");
+        assert_eq!(
+            response.variant,
+            vec![("Location".to_string(), location.clone())]
+        );
+        assert_eq!(
+            text(&response.body),
+            format!("This resource can be found at <a href=\"{location}\">{location}</a>.")
+        );
+        assert!(face.setting.peek(setting::Key::ApiToken).is_none());
+    }
+
+    #[test]
+    fn head_admits_itself_to_the_route_and_withholds_the_body() {
+        crate::pin_test_dir();
+        // `HEAD` is exempt from the 411 check and shares the GET dispatch, so it
+        // reaches `cast-info`; `answer` withholds the body in one place.
+        let (face, _) = harness_management("head-cast-info");
+        let mut req = request("HEAD", "/api?query=cast-info", &[]);
+        req.remote_ip = LOCAL.to_string();
+        let response = face.answer(&req);
+        assert_eq!(response.status, 200);
+        assert!(response.omit_body);
+        assert!(!response.body.is_empty(), "the length is still advertised");
+    }
+
+    #[test]
+    fn a_real_loopback_socket_is_the_peer_the_gate_reads() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("socket-loopback");
+        let server = HttpServer::new(face);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        client
+            .write_all(b"GET /api?query=cast-info HTTP/1.1\r\n\r\n")
+            .expect("write request");
+        let reader = std::thread::spawn(move || {
+            let mut client = client;
+            let mut bytes = Vec::new();
+            let _ = client.read_to_end(&mut bytes);
+            bytes
+        });
+        server.serve_stream(stream);
+        let rendered = text(&reader.join().expect("reader joins"));
+        assert!(rendered.starts_with("HTTP/1.1 200 OK\r\n"), "{rendered}");
+        assert!(rendered.contains("token="), "the entry URL carries it");
+        // The same route, from a peer whose address could not be read, stays shut
+        // and stays un-minted: `''` is not "this is us".
+        let (face, _) = harness_management("socket-unknown");
+        let response = face.answer(&get_api("/api?query=cast-info", ""));
+        assert_eq!(response.status, 403);
+        assert!(face.setting.peek(setting::Key::ApiToken).is_none());
+    }
+
+    #[test]
+    fn the_peer_address_is_read_without_its_port() {
+        crate::pin_test_dir();
+        // `is_loopback` parses an `IpAddr`; `127.0.0.1:52344` parses as nothing,
+        // so the port has to come off before the question is asked.
+        assert!(is_loopback("::1"));
+        assert!(!is_loopback(""));
+        assert!(!is_loopback("9.9.9.9"));
+        assert!(!is_loopback("127.0.0.1:52344"));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let _client = TcpStream::connect(addr).expect("connect");
+        let (stream, _) = listener.accept().expect("accept");
+        let read = peer_ip(&stream);
+        assert!(!read.contains(':'), "no port survives: {read}");
+        assert!(is_loopback(&read));
+    }
+
+    #[test]
+    fn the_get_route_table_is_well_formed() {
+        crate::pin_test_dir();
+        // The gate is a **string** in the table on purpose, so the table itself
+        // needs asking: an empty scan is a scan that agrees with anything.
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 2);
+        let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), GET_MANAGEMENT_ROUTES.len());
+        for route in GET_MANAGEMENT_ROUTES.iter() {
+            assert!(!route.query.is_empty());
+            assert!(
+                Gate::parse(route.gate).is_some(),
+                "{} carries a gate name this port cannot read: {:?}",
+                route.query,
+                route.gate
+            );
+        }
+        assert_eq!(
+            GET_MANAGEMENT_ROUTES
+                .iter()
+                .filter(|r| r.action == Action::Cast)
+                .count(),
+            1
+        );
+        assert_eq!(
+            GET_MANAGEMENT_ROUTES
+                .iter()
+                .filter(|r| r.action == Action::CastInfo)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_gate_name_this_port_does_not_know_refuses() {
+        crate::pin_test_dir();
+        // Fail closed, asserted through the **response** (the `Face` log has no
+        // injection seam, and no test in this file reads log lines): the same
+        // request that the real `"token"` gate lets through is refused for a
+        // name the table does not have.
+        let (face, _) = harness_management("unknown-gate");
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("{CAST_TARGET}&token={SECRET}");
+        let req = get_api(&target, LOCAL);
+        assert!(face.gate_refusal("token", &req).is_none());
+        let refusal = face.gate_refusal("nonsense", &req).expect("refused");
+        assert_eq!(refusal.status, 403);
+        assert_eq!(refusal.body, json_body(1, MANAGEMENT_REFUSAL));
+        assert!(Gate::parse("Management").is_none(), "exact match");
+        assert!(Gate::parse("management ").is_none());
+    }
+
+    #[test]
+    fn the_token_compare_is_constant_time_and_exact() {
+        crate::pin_test_dir();
+        assert!(token::secret_eq("", ""));
+        assert!(token::secret_eq("a", "a"));
+        assert!(!token::secret_eq("a", "b"));
+        assert!(!token::secret_eq("abc", "abcd"));
+        assert!(!token::secret_eq("abcd", "abc"));
+        assert!(token::secret_eq("没", "没"));
+        assert!(!token::secret_eq("没", "啊"));
+    }
+
+    #[test]
+    fn a_repeated_query_parameter_keeps_its_first_value() {
+        crate::pin_test_dir();
+        // First pair wins, like the shipped parser. If `cast-info` won instead,
+        // this loopback request would be served (200) rather than refused.
+        let (face, management) = harness_management("repeated-query");
+        store_token(&face.setting, Some(SECRET));
+        let target = format!("/api?query=cast&query=cast-info&url=http://host/a.mp4&token=");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 403);
+        assert_eq!(response.body, json_body(1, TOKEN_REFUSAL));
+        assert!(management.calls().is_empty());
     }
 }
