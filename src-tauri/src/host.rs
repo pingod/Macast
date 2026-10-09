@@ -19,11 +19,16 @@
 //!   line in a log the user can open. The mitigation is structural rather than
 //!   behavioural: [`StateTable`] is seeded with every name the three SCPDs
 //!   declare, so a name this shell writes is never unknown.
-//! - **there is no service to stop.** `stop_service` is the reference's
-//!   "cherrypy.engine.stop() and tell the user"; this shell does not run an HTTP
-//!   service yet, so it records the request on a shared flag and says so in the
-//!   log. It is not a silent no-op: a caller can read the flag, and the next
-//!   module that grows a server is meant to hang off the same one.
+//! - **stopping the service stops the receiver, not the player.** `stop_service`
+//!   is the reference's "the app asked to stop answering DLNA"; here that means
+//!   the HTTP face, the SSDP announcer (with its `byebye`) and the GENA event
+//!   thread, reached through `crate::Runtime`. The mpv child keeps playing what it
+//!   was handed, because that is what "the service stopped" reads like to a user:
+//!   the phone no longer finds Macast, the window it opened stays open. Before the
+//!   services existed this method only set a flag; the flag is still set, because
+//!   `player_snapshot` reports it and a caller that cannot reach the app handle
+//!   (a test, a thread started before `.setup()` finished) still gets a durable
+//!   record that the request happened.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,13 +36,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use macast_core::logging::{Level, Logger};
 use macast_core::paths;
 use macast_core::setting::{Key, Setting};
 use macast_mpv::argv;
 use macast_mpv::player::{Host, Player, StateCall};
+use macast_upnp::store::SharedBroadcast;
 
 /// `DLNAProtocol.SERVICE_STATE_OBSERVED` for the two services this shell can
 /// reach (`macast/protocol.py:33-44`). The connection manager's three are listed
@@ -147,6 +153,12 @@ const DECLARED: [(&str, char); 48] = [
 pub struct StateTable {
     values: Mutex<BTreeMap<String, Value>>,
     playlist: Mutex<Vec<String>>,
+    log: Arc<Logger>,
+    playlist_index: Mutex<i64>,
+    history: Mutex<Vec<(String, String)>>,
+    /// Who hears about a changed state variable. `None` until `main.rs` has
+    /// built the eventing service; the boot writes never broadcast anyway.
+    broadcaster: Mutex<Option<SharedBroadcast>>,
 }
 
 /// A poisoned lock still holds the table; the state a client reads is worth more
@@ -162,7 +174,7 @@ impl StateTable {
     /// what makes the boot values right rather than plausible:
     /// `TransportPlaySpeed` ends up the **number** `1`, not the empty string the
     /// XML would leave, and both counters end up `2147483647`.
-    pub fn new(log: &Logger) -> Self {
+    pub fn new(log: Arc<Logger>) -> Self {
         let mut values: BTreeMap<String, Value> = BTreeMap::new();
         for (name, datatype) in DECLARED {
             let value = match datatype {
@@ -184,22 +196,38 @@ impl StateTable {
         let table = Self {
             values: Mutex::new(values),
             playlist: Mutex::new(Vec::new()),
+            log: log.clone(),
+            // Nothing has been cast yet, so there is no track to point at —
+            // `-1`, not `0`, which would read as "the first item is loaded".
+            playlist_index: Mutex::new(-1),
+            history: Mutex::new(Vec::new()),
+            broadcaster: Mutex::new(None),
         };
         // `init_state()`, in the reference's own order. The debug lines are the
         // reference's `setState: {} {}` — a log the user reads should look like
         // the one they have always read.
-        table.write("CurrentPlayMode", json!("NORMAL"), log, false);
-        table.write("TransportPlaySpeed", json!(1), log, false);
-        table.write("TransportStatus", json!("OK"), log, false);
-        table.write("RelativeCounterPosition", json!(2147483647), log, false);
-        table.write("AbsoluteCounterPosition", json!(2147483647), log, false);
-        table.write("A_ARG_TYPE_Direction", json!("Output"), log, false);
-        table.write("CurrentConnectionIDs", json!("0"), log, false);
-        table.write("PlaybackStorageMedium", json!("None"), log, false);
+        table.write("CurrentPlayMode", json!("NORMAL"), log.as_ref(), false);
+        table.write("TransportPlaySpeed", json!(1), log.as_ref(), false);
+        table.write("TransportStatus", json!("OK"), log.as_ref(), false);
+        table.write(
+            "RelativeCounterPosition",
+            json!(2147483647),
+            log.as_ref(),
+            false,
+        );
+        table.write(
+            "AbsoluteCounterPosition",
+            json!(2147483647),
+            log.as_ref(),
+            false,
+        );
+        table.write("A_ARG_TYPE_Direction", json!("Output"), log.as_ref(), false);
+        table.write("CurrentConnectionIDs", json!("0"), log.as_ref(), false);
+        table.write("PlaybackStorageMedium", json!("None"), log.as_ref(), false);
         table.write(
             "SinkProtocolInfo",
-            json!(protocol_info(log)),
-            log,
+            json!(protocol_info(log.as_ref())),
+            log.as_ref(),
             false,
         );
         table
@@ -224,16 +252,46 @@ impl StateTable {
         // number 1 at boot and a string when a sender sets a speed.
         let changed = *current != value;
         log.debug(&format!("setState: {} {}", name, render(&value)));
+        // The broadcast needs the value twice — once for the table, once for the
+        // subscribers — so it pays for the clone and nothing else does.
+        let announce = changed && broadcast && OBSERVED.contains(&name);
+        let wired = if announce { Some(value.clone()) } else { None };
         if changed {
             values.insert(name.to_string(), value);
         }
-        if changed && broadcast && OBSERVED.contains(&name) {
-            // The reference pushes the name onto `state_queue` and sets
-            // `_state_event` here; GENA lives outside this shell, so the honest
-            // statement is which names *would* be broadcast.
-            log.debug(&format!("setState: '{}' is observed and would be sent to clients", name));
+        // The guard goes down before the broadcast. `enqueue` takes the eventing
+        // service's own lock, and the reference's rule for that lock is the same
+        // one AGENTS.md §4.2 records for the subscriber table: nobody may sit on
+        // one ledger while touching another's I/O, or a dead client holds the
+        // state table.
+        drop(values);
+        if let Some(value) = wired {
+            match self.broadcaster() {
+                Some(shared) => shared.enqueue(name, &value),
+                // Nothing is listening yet, which is a fact worth one line: the
+                // name *was* observed and *was* changed, and the window where
+                // that can happen is only the boot before `main.rs` wires the
+                // eventing service in.
+                None => log.debug(&format!(
+                    "setState: '{}' is observed but no eventing service is wired",
+                    name
+                )),
+            }
         }
         changed
+    }
+
+    /// Hand the table its GENA broadcast target — `DLNAProtocol`'s
+    /// `state_queue`/`_state_event` pair, as the object `macast-upnp` owns.
+    pub fn set_broadcaster(&self, shared: SharedBroadcast) {
+        *lock(&self.broadcaster) = Some(shared);
+    }
+
+    /// Bound once in `main.rs`'s `.setup()`, so any write that reaches `write`
+    /// after the services are up is broadcast. Reading it is a short lock and a
+    /// clone of an `Arc`, never a clone of the table.
+    fn broadcaster(&self) -> Option<SharedBroadcast> {
+        lock(&self.broadcaster).clone()
     }
 
     /// `get_state(name).value` for the strings the control surface reads back.
@@ -274,6 +332,155 @@ impl StateTable {
 
     pub fn playlist(&self) -> Vec<String> {
         lock(&self.playlist).clone()
+    }
+
+    /// `self.current_index` (`protocol.py:1120`, `1142`, `1193`): the playlist
+    /// position of what the player is showing right now, or `-1` for "nothing
+    /// has been cast this run".
+    pub fn playlist_index(&self) -> i64 {
+        *lock(&self.playlist_index)
+    }
+
+    pub fn set_playlist_index(&self, index: i64) {
+        *lock(&self.playlist_index) = index;
+    }
+
+    /// `PlaybackGuard._add_history` (`protocol.py:1203-1220`): newest first,
+    /// deduped by URI, capped at 50 so the settings file stays small. An empty
+    /// title stores the URI, because the history's job is to be recognisable
+    /// later and a blank row is not.
+    pub fn add_history(&self, title: &str, uri: &str) {
+        let mut history = lock(&self.history);
+        history.retain(|(_, item)| item != uri);
+        let name = if title.is_empty() { uri } else { title };
+        history.insert(0, (name.to_string(), uri.to_string()));
+        if history.len() > 50 {
+            history.truncate(50);
+        }
+    }
+
+    pub fn play_history(&self) -> Vec<(String, String)> {
+        lock(&self.history).clone()
+    }
+
+    pub fn clear_history(&self) {
+        lock(&self.history).clear();
+    }
+}
+
+/// The `StateStore` seam `macast-upnp` reads and writes through.
+///
+/// Two things differ from the inherent methods, and both are the trait's
+/// wording rather than an accident: `write` has no logger parameter (this table
+/// owns its `Arc<Logger>` — the reference's `set_state` reaches for the module
+/// logger the same way), and `playlist_push` hands back the pair of **state
+/// variables** (`CurrentTrack`, `NumberOfTracks`), so the 0-based position the
+/// list reports becomes the 1-based one a control point reads
+/// (`protocol.py:1122`: `self.current_index + 1`).
+impl macast_upnp::StateStore for StateTable {
+    fn read(&self, name: &str) -> Option<Value> {
+        self.read(name)
+    }
+
+    fn write(&self, name: &str, value: Value) -> bool {
+        // `broadcast: false` here is not "never broadcast": it is "this store is
+        // not the one that decides who hears about it" — that is `crate::eventing`
+        // in macast-upnp, which owns the subscriber table and the queue.
+        self.write(name, value, self.log.as_ref(), false)
+    }
+
+    fn playlist_push(&self, uri: &str) -> (i64, i64) {
+        let (index, total) = self.playlist_push(uri);
+        (index + 1, total)
+    }
+
+    fn playlist(&self) -> Vec<String> {
+        self.playlist()
+    }
+
+    fn playlist_index(&self) -> i64 {
+        self.playlist_index()
+    }
+
+    fn set_playlist_index(&self, index: i64) {
+        self.set_playlist_index(index);
+    }
+
+    fn add_history(&self, title: &str, uri: &str) {
+        self.add_history(title, uri);
+    }
+}
+
+/// The `Renderer` seam, which is the player wearing a second face.
+///
+/// A newtype rather than an `impl` on [`Player`] itself because the trait's
+/// wording belongs to DLNA: `set_media_url` here has no `start` parameter,
+/// because the reference's `SetAVTransportURI` does not carry one — a sender that
+/// wants a position sends `Seek` afterwards (`macast/protocol.py:1180-1250`). So
+/// this type's whole job is to be the place where that difference is stated, and
+/// to hold nothing else.
+///
+/// `Player` is already a handle (`Clone` shares one `Arc<Shared>`), so this is a
+/// handle of a handle: `main.rs` builds one per `Soap`, and both point at the one
+/// mpv thread.
+pub struct ShellRenderer {
+    pub player: Player,
+}
+
+impl macast_upnp::store::Renderer for ShellRenderer {
+    /// `note_media_live` and not `set_media_live`: the reference enumerates its
+    /// plugin bus by the `set_media_` prefix, so a name spelled that way would
+    /// subscribe the whole application to a message nobody sends
+    /// (AGENTS.md §4.2, "这一条故意不叫 `set_media_live`"). The pass-through is
+    /// exact — including `None`, which is "keep today's behaviour" and not
+    /// "this is a file".
+    fn note_media_live(&self, live: Option<bool>) {
+        self.player.note_media_live(live);
+    }
+
+    /// `None` for the start position: `Player` turns that into the reference's
+    /// default `"0"`, and the loadfile builder drops a `"0"` so the command keeps
+    /// the bare shape.
+    fn set_media_url(&self, uri: &str) {
+        self.player.set_media_url(uri, None);
+    }
+
+    fn set_media_title(&self, title: &str) {
+        self.player.set_media_title(title);
+    }
+
+    /// The sender's clock string, verbatim, to mpv's own parser — see the trait
+    /// doc for why this crate is not allowed to read it first.
+    fn set_media_position(&self, target: &str) {
+        self.player.set_media_position(target);
+    }
+
+    fn set_media_volume(&self, value: Value) {
+        self.player.set_media_volume(&value);
+    }
+
+    fn set_media_mute(&self, value: Value) {
+        self.player.set_media_mute(&value);
+    }
+
+    fn set_media_pause(&self) {
+        self.player.set_media_pause();
+    }
+
+    fn set_media_resume(&self) {
+        self.player.set_media_resume();
+    }
+
+    fn set_media_stop(&self) {
+        self.player.set_media_stop();
+    }
+
+    /// The window title for an address that arrived with no title. This is the
+    /// same function `cast_uri` uses, so the name a sender sees in the DLNA
+    /// state table and the name on the mpv window cannot disagree (AGENTS.md
+    /// §4.2, "改播放器的地址，就必须改播放器的名字").
+    fn title_for_uri(&self, uri: &str) -> String {
+        title_for_uri(uri)
     }
 }
 
@@ -355,13 +562,10 @@ impl Host for TauriHost {
     }
 
     fn stop_service(&self) {
-        self.service_stopped.store(true, Ordering::SeqCst);
-        // Deviation by design: see the module doc. The reference would say
-        // "stopping the service" and there is no service to stop yet.
-        self.log.warning(
-            "the renderer asked the application to stop its service; this shell has \
-             no HTTP service, so the request is recorded on a flag",
-        );
+        // One implementation, reached from two seams. The work lives in the
+        // `Hooks` impl below because that is the trait `macast-upnp` is written
+        // against; this arm exists so the renderer's bus call lands on it too.
+        macast_upnp::store::Hooks::stop_service(self);
     }
 
     fn transport_state(&self) -> String {
@@ -461,6 +665,53 @@ impl Host for TauriHost {
     }
 }
 
+/// The `Hooks` seam — the two things outside `macast-upnp` that a protocol answer
+/// depends on, which the crate deliberately refuses to reach into: tell the human
+/// something, and stop answering the phone.
+///
+/// `TauriHost` is the implementor rather than a second struct because it already
+/// owns both handles each method needs (`app` for the page, `table` for nothing
+/// here) and because `Arc::new(host.clone()) as SharedHooks` is then the whole
+/// wiring cost in `main.rs`. The two `stop_service` methods that now exist on this
+/// type are one behaviour, not two: [`Host::stop_service`] delegates here.
+impl macast_upnp::store::Hooks for TauriHost {
+    /// `cherrypy.engine.publish('app_notify', title, text)`. The payload is the
+    /// two-argument list, same shape as [`Host::publish`]'s, so the page's single
+    /// `listen('app_notify', …)` handler reads `payload[0]` and `payload[1]` for
+    /// both routes — the renderer's notification and the receiver's.
+    ///
+    /// Logged, never unwrapped, for the reason recorded in AGENTS.md §4.2: the
+    /// caller here is SSDP's bind-failure path running on `SSDP_STOP_THREAD`, and
+    /// a failed notification on that thread must still let the stop itself happen.
+    fn notify(&self, title: &str, text: &str) {
+        if let Err(e) = self.app.emit("app_notify", [title, text]) {
+            self.log
+                .error(&format!("cannot notify the page ({}): {}", title, e));
+        }
+    }
+
+    /// The reference's "stop the service and tell the user", where *the service*
+    /// is the receiver: HTTP face, SSDP announcer, GENA event thread. The player
+    /// is not in that list — see the module doc's second deviation.
+    ///
+    /// `try_state` rather than `state`, and the order is load-bearing: the flag
+    /// goes first because it is the only answer a caller can read on a machine
+    /// where `Runtime` was never managed (a setup that failed, a test host that
+    /// builds a `TauriHost` directly). Panicking there would turn "nothing to
+    /// stop" into a crashed window, which is the same judgement call as deviation
+    /// number one above.
+    fn stop_service(&self) {
+        self.service_stopped.store(true, Ordering::SeqCst);
+        match self.app.try_state::<crate::Runtime>() {
+            Some(runtime) => runtime.stop_services(),
+            None => self.log.warning(
+                "stop_service: no managed runtime yet, so the flag is the only record \
+                 of this request",
+            ),
+        }
+    }
+}
+
 /// `set_state_transport(data)`: the state first, then `TransportStatus` back to
 /// `OK` (`protocol.py:1303-1306`). Two writes, never one.
 fn transport(table: &StateTable, log: &Logger, state: &str) {
@@ -530,8 +781,9 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
     host.table
         .write("CurrentTrackTitle", json!(name.clone()), host.log.as_ref(), true);
 
-    // 7. playlist + track counters.
+    // 7. playlist + track counters, and the position `_playlist_step` steps from.
     let (index, number) = host.table.playlist_push(uri);
+    host.table.set_playlist_index(index);
     host.table
         .write("NumberOfTracks", json!(number), host.log.as_ref(), true);
     host.table
@@ -546,10 +798,12 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
         .write("AbsoluteTimePosition", json!("00:00:00"), host.log.as_ref(), true);
     transport(&host.table, host.log.as_ref(), "PLAYING");
 
-    // 9. `_add_history(uri, title)` — deliberately absent: it persists
-    //    `Play_History` into the user's settings file, and §10 forbids writing to
-    //    it from a verification path. The omission is a recorded gap, not an
-    //    oversight, and the page's own history is unaffected (it has none yet).
+    // 9. `_add_history(uri, title)` — in the table only. The reference writes this
+    //    list into `Play_History` in the user's settings file; this shell keeps the
+    //    rows in memory, because §10 forbids a verification path from writing his
+    //    configuration, and a row that is read back by nothing still costs him a
+    //    write on every cast.
+    host.table.add_history(&given, uri);
 
     Ok(json!({
         "uri": uri,

@@ -6,15 +6,23 @@
 //! `macast-mpv/src/lib.rs` names as the missing piece, and every rule this file
 //! applies was verified there against `macast/protocol.py` and
 //! `macast_renderer/mpv.py`. This file's job is narrower — put the handles
-//! together, start the player, and expose enough of it to click on that a real
-//! mpv child appears and disappears.
+//! together, start the player, start the receiver, and expose enough of both to
+//! click on that a real mpv child appears and disappears and a real `NOTIFY`
+//! arrives at a subscribed control point.
 //!
-//! What is deliberately **not** here: the HTTP/SSDP/mDNS services. This shell
-//! plays media; it does not yet answer a phone's `DESCRIBE`. That is the reason
-//! `cast_url` exists as a command — it is the same call `Handler.cast_uri` makes
-//! internally (`macast/protocol.py:1163`), so the page can drive the exact
-//! sequence a DLNA `SetAVTransportURI` would, without pretending to be a
-//! renderer discovery target.
+//! What lives here now: the three services that make this shell a **discovery
+//! target** as well as a player — the HTTP face (`description.xml`, SCPD, control
+//! and GENA), the SSDP announcer, and the event thread — wired to the four
+//! `macast-upnp` seams [`host`] implements. A phone's `DESCRIBE` is answered, and
+//! a `SetAVTransportURI` reaches the same mpv `cast_url` drives, so the page and
+//! the control point are two readers of one state table rather than two players.
+//!
+//! `cast_url` stays for the same reason it was written before the services
+//! existed: it is the call `Handler.cast_uri` makes internally
+//! (`macast/protocol.py:1163`), so the page can drive the exact sequence a DLNA
+//! `SetAVTransportURI` would without waiting for a phone to find us. What is
+//! still **not** here is Chromecast and AirPlay — those are different protocols,
+//! not the same one wearing a different hat.
 
 mod host;
 
@@ -33,6 +41,12 @@ use macast_core::paths;
 use macast_core::setting::{Key, Setting};
 use macast_mpv::argv;
 use macast_mpv::player::Player;
+use macast_upnp::device::SsdpPlugin;
+use macast_upnp::eventing::Eventing;
+use macast_upnp::http::{Control, Face, HttpServer, Subscription};
+use macast_upnp::scpd::Scpd;
+use macast_upnp::soap::Soap;
+use macast_upnp::store::{SharedBroadcast, SharedHooks, SharedRenderer, SharedStore};
 
 use host::{StateTable, TauriHost};
 
@@ -55,12 +69,46 @@ const EXTRA_BIN_DIRS: [&str; 4] = [
 /// (`Player: Clone` and `TauriHost: Clone` are both shallow), and `table` /
 /// `service_stopped` are the host's own handles copied out so the commands can
 /// read them without going through a trait they have no reason to reach.
+///
+/// The three service handles are the receiver: [`HttpServer`] is the HTTP face
+/// that answers `DESCRIBE`/`GET`/`POST`, [`SsdpPlugin`] is the announcer on
+/// UDP/1900, [`Eventing`] is the GENA thread. They are `Arc`s rather than values
+/// because both `start` methods take `&Arc<Self>` — the reference's services can
+/// be started and stopped from inside their own worker threads, and an `Arc`
+/// cloned into the thread is how that stays legal in Rust.
 struct Runtime {
     player: Player,
     host: TauriHost,
     table: Arc<StateTable>,
     setting: Arc<Setting>,
     service_stopped: Arc<AtomicBool>,
+    http: Arc<HttpServer>,
+    ssdp: Arc<SsdpPlugin>,
+    eventing: Arc<Eventing>,
+}
+
+impl Runtime {
+    /// Stop the receiver and nothing else — the decision is
+    /// [`host`]'s module doc, deviation number two: "the phone no longer finds
+    /// Macast, the window it opened stays open."
+    ///
+    /// The order is the reference's teardown order for a service stop, and each
+    /// step is a no-op when that service never came up, so calling this twice (a
+    /// bind failure on `SSDP_STOP_THREAD` followed by the window closing) is
+    /// harmless. `ssdp` goes **first** among the networked ones because its stop
+    /// sends `byebye` — a control point that hears nothing at all keeps
+    /// re-announcing a device that is not there for the length of its cache
+    /// timeout, which is how a stopped Macast used to stay clickable on the TV
+    /// for half a minute.
+    fn stop_services(&self) {
+        self.ssdp.stop();
+        self.http.stop();
+        self.eventing.stop();
+        self.host.log.info(
+            "receiver stopped (SSDP byebye, HTTP face closed, GENA thread released); \
+             the player is untouched",
+        );
+    }
 }
 
 #[derive(Default)]
@@ -125,8 +173,9 @@ fn cast_url(
 }
 
 /// Everything a reader can ask the player for without changing it: the transport
-/// flags, the pid we own, the socket, the DLNA state table, and the playlist.
-/// The page polls this after each action rather than assuming its call worked.
+/// flags, the pid we own, the socket, the DLNA state table, the playlist and the
+/// play history. The page polls this after each action rather than assuming its
+/// call worked.
 #[tauri::command]
 fn player_snapshot(runtime: State<'_, Runtime>) -> Value {
     let player = &runtime.player;
@@ -152,8 +201,28 @@ fn player_snapshot(runtime: State<'_, Runtime>) -> Value {
         "position": runtime.table.read_str("RelativeTimePosition"),
         "duration": runtime.table.read_str("CurrentTrackDuration"),
         "playlist": runtime.table.playlist(),
+        // Newest first, deduped by address, capped at 50 — the table's own rule,
+        // which `cast_uri` applies on every push, whether the push came from the
+        // page or from a `SetAVTransportURI`. Each row is what a re-cast sends:
+        // the name that was handed over with it (or the one the fallback derived),
+        // so a history click re-plays under the same window title.
+        "history": runtime
+            .table
+            .play_history()
+            .iter()
+            .map(|(title, uri)| json!({ "title": title, "url": uri }))
+            .collect::<Vec<_>>(),
         "states": states,
     })
+}
+
+/// Empty the play history. The page's 「播放历史」 card has a clear button, and
+/// this is the only way its row count can go down — nothing truncates the list
+/// while playing except the 50-entry cap.
+#[tauri::command]
+fn clear_play_history(runtime: State<'_, Runtime>) -> Value {
+    runtime.table.clear_history();
+    json!({ "history": [] })
 }
 
 /// How long a control command waits for mpv to answer for itself before its ack
@@ -401,7 +470,7 @@ pub fn run() {
             // makes (macast/logsplit.py), and the reason `Host::log` exists.
             let log_path = log.claim();
             let setting = Arc::new(Setting::load_default());
-            let table = Arc::new(StateTable::new(&log));
+            let table = Arc::new(StateTable::new(log.clone()));
             let service_stopped = Arc::new(AtomicBool::new(false));
 
             let config = config_from_settings(&setting, &log);
@@ -431,15 +500,86 @@ pub fn run() {
                 service_stopped: service_stopped.clone(),
             };
             let player = Player::new(host.clone(), config);
-            player.start();
 
+            // The receiver, wired to the four seams [`host`] implements. All of it is
+            // built **before** `player.start()` on purpose: every construction step
+            // below can refuse (`Scpd::embedded`, `Face::new`), and a `?` that fires
+            // after the mpv child exists would leave it orphaned — the exact shape
+            // AGENTS.md §4.2 counted (「被反复重启的 Macast 会攒播放器」). Refusing
+            // here costs a window, not a process.
+            //
+            // `Eventing` goes first because the other two take it as an argument: it
+            // is the `StateStore`'s broadcast target (so a state write from the mpv
+            // event thread reaches subscribed control points) and the `Subscription`
+            // behind the HTTP face's SUBSCRIBE/UNSUBSCRIBE at the same time. One
+            // object, both roles, because in the reference they are one thread.
+            let eventing = Eventing::new(table.clone() as SharedStore);
+            table.set_broadcaster(eventing.clone() as SharedBroadcast);
+            let scpd = Arc::new(Scpd::embedded()?);
+            let soap = Soap::new(
+                scpd,
+                table.clone() as SharedStore,
+                // The renderer seam is the player plus nothing else: this shell has one
+                // renderer, so there is no `ProtocolGroup` fan-out to reproduce here
+                // (`macast/protocol_group.py`), and `ShellRenderer` is the single
+                // delegate `Renderer::methods()` would have enumerated.
+                Arc::new(host::ShellRenderer {
+                    player: player.clone(),
+                }) as SharedRenderer,
+                eventing.clone() as SharedBroadcast,
+                setting.clone(),
+            );
+            // `Face::new` reads and validates `description.xml` (it is what a phone
+            // `DESCRIBE`s), so an `Err` here means "we would answer discovery with
+            // garbage" and the face must not start. That is a build-time fact about
+            // our own bundled XML, not a runtime condition.
+            let face = Face::new(
+                Arc::new(soap) as Arc<dyn Control>,
+                eventing.clone() as Arc<dyn Subscription>,
+                setting.clone(),
+            )?;
+            let http = HttpServer::new(Arc::new(face));
+            // `host.clone()` rather than `host`: the last one moves into `Runtime`
+            // below, and SSDP needs a `SharedHooks` of its own — the `notify` half is
+            // how a bind failure reaches the page, and the `stop_service` half is how
+            // it reaches *this* struct's `stop_services`.
+            let ssdp = SsdpPlugin::new(Arc::new(host.clone()) as SharedHooks, setting.clone());
+
+            // Managed before anything is started, and this ordering is load-bearing
+            // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
+            // `Hooks::stop_service`, which resolves the services through
+            // `try_state::<Runtime>()`. Managed first, that call finds them and stops
+            // the receiver; managed last, it finds nothing and the flag becomes the
+            // only record of a request the user can see as "the phone found it and it
+            // never answered".
             app.manage(Runtime {
                 player: player.clone(),
                 host,
                 table,
                 setting,
                 service_stopped,
+                http: http.clone(),
+                ssdp: ssdp.clone(),
+                eventing: eventing.clone(),
             });
+
+            player.start();
+            http.start();
+            ssdp.start();
+            eventing.start();
+            // The answer, not the ask: `HttpServer::start` can refuse (the port is
+            // taken) and return, so "started" is only true once `is_running()` says
+            // so — and a control point's whole experience of this app is that port.
+            // SSDP's state is read through `ssdp()` because the plugin delegates to
+            // the server it owns. The GENA thread is not reported: it has no query to
+            // ask, and a line saying "started" for a thread that could have failed to
+            // spawn is the kind of unasked claim this port keeps refusing.
+            log.info(&format!(
+                "receiver: HTTP {} on port {}, SSDP {}",
+                if http.is_running() { "listening" } else { "did not start" },
+                http.bound_port(),
+                if ssdp.ssdp().is_running() { "announcing" } else { "did not start" },
+            ));
             log.info(&format!("renderer log: {}", log_path.display()));
             Ok(())
         })
@@ -448,6 +588,7 @@ pub fn run() {
             set_status,
             cast_url,
             player_snapshot,
+            clear_play_history,
             stop_playback,
             pause,
             resume,
@@ -462,9 +603,17 @@ pub fn run() {
     // 播放器」). `RunEvent::Exit` is the only place that fires on every way out —
     // `on_window_event`/Destroyed misses a signal, and `Host::stop_service` is
     // not called by a quit.
+    //
+    // The receiver goes with it for the same reason in the other direction: a
+    // process that quits while UDP/1900 still has our `ALIVE` in flight looks to
+    // every control point on the network like a device that is there and silent,
+    // so it stays in their caches for the length of the timeout. `stop_services`
+    // sends the `byebye` that tells them otherwise, and it is a no-op for a
+    // service that never came up — which is the state after a refused bind.
     app.run(move |app, event| {
         if let tauri::RunEvent::Exit = event {
             if let Some(runtime) = app.try_state::<Runtime>() {
+                runtime.stop_services();
                 runtime.player.stop();
                 // `Logger`'s inherent method, not `Host::log`: the trait is not in
                 // scope here, and the host's `log` field is the same logger the
