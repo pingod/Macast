@@ -249,8 +249,15 @@ struct Shared {
     /// side for anything we do not understand).
     live: Mutex<command::Liveness>,
     /// The `subscribe('mpvipc_start', loadfile)` of the reference, in the shape a
-    /// port can actually make one-shot: the url `reload()` read while the player
-    /// was still playing, waiting for the next connection to spend it.
+    /// port can actually make one-shot: the url waiting for the next connection to
+    /// spend it.
+    ///
+    /// Two places arm it, and both are a url the player was handed but could not be
+    /// written to. [`Player::reload`] is the reference's: the url it read while the
+    /// player was still playing, held for the restart it is about to ask for.
+    /// [`Player::set_media_url`] is the port's: the same hold for a cast that arrives
+    /// while the ipc thread is still in its first connect, which the reference never
+    /// had to answer because its subscription outlived the socket.
     ///
     /// [`Shared::pending_reload`] is **taken**, not inspected, so the second
     /// reconnect of the same session loads nothing — that take is the
@@ -502,11 +509,27 @@ impl Player {
     /// The comparison is [`pyops::py_eq`] and not `==` on `Value`: the reference
     /// compares against the enum's `4`, so the number `4.0` means fullscreen and the
     /// string `"4"` does not.
+    ///
+    /// A hand-off that arrives **before the first connect** is put in
+    /// [`Shared::pending_reload`] so the socket that is on its way can load it. The
+    /// reference has no such case: its `mpvipc_start` subscription is armed only by
+    /// `reload()`, so a cast that lands during the connect sleep writes to a `None`
+    /// socket, logs `sendCommand: …`, and is never loaded — which is exactly what this
+    /// port did on a real receiver (AGENTS.md §4.1's 「连上了但什么都没播」, with the
+    /// mpv side of it here rather than in the renderer). The slot is armed **before**
+    /// the attempt, not after it reports the drop: a connect that lands between the
+    /// dropped send and a later arm would find nothing waiting, and losing the media is
+    /// the failure this exists to end. The worst case of the chosen order is that both
+    /// that reconnect and this call load the same url — a reload of a file that was
+    /// about to play, not a cast that never plays.
     pub fn set_media_url(&self, url: &str, start: Option<&str>) {
         if pyops::py_eq(&self.shared.host.player_size(), &json!(4)) {
             self.send_command(&command::fullscreen());
         }
         let live = self.media_live();
+        if guard(&self.shared.link).is_none() {
+            *guard(&self.shared.pending_reload) = Some(url.to_string());
+        }
         self.send_command(&command::loadfile(url, start, live));
     }
 
@@ -3489,6 +3512,94 @@ mod tests {
             ],
             "and the setting is not decoration either"
         );
+    }
+
+    #[test]
+    fn a_cast_that_lands_before_the_socket_is_held_for_it() {
+        // The one window the reference never had to answer: its `mpvipc_start`
+        // subscription is armed only by `reload()`, so a cast arriving during the first
+        // connect sleep writes to a `None` socket, logs `sendCommand: …`, and is never
+        // loaded. Here the hand-off can land before the ipc thread exists at all, so it
+        // is held where the socket that is on its way can spend it.
+        //
+        // The drop is still logged — holding the url does not make the write succeed,
+        // and that line is the only witness that a hand-off arrived with nothing to
+        // write to. The replay's order is the load-bearing half: media, then the name
+        // twice, then the ten observations, because a window that got its media but not
+        // its name is AGENTS.md §4.2's 「改播放器的地址，就必须改播放器的名字」.
+        let mut h = harness(|_, _| {});
+        h.player.set_media_url(MEDIA_URL, None);
+        h.player.set_media_title("某部片子");
+        assert_eq!(
+            guard(&h.player.shared.pending_reload).as_deref(),
+            Some(MEDIA_URL),
+            "the hand-off has to wait for the socket, not vanish with it"
+        );
+        assert!(
+            h.host
+                .at(Level::Error)
+                .iter()
+                .any(|line| line.contains("NoneType")),
+            "the dropped write is still reported: {:?}",
+            h.host.at(Level::Error)
+        );
+
+        h.start();
+        wait_until("the replay and the session's ten observations", || {
+            h.fake.commands().len() >= 13
+        });
+        let all = h.fake.commands();
+        assert_eq!(
+            &all[..3],
+            &[
+                json!(["loadfile", MEDIA_URL, "replace"]),
+                json!(["set_property", "title", "某部片子"]),
+                json!(["set_property", "force-media-title", "某部片子"]),
+            ][..],
+            "{:?}",
+            all
+        );
+        assert_eq!(&all[3..13], &session_setup()[..], "{:?}", all);
+        assert_eq!(h.host.count_containing("mpv loadfile"), 1);
+        assert!(
+            guard(&h.player.shared.pending_reload).is_none(),
+            "the replay is spent by the connection that read it"
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn a_hand_off_writes_through_and_holds_nothing_when_the_socket_is_there() {
+        // The other side of the same rule, and the one that keeps the fix from becoming
+        // a retry loop: a hand-off that reaches a live socket is not also parked, so the
+        // next reconnect — one the user did not ask for — loads nothing.
+        let mut h = harness(|_, _| {});
+        h.start();
+        assert_eq!(
+            h.sent(1, |p| p.set_media_url(MEDIA_URL, None)),
+            vec![json!(["loadfile", MEDIA_URL, "replace"])]
+        );
+        assert!(
+            guard(&h.player.shared.pending_reload).is_none(),
+            "a written hand-off must not be replayed"
+        );
+
+        let before = h.fake.commands().len();
+        h.fake.drop_connections();
+        wait_until("a second session writes its own setup", || {
+            h.fake.commands().len() >= before + 10
+        });
+        let added = h.fake.commands()[before..].to_vec();
+        assert_eq!(&added[..10], &session_setup()[..], "{:?}", added);
+        assert!(
+            !added
+                .iter()
+                .any(|row| row.as_array().map_or(false, |c| c.first()
+                    == Some(&json!("loadfile")))),
+            "a live hand-off was already delivered: {:?}",
+            added
+        );
+        h.stop();
     }
 
     #[test]
