@@ -24,6 +24,12 @@
       .row > div { flex: 1 1 260px; }
       #error { color: #fca5a5; }
       #events { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60px; }
+      .hist { display: block; width: 100%; text-align: left; margin: 6px 0 0; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; cursor: pointer; }
+      .hist:hover { border-color: #2563eb; background: #16213a; }
+      .hist-title { display: block; font-size: 13px; overflow-wrap: anywhere; }
+      .hist-url { display: block; font-size: 11px; color: #9ca3af; overflow-wrap: anywhere; }
+      #clear-history { background: #7f1d1d; }
+      #clear-history:hover { background: #991b1b; }
     </style>
   </head>
   <body>
@@ -79,6 +85,14 @@
         <label>事件（后端 publish 到页面的那几条）</label>
         <div id="events">（还没有事件）</div>
       </section>
+
+      <section class="card">
+        <h2>播放历史</h2>
+        <p class="muted">最近 50 条，按地址去重，新的在前。点一行就是拿「当初一起交过来的那个名字」重投，
+          所以窗口标题不会变成地址末段。</p>
+        <div id="history">（还没有投过）</div>
+        <button id="clear-history">清空历史</button>
+      </section>
     </main>
     <script>
       const core = window.__TAURI__?.core;
@@ -104,6 +118,53 @@
         for (const key of ['backend', 'version', 'migration', 'status']) out(key, data[key]);
       }
 
+      // 历史记录每行是 (名字, 地址)。这一列的每一项都来自**发送端**：DLNA 那边
+      // 是 DIDL 的 `dc:title`，我们把它存下来就完了。所以这一格跟设置页的日志面板
+      // 是同一个 XSS 边界（AGENTS.md §4.10 那条红线），行必须用 createElement +
+      // textContent 建，永远不许 innerHTML。
+      // 重投必须把存下来的那个名字一起交回去。**只交地址**不交名字，
+      // `cast_uri` 就用 `title_for_uri` 现推一个，而中转地址的末段是 `media` ——
+      // 那正是 §4.2「改播放器的地址，就必须改播放器的名字」记下的症状。
+      let historySignature = null;
+      function renderHistory(rows) {
+        const box = document.querySelector('#history');
+        const list = rows || [];
+        const signature = JSON.stringify(list);
+        // 页面每 1500 毫秒重读一次快照；没有变化就不重建 DOM，
+        // 否则鼠标正指向的那一行会在自己那一次点击之前被换掉。
+        if (signature === historySignature) return;
+        historySignature = signature;
+        box.textContent = '';
+        if (!list.length) {
+          const empty = document.createElement('p');
+          empty.className = 'muted';
+          empty.textContent = '（还没有投过）';
+          box.appendChild(empty);
+          return;
+        }
+        for (const row of list) {
+          const button = document.createElement('button');
+          button.className = 'hist';
+          const title = document.createElement('span');
+          title.className = 'hist-title';
+          title.textContent = row.title || '（没有名字）';
+          const url = document.createElement('span');
+          url.className = 'hist-url';
+          url.textContent = row.url;
+          button.appendChild(title);
+          button.appendChild(url);
+          button.addEventListener('click', async () => {
+            try {
+              note(`重投 → ${JSON.stringify(await invoke('cast_url', { uri: row.url, title: row.title || null }))}`);
+            } catch (e) {
+              note(`重投失败：${e}`);
+            }
+            await snapshot();
+          });
+          box.appendChild(button);
+        }
+      }
+
       async function snapshot() {
         if (!invoke) return;
         const s = await invoke('player_snapshot');
@@ -118,6 +179,7 @@
         out('position', `${s.position || '—'} / ${s.duration || '—'}`);
         out('media_live', s.media_live === null ? '未声明' : String(s.media_live));
         out('playlist', s.playlist.length ? s.playlist.join(' · ') : '（空）');
+        renderHistory(s.history);
       }
 
       document.querySelector('#mark-ready').addEventListener('click', async () => {
@@ -137,6 +199,18 @@
         }
         await snapshot();
       });
+      // 清空是唯一能让这一列行数变少的动作 —— 播放本身只有 50 条上限的截断。
+      // 后端的 `clear_play_history` 早已注册，这一格一直是页面缺的那一半。
+      document.querySelector('#clear-history').addEventListener('click', async () => {
+        try {
+          await invoke('clear_play_history');
+          note('clear_play_history → {"history":[]}');
+        } catch (e) {
+          note(`清空历史失败：${e}`);
+        }
+        await snapshot();
+      });
+
       // 后端那四个控制命令回的是「等过状态表」的答复，不是「mpv 照做了」的答复：
       // `settled` 说的是我们有没有在 400 毫秒里读到那一句，参考实现（mpv.py:273-300）
       // 只有在 mpv 自己上报 ObserveProperty 时才写表，播放器空闲时它根本不写，
