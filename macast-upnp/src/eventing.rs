@@ -141,6 +141,29 @@ impl Subscriber {
     }
 }
 
+/// One row of the read-only subscriber view [`Eventing::subscribers`] returns.
+///
+/// These are facts, not a page shape: `serde` is not a dependency of this crate,
+/// and the JSON the settings page reads is owned by whoever serves it
+/// (`src-tauri/src/main.rs` reproduces the reference's `query=subscribers`
+/// keys). Every lease-backed field of one row comes out of **one** lock
+/// acquisition, so a row is a point-in-time snapshot: it can be a moment behind
+/// the event thread, never a mix of two moments.
+pub struct SubscriberRow {
+    pub sid: String,
+    pub service: String,
+    pub url: String,
+    /// The timeout this subscription was last granted, in seconds.
+    pub timeout: i64,
+    /// `NTSEQ` of the next event this subscriber would receive.
+    pub seq: u64,
+    /// Broadcast failures accumulated since the subscription began; the sender
+    /// drops a client once this passes `MAX_CLIENT_ERRORS`.
+    pub errors: u32,
+    /// Its lease has run out but the event thread has not reaped it yet.
+    pub timed_out: bool,
+}
+
 /// The GENA state machine: who is subscribed, what changed, and the thread
 /// that turns one into the other.
 pub struct Eventing {
@@ -153,6 +176,12 @@ pub struct Eventing {
     state_event: Condvar,
     init_sem: Arc<Semaphore>,
     running: AtomicBool,
+    /// The event thread itself, kept so [`Eventing::event_thread_alive`] can ask
+    /// it rather than read our own flag. `running` is a *request* to stop; a
+    /// thread that panicked on the way through `loop_once` leaves it set, which
+    /// is precisely the state the page exists to be able to see. The reference
+    /// asks the real thing (`protocol.py` reports `thread.is_alive()`).
+    event_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Eventing {
@@ -167,6 +196,7 @@ impl Eventing {
             state_event: Condvar::new(),
             init_sem: Semaphore::new(INIT_PERMITS),
             running: AtomicBool::new(false),
+            event_thread: Mutex::new(None),
         })
     }
 
@@ -298,9 +328,14 @@ impl Eventing {
         let spawned = std::thread::Builder::new()
             .name("gena-event".to_string())
             .spawn(move || eventing.loop_forever());
-        if let Err(e) = spawned {
-            self.running.store(false, Ordering::SeqCst);
-            self.log.error(&format!("event thread did not start: {e}"));
+        match spawned {
+            Ok(handle) => {
+                *self.event_thread.lock().unwrap() = Some(handle);
+            }
+            Err(e) => {
+                self.running.store(false, Ordering::SeqCst);
+                self.log.error(&format!("event thread did not start: {e}"));
+            }
         }
     }
 
@@ -308,6 +343,87 @@ impl Eventing {
         self.running.store(false, Ordering::SeqCst);
         drop(self.state_queue.lock().unwrap());
         self.state_event.notify_all();
+    }
+
+    /// The published subscriber table, as rows.
+    ///
+    /// It binds the snapshot **once** (`published()`) and then reads from that
+    /// `Arc`, which is the contract the reference's Part 49 exists for: a reader
+    /// that re-reads the live table while the event thread republishes is a
+    /// reader that iterates a structure changing under it. Nothing here takes the
+    /// table lock while holding a subscriber lease, so no order of these two
+    /// locks can deadlock against the event thread.
+    ///
+    /// Each row takes the subscriber's lease **once**. `std::sync::Mutex` is not
+    /// reentrant, so a second `lease.lock()` inside the same row — whichever
+    /// accessor it goes through — is this reader deadlocking against a guard it
+    /// already holds, and it deadlocks only once the table has a subscriber in
+    /// it, which is exactly the state a unit test over an empty table never
+    /// reaches. This is not a background reader: a synchronous Tauri command
+    /// runs on the main thread, so the page's 5-second poll would freeze the
+    /// window (and its accessibility tree) while the HTTP services keep
+    /// answering — a live port is not evidence the UI thread is alive.
+    ///
+    /// Queued-but-unpublished subscriptions are deliberately **not** in these
+    /// rows — they are counted by [`Eventing::pending_append`], because "the
+    /// connection was accepted but no client is listed" and "nobody subscribed"
+    /// are different failures and the page has to be able to tell them apart.
+    pub fn subscribers(&self) -> Vec<SubscriberRow> {
+        let now = now_secs();
+        self.published()
+            .values()
+            .map(|client| {
+                let lease = client.lease.lock().unwrap();
+                SubscriberRow {
+                    sid: client.sid.clone(),
+                    service: client.service.clone(),
+                    url: client.url.clone(),
+                    timeout: lease.timeout,
+                    seq: lease.seq,
+                    errors: lease.error,
+                    timed_out: now > lease.start + lease.timeout,
+                }
+            })
+            .collect()
+    }
+
+    /// Subscriptions accepted this instant but not yet in the table.
+    pub fn pending_append(&self) -> usize {
+        self.append_queue.lock().unwrap().len()
+    }
+
+    /// State changes waiting for the next tick's broadcast.
+    pub fn pending_state(&self) -> usize {
+        self.state_queue.lock().unwrap().len()
+    }
+
+    /// Removals queued and not yet published. The reference does not report this
+    /// one; it is here because a stuck reaper is the same shape of failure as a
+    /// stuck appender, and it would otherwise show up as "subscribers that never
+    /// go away".
+    pub fn pending_remove(&self) -> usize {
+        self.remove_queue.lock().unwrap().len()
+    }
+
+    /// Whether we have asked the event thread to run — `start()` sets it,
+    /// `stop()` clears it. Read it **together with**
+    /// [`Eventing::event_thread_alive`], never instead of it: the useful state is
+    /// the disagreement between the two ("we think it is running, the thread is
+    /// gone"), which is exactly the silently-dead GENA the reference's subscriber
+    /// page exists to catch.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Whether the event thread is still running itself, as opposed to whether we
+    /// asked it to. False before `start()` and after the thread has returned, by
+    /// panic or by clean stop alike.
+    pub fn event_thread_alive(&self) -> bool {
+        self.event_thread
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
     }
 }
 
@@ -691,7 +807,7 @@ mod tests {
     }
 
     fn log_tail() -> String {
-        logging::read_tail(&paths::log_file(), 4000)
+        logging::read_tail(&paths::log_file(), 4000).text
     }
 
     fn wait_for_log(needle: &str, secs: u64) {
@@ -887,6 +1003,78 @@ mod tests {
             "the renewed lease survives the reap"
         );
         assert_eq!(client.timeout(), 300);
+    }
+
+    /// Read the subscriber rows on **another thread**, with a deadline.
+    ///
+    /// `subscribers()` is the thing under test, and a wrong lease lock there does
+    /// not panic — `std::sync::Mutex` is not reentrant, so it *blocks*. A harness
+    /// that waits for it forever therefore reports nothing at all, which is worse
+    /// than a red test; this helper turns that hang into a loud failure. It is not
+    /// a contrivance: in production this reader is the Tauri `subscriber_snapshot`
+    /// command, which runs on the main thread, so the blocked lock is a frozen
+    /// window while the HTTP services keep answering.
+    fn read_rows_in_time(ev: &Arc<Eventing>, secs: u64) -> Vec<SubscriberRow> {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<SubscriberRow>>();
+        let reader = Arc::clone(ev);
+        std::thread::Builder::new()
+            .name("subscriber-rows-reader".to_string())
+            .spawn(move || {
+                let _ = tx.send(reader.subscribers());
+            })
+            .expect("the reader thread starts");
+        match rx.recv_timeout(Duration::from_secs(secs)) {
+            Ok(rows) => rows,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!(
+                "the reader thread died before answering; its own panic message \
+                 above is the real failure"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "`Eventing::subscribers()` did not answer within {secs}s, i.e. it is \
+                 blocked on a lease it already holds. One lock per row: a second \
+                 `lease.lock()` inside the row — through any accessor — is a deadlock \
+                 that only appears once a control point is subscribed, which is the \
+                 state a test over an empty table never reaches."
+            ),
+        }
+    }
+
+    #[test]
+    fn the_subscriber_rows_answer_once_the_table_is_not_empty() {
+        crate::pin_test_dir();
+        let ev = Eventing::new(Arc::new(FakeStore::new()));
+        let (sid, _) = ev.add("AVTransport", DEAD_URL, 300);
+        ev.tick();
+        assert!(
+            ev.published().contains_key(&sid),
+            "the subscription is published"
+        );
+
+        let rows = read_rows_in_time(&ev, 5);
+        assert_eq!(rows.len(), 1, "one subscriber, one row");
+        assert_eq!(rows[0].sid, sid);
+        assert_eq!(rows[0].service, "AVTransport");
+        assert_eq!(rows[0].url, DEAD_URL);
+        assert_eq!(rows[0].timeout, 300, "the granted timeout, in seconds");
+        assert_eq!(rows[0].seq, 0, "nothing has been acknowledged");
+        assert_eq!(rows[0].errors, 0, "no broadcast attempted yet");
+        assert!(!rows[0].timed_out, "the lease is young");
+
+        ev.enqueue("TransportState", &json!("PLAYING"));
+        ev.tick();
+        let rows = read_rows_in_time(&ev, 5);
+        assert_eq!(rows[0].errors, 1, "the dead callback counted one failure");
+        assert_eq!(rows[0].seq, 0, "a failure never advances the seq");
+
+        ev.published()
+            .get(&sid)
+            .expect("still published")
+            .lease
+            .lock()
+            .unwrap()
+            .start -= 2000;
+        let rows = read_rows_in_time(&ev, 5);
+        assert!(rows[0].timed_out, "the row says the lease ran out");
     }
 
     #[test]

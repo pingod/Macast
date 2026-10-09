@@ -329,36 +329,88 @@ pub fn module_logs() -> Vec<LogFile> {
     rows
 }
 
-/// Default tail for the settings page, and the byte cap that goes with it
-/// (`?tail=` / `?all=1`, default 2000 lines / 512 KB in Python).
+/// Default tail for the settings page (`?tail=`, `LOG_TAIL_LINES` in Python).
 pub const DEFAULT_TAIL_LINES: usize = 2000;
-pub const MAX_TAIL_LINES: usize = 200_000;
-pub const TAIL_BYTE_CAP: u64 = 512 * 1024;
+/// Ceiling for one tail request (`LOG_TAIL_MAX_LINES`).
+pub const MAX_TAIL_LINES: usize = 50_000;
+/// Floor of the byte window: 512 KB of log is enough for the default 2000 lines.
+pub const TAIL_BYTE_FLOOR: u64 = 512 * 1024;
+/// Ceiling of the byte window (`LOG_TAIL_MAX_BYTES`) -- the budget scales toward
+/// this as more lines are asked for, and never past it.
+pub const TAIL_BYTE_MAX: u64 = 4 * 1024 * 1024;
+/// The reference's per-line allowance. DIDL titles plus whole SOAP request lines
+/// run to several hundred bytes, which is why the budget is a product of the
+/// line count and not one fixed window: a 512 KB cap on a `?tail=10000` request
+/// answers with ~2000 lines and the page has no way to say so.
+const TAIL_BYTES_PER_LINE: u64 = 256;
+/// `?all=1` bound (`LOG_ALL_MAX_BYTES`): "anything bigger is a download, not a
+/// page".
+pub const ALL_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
-/// Read the last `lines` whole lines of `path`, at most `TAIL_BYTE_CAP` bytes.
+/// The byte window a request for `lines` lines may read.
+fn tail_byte_budget(lines: usize) -> u64 {
+    let wanted = (lines as u64).saturating_mul(TAIL_BYTES_PER_LINE);
+    wanted.max(TAIL_BYTE_FLOOR).min(TAIL_BYTE_MAX)
+}
+
+/// What a bounded read of one file decided.
 ///
-/// `errors='replace'` and the partial first line dropped: a byte window into a
-/// UTF-8 file **always** cuts a character in half, and a strict decode there
-/// would throw `UnicodeDecodeError` on the one path that must keep answering.
-pub fn read_tail(path: &Path, lines: usize) -> String {
+/// All three fields are needed together: `truncated` without `size` is
+/// "something is missing" with no way to say how much, which is the half the
+/// reference added so the page can print "only the last N lines of M bytes"
+/// instead of silently pretending it shows everything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailRead {
+    pub text: String,
+    pub truncated: bool,
+    pub size: u64,
+}
+
+impl TailRead {
+    fn empty() -> TailRead {
+        TailRead {
+            text: String::new(),
+            truncated: false,
+            size: 0,
+        }
+    }
+}
+
+/// Read the last `lines` whole lines of `path`, within a byte window that scales
+/// with `lines` ([`tail_byte_budget`]).
+///
+/// Lossy decode and the partial first line dropped: a byte window into a UTF-8
+/// file **always** cuts a character in half, and a strict decode there would
+/// throw on the one path that must keep answering (a Chinese media title in a
+/// DIDL log line is enough to hit it).
+///
+/// A missing or unreadable file is `Ok` and empty, not an error -- "no log yet"
+/// (fresh install, or it was just cleared) must render an empty box, not a red
+/// banner.
+pub fn read_tail(path: &Path, lines: usize) -> TailRead {
     let lines = lines.clamp(1, MAX_TAIL_LINES);
     let mut file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return String::new(),
+        Err(_) => return TailRead::empty(),
     };
     let size = match file.metadata() {
         Ok(m) => m.len(),
-        Err(_) => return String::new(),
+        Err(_) => return TailRead::empty(),
     };
-    let window = size.min(TAIL_BYTE_CAP);
+    let window = size.min(tail_byte_budget(lines));
     let start = size - window;
     if start > 0 {
         let _ = file.seek(SeekFrom::Start(start));
     }
     let mut buf = Vec::with_capacity(window as usize);
     if file.read_to_end(&mut buf).is_err() {
-        return String::new();
+        return TailRead {
+            text: String::new(),
+            truncated: start > 0,
+            size,
+        };
     }
+    let mut truncated = start > 0;
     if start > 0 {
         // Discard up to the first newline: whatever is before it is a fragment
         // of a line whose head we never read.
@@ -366,21 +418,191 @@ pub fn read_tail(path: &Path, lines: usize) -> String {
             Some(index) => {
                 buf.drain(0..=index);
             }
-            None => return String::new(),
+            None => return TailRead {
+                text: String::new(),
+                truncated,
+                size,
+            },
         }
     }
     let text = String::from_utf8_lossy(&buf);
     let all: Vec<&str> = text.lines().collect();
     let skip = all.len().saturating_sub(lines);
-    all[skip..].join("\n")
+    if all.len() > lines {
+        // Line-bound, not byte-bound: we still left whole lines behind.
+        truncated = true;
+    }
+    TailRead {
+        text: all[skip..].join("\n"),
+        truncated,
+        size,
+    }
 }
 
-/// Tail the main log or one module's log — the `query=log&module=` surface.
-pub fn read_log(module: Option<&str>, lines: usize) -> String {
-    match module {
-        None | Some("") | Some("整体") => read_tail(&paths::log_file(), lines),
-        Some(name) => read_tail(&module_log_path(name), lines),
+/// Whole-file flavour of [`read_tail`], bounded by `max_bytes` only: no line
+/// cap, no partial head dropped.
+pub fn read_whole(path: &Path, max_bytes: u64) -> TailRead {
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return TailRead::empty(),
+    };
+    let size = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return TailRead::empty(),
+    };
+    // One byte past the bound is all the witness we need that there was more --
+    // and it is also the ceiling on what this call may put in memory, so a 40 MB
+    // log asked for with `?all=1` does not become a 40 MB allocation.
+    let want = size.min(max_bytes.saturating_add(1));
+    let mut buf = Vec::with_capacity(want as usize);
+    if file.take(want).read_to_end(&mut buf).is_err() {
+        return TailRead::empty();
     }
+    let truncated = buf.len() as u64 > max_bytes;
+    buf.truncate(max_bytes as usize);
+    TailRead {
+        text: String::from_utf8_lossy(&buf).into_owned(),
+        truncated,
+        size,
+    }
+}
+
+/// The page's log view: one file's tail (or whole body) plus the counts that let
+/// it say what it is showing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LogPayload {
+    pub logs: String,
+    pub truncated: bool,
+    pub lines: usize,
+    pub size: u64,
+    /// `''` for the main log, matching the reference: the page uses it to tell
+    /// "showing everything" from "nothing was selected".
+    pub module: String,
+}
+
+/// Tail or read one log as the settings page asks for it.
+///
+/// `Err(module)` is the unknown-name answer (see [`log_target`]) -- a sentence
+/// the caller renders, not a file it can read.
+pub fn read_log(module: Option<&str>, lines: usize, all: bool) -> Result<LogPayload, String> {
+    let (path, name) = log_target(module);
+    let path = match path {
+        Some(p) => p,
+        None => return Err(name),
+    };
+    let read = if all {
+        read_whole(&path, ALL_MAX_BYTES)
+    } else {
+        read_tail(&path, lines)
+    };
+    let lines = if read.text.is_empty() {
+        0
+    } else {
+        read.text.lines().count()
+    };
+    Ok(LogPayload {
+        logs: read.text,
+        truncated: read.truncated,
+        lines,
+        size: read.size,
+        module: name,
+    })
+}
+
+/// Which file a log query targets: `macast.log`, or one module's own.
+///
+/// `(None, name)` means nobody has written a log under that name -- an unknown
+/// name is a mistake, not a secret, so it gets its own answer rather than the
+/// whole list. The known set is the files on disk **plus** the loggers claimed
+/// this run, because a plugin that has claimed its file but not yet logged
+/// anything is a name the page is entitled to read (an empty box, per
+/// [`read_tail`]).
+pub fn log_target(module: Option<&str>) -> (Option<PathBuf>, String) {
+    let name = module.unwrap_or("").trim().to_string();
+    let lower = name.to_lowercase();
+    if name.is_empty() || lower == "main" || lower == "macast" || lower == "整体" {
+        return (Some(paths::log_file()), String::new());
+    }
+    if !known_log_modules().iter().any(|known| known == &name) {
+        return (None, name);
+    }
+    (Some(module_log_path(&name)), name)
+}
+
+/// Every module name the page may ask for: on disk or claimed this run.
+pub fn known_log_modules() -> Vec<String> {
+    let mut names: Vec<String> = module_logs().into_iter().map(|row| row.name).collect();
+    for name in claimed_names() {
+        if !names.iter().any(|known| known == &name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names
+}
+
+/// The names of the loggers that claimed their own file this run, sorted.
+///
+/// Kept separate from [`module_logs`] on purpose: the files on disk answer
+/// "what has been written", this answers "what has been routed", and the second
+/// half is what lets a fresh plugin show up in the dropdown before its first
+/// record rotates anything in.
+pub fn claimed_names() -> Vec<String> {
+    let table = logger_table().lock().unwrap_or_else(|e| e.into_inner());
+    let mut names: Vec<String> = table
+        .values()
+        .filter(|logger| logger.is_claimed())
+        .map(|logger| logger.name.clone())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Truncate one log and drop its rotated backups, returning how many files were
+/// emptied or removed (the log itself counts as one).
+///
+/// Truncating from out here is safe because every writer opens in append mode:
+/// the next record seeks to the (new) end instead of writing into a hole. The
+/// backups have to go too -- they are the older megabytes the user is trying to
+/// get rid of -- and unlike [`remove_log_files`], which keeps backups past the
+/// rotation count, this follows the reference's `path + '.*'` and takes any
+/// sibling the name prefixes, because a stray `macast.log.3` is exactly such a
+/// leftover.
+///
+/// `Err` is only the truncation itself failing; a backup that will not go away
+/// is counted as not-removed, not as a failed clear.
+pub fn clear_log_file(path: &Path) -> std::io::Result<usize> {
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .create(true)
+        .open(path)?
+        .sync_all()?;
+    let mut removed = 1usize;
+    let Some(stem) = path.file_name().and_then(|s| s.to_str()) else {
+        return Ok(removed);
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(removed);
+    };
+    let prefix = format!("{stem}.");
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let other = entry.path();
+            if !other.is_file() {
+                continue;
+            }
+            match other.file_name().and_then(|s| s.to_str()) {
+                Some(name) if name.starts_with(&prefix) => {
+                    if fs::remove_file(&other).is_ok() {
+                        removed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
@@ -510,50 +732,224 @@ mod tests {
         assert!(logs.join("keep.txt").exists());
     }
 
+    /// ~53 bytes per line, CJK included, so a byte window into it lands
+    /// mid-character about as often as mid-line -- which is what the reader is
+    /// required to survive.
+    fn tail_fixture(total: usize) -> String {
+        let mut body = String::new();
+        for i in 0..total {
+            body.push_str(&format!("line {} 中文字符{}\n", i, "填".repeat(10)));
+        }
+        body
+    }
+
+    #[test]
+    fn tail_byte_budget_scales_with_the_ask() {
+        // Below the crossover (2048 lines) the floor rules, which is what makes
+        // `?tail=3` as cheap to read as the page default.
+        assert_eq!(tail_byte_budget(0), TAIL_BYTE_FLOOR);
+        assert_eq!(tail_byte_budget(1), TAIL_BYTE_FLOOR);
+        assert_eq!(tail_byte_budget(DEFAULT_TAIL_LINES), TAIL_BYTE_FLOOR);
+        // Above it the budget is 256 bytes per line -- the reference's allowance,
+        // sized for DIDL titles and whole SOAP request lines.
+        assert_eq!(tail_byte_budget(4_000), 4_000 * TAIL_BYTES_PER_LINE);
+        assert_eq!(tail_byte_budget(10_000), 10_000 * TAIL_BYTES_PER_LINE);
+        // And it stops at the ceiling instead of following the request.
+        assert_eq!(tail_byte_budget(16_384), TAIL_BYTE_MAX);
+        assert_eq!(tail_byte_budget(20_000), TAIL_BYTE_MAX);
+        // saturating: `usize::MAX * 256` must not wrap into a tiny window.
+        assert_eq!(tail_byte_budget(usize::MAX), TAIL_BYTE_MAX);
+    }
+
     #[test]
     fn tail_reader_drops_the_cut_head_and_caps_lines() {
-        // The fixture has to be *bigger* than `TAIL_BYTE_CAP` or the byte window
-        // never bites and the test asserts nothing: at 5000 short lines (~115 KiB)
-        // the whole file fits, so "the first line is a fragment" is a claim about a
-        // cut that never happened. 20 000 padded lines ≈ 760 KiB, comfortably over.
+        // The fixture has to be *bigger* than the floor or the byte window never
+        // bites and "the first line is a fragment" is a claim about a cut that
+        // never happened. 20 000 padded lines ≈ 1.07 MB, comfortably over.
         const TOTAL: usize = 20_000;
         let scratch = Scratch::new("tail");
         let path = scratch.0.join("t.log");
-        let mut body = String::new();
-        for i in 0..TOTAL {
-            body.push_str(&format!("line {} 中文字符{}\n", i, "填".repeat(10)));
-        }
+        let body = tail_fixture(TOTAL);
         fs::write(&path, body.as_bytes()).unwrap();
         assert!(
-            body.len() as u64 > TAIL_BYTE_CAP,
-            "fixture is {} bytes, cap is {}: the window would not bite",
+            body.len() as u64 > TAIL_BYTE_FLOOR,
+            "fixture is {} bytes, floor is {}: the window would not bite",
             body.len(),
-            TAIL_BYTE_CAP
+            TAIL_BYTE_FLOOR
         );
 
-        let tail = read_tail(&path, 3);
-        assert_eq!(tail.lines().count(), 3);
+        let three = read_tail(&path, 3);
+        assert_eq!(three.text.lines().count(), 3);
         assert_eq!(
-            tail.lines().next(),
+            three.text.lines().next(),
             Some(format!("line {} 中文字符{}", TOTAL - 3, "填".repeat(10)).as_str())
         );
+        assert!(three.truncated, "thousands of lines were left behind");
+        assert_eq!(three.size, body.len() as u64);
 
-        // The window is byte-capped, so the byte at `start` is mid-line and quite
-        // possibly mid-character. Neither may reach the caller: no fragment, and no
-        // replacement character (the discarded head swallows the split code point).
-        let wide = read_tail(&path, 100_000);
-        assert!(!wide.contains('\u{fffd}'));
-        let got = wide.lines().count();
-        assert!(got > 0 && got < TOTAL, "the cap must bite: {got} of {TOTAL}");
-        assert!(
-            wide.starts_with("line "),
-            "starts with {:?}",
-            wide.lines().next()
+        // The page's default ask: still byte-bound, and neither a line fragment
+        // nor a replacement character may reach the caller (discarding the head
+        // swallows the split code point with it).
+        let wide = read_tail(&path, DEFAULT_TAIL_LINES);
+        assert_eq!(wide.text.lines().count(), DEFAULT_TAIL_LINES);
+        assert!(!wide.text.contains('\u{fffd}'));
+        assert!(wide.text.starts_with("line "));
+        assert!(wide
+            .text
+            .ends_with(&format!("line {} 中文字符{}", TOTAL - 1, "填".repeat(10))));
+        assert!(wide.truncated);
+
+        // Why the budget is a product of the line count rather than one fixed
+        // window: asking for 10 000 lines has to *get* 10 000 lines. A fixed
+        // 512 KiB window answers this with ~9 700 and the page cannot tell.
+        let ten = read_tail(&path, 10_000);
+        assert_eq!(ten.text.lines().count(), 10_000);
+        assert_eq!(
+            ten.text.lines().next(),
+            Some(format!("line {} 中文字符{}", TOTAL - 10_000, "填".repeat(10)).as_str())
         );
-        // …and what survives is the *tail* of the file: the last line is there.
-        assert!(wide.ends_with(&format!("line {} 中文字符{}", TOTAL - 1, "填".repeat(10))));
+        assert!(ten.truncated, "the line cap bit, the byte window did not");
 
-        // Missing file answers with silence, not a panic.
-        assert_eq!(read_tail(&scratch.0.join("nope.log"), 10), "");
+        // At the ceiling the window is 4 MiB -- past this whole file -- so nothing
+        // was left behind and `truncated` has to say so honestly.
+        let whole = read_tail(&path, MAX_TAIL_LINES);
+        assert_eq!(whole.text.lines().count(), TOTAL);
+        assert!(!whole.truncated);
+
+        // Missing file answers with silence: not a panic, not an error.
+        let gone = read_tail(&scratch.0.join("nope.log"), 10);
+        assert_eq!(gone.text, "");
+        assert!(!gone.truncated);
+        assert_eq!(gone.size, 0);
+    }
+
+    #[test]
+    fn whole_reader_stops_at_the_bound_and_keeps_the_true_size() {
+        let scratch = Scratch::new("whole");
+        let path = scratch.0.join("w.log");
+        let body = tail_fixture(2_000);
+        fs::write(&path, body.as_bytes()).unwrap();
+
+        let limited = read_whole(&path, 100);
+        assert_eq!(limited.text.len(), 100, "the bound is a byte bound");
+        assert!(limited.truncated);
+        assert_eq!(
+            limited.size,
+            body.len() as u64,
+            "size is the file, not the window -- the page prints both"
+        );
+
+        let within = read_whole(&path, ALL_MAX_BYTES);
+        assert_eq!(within.text, body);
+        assert!(!within.truncated);
+        assert_eq!(within.size, body.len() as u64);
+
+        // A file far past the bound still reports its real length.
+        let big = scratch.0.join("big.log");
+        fs::write(&big, vec![b'a'; 4024]).unwrap();
+        let capped = read_whole(&big, 1_000);
+        assert_eq!(capped.text.len(), 1_000);
+        assert!(capped.truncated);
+        assert_eq!(capped.size, 4024);
+
+        assert_eq!(read_whole(&scratch.0.join("nope.log"), 100), TailRead::empty());
+    }
+
+    #[test]
+    fn log_target_names_the_main_log_for_every_alias() {
+        for alias in [None, Some(""), Some("main"), Some(" MACAST "), Some(" 整体 ")] {
+            let (path, module) = log_target(alias);
+            assert_eq!(path, Some(paths::log_file()), "{alias:?}");
+            assert_eq!(module, "", "{alias:?} must read as the main log");
+        }
+        // An unknown name is a mistake, not a secret: its own answer, not the list.
+        let (path, module) = log_target(Some("no-such-module-18"));
+        assert_eq!(path, None);
+        assert_eq!(module, "no-such-module-18");
+    }
+
+    #[test]
+    fn a_claimed_module_is_readable_before_it_has_written_anything() {
+        // Claiming is process-global and irreversible, so this asserts membership
+        // of the name it claims -- never an exact set other tests may have added.
+        const NAME: &str = "Cards18";
+        let logger = Logger::named(NAME);
+        let target = logger.claim();
+        assert!(claimed_names().iter().any(|n| n == NAME));
+        assert!(known_log_modules().iter().any(|n| n == NAME));
+
+        // Claimed but empty: an empty box with the name still echoed back.
+        let empty = read_log(Some(NAME), DEFAULT_TAIL_LINES, false).unwrap();
+        assert_eq!(empty.logs, "");
+        assert_eq!(empty.lines, 0);
+        assert_eq!(empty.size, 0);
+        assert_eq!(empty.module, NAME);
+
+        logger.info("first record");
+        logger.info("second record");
+        let read = read_log(Some(NAME), DEFAULT_TAIL_LINES, false).unwrap();
+        assert_eq!(read.lines, 2);
+        let on_disk = fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            read.logs,
+            on_disk.strip_suffix('\n').unwrap_or(&on_disk),
+            "the tail reader joins whole lines: only the final newline is lost"
+        );
+        assert!(read.logs.contains(" [INFO] first record"));
+        assert!(!read.truncated);
+        assert_eq!(read.size, fs::metadata(&target).unwrap().len());
+
+        // `?all=1` is the same file through the other reader, and the two readers
+        // differ by exactly the newline the tail dropped: `read_whole` hands back
+        // the bytes, `read_tail` hands back whole lines joined. The reference has
+        // the same asymmetry (`f.read()` vs `"\n".join(lines[-tail:])`), so the
+        // page must not assume the two flavours print identically.
+        let all = read_log(Some(NAME), DEFAULT_TAIL_LINES, true).unwrap();
+        assert_eq!(all.logs, on_disk);
+        assert_eq!(all.lines, 2);
+        assert_eq!(all.size, read.size);
+        assert!(!all.truncated);
+
+        // The unknown name refuses, and the refusal carries the name to render.
+        assert_eq!(
+            read_log(Some("no-such-module-18"), DEFAULT_TAIL_LINES, false),
+            Err("no-such-module-18".to_string())
+        );
+    }
+
+    #[test]
+    fn clear_log_file_empties_the_log_and_takes_every_backup() {
+        let scratch = Scratch::new("clearlog");
+        let main = scratch.0.join(paths::LOG_FILE_NAME);
+        fs::write(&main, "stale").unwrap();
+        for suffix in ["1", "2", "3", "bak"] {
+            fs::write(format!("{}.{}", main.display(), suffix), "stale").unwrap();
+        }
+        fs::write(scratch.0.join("keep.txt"), "stale").unwrap();
+        fs::create_dir(scratch.0.join("macast.log.d")).unwrap();
+
+        let removed = clear_log_file(&main).unwrap();
+        assert_eq!(removed, 5, "main + three backups + the .bak leftover");
+        assert!(
+            main.exists(),
+            "cleared, not deleted: every writer holds it open in append mode"
+        );
+        assert_eq!(fs::metadata(&main).unwrap().len(), 0);
+        assert!(
+            !Path::new(&format!("{}.3", main.display())).exists(),
+            "unlike remove_log_files, which keeps .3 past the rotation count"
+        );
+        assert!(!Path::new(&format!("{}.bak", main.display())).exists());
+        assert!(scratch.0.join("keep.txt").exists());
+        assert!(
+            scratch.0.join("macast.log.d").is_dir(),
+            "a directory that happens to match the prefix is not a backup"
+        );
+
+        // Clearing a log that does not exist yet is not a failure.
+        assert_eq!(
+            clear_log_file(&scratch.0.join("never-written.log")).unwrap(),
+            1
+        );
     }
 }

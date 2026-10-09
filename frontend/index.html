@@ -30,6 +30,22 @@
       .hist-url { display: block; font-size: 11px; color: #9ca3af; overflow-wrap: anywhere; }
       #clear-history { background: #7f1d1d; }
       #clear-history:hover { background: #991b1b; }
+      select { padding: 9px 12px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; width: 100%; box-sizing: border-box; }
+      .state-ok { color: #86efac; }
+      .state-warn { color: #fcd34d; }
+      .state-bad { color: #fca5a5; }
+      .reason { color: #9ca3af; font-size: 12px; }
+      #log-text { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow-y: auto; min-height: 60px; }
+      #log-clear { background: #7f1d1d; }
+      #log-clear:hover { background: #991b1b; }
+      .sub { display: block; width: 100%; text-align: left; margin: 6px 0 0; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; }
+      .sub-sid { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+      .sub-meta { display: block; font-size: 11px; color: #9ca3af; overflow-wrap: anywhere; }
+      .sub-dead { border-color: #7f1d1d; }
+      .counters { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+      .counters div { flex: 1 1 120px; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; }
+      .counters span { display: block; font-size: 11px; color: #9ca3af; }
+      .counters b { font-size: 18px; font-weight: 500; }
     </style>
   </head>
   <body>
@@ -92,6 +108,73 @@
           所以窗口标题不会变成地址末段。</p>
         <div id="history">（还没有投过）</div>
         <button id="clear-history">清空历史</button>
+      </section>
+
+      <section class="card">
+        <h2>服务与网络</h2>
+        <p class="muted">这台接收端是<strong>三个</strong>各有生命周期的服务（HTTP 接口 / SSDP 通告 / GENA 事件），
+          所以状态一行一个，而不是参考实现那一个总开关 —— 这里要能看出来的是「其中一个死了、另两个还在答话」。</p>
+        <dl>
+          <dt>HTTP 接口</dt><dd id="svc-http">加载中…</dd>
+          <dt>SSDP 通告</dt><dd id="svc-ssdp">加载中…</dd>
+          <dt>GENA 事件</dt><dd id="svc-gena">加载中…</dd>
+          <dt>端口</dt><dd id="svc-port">—</dd>
+          <dt>HTTPS</dt><dd id="svc-https">—</dd>
+          <dt>可广播地址</dt><dd id="svc-advertised">—</dd>
+          <dt>启用协议</dt><dd id="svc-protocol">—</dd>
+          <dt>渲染器</dt><dd id="svc-renderer">—</dd>
+          <dt>版本 / 系统</dt><dd id="svc-system">—</dd>
+        </dl>
+
+        <div class="row">
+          <div>
+            <label for="friendly-name">设备名（手机和电视上看到的那一行）</label>
+            <input id="friendly-name" placeholder="Macast" />
+          </div>
+          <div>
+            <label for="iface">发现用的网卡（留空＝自动跟随默认路由）</label>
+            <select id="iface"></select>
+          </div>
+        </div>
+        <button id="save-name">保存设备名</button>
+        <button id="save-iface">切换网卡</button>
+        <p class="muted" id="cfg-note"></p>
+      </section>
+
+      <section class="card">
+        <h2>日志</h2>
+        <p class="muted">正文里含<strong>发送端给的标题和地址</strong>，所以这一格永远只用 textContent 渲染，
+          并且只在按下按钮时拉一次 —— 它不参与任何轮询。</p>
+        <div class="row">
+          <div>
+            <label for="log-module">看哪一份</label>
+            <select id="log-module"></select>
+          </div>
+          <div>
+            <label for="log-tail">末尾行数</label>
+            <input id="log-tail" type="number" min="1" value="200" />
+          </div>
+        </div>
+        <button id="log-read">读取尾部</button>
+        <button id="log-all">读全文</button>
+        <button id="log-clear">清空这一份</button>
+        <p class="muted" id="log-meta">（还没读过）</p>
+        <div id="log-text">（还没读过）</div>
+      </section>
+
+      <section class="card">
+        <h2>订阅客户端</h2>
+        <p class="muted">谁订阅了我们的 UPnP 事件，以及那台「把他们列出来」的机器还在不在排干自己的队列。</p>
+        <dl>
+          <dt>聚合</dt><dd id="sub-aggregated">加载中…</dd>
+          <dt>事件线程</dt><dd id="sub-thread">—</dd>
+        </dl>
+        <div class="counters">
+          <div><span>待入表</span><b id="sub-append">—</b></div>
+          <div><span>待发状态</span><b id="sub-state">—</b></div>
+          <div><span>待摘除</span><b id="sub-remove">—</b></div>
+        </div>
+        <div id="sub-rows"></div>
       </section>
     </main>
     <script>
@@ -250,9 +333,335 @@
       }
       if (!listen) note('window.__TAURI__.event 不可用：页面拿不到后端事件');
 
+      // —— 服务与网络 ——
+      // `is_healthy()` 在 HTTP 接口（http.rs:1857）与 SSDP（ssdp.rs:379）里都是
+      // 「没在跑就答健康」：一个**主动停掉**的服务器不是故障。所以页面不能把
+      // healthy:true 读成「一切正常」，必须先问 running，再把两者不一致的那一格
+      // 单独说清 —— 那才是这一格存在的理由（AGENTS.md §4.2「别把端口在听当证据」）。
+      function svcState(running, healthy) {
+        if (!running) return { text: '已停止', cls: 'state-warn' };
+        if (healthy) return { text: '在听', cls: 'state-ok' };
+        return { text: '端口还在听，可工作线程已经不在 —— 这是故障，不是停止', cls: 'state-bad' };
+      }
+      // GENA 没有 healthy 这一问，只有「线程还在不在」。`event_thread_alive()` 的
+      // 注释就写着它要和 running 一起读：有用的状态恰恰是两者的不一致 —— 服务
+      // 声称在跑而线程没了，订阅者就永远进不了表，设置页看到的是「暂无订阅客户端」，
+      // 而真相是「那台负责把他们列进来的机器已经不排干队列了」。
+      function threadState(running, alive) {
+        if (!running) return { text: '没让它跑', cls: 'state-warn' };
+        if (alive) return { text: '在跑', cls: 'state-ok' };
+        return { text: '要它在跑，可线程已经不在了（订阅者因此永远进不了表）', cls: 'state-bad' };
+      }
+      function setState(id, st) {
+        const el = document.querySelector(`#${id}`);
+        el.textContent = st.text;
+        el.className = st.cls;
+      }
+      function fmtBytes(n) {
+        if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
+        if (n < 1024) return `${n} B`;
+        if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
+        return `${(n / 1048576).toFixed(1)} MiB`;
+      }
+
+      // 每 5000 毫秒的轮询不许吃掉了用户正在打的字：一旦用户在框里动过手，
+      // 这一格就交给他，直到下一次显式读取为止。
+      let nameTouched = false;
+      let ifaceTouched = false;
+
+      // 网卡表里**可用与不可用的行都要列出来**（`network_interfaces` 不过滤），
+      // 因为参考实现也不过滤：一台「在但没插线」的网卡是真实选项，把它藏起来
+      // 等于让用户以为这台机器上没有那个口。不可用的那一行把后端的 reason 原样
+      // 念出来 —— 那句话的主人是谁决定的，页面就不该另写一份。
+      let ifaceSignature = null;
+      function renderInterfaces(rows, current) {
+        const list = rows || [];
+        const signature = JSON.stringify([list.map((r) => [r.name, r.ip, r.usable, r.reason, r.default]), current]);
+        if (signature === ifaceSignature) return;
+        ifaceSignature = signature;
+        const sel = document.querySelector('#iface');
+        sel.textContent = '';
+        const auto = document.createElement('option');
+        auto.value = '';
+        auto.textContent = '自动（跟随默认路由）';
+        sel.appendChild(auto);
+        for (const row of list) {
+          const opt = document.createElement('option');
+          opt.value = row.name;
+          const marks = [row.usable ? '' : '不可用', row.default ? '默认路由' : '', row.selected ? '已选中' : '']
+            .filter(Boolean).join(' · ');
+          opt.textContent = `${row.name}  ${row.ip || '（没有 IPv4）'}${row.reason ? ` ${row.reason}` : ''}${marks ? ` 【${marks}】` : ''}`;
+          sel.appendChild(opt);
+        }
+        if (ifaceTouched && list.some((r) => r.name === sel.value)) return;
+        sel.value = current || '';
+        if (sel.value !== (current || '')) sel.value = '';
+      }
+
+      // 后端**不会**在你指定的网卡消失时报错，也不会改写你存的值：
+      // `resolve_pin`（net.rs:199-219）在指不到行、或那一行没有局域网可达 IPv4 时，
+      // 打一行 Utils 的 warning 然后回 `""` = 自动选择。所以「这一行现在其实没生效」
+      // 这句话只有页面能说，而且必须从服务交回来的数据里推，不能另加一个字段。
+      function pinNote(rows, current) {
+        if (!current) return '';
+        const row = (rows || []).find((r) => r.name === current);
+        if (!row) {
+          return `指定的网卡 ${current} 现在不在这台机器的表里：后端的回落是静默的（它只往日志写一行 warning），`
+            + '发现其实已经改由默认路由决定，而你存的值没有被改写。';
+        }
+        if (!row.usable) {
+          return `指定的网卡 ${current} 没有局域网可达的 IPv4（${row.reason || '原因见日志'}）：`
+            + '后端的回落是静默的，发现已由默认路由决定，而你存的值没有被改写。';
+        }
+        return '';
+      }
+
+      async function services() {
+        if (!invoke) return;
+        const d = await invoke('service_snapshot');
+        const s = d.server, nw = d.network;
+        setState('svc-http', svcState(d.http.running, d.http.healthy));
+        setState('svc-ssdp', svcState(d.ssdp.running, d.ssdp.healthy));
+        setState('svc-gena', threadState(d.eventing.running, d.eventing.thread_alive));
+
+        // `bound_port` 只在**拥有它的那一行**报一次（这是本端口与参考实现的一处
+        // 有意分歧：三个服务三条生命周期，而 `server.running` 只说 HTTP 那一张脸）。
+        let port = `${s.port}`;
+        if (s.bound_port === null || s.bound_port === undefined) {
+          port += '（还没有真的绑上）';
+        } else if (s.bound_port !== s.port) {
+          port += ` · 实际绑定 ${s.bound_port}（${s.port} 被占用，本端口按参考实现一样回退到别的端口，USN 也跟着改了）`;
+        }
+        out('svc-port', port);
+        out('svc-https', s.https_enabled ? `已启用 · 端口 ${s.https_port}` : '未启用');
+        out('svc-advertised', (nw.advertised && nw.advertised.length) ? nw.advertised.join(' / ') : '（读不到可广播的地址：手机看得到我们也投不上）');
+        out('svc-protocol', (s.protocol && s.protocol.length) ? s.protocol.join(' · ') : '（没有配置任何协议）');
+        out('svc-renderer', s.renderer || '（默认 mpv）');
+        out('svc-system', `${s.version} · ${s.system} ${s.system_version}（${s.platform}）`);
+
+        const nameBox = document.querySelector('#friendly-name');
+        if (!nameTouched) nameBox.value = s.friendly_name || '';
+        renderInterfaces(nw.interfaces, nw.interface);
+        const note_ = pinNote(nw.interfaces, nw.interface);
+        out('cfg-note', s.service_stopped ? `服务已被停用（service_stopped=true）：${note_}` : note_);
+      }
+
+      document.querySelector('#friendly-name').addEventListener('input', () => { nameTouched = true; });
+      document.querySelector('#iface').addEventListener('change', () => { ifaceTouched = true; });
+
+      // 存下来的名字**按你打的原样存**（参考实现 trim 网卡名，从不 trim 友好名：
+      // 设备名末尾那个空格就是用户打的）。但描述 XML 是 `Face::new` 在构造时烤成
+      // 一个 Vec<u8> 的，所以 `GET /description.xml` 要到重启才跟着变 ——
+      // 后端把这件事写在 `restart_pending` 里，页面就必须把它说出口，
+      // 否则用户读到的是「改了没生效，界面坏了」。
+      document.querySelector('#save-name').addEventListener('click', async () => {
+        const name = document.querySelector('#friendly-name').value;
+        try {
+          const r = await invoke('set_friendly_name', { name });
+          if (r.code === 0) {
+            nameTouched = false;
+            note(`设备名已存为「${r.saved}」· 读回「${r.friendly_name}」· 手机看到的描述文件要到下次重启才跟着变（restart_pending=${r.restart_pending}）`);
+          } else {
+            note(`保存设备名：${JSON.stringify(r)}`);
+          }
+        } catch (e) {
+          note(`保存设备名失败：${e}`);
+        }
+        await services().catch(() => {});
+      });
+
+      // 不认识的网卡名是**后端**拒的，不是页面拒的（打错一个字就会静默掉到回环，
+      // 症状长得像「配好了却找不到设备」）。所以这里把后端那句原话念回来，
+      // 而不是在页面再抄一份可用清单 —— 那句话只有一个主人。
+      document.querySelector('#save-iface').addEventListener('click', async () => {
+        const name = document.querySelector('#iface').value;
+        try {
+          const r = await invoke('set_network_interface', { name });
+          if (r.code === 0) {
+            ifaceTouched = false;
+            note(`${r.message}${r.ssdp_reannounced ? ' · SSDP 已重新通告' : ' · SSDP 当前没在跑，所以这一次没有重通告任何东西'}`);
+            // 网卡一换，可广播地址就换了一批；立刻重读一次，别让页面停在旧表上。
+            await services().catch(() => {});
+          } else {
+            note(r.message);
+          }
+        } catch (e) {
+          note(`切换网卡失败：${e}`);
+        }
+      });
+
+      // —— 日志 ——
+      // `log_modules()` 交回来的是三样东西：磁盘上现在的文件（modules，新的在前）、
+      // 主日志的大小，以及 `known` = 在盘上的 ∪ 已被插件认领的。
+      // 后者里那些「认领了却还没写过」的名字**必须列**（空盒子也是这个功能该给的
+      // 一个答案），但要标明是空的，否则它们读起来像「有这份日志却打不开」。
+      let logSignature = null;
+      function renderLogModules(m) {
+        const onDisk = m.modules || [];
+        const extras = (m.known || []).filter((n) => !onDisk.some((r) => r.name === n));
+        const signature = JSON.stringify([m.main, onDisk, extras]);
+        if (signature === logSignature) return;
+        logSignature = signature;
+        const sel = document.querySelector('#log-module');
+        const previous = sel.value;
+        sel.textContent = '';
+        const main = document.createElement('option');
+        main.value = '';
+        main.textContent = `整体日志（macast.log）· ${fmtBytes(m.main && m.main.size)}`;
+        sel.appendChild(main);
+        for (const row of onDisk) {
+          const opt = document.createElement('option');
+          opt.value = row.name;
+          opt.textContent = `${row.name} · ${fmtBytes(row.size)}`;
+          sel.appendChild(opt);
+        }
+        for (const name of extras) {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = `${name}（还没有内容）`;
+          sel.appendChild(opt);
+        }
+        sel.value = previous;
+        if (![...sel.options].some((o) => o.value === previous)) sel.value = '';
+      }
+
+      async function loadLogModules() {
+        if (!invoke) return;
+        renderLogModules(await invoke('log_modules'));
+      }
+
+      // 正文里含**发送端提供的** DIDL `dc:title` 与地址（AGENTS.md §4.10 那条红线：
+      // 局域网里任何一台设备投一个带 `<img onerror=…>` 的标题，打开日志面板就会执行）。
+      // 所以这里只有 textContent，永远不许 innerHTML；而且这一格不参与任何轮询，
+      // 只在按下按钮时拉一次。
+      async function readLog(wantAll) {
+        if (!invoke) return;
+        const module = document.querySelector('#log-module').value;
+        const tail = Number(document.querySelector('#log-tail').value);
+        const args = { module: module || null, all: wantAll || null };
+        // 行数不在页面里夹：`read_tail` 自己 `clamp(1, MAX_TAIL_LINES)`，
+        // 在页面再抄一个上限等于造第二个会漂移的真值点。
+        if (!wantAll && Number.isFinite(tail) && tail >= 1) args.tail = Math.floor(tail);
+        let d;
+        try {
+          d = await invoke('log_view', args);
+        } catch (e) {
+          out('log-text', String(e));
+          out('log-meta', '读取失败');
+          return;
+        }
+        if (d.code !== 0) {
+          out('log-text', '（没有这一份日志）');
+          out('log-meta', `${d.message}：${d.module}`);
+          return;
+        }
+        out('log-text', d.logs || '（空的）');
+        const which = d.module ? `「${d.module}」` : '整体日志';
+        const head = wantAll
+          ? `${which} · 全文 ${fmtBytes(d.size)}，读到 ${d.lines} 行`
+          : `${which} · 要 ${args.tail ?? '默认'} 行，读到 ${d.lines} 行，文件 ${fmtBytes(d.size)}`;
+        // 被切掉的只有**字节窗口**，不是行数上限：窗口是按行数算出来的，
+        // 所以要行数它就跟着变大 —— 这句话别说成「最多 50000 行」。
+        out('log-meta', d.truncated
+          ? `${head} · 字节窗口装不下，只给了末尾这一段（把行数调大就看得更多）`
+          : `${head} · 没被截断`);
+      }
+
+      document.querySelector('#log-read').addEventListener('click', () => readLog(false));
+      document.querySelector('#log-all').addEventListener('click', () => readLog(true));
+
+      // `clear_log_file` 数的是「被清空或被删掉几个文件」，而日志本身算一个，
+      // 所以备份数 = removed − 1。页面要说的是这个数，不是「清空了」了事。
+      document.querySelector('#log-clear').addEventListener('click', async () => {
+        const module = document.querySelector('#log-module').value;
+        try {
+          const r = await invoke('clear_log', { module: module || null });
+          if (r.code === 0) {
+            const backups = Math.max(0, (r.removed || 0) - 1);
+            note(`已清空${module ? `「${module}」` : '整体日志'}${backups ? `，连同它轮转出来的 ${backups} 个备份` : '（没有轮转出来的备份）'}`);
+          } else {
+            note(r.message);
+          }
+        } catch (e) {
+          note(`清空日志失败：${e}`);
+        }
+        await loadLogModules().catch(() => {});
+        await readLog(false).catch(() => {});
+      });
+
+      // —— 订阅客户端 ——
+      // 三个计数器要**分开列**，因为它们说的是三种不同的死法：`pending_append`
+      // 非零是「连接握好了却还没进表」（跟「根本没人订阅」是两件事），
+      // `pending_state` 是「状态变更排着而没广播出去」，`pending_remove` 是
+      // 「收尸的那一路没在排干」。最后这个不在参考实现里，因为那里没有它的见证者。
+      let subSignature = null;
+      function renderSubscribers(child, sids) {
+        out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
+        setState('sub-thread', threadState(child.running, child.event_thread_alive));
+        out('sub-append', String(child.pending_append));
+        out('sub-state', String(child.pending_state));
+        out('sub-remove', String(child.pending_remove));
+
+        const rows = child.rows || [];
+        const signature = JSON.stringify(rows);
+        const box = document.querySelector('#sub-rows');
+        if (signature === subSignature) return;
+        subSignature = signature;
+        box.textContent = '';
+        if (!rows.length) {
+          const empty = document.createElement('p');
+          empty.className = 'muted';
+          empty.textContent = sids.length
+            ? '（表里没有行，但上面那三个计数器不是零 —— 队列没被排干，看「待入表」）'
+            : '（没有订阅者：手机还没连上来，或者它续约的 path 不是我们答的那一个）';
+          box.appendChild(empty);
+          return;
+        }
+        for (const row of rows) {
+          const div = document.createElement('div');
+          div.className = row.timed_out ? 'sub sub-dead' : 'sub';
+          const sid = document.createElement('span');
+          sid.className = 'sub-sid';
+          sid.textContent = `${row.sid} · ${row.service} · seq ${row.seq}${row.timed_out ? ' · 已超时' : ''}`;
+          const meta = document.createElement('span');
+          meta.className = 'sub-meta';
+          // url 是发送端给的（SUBSCRIBE 的回调地址），所以它和日志正文一样是
+          // 不可信文字，进 textContent 而不是进标记。
+          meta.textContent = `${row.url} · 续约 ${row.timeout} 秒 · 失败 ${row.errors} 次`;
+          div.appendChild(sid);
+          div.appendChild(meta);
+          box.appendChild(div);
+        }
+      }
+
+      async function subscribers() {
+        if (!invoke) return;
+        const d = await invoke('subscriber_snapshot');
+        const sids = d.aggregated || [];
+        // 这一族现在只有一个孩子（DLNA 接收端）；写法按多个来，
+        // 以后 Chromecast / AirPlay 加进来时这一格不用改。
+        for (const child of d.children || []) renderSubscribers(child, child.subscribed || []);
+        if (!(d.children || []).length) out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
+      }
+
       refresh().catch((e) => out('error', String(e)));
       snapshot().catch((e) => note('读取播放器状态失败：' + e));
       setInterval(() => snapshot().catch(() => {}), 1500);
+
+      // 网卡枚举要问操作系统（getifaddrs），比读一次播放器状态贵，所以它不进
+      // 那一轮 1500 毫秒；订阅表同理 —— 它是服务侧的事，不是逐帧的事。
+      // 日志清单也走这一轮：它只是 `stat` 目录下那几个文件，一次读都不做，
+      // 而它**必须**跟着轮 —— 下拉里那两个字节数是文件当下的长度，
+      // 只在启动时问一次等于让页面印一个越来越旧的数（广播一开日志就在长）。
+      // 重绘由 `renderLogModules` 自己的签名门挡住，长度没变就不会碰选择器。
+      services().catch((e) => note('读取服务状态失败：' + e));
+      subscribers().catch((e) => note('读取订阅客户端失败：' + e));
+      loadLogModules().catch((e) => note('读取日志清单失败：' + e));
+      setInterval(() => {
+        services().catch(() => {});
+        subscribers().catch(() => {});
+        loadLogModules().catch(() => {});
+      }, 5000);
     </script>
   </body>
 </html>

@@ -219,6 +219,32 @@ pub fn resolve_pin<F: FnMut(&str)>(pinned: &str, rows: &[InterfaceRow], mut warn
     pinned.to_string()
 }
 
+/// The write-side twin of [`resolve_pin`]: may this name be stored at all?
+///
+/// `Some(message)` refuses the write; `None` means store it. `""` is the picker's
+/// 自动选择 and is never refused. Any other name must belong to an interface the
+/// machine reports right now — **usable or not**, because the reference does not
+/// filter (`macast/protocol.py:1977-1995`) and a down-but-real interface is the
+/// user's to keep pinning, whereas a typo would park Macast on the loopback
+/// fallback and leave it invisible *while looking configured*.
+///
+/// The refusal has to name the alternatives: this branch is reachable from the
+/// page for real — unplug the USB dongle between rendering the picker and
+/// clicking 应用 — and "未找到" without a list sends the user to the wrong door
+/// (the same "every refusal must give a next step" rule the Python side writes
+/// into §4.8). `known` is the same sorted set the picker's table is built from.
+pub fn pin_refusal(name: &str, known: &[String]) -> Option<String> {
+    if name.is_empty() || known.iter().any(|k| k == name) {
+        return None;
+    }
+    let list = if known.is_empty() {
+        "无".to_string()
+    } else {
+        known.join("、")
+    };
+    Some(format!("未找到网卡 {}，当前可用：{}", name, list))
+}
+
 /// `'%r'` of a `str` for the two warnings above, so a name with a quote in it
 /// still reads as one token.
 fn python_repr_str(s: &str) -> String {
@@ -716,6 +742,27 @@ mod tests {
         notes.clear();
         assert_eq!(resolve_pin("", &rows, |m| notes.push(m.to_string())), "");
         assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn a_pin_that_names_nothing_is_refused_with_the_list_that_does() {
+        let known: Vec<String> = vec!["en0".into(), "en7".into(), "utun4".into()];
+        assert_eq!(pin_refusal("", &known), None, "自动选择 is always allowed");
+        assert_eq!(pin_refusal("en0", &known), None);
+        assert_eq!(
+            pin_refusal("utun4", &known),
+            None,
+            "down-but-real is the user's to keep pinning"
+        );
+        assert_eq!(
+            pin_refusal("en9", &known),
+            Some("未找到网卡 en9，当前可用：en0、en7、utun4".to_string())
+        );
+        // A machine that reports nothing still gets a sentence, not an empty list.
+        assert_eq!(
+            pin_refusal("en0", &[]),
+            Some("未找到网卡 en0，当前可用：无".to_string())
+        );
     }
 
     #[test]

@@ -26,19 +26,22 @@
 
 mod host;
 
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
-use macast_core::logging::Logger;
+use macast_core::env;
+use macast_core::logging::{self, Logger};
+use macast_core::net;
 use macast_core::paths;
-use macast_core::setting::{Key, Setting};
+use macast_core::setting::{application_port, https_enabled, https_port, Key, Setting};
 use macast_mpv::argv;
 use macast_mpv::player::Player;
 use macast_upnp::device::SsdpPlugin;
@@ -223,6 +226,322 @@ fn player_snapshot(runtime: State<'_, Runtime>) -> Value {
 fn clear_play_history(runtime: State<'_, Runtime>) -> Value {
     runtime.table.clear_history();
     json!({ "history": [] })
+}
+
+/// `query=status` (`macast/protocol.py:1998-2029`): the service's own identity,
+/// which address the phone should reach, and which NIC is in play.
+///
+/// One deliberate difference from the reference. Python reports a single
+/// `server.running`, because in that app CherryPy's engine is the only service
+/// and "running" means "the engine started". Here the receiver is **three**
+/// services with three independent lifecycles (the HTTP face, SSDP, GENA), and
+/// the failure this page has to be able to show is exactly one of them having
+/// died while the others answer — the reference's own history has two of those
+/// (a GENA thread that stops draining the subscribe queue, §4.2 「订阅者必须
+/// "没有状态变更也能入表"」, and an SSDP listener that is healthy-looking while
+/// its receive thread is gone, §4.2 「SSDP 的定时重announce 要先问它还活着没」).
+/// So `running` keeps the reference's meaning for the HTTP face, and each
+/// service gets its own `running` / `healthy` pair **without** repeating the
+/// port: `bound_port` is only reported once, on the face that owns it.
+#[tauri::command]
+fn service_snapshot(runtime: State<'_, Runtime>) -> Value {
+    let setting = &runtime.setting;
+
+    // `Setting.get(Macast_Protocols, []) or [Setting.get(Macast_Protocol, '')] if
+    // Setting.has(Macast_Protocol) else []` — the legacy single value is only
+    // consulted when the list is empty, and `has` gates the read so a legacy
+    // install that never wrote the key is reported as "nothing configured"
+    // rather than as a stored empty string. Note `get_str_list` reads through
+    // `peek`, so unlike Python's `get` this does not insert `[]` into his table
+    // just because the page asked what is in it.
+    let mut protocols = setting.get_str_list(Key::MacastProtocols);
+    if protocols.is_empty() && setting.has(Key::MacastProtocol) {
+        protocols = vec![setting.get_str(Key::MacastProtocol, "")];
+    }
+
+    // Only the addresses a phone can actually reach. `Setting::get_ip()` also
+    // lists VM bridges and Tailscale tunnels, which is noise here and actively
+    // misleading when diagnosing "I can see it but casting fails" — the sender
+    // may have picked one of the dead addresses.
+    let advertised = net::advertised_addresses(setting);
+    let (system, system_version) = paths::system_version();
+
+    json!({
+        "server": {
+            "running": runtime.http.is_running(),
+            "port": application_port(setting),
+            "bound_port": runtime.http.bound_port(),
+            "version": paths::version(),
+            "friendly_name": setting.friendly_name(),
+            "renderer": setting.get_str(Key::MacastRenderer, ""),
+            "protocol": protocols,
+            "platform": env::sys_platform(),
+            "system": system,
+            "system_version": system_version,
+            "ip": advertised.join("/"),
+            "https_enabled": https_enabled(setting),
+            "https_port": if https_enabled(setting) { Some(https_port(setting)) } else { None },
+            "service_stopped": runtime.service_stopped.load(Ordering::SeqCst),
+        },
+        "http": {
+            "running": runtime.http.is_running(),
+            "healthy": runtime.http.is_healthy(),
+        },
+        "ssdp": {
+            "running": runtime.ssdp.ssdp().is_running(),
+            "healthy": runtime.ssdp.ssdp().is_healthy(),
+        },
+        "eventing": {
+            "running": runtime.eventing.is_running(),
+            "thread_alive": runtime.eventing.event_thread_alive(),
+        },
+        "network": {
+            // '' means automatic (the default-route interface).
+            "interface": setting.get_str(Key::NetworkInterface, ""),
+            "advertised": advertised,
+            "interfaces": net::network_interfaces(setting),
+        },
+    })
+}
+
+/// Store the name phones and TVs show for this receiver.
+///
+/// The reference has **no** POST for this — 高级设置 writes the whole JSON blob —
+/// so this is a widening, and it is deliberately narrow: one key, and it is the
+/// key whose value the page also *reads back* (`service_snapshot`).
+///
+/// The name is stored exactly as typed. Python trims the interface name
+/// ([`set_network_interface`]) but never the friendly name, and the difference
+/// is a feature: a trailing space in a device name is what the user typed.
+///
+/// One thing does go stale: `Face::new` bakes the device description into a
+/// `Vec<u8>` once at construction (`macast-upnp/src/description.rs` reads
+/// `setting.friendly_name()` there), so the phone's `GET /description.xml` keeps
+/// the old name until restart. `SsdpPlugin::update_ip()` is **not** the fix —
+/// SSDP payloads carry the USN and the LOCATION, not the friend name. The reply
+/// says so instead of pretending the change is fully live.
+#[tauri::command]
+fn set_friendly_name(runtime: State<'_, Runtime>, name: String) -> Value {
+    runtime.setting.set(Key::DlnaFriendlyName, Value::String(name.clone()));
+    json!({
+        "code": 0,
+        "friendly_name": runtime.setting.friendly_name(),
+        "saved": name,
+        "restart_pending": true,
+    })
+}
+
+/// Pin (or clear, with `""`) the interface used for discovery, and re-advertise.
+///
+/// Ported from `_set_network_interface` (`macast/protocol.py:1977-1995`) with
+/// its refusal intact: an unknown interface name is refused rather than stored,
+/// because a typo would otherwise silently drop Macast to the loopback fallback
+/// and make it invisible while looking like it was configured. The known set is
+/// every row of the picker's table, usable or not — matching Python, which does
+/// not filter, so that a down-but-real interface is not "not found".
+///
+/// The reference then publishes `network_interface_changed`, whose handler
+/// (`macast/macast.py:1324-1330`) rebinds SSDP **and** cycles mDNS. Only the
+/// SSDP half is portable here: mDNS belongs to the Chromecast and AirPlay
+/// broadcasters, which are tasks #19 and #20. Until they exist, a phone looking
+/// for `_googlecast._tcp` has nothing to see anyway.
+#[tauri::command]
+fn set_network_interface(runtime: State<'_, Runtime>, name: String) -> Value {
+    let name = name.trim().to_string();
+    if !name.is_empty() {
+        let known: Vec<String> = {
+            let mut names: Vec<String> = net::network_interfaces(&runtime.setting)
+                .into_iter()
+                .map(|row| row.name)
+                .collect();
+            names.sort();
+            names
+        };
+        if let Some(refusal) = net::pin_refusal(&name, &known) {
+            return json!({"code": 1, "message": refusal});
+        }
+    }
+
+    runtime.setting.set(Key::NetworkInterface, Value::String(name.clone()));
+
+    // The reference restarts the announcer unconditionally; here the restart is
+    // asked for only when the announcer is up, because `update_ip()` stops and
+    // starts it, and bringing SSDP up for a user who stopped the service would
+    // be this command announcing something nobody asked it to announce.
+    let rebound = runtime.ssdp.ssdp().is_running();
+    if rebound {
+        runtime.ssdp.update_ip();
+    }
+
+    json!({
+        "code": 0,
+        "message": format!("已切换到 {}", if name.is_empty() { "自动选择" } else { &name }),
+        "interface": name,
+        "ssdp_reannounced": rebound,
+    })
+}
+
+/// Read one log the way the settings page asks for it: `query=log` with an
+/// optional `module=`, `tail=` and `all=`.
+///
+/// No `State` parameter on this command and the two below it: the log surface
+/// reaches the filesystem through `macast-core`, not through the running
+/// services, and a `State<'_, Runtime>` we never read would be a parameter the
+/// compiler has to be argued into tolerating.
+///
+/// An unknown module is the reference's zeroed answer with
+/// `message: 'unknown log module'` (`protocol.py:2416-2431`), not an error: a
+/// fresh install, a name typed into the wrong box, and a module that has since
+/// been unloaded all arrive here, and the page renders `logs` either way.
+#[tauri::command]
+fn log_view(module: Option<String>, tail: Option<usize>, all: Option<bool>) -> Value {
+    let want_all = all.unwrap_or(false);
+    let lines = tail.unwrap_or(logging::DEFAULT_TAIL_LINES);
+    match logging::read_log(module.as_deref(), lines, want_all) {
+        Ok(payload) => json!({
+            "code": 0,
+            "logs": payload.logs,
+            "truncated": payload.truncated,
+            "lines": payload.lines,
+            "size": payload.size,
+            "module": payload.module,
+        }),
+        Err(name) => json!({
+            "code": 1,
+            "message": "unknown log module",
+            "logs": "",
+            "truncated": false,
+            "lines": 0,
+            "size": 0,
+            "module": name,
+        }),
+    }
+}
+
+/// Empty one log, module-aware, exactly like `POST clear-log`
+/// (`('clear-log', GATE_MANAGEMENT, '_post_clear_log')`, `protocol.py:2329` and
+/// `3091-3098`): resolve the target, refuse an unknown name, then truncate the
+/// file and its rotated siblings.
+///
+/// The failure line goes to `logging::root()` — the main log — rather than the
+/// logger this shell uses for player traffic, because `host.log` claims the
+/// per-module file and 「clear log error」 written there would hide the one fact
+/// the log surface exists to report.
+#[tauri::command]
+fn clear_log(module: Option<String>) -> Value {
+    let (path, _) = logging::log_target(module.as_deref());
+    let Some(path) = path else {
+        return json!({"code": 1, "message": "unknown log module"});
+    };
+    match logging::clear_log_file(&path) {
+        Ok(removed) => json!({"code": 0, "message": "success", "removed": removed}),
+        Err(e) => {
+            logging::root().error(&format!("clear log error: {e}"));
+            json!({"code": 1, "message": "clear failed"})
+        }
+    }
+}
+
+/// `query=log-modules` (`protocol.py:2116-2128`): the main log plus one row per
+/// module file, so the page's log selector can show what is there before the
+/// user clicks it.
+///
+/// Two documented differences from `logsplit.list_logs()`, both inherited from
+/// `logging::module_logs()` rather than invented here: rotated `name.log.N`
+/// backups are **not** listed (the page offers "the current MPV log", not three
+/// generations of it), and rows come newest-first instead of sorted by name —
+/// the picker wants the module that is doing something at the top.
+///
+/// `main` is `(0, 0)` when the file cannot be stat'ed, which is the reference's
+/// `except OSError` branch: 「No log yet (fresh install, or it was just cleared)
+/// is not an error」.
+#[tauri::command]
+fn log_modules() -> Value {
+    let main = match fs::metadata(paths::log_file()) {
+        Ok(meta) => json!({"size": meta.len(), "mtime": mtime_secs(&meta)}),
+        Err(_) => json!({"size": 0, "mtime": 0}),
+    };
+    let modules: Vec<Value> = logging::module_logs()
+        .into_iter()
+        .map(|row| {
+            json!({
+                "name": row.name,
+                "file": format!("{}.log", row.name),
+                "size": row.bytes,
+                "mtime": row.modified,
+            })
+        })
+        .collect();
+    json!({
+        "main": main,
+        "modules": modules,
+        "claimed": logging::claimed_names(),
+        "known": logging::known_log_modules(),
+    })
+}
+
+/// `query=subscribers` (`protocol.py:2202-2238`): who is subscribed to our
+/// events, and whether the machinery that lists them is still draining.
+///
+/// There is **one** child here. The reference loops its protocol group's
+/// children, and in this port the only member of that group is the DLNA
+/// receiver until tasks #19 and #20 add the others; the row is shaped exactly
+/// like theirs so the second child costs nothing to add.
+///
+/// The two counters that matter are the reference's own, and both comments are
+/// carried over because they are the reason the keys exist: a subscription that
+/// was accepted but never published is a different failure from nobody
+/// subscribing at all, and a non-zero pending queue means the event thread is
+/// not draining — either it is gone, or it never ran.
+#[tauri::command]
+fn subscriber_snapshot(runtime: State<'_, Runtime>) -> Value {
+    let rows = runtime.eventing.subscribers();
+    let mut sids: Vec<String> = rows.iter().map(|r| r.sid.clone()).collect();
+    sids.sort();
+
+    json!({
+        "aggregated": sids,
+        "children": [{
+            "title": "DLNA Protocol",
+            "type": "DLNAProtocol",
+            "running": runtime.eventing.is_running(),
+            // Read together with `running`, never instead of it: the useful
+            // state is the disagreement between the two.
+            "event_thread_alive": runtime.eventing.event_thread_alive(),
+            "subscribed": sids,
+            "pending_append": runtime.eventing.pending_append(),
+            "pending_state": runtime.eventing.pending_state(),
+            // Not in the reference. A stuck reaper is the same shape of failure
+            // as a stuck appender, and without this number "subscribers that
+            // never go away" has no witness.
+            "pending_remove": runtime.eventing.pending_remove(),
+            "rows": rows
+                .into_iter()
+                .map(|row| {
+                    json!({
+                        "sid": row.sid,
+                        "service": row.service,
+                        "url": row.url,
+                        "timeout": row.timeout,
+                        "seq": row.seq,
+                        "errors": row.errors,
+                        "timed_out": row.timed_out,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }],
+    })
+}
+
+/// A file's mtime as whole seconds, `0` when the platform will not say. The
+/// reference's `os.stat(...).st_mtime` is a float; the page only ever shows it
+/// as a date, so the fraction is not worth a drift-prone `as` on the field.
+fn mtime_secs(meta: &fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// How long a control command waits for mpv to answer for itself before its ack
@@ -601,6 +920,13 @@ pub fn run() {
             pause,
             resume,
             set_volume,
+            service_snapshot,
+            set_friendly_name,
+            set_network_interface,
+            log_view,
+            clear_log,
+            log_modules,
+            subscriber_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Macast Tauri application");

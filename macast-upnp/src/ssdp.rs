@@ -1393,6 +1393,7 @@ mod tests {
     /// Every log line mentioning `needle`, most recent file read first.
     fn logged(needle: &str) -> Vec<String> {
         logging::read_tail(&paths::log_file(), 4000)
+            .text
             .lines()
             .filter(|line| line.contains(needle))
             .map(|line| line.to_string())
