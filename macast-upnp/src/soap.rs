@@ -1175,7 +1175,9 @@ impl Soap {
         self.renderer.note_media_live(live);
 
         self.set_state_url(&uri)?;
-        self.renderer.set_media_url(&uri);
+        // `None`, not `"0"`: `SetAVTransportURI` has no start position argument,
+        // and a sender that wants one sends `Seek` after this.
+        self.renderer.set_media_url(&uri, None);
 
         if parsed.failed {
             // Python writes `raw_meta`, **unnormalized**, which is `None` when
@@ -1287,7 +1289,9 @@ impl Soap {
 
         self.renderer.note_media_live(None);
         self.set_state_url(&uri)?;
-        self.renderer.set_media_url(&uri);
+        // A playlist step starts the next item at its beginning: Python calls
+        // `set_media_url(uri)` and lets `start` take its own `"0"` default.
+        self.renderer.set_media_url(&uri, None);
         self.renderer.set_media_title(&title);
         self.set_state("CurrentTrack", Value::from(index + 1))?;
         self.set_state("CurrentTrackURI", Value::String(uri.clone()))?;
@@ -1605,8 +1609,16 @@ mod tests {
             self.push(format!("note_media_live={answer}"));
         }
 
-        fn set_media_url(&self, uri: &str) {
-            self.push(format!("set_media_url={uri}"));
+        /// `None` for `start` leaves the recorded line exactly as it was before
+        /// this parameter existed, so the assertions in this module still ask
+        /// about the address alone — which is the point: DLNA never has a start
+        /// to hand over. A `Some` appends it, because then the line is the
+        /// witness that the sender's position reached the player.
+        fn set_media_url(&self, uri: &str, start: Option<&str>) {
+            match start {
+                None => self.push(format!("set_media_url={uri}")),
+                Some(at) => self.push(format!("set_media_url={uri} start={at}")),
+            }
         }
 
         fn set_media_title(&self, title: &str) {

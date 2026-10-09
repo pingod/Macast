@@ -174,7 +174,27 @@ pub trait Renderer: Send + Sync {
     /// understand (AGENTS.md §4.1, last row).
     fn note_media_live(&self, live: Option<bool>);
 
-    fn set_media_url(&self, uri: &str);
+    /// Hand the player the address, and where in it the sender asked to start.
+    ///
+    /// `start` is the sender's own clock text, verbatim, or `None` for "no
+    /// opinion". The two callers of this method differ in exactly this
+    /// parameter, which is why it lives on the trait rather than being tacked
+    /// onto one of them:
+    ///
+    /// * DLNA's `SetAVTransportURI` carries **no** start position
+    ///   (`macast/protocol.py:1180`-`1250`), so [`crate::soap`] passes `None`,
+    ///   and a sender that wants a position sends `Seek` afterwards;
+    /// * Cast's `LOAD` does — `renderer.set_media_url(url,
+    ///   start=str(int(self._position)))` (`macast/protocol_cast.py:995`) — and
+    ///   the position is already sitting in that message.
+    ///
+    /// `None` and `Some("0")` are the same request, not two behaviours: the
+    /// reference's own default for `start` is `"0"` (`macast/renderer.py:76`),
+    /// and the player drops a position that is empty or literally `0` so the
+    /// mpv command keeps the bare `["loadfile", url, "replace"]` shape instead
+    /// of growing a start option for a position that is already the beginning
+    /// (`macast-mpv/src/player.rs:502`).
+    fn set_media_url(&self, uri: &str, start: Option<&str>);
     fn set_media_title(&self, title: &str);
 
     /// `Seek`'s `Target`, handed on **as the sender's text**.

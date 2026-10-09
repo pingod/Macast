@@ -413,12 +413,16 @@ impl macast_upnp::StateStore for StateTable {
 
 /// The `Renderer` seam, which is the player wearing a second face.
 ///
-/// A newtype rather than an `impl` on [`Player`] itself because the trait's
-/// wording belongs to DLNA: `set_media_url` here has no `start` parameter,
-/// because the reference's `SetAVTransportURI` does not carry one — a sender that
-/// wants a position sends `Seek` afterwards (`macast/protocol.py:1180-1250`). So
-/// this type's whole job is to be the place where that difference is stated, and
-/// to hold nothing else.
+/// A newtype rather than an `impl` on [`Player`] itself because the start
+/// position means different things on each side. [`Player`] speaks mpv: it takes
+/// an optional start because the reference's `set_media_url` has one (`macast/renderer.py:76`, default `"0"`). This trait
+/// speaks the *sender's* protocol, and which of its callers has a position to
+/// hand over is a fact about the wire, not about the player — DLNA's
+/// `SetAVTransportURI` carries none, so a sender that wants a position sends
+/// `Seek` afterwards (`macast/protocol.py:1180-1250`), while Cast's `LOAD`
+/// puts one in `currentTime` (`macast/protocol_cast.py:995`). So this type's
+/// whole job is to be the place where that difference is stated, and to pass
+/// whatever the wire said straight through.
 ///
 /// `Player` is already a handle (`Clone` shares one `Arc<Shared>`), so this is a
 /// handle of a handle: `main.rs` builds one per `Soap`, and both point at the one
@@ -438,11 +442,12 @@ impl macast_upnp::store::Renderer for ShellRenderer {
         self.player.note_media_live(live);
     }
 
-    /// `None` for the start position: `Player` turns that into the reference's
-    /// default `"0"`, and the loadfile builder drops a `"0"` so the command keeps
-    /// the bare shape.
-    fn set_media_url(&self, uri: &str) {
-        self.player.set_media_url(uri, None);
+    /// Straight through: `None` is the reference's default `"0"`, and the
+    /// loadfile builder drops a position that is empty or `0` so the command
+    /// keeps the bare shape. Who had a position and who did not is the wire's
+    /// answer, not this type's.
+    fn set_media_url(&self, uri: &str, start: Option<&str>) {
+        self.player.set_media_url(uri, start);
     }
 
     fn set_media_title(&self, title: &str) {
