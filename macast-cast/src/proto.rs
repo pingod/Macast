@@ -404,9 +404,10 @@ mod tests {
     /// diff; a test added without the pin makes the audit ask for more than it
     /// finds, and a test deleted silently makes this floor stale, which is the
     /// one thing the number is here to catch. **A new module with tests moves
-    /// this number**, and 30 is the count with [`crate::cert`] in it plus the
-    /// test that asks whether a missing directory actually gets made.
-    const TESTS_IN_THIS_CRATE: usize = 30;
+    /// this number**, and 65 is the measured count with [`crate::channel`] in it
+    /// — 35 channel + 18 proto + 12 cert — plus the test that asks whether a
+    /// missing directory actually gets made.
+    const TESTS_IN_THIS_CRATE: usize = 65;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

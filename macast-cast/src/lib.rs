@@ -60,11 +60,18 @@
 //! uncastable (§4.1), and it produces no error on our side at all.
 
 pub mod cert;
+pub mod channel;
 pub mod proto;
 
 pub use cert::{
     ensure_in_setting_dir, ensure_pair, CertError, Pair, Source, CAST_CERT_FILE, CAST_KEY_FILE,
     COMMON_NAME, SHARED_CERT_FILE, SHARED_KEY_FILE, SUBJECT_ALTERNATIVE_NAMES,
+};
+pub use channel::{
+    launch_refusal, live_from_stream_type, random_session, sender_media_title, CastChannel,
+    APP_BACKDROP_ID, CAST_PORT, DEFAULT_MEDIA_APP_ID, DEFAULT_MEDIA_APP_NAME,
+    LOAD_GRACE_SECONDS, MAX_CONNECTIONS, PORT_FALLBACK_RANGE, RECEIVER_SOURCE,
+    SERVED_APP_IDS, TITLE_MAX_CHARS, TRANSPORT_ID,
 };
 pub use proto::{
     app_namespaces, encode_auth_challenge, encode_auth_response, encode_cast_message, field_bytes,
