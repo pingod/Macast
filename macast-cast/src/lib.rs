@@ -1,12 +1,13 @@
-//! The Chromecast face of the Rust receiver: what a sender says on the wire,
-//! and what we say back.
+//! The Chromecast and AirPlay faces of the Rust receiver: what a sender says
+//! on the wire, and what we say back.
 //!
-//! Python counterpart: `macast/protocol_cast.py`. The reference is one file of
-//! 1298 lines that grew every lesson in AGENTS.md §4.1 and §4.9 into it, so this
-//! crate is ported in layers rather than all at once: [`proto`] is the envelope
-//! and the namespaces, [`cert`] is the pair the TLS face runs on, then the
-//! channel on 8009, then the setup faces on 8008 and 8443,
-//! then the mDNS announcement.
+//! Python counterparts: `macast/protocol_cast.py` and
+//! `macast/protocol_airplay.py`. The references are files that grew every
+//! lesson in AGENTS.md §4.1 and §4.9 into them, so this crate is ported in
+//! layers rather than all at once: [`proto`] is the Cast envelope and its
+//! namespaces, [`cert`] is the pair the TLS face runs on, [`channel`] is the
+//! Cast channel on 8009, [`airplay`] is the AirPlay RTSP receiver on 7000,
+//! then the setup faces on 8008 and 8443, then the mDNS announcement.
 //!
 //! ## What this crate owns, and what it deliberately does not
 //!
@@ -42,8 +43,11 @@
 //!   when a pair already sits in it, the shared `macast.*` pair is what this
 //!   module writes, and neither is ever overwritten — a broken foreign pair is
 //!   reported by name and left in place.
-//! * *(next)* `channel` — TLS on 8009, the namespace-only dispatch, the sender
+//! * [`channel`] — TLS on 8009, the namespace-only dispatch, the sender
 //!   and session ledgers, volume, `LAUNCH_ERROR`, and the playback watcher.
+//! * [`airplay`] — the AirPlay RTSP receiver on 7000: the eleven methods,
+//!   session management, `Content-Location` parsing (header and SDP body),
+//!   port fallback, and the `RendererCallback` seam the player answers through.
 //! * *(next)* `setup` — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a
 //!   **bare** UUID in `ssdp_udn`, `params=` filtering, `/setup/icon.png`.
 //! * *(next)* `mdns` — the `_googlecast._tcp` announcement and its TXT records.
@@ -59,6 +63,7 @@
 //! strings is the single mistake that makes a device discoverable and
 //! uncastable (§4.1), and it produces no error on our side at all.
 
+pub mod airplay;
 pub mod cert;
 pub mod channel;
 pub mod proto;
@@ -78,6 +83,12 @@ pub use proto::{
     field_varint, frame_length, parse_cast_message, parse_fields, wrap_frame, CastMessage, Field,
     FieldValue, Payload, APP_NAMESPACES, FRAME_HEADER_LEN, NS_CONNECTION, NS_DEVICEAUTH,
     NS_HEARTBEAT, NS_MEDIA, NS_PLAYER_MESSAGE, NS_RECEIVER,
+};
+
+pub use airplay::{
+    get_header, info_plist, parse_content_location, random_mac, reason_phrase, AirPlayReceiver,
+    AirPlayState, RendererCallback, RtspRequest, AIRPLAY_PORT, AIRPLAY_SERVICE, FEATURES,
+    IDLE_TIMEOUT_SECONDS, REASON_PHRASES, SUPPORTED_METHODS,
 };
 
 /// The config directory **this crate's tests** log into, pinned per process.

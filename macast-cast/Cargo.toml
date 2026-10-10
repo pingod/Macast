@@ -45,3 +45,6 @@ rustls-pemfile = { workspace = true }
 # the log line that explained the failure named the wrong suspect (AGENTS.md
 # §4.2, "写文件的代码要自己把目录建出来").
 rcgen = { workspace = true }
+log = { workspace = true }
+rand = { workspace = true }
+url = { workspace = true }

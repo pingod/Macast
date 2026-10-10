@@ -82,6 +82,9 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 rustls-pemfile = "2"
 rcgen = "0.13"
+log = "0.4"
+rand = "0.8"
+url = "2"
 
 macast-core = { path = "macast-core" }
 macast-mpv = { path = "macast-mpv" }
