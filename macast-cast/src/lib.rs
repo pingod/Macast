@@ -67,6 +67,7 @@ pub mod airplay;
 pub mod cert;
 pub mod channel;
 pub mod proto;
+pub mod resolve;
 
 pub use cert::{
     ensure_in_setting_dir, ensure_pair, CertError, Pair, Source, CAST_CERT_FILE, CAST_KEY_FILE,

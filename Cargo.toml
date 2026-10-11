@@ -85,6 +85,13 @@ rcgen = "0.13"
 log = "0.4"
 rand = "0.8"
 url = "2"
+regex = "1"
+# `media_resolve.py` reaches for `re` in three places whose answer is a *match*,
+# not a parse: the refused-status matcher (`\b(?:40[134]|410)\b`, word boundaries
+# doing the work that `str::contains` would get wrong by matching inside "4010"),
+# the share-text sweep that pulls a URL out of a phone's copied sentence (with the
+# full-width punctuation class that ends the match), and the " (12)" page-entry
+# suffix. `LazyLock` keeps each pattern compiled once, as Python does at import.
 
 macast-core = { path = "macast-core" }
 macast-mpv = { path = "macast-mpv" }

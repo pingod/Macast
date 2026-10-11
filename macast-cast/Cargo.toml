@@ -48,3 +48,10 @@ rcgen = { workspace = true }
 log = { workspace = true }
 rand = { workspace = true }
 url = { workspace = true }
+# `resolve.rs` mirrors the three places `media_resolve.py` asks a regex rather than
+# a parser: the refused-status matcher (the word-boundary class that keeps a 500
+# from being read as a refusal), the share-text sweep that pulls an address out of
+# a phone's copied sentence and stops at full-width punctuation, and the " (12)"
+# page-entry suffix `page_wording` strips. Why the patterns are worth a dependency
+# at all is the root manifest's note.
+regex = { workspace = true }
