@@ -1214,6 +1214,506 @@ pub fn cookie_browser_spec(spec: &str) -> Option<String> {
     Some(format!("{}:{}", name, profile))
 }
 
+/// The cookie sources one engine run may use. An empty half means "not given":
+/// Python reads the same pair out of a dict, where a missing key and an empty
+/// string both answer `''`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Cookies<'a> {
+    pub file: &'a str,
+    pub browser: &'a str,
+}
+
+/// `cookie_arguments(cookies)`: the argv slice that points the engine at a
+/// cookie source. The pasted jar wins because it is what the user *gave* us,
+/// while the browser name is only what we inferred; with neither, the engine
+/// resolves anonymously and adds nothing to the command line.
+pub fn cookie_arguments(cookies: &Cookies<'_>) -> Vec<String> {
+    let path = py_strip(cookies.file);
+    if !path.is_empty() {
+        return vec!["--cookies".into(), path.to_string()];
+    }
+    match cookie_browser_spec(cookies.browser) {
+        Some(spec) => vec!["--cookies-from-browser".into(), spec],
+        None => Vec::new(),
+    }
+}
+
+/// The whole command line `ytdlp_candidates` would hand to the operating
+/// system. A seam, not a second copy: the argv is the part of that function a
+/// test can pin without spawning an engine that is not on this machine.
+pub fn ytdlp_command(binary: &str, page_url: &str, cookies: &Cookies<'_>) -> Vec<String> {
+    let mut command: Vec<String> = vec![
+        binary.into(),
+        "-J".into(),
+        "--no-playlist".into(),
+        "--no-warnings".into(),
+        "--quiet".into(),
+        "--socket-timeout".into(),
+        "20".into(),
+    ];
+    command.extend(cookie_arguments(cookies));
+    command.push(page_url.into());
+    command
+}
+
+/// `engine_note(completed)`: the sentence the card shows when the engine said
+/// no. `--no-warnings` does **not** silence everything the engine writes to
+/// stderr: `cookies.py` sends 「skipping cookie file entry due to invalid
+/// length」 straight to `write_string`, which bypasses the logging machinery,
+/// so that warning can be the first line while the real refusal is below it.
+/// Reading the first line would call *our* junk jar a site that wants a
+/// session. Hence: an `ERROR:` line wins, and only then the first line with any
+/// content. Cut to 200 characters because a real stderr carries a traceback
+/// after the sentence, and a traceback on a settings page is not an explanation.
+pub fn engine_note(returncode: i32, stderr: Option<&str>) -> String {
+    const LIMIT: usize = ENGINE_NOTE_LIMIT;
+    let text = py_strip(stderr.unwrap_or("")).to_string();
+    let mut first = String::new();
+    for line in py_splitlines(&text) {
+        let line = py_strip(line);
+        if line.is_empty() {
+            continue;
+        }
+        if first.is_empty() {
+            first = line.to_string();
+        }
+        if line.starts_with("ERROR:") {
+            return line.chars().take(LIMIT).collect();
+        }
+    }
+    if !first.is_empty() {
+        return first.chars().take(LIMIT).collect();
+    }
+    if returncode != 0 {
+        return format!("yt-dlp 退出码 {}", returncode);
+    }
+    "yt-dlp 没有返回任何地址".to_string()
+}
+
+/// `engine_note`'s `limit` argument, kept as a constant so the corpus and the
+/// page agree on one number.
+pub const ENGINE_NOTE_LIMIT: usize = 200;
+
+/// `_COOKIE_WORDS`: what an engine says when the page will not hand anything
+/// over without a session. Every extractor phrases it differently, and a return
+/// code never distinguishes them from "this site has no video", so this is a
+/// guess at somebody else's sentence and lives where one owner can be pinned.
+const COOKIE_WORDS: &[&str] = &[
+    "cookie",
+    "log in",
+    "login",
+    "logged in",
+    "sign in",
+    "authentication",
+    "unauthorized",
+    "需要登录",
+    "授权",
+];
+
+/// `needs_cookies(note)`: whether an engine's own refusal is asking for a
+/// session.
+pub fn needs_cookies(note: &str) -> bool {
+    let text = note.to_lowercase();
+    COOKIE_WORDS.iter().any(|word| text.contains(word))
+}
+
+/// The four ways the engine can fail at **our** cookie source. This table
+/// exists because `needs_cookies` cannot do its job without it: the word
+/// `cookie` appears just as confidently in a site's 「cookies to access this
+/// webpage」 as in the engine telling us it could not open the store we pointed
+/// it at. So ask this first, and only call a sentence a login request when no
+/// row here answered.
+///
+/// The rows are verbatim fragments from `yt_dlp/cookies.py`, lower-cased to
+/// match, and the order is load-bearing — **first match wins**, because
+/// `could not copy chrome cookie database` also contains a `not_found`
+/// fragment.
+pub const COOKIE_PROBLEMS: &[&str] = &["locked", "not_found", "decrypt", "bad_profile"];
+
+const COOKIE_SOURCE_TABLE: &[(&str, &[&str])] = &[
+    // The browser is running and holds its own database open (Windows: the
+    // engine reaches this from a sharing violation).
+    ("locked", &["could not copy chrome cookie database"]),
+    // No file named `Cookies` under the root it looked at. Three spellings of
+    // this sentence, all ERROR level so all reachable: the Chrome family quotes
+    // the root it searched, Firefox prints it bare, and Safari prints neither a
+    // root nor an `in` at all. The singular form is here because it also sits
+    // inside `locked`'s sentence above — which is what makes that row have to
+    // be checked first.
+    ("not_found", &["cookies database", "cookie database"]),
+    // The store was found and opened, but the key that decrypts it was not
+    // reachable: DPAPI, the login keyring, kwallet, or Chrome's `Local State`.
+    (
+        "decrypt",
+        &[
+            "failed to decrypt with dpapi",
+            "failed to read from keyring",
+            "kwallet-query",
+            "could not find local state file",
+            "no encrypted key in local state",
+        ],
+    ),
+    // Opera keeps one profile and does not take this argument at all: it prints
+    // the refusal at ERROR level — so that sentence is the line `engine_note`
+    // brings back — and then goes on to look for a database under a path it
+    // built out of the profile name. Saying "that browser has no profiles"
+    // beats reporting the not-found sentence that follows it.
+    ("bad_profile", &["does not support profiles"]),
+];
+
+/// `cookie_source_problem(note)`: which of our cookie sources the engine's
+/// sentence says failed. `None` where Python returns the empty string.
+pub fn cookie_source_problem(note: &str) -> Option<&'static str> {
+    let text = note.to_lowercase();
+    for (problem, words) in COOKIE_SOURCE_TABLE {
+        if words.iter().any(|word| text.contains(word)) {
+            return Some(problem);
+        }
+    }
+    None
+}
+
+/// `_UNSUPPORTED_WORDS`: what an engine says when the page is not from a site
+/// it knows how to read at all. Deliberately *not* including `unable to
+/// extract`, which means an extractor it does have ran and came back empty:
+/// that is a real answer about this page, and re-labelling it as our limitation
+/// would send the user hunting for a different site when the honest sentence is
+/// the engine's own.
+const UNSUPPORTED_WORDS: &[&str] = &["unsupported url", "no supported", "not supported"];
+
+/// `engine_says_unsupported(note)`.
+pub fn engine_says_unsupported(note: &str) -> bool {
+    let text = note.to_lowercase();
+    UNSUPPORTED_WORDS.iter().any(|word| text.contains(word))
+}
+
+/// `JS_HOLE`: the hole this feature admits, written as the sentence a user
+/// reads at the moment it costs them something. The Python module keeps one
+/// copy that the card, the help, and the empty-result sentence all read, so a
+/// limit never lives only in a design document.
+pub const JS_HOLE: &str = "需要 JavaScript 才能算出地址的站点本机解不出来：\
+                            地址不在 HTML 里，要页面自己的脚本再算一次";
+
+/// `COOKIE_JAR_MAX_BYTES`: a jar is written into the config directory and then
+/// handed to a subprocess, so the cap is not politeness — a 200 MB paste is a
+/// disk problem. Compared against the UTF-8 byte length, like Python's
+/// `len(text.encode('utf-8'))`.
+pub const COOKIE_JAR_MAX_BYTES: usize = 256 * 1024;
+/// `COOKIE_JAR_FIELDS`: the Netscape format puts seven tab-separated fields on
+/// a cookie line.
+pub const COOKIE_JAR_FIELDS: usize = 7;
+/// `HTTPOONLY_PREFIX`: an HttpOnly cookie is a *cookie* whose line starts with
+/// this, not a comment. A jar exported from a browser marks its session cookies
+/// this way, so a reader that skips every `#` line reads a pile of real login
+/// cookies as "nothing here".
+pub const HTTPOONLY_PREFIX: &str = "#HttpOnly_";
+
+/// `cookie_jar_state(text)`: `(cookies, bad_lines)` for a pasted Netscape jar —
+/// it reads, it does not run. An empty or malformed jar produces *no* error at
+/// all from the engine (it simply resolves the page anonymously and comes back
+/// with fewer addresses), so saying "3 条 cookie，2 行看不懂" at paste time is
+/// the only moment anyone can act on it. The `Err` half is Python's `ValueError`.
+pub fn cookie_jar_state(text: &str) -> Result<(usize, usize), String> {
+    if text.len() > COOKIE_JAR_MAX_BYTES {
+        return Err(format!(
+            "cookie 文件太大了（上限 {} KB）",
+            COOKIE_JAR_MAX_BYTES / 1024
+        ));
+    }
+    let mut cookies = 0usize;
+    let mut bad = 0usize;
+    for raw in py_splitlines(text) {
+        // The prefix binds at index 0 of the *raw* line, so it is stripped
+        // before the comment test; then the engine's own skip applies to what
+        // is left. An indented `  #HttpOnly_…` stays a comment, and so does
+        // `#HttpOnly_# …`. Counting either as a cookie would promise a login
+        // state the engine never loads.
+        let stripped = raw.strip_prefix(HTTPOONLY_PREFIX).unwrap_or(raw);
+        if py_strip(stripped).is_empty() || stripped.trim_start_matches(py_is_space).starts_with('#')
+        {
+            continue;
+        }
+        // `rstrip('\r\n')` never bites: `py_splitlines` leaves neither on a row.
+        let fields: Vec<&str> = stripped.trim_end_matches(['\r', '\n']).split('\t').collect();
+        if fields.len() >= COOKIE_JAR_FIELDS && !py_strip(fields[0]).is_empty() {
+            cookies += 1;
+        } else {
+            bad += 1;
+        }
+    }
+    Ok((cookies, bad))
+}
+
+/// The characters CPython's `repr` would escape: everything in category Cc,
+/// every separator (Zs minus the ASCII space, Zl, Zp), and the format characters
+/// (Cf) it counts as invisible. Rust's `is_control` is exactly Cc and
+/// `is_whitespace` covers the separators plus the control codes `repr` already
+/// names, so the hand-built list below is the Cf set.
+///
+/// **Documented divergence**: Cc/Cf/Zs/Zl/Zp are enumerated here rather than
+/// looked up in a general-category table, so Co and Cn code points — private-use
+/// and unassigned, which CPython also escapes — print verbatim in this port. The
+/// corpus has no row in those categories, and adding a unicode-category
+/// dependency to a crate that does not otherwise need one is not worth a code
+/// point no argv can contain.
+fn py_is_nonprintable(c: char) -> bool {
+    if c == ' ' {
+        return false;
+    }
+    if c.is_control() || c.is_whitespace() {
+        return true;
+    }
+    let cp = c as u32;
+    matches!(cp,
+        0x00ad
+            | 0x0600..=0x0605
+            | 0x061c
+            | 0x06dd
+            | 0x070f
+            | 0x08e2
+            | 0x110bd
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2060..=0x2064
+            | 0x2066..=0x206f
+            | 0xfeff
+            | 0xfff9..=0xfffb
+            | 0x16fe3
+            | 0x1bca0..=0x1bca3
+            | 0x1d173..=0x1d17a
+            | 0xe0001
+            | 0xe0020..=0xe007f)
+}
+
+/// `repr()` of a Python `str`, which is what `str(list)` puts between the
+/// brackets of an argv — and `subprocess` builds its timeout sentence out of
+/// exactly that. Quote choice: `'` unless the text has a `'` and no `"`, in
+/// which case `"` (so a shell-ish argument keeps its apostrophe unescaped).
+fn py_repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other if other == quote => {
+                out.push('\\');
+                out.push(other);
+            }
+            other if py_is_nonprintable(other) => match other as u32 {
+                cp if cp < 0x100 => out.push_str(&format!("\\x{:02x}", cp)),
+                cp if cp < 0x10000 => out.push_str(&format!("\\u{:04x}", cp)),
+                cp => out.push_str(&format!("\\U{:08x}", cp)),
+            },
+            other => out.push(other),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// `str(list)` of a list of strings: each element's `repr`, comma and space
+/// apart, inside square brackets.
+fn py_repr_str_list(items: &[String]) -> String {
+    let inner = items
+        .iter()
+        .map(|s| py_repr_str(s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{}]", inner)
+}
+
+/// How `str()` would print the `timeout` that `subprocess.run` was handed.
+/// There is no whole-seconds branch: Rust's `Display` for `f64` already prints
+/// a whole number without a `.0`, and deleting that branch redd nothing across
+/// the 41 recorded sentences. **Documented divergence**: Python prints `120.0`
+/// for a *float* 120 and switches to exponent notation below 1e-4 (`1e-07`),
+/// where Rust prints `120` and `0.0000001`. The port only ever passes whole
+/// seconds (`YTDLP_TIMEOUT` is the integer 120), so no product path reaches
+/// either gap; both shapes stay in the corpus as rows that must *not* match.
+fn timeout_seconds_text(timeout: Duration) -> String {
+    format!("{}", timeout.as_secs_f64())
+}
+
+/// `str(subprocess.TimeoutExpired(cmd, timeout))`, measured on the pinned
+/// interpreter: `Command '<list repr>' timed out after <timeout> seconds`.
+/// The `Command '…'` wrapper is part of the sentence, so the card that shows
+/// 「yt-dlp 没能运行（TimeoutExpired: …）」 names the argv that timed out.
+fn timeout_sentence(argv: &[String], timeout: Duration) -> String {
+    format!(
+        "Command '{}' timed out after {} seconds",
+        py_repr_str_list(argv),
+        timeout_seconds_text(timeout)
+    )
+}
+
+/// The `type(exc).__name__` half of the Python message for an `OSError` that
+/// comes out of `Popen`. Only the name is ported faithfully: the message half
+/// is Rust's `io::Error` `Display`, which for the same failure reads
+/// `No such file or directory (os error 2)` where CPython writes
+/// `[Errno 2] No such file or directory: '/nope'`. Same shape as `probe_url_with`,
+/// and no corpus row can pin it without spawning a binary that is not here.
+fn python_error_name(err: &std::io::Error) -> &'static str {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "FileNotFoundError",
+        std::io::ErrorKind::PermissionDenied => "PermissionError",
+        _ => "OSError",
+    }
+}
+
+/// `completed.returncode`: Python reports a signal-killed child as `-N`, which
+/// a bare `ExitStatus::code()` would drop. On Windows there is no signal half.
+#[cfg(unix)]
+fn returncode_of(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    match status.code() {
+        Some(c) => c,
+        None => -status.signal().unwrap_or(0),
+    }
+}
+
+#[cfg(not(unix))]
+fn returncode_of(status: &std::process::ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
+}
+
+/// `_sink(sink, note)`: a note only lands when somebody is collecting **and**
+/// there is something to say. An empty sentence on the card is worse than none.
+fn sink_note(sink: &mut Option<&mut Vec<String>>, note: &str) {
+    if note.is_empty() {
+        return;
+    }
+    if let Some(rows) = sink {
+        rows.push(note.to_string());
+    }
+}
+
+/// `ytdlp_candidates(page_url, binary=None, cookies=None, sink=None)`: run the
+/// engine and read its JSON. Empty on every failure — the caller's answer to
+/// "no addresses" is the four-way sentence in `ResolveJob`, not an exception —
+/// and the reason, if anybody is listening, goes into `sink`.
+pub fn ytdlp_candidates(
+    page_url: &str,
+    binary: Option<&str>,
+    cookies: &Cookies<'_>,
+    sink: Option<&mut Vec<String>>,
+) -> Vec<Candidate> {
+    ytdlp_candidates_with(page_url, binary, cookies, sink, Duration::from_secs(YTDLP_TIMEOUT_SECS))
+}
+
+/// The same with the timeout as a parameter, so a case that wants to watch the
+/// deadline fire does not wait two minutes for it.
+pub fn ytdlp_candidates_with(
+    page_url: &str,
+    binary: Option<&str>,
+    cookies: &Cookies<'_>,
+    mut sink: Option<&mut Vec<String>>,
+    timeout: Duration,
+) -> Vec<Candidate> {
+    let bin = binary
+        .filter(|b| !b.is_empty())
+        .map(|b| b.to_string())
+        .or_else(|| find_command("yt-dlp", None, None, None));
+    let bin = match bin {
+        // `if binary is None: return []` — no note, because a machine without
+        // the engine is a normal state, not a failure of this resolve.
+        None => return Vec::new(),
+        Some(b) => b,
+    };
+    let argv = ytdlp_command(&bin, page_url, cookies);
+
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(console_flags(None));
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            sink_note(
+                &mut sink,
+                &format!("yt-dlp 没能运行（{}: {}）", python_error_name(&e), e),
+            );
+            return Vec::new();
+        }
+    };
+
+    let out_bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let err_bytes: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut sh = child.stdout.take().unwrap();
+    let mut se = child.stderr.take().unwrap();
+    let ob = Arc::clone(&out_bytes);
+    let eb = Arc::clone(&err_bytes);
+    let out_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = sh.read_to_end(&mut buf);
+        *ob.lock().unwrap() = buf;
+    });
+    let err_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = se.read_to_end(&mut buf);
+        *eb.lock().unwrap() = buf;
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut status: Option<std::process::ExitStatus> = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(s)) => {
+                status = Some(s);
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let status = match status {
+        Some(s) => s,
+        None => {
+            // TimeoutExpired is a SubprocessError, so it takes the same sentence
+            // as a failed spawn — with the engine's own text for the argv.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_thread.join();
+            let _ = err_thread.join();
+            sink_note(
+                &mut sink,
+                &format!(
+                    "yt-dlp 没能运行（TimeoutExpired: {}）",
+                    timeout_sentence(&argv, timeout)
+                ),
+            );
+            return Vec::new();
+        }
+    };
+    let _ = out_thread.join();
+    let _ = err_thread.join();
+    let out_bytes = std::mem::take(&mut *out_bytes.lock().unwrap());
+    let err_bytes = std::mem::take(&mut *err_bytes.lock().unwrap());
+    // Python read the streams with encoding='utf-8', errors='replace'.
+    let stdout = String::from_utf8_lossy(&out_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&err_bytes).into_owned();
+    let returncode = returncode_of(&status);
+    if returncode != 0 || py_strip(&stdout).is_empty() {
+        sink_note(&mut sink, &engine_note(returncode, Some(&stderr)));
+        return Vec::new();
+    }
+    parse_ytdlp_json(&stdout)
+}
+
 /// Python `title_for_uri`: what to call a stream when nobody has told us its
 /// name.
 ///
@@ -4078,3 +4578,7 @@ mod tests {
 #[cfg(test)]
 #[path = "scrape_tests.rs"]
 mod scrape_tests;
+
+#[cfg(test)]
+#[path = "engine_tests.rs"]
+mod engine_tests;
