@@ -497,8 +497,11 @@ fn py_is_space(c: char) -> bool {
     )
 }
 
-/// Python `str.strip()` with no argument.
-fn py_strip(s: &str) -> &str {
+/// Python `str.strip()` with no argument. `pub(crate)` because `html.rs` needs
+/// the *same* predicate as `parse_starttag`'s `rawdata[k:endpos].strip()`: the
+/// parser's regular expressions use the five-character class `[\t\n\r\f /]`,
+/// while this is the 29-code-point set — nothing may unify the two.
+pub(crate) fn py_strip(s: &str) -> &str {
     s.trim_matches(py_is_space)
 }
 
@@ -2208,6 +2211,375 @@ pub fn visible_rows(candidates: &[Candidate]) -> (Vec<Candidate>, Vec<Candidate>
     (kept, hidden)
 }
 
+// ---------------------------------------------------------------------------
+// engine 1 -- scrape the page with the standard library
+// ---------------------------------------------------------------------------
+
+/// `raw.decode("utf-8", "replace")`: the last resort in `decode_body`, and what
+/// a page becomes when the charset the server announced is a lie.
+///
+/// CPython's UTF-8 "replace" handler writes one U+FFFD per *maximal subpart*
+/// and then resumes; Rust's lossy decoder follows the same recommended
+/// practice, so the two agree byte for byte on the cases in the differential
+/// table rather than merely "both produce replacement characters".
+pub fn utf8_replace(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).into_owned()
+}
+
+/// `decode_body(raw, charset='')` — try the server's label, then utf-8, then
+/// gbk, then utf-8 with replacement.
+///
+/// [`crate::charmap::decode_by_label`]'s three-way answer maps onto Python's
+/// `try/except (UnicodeDecodeError, LookupError)` exactly: `Some(Ok)` is a
+/// decoded page, `Some(Err)` is a mislabeled page (ask the next name), and
+/// `None` is a label this build has no table for — also ask the next name. So
+/// a declined label cannot fail a page; it falls through to utf-8/replace,
+/// which is the documented divergence in `charmap.rs` and is why that `None`
+/// had to stay distinguishable from `Some(Err(()))`.
+///
+/// `charset` is `Option<&str>` because both spellings of "the server said
+/// nothing" appear in the truth table: `''` (no `charset=` token) and `None`.
+///
+/// One Python branch is unrepresentable here and is *skipped, not faked*:
+/// `isinstance(raw, str) → return raw`. This port's only producer of `raw` is
+/// a socket read, so the branch has no caller.
+pub fn decode_body(raw: &[u8], charset: Option<&str>) -> String {
+    for name in [charset.unwrap_or(""), "utf-8", "gbk"] {
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(Ok(text)) = crate::charmap::decode_by_label(raw, name) {
+            return text;
+        }
+    }
+    utf8_replace(raw)
+}
+
+/// `_PageParser`: turns the parser's callbacks into `(href, "where:attribute")`
+/// rows, plus the page title the card shows.
+///
+/// Row order is the order the page is read in and the table is scanned in, so
+/// a tag carrying both `src` and `data-src` emits **two** rows. That is
+/// observable in the differential table (A10) and it is the reason `take` has
+/// no `break`.
+#[derive(Debug, Default)]
+pub struct PageParser {
+    pub found: Vec<(String, String)>,
+    pub page_title: String,
+    in_title: bool,
+}
+
+impl PageParser {
+    /// `_PageParser.SRC_ATTRS`. `data-src` and its cousins are here because
+    /// lazy-load is the normal shape of a self-hosted video page: the `src` is
+    /// a placeholder and the real file sits in an attribute a script copies
+    /// across.
+    pub const SRC_ATTRS: [&'static str; 7] = [
+        "src",
+        "data-src",
+        "data-orig-file",
+        "data-video-src",
+        "data-hls-url",
+        "data-mp4",
+        "data-file",
+    ];
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `_take(values, where)` — every name in the table, then `href`.
+    fn take(&mut self, values: &HashMap<String, String>, where_: &str) {
+        for name in Self::SRC_ATTRS.iter().copied().chain(std::iter::once("href")) {
+            // `if href:` — a value only reaches this map when Python would
+            // also have accepted it, so presence here is the whole test.
+            if let Some(href) = values.get(name) {
+                self.found
+                    .push((href.clone(), format!("{}:{}", where_, name)));
+            }
+        }
+    }
+}
+
+/// `' '.join(s.split())`: Python's whitespace runs collapsed to one space,
+/// using its 29-code-point set — not the 25 Rust's `\s` knows.
+fn normalize_spaces(s: &str) -> String {
+    s.split(py_is_space)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl crate::html::HtmlSink for PageParser {
+    fn handle_starttag(&mut self, tag: &str, attrs: &[(String, Option<String>)]) {
+        if tag == "title" {
+            self.in_title = true;
+            return;
+        }
+        // `for key, value in attrs: if value: values.setdefault(key.lower(), value)`
+        // — a bare attribute (`src`, no `=`) is `None` in CPython and an empty
+        // one is `''`; neither is a value. Names arrive from `html.rs` already
+        // lowercased (`to_lowercase` on both tag and attribute), so `key.lower()`
+        // is not re-applied here.
+        let mut values: HashMap<String, String> = HashMap::new();
+        for (key, value) in attrs {
+            if let Some(value) = value {
+                if !value.is_empty() {
+                    values.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+        }
+        match tag {
+            "video" | "audio" | "source" | "embed" => self.take(&values, tag),
+            "link" => {
+                let rel = normalize_spaces(
+                    &values
+                        .get("rel")
+                        .map(|value| value.to_lowercase())
+                        .unwrap_or_default(),
+                );
+                // `'preload' in rel` is a *substring* test, and `as` is compared
+                // case-sensitively against the raw attribute value — the
+                // `lower()` above belongs to `rel` alone.
+                if rel.contains("preload")
+                    && matches!(
+                        values.get("as").map(String::as_str),
+                        Some("video") | Some("fetch")
+                    )
+                {
+                    let mut one = HashMap::new();
+                    if let Some(href) = values.get("href") {
+                        one.insert("href".to_string(), href.clone());
+                    }
+                    self.take(&one, "preload");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_endtag(&mut self, tag: &str) {
+        if tag == "title" {
+            self.in_title = false;
+        }
+    }
+
+    fn handle_data(&mut self, data: &str) {
+        // The first non-empty `<title>` text is the page's; a site that
+        // animates the tab title with a script would only be editing the same
+        // node. Truncation is by *character*, and `html.rs` counts characters
+        // too — a Chinese title is the case that makes that load-bearing.
+        if !self.in_title || !self.page_title.is_empty() {
+            return;
+        }
+        let stripped = py_strip(data);
+        if stripped.is_empty() {
+            return;
+        }
+        self.page_title = stripped.chars().take(TITLE_MAX_CHARS).collect();
+    }
+}
+
+/// `_OG_VIDEO_NAMES` — `secure_url` first so a page offering both gives the
+/// https one a stable place in the list.
+const OG_VIDEO_NAMES: [&str; 3] = ["og:video:secure_url", "og:video:url", "og:video"];
+
+/// `re.compile(r'<meta\b[^>]*>')` with `IGNORECASE`, which `(?i)` carries.
+static META_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)<meta\b[^>]*>").expect("meta tag regex"));
+
+/// `_META_ATTR`, **without** `IGNORECASE`: the page's own casing survives the
+/// scan and only gets lowered when it is looked up, which is what makes a
+/// `PROPERTY=` tag behave like a `property=` one while an `HTTP-EQUIV` value
+/// stays exactly as written.
+///
+/// Rust's `\s` misses U+001C..U+001F, which Python's str `\s` includes, so the
+/// class is spelled out. `\w` is the documented divergence in the other
+/// direction: Rust includes Unicode marks, Python's `isalnum` does not, and no
+/// attribute name in the table exercises it.
+static META_ATTR: LazyLock<Regex> = LazyLock::new(|| {
+    let around_eq = r#"[\s\x{1C}-\x{1F}]*"#;
+    Regex::new(&format!(
+        r#"([\w:-]+){around_eq}={around_eq}["']([^"']*)["']"#
+    ))
+    .expect("meta attribute regex")
+});
+
+/// `_meta_og_video(body)` — read with a regex rather than the parser:
+/// attribute order is not stable across generators, `<meta>` may or may not be
+/// self-closed, and the tag can appear before `<body>`, where a one-shot read
+/// of the head is all we need.
+pub fn meta_og_video(body: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for tag in META_TAG.find_iter(body) {
+        let mut attrs: HashMap<String, String> = HashMap::new();
+        for cap in META_ATTR.captures_iter(tag.as_str()) {
+            let key = cap[1].to_lowercase();
+            let value = cap[2].to_string();
+            attrs.entry(key).or_insert(value);
+        }
+        // `attrs.get('property') or attrs.get('name') or ''` — an *empty*
+        // property falls through to name, which is not the same as `None`.
+        let name = attrs
+            .get("property")
+            .filter(|value| !value.is_empty())
+            .or_else(|| attrs.get("name").filter(|value| !value.is_empty()))
+            .map(|value| value.to_lowercase())
+            .unwrap_or_default();
+        if OG_VIDEO_NAMES.contains(&name.as_str()) {
+            if let Some(content) = attrs.get("content") {
+                if !content.is_empty() {
+                    found.push((content.clone(), name));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// `_LITERAL_URL` — one capture group, mandatory, with the query tail inside
+/// it. The character class ends the match at a quote, an angle bracket, a
+/// backslash, or whitespace, which is how a URL embedded in prose stops at the
+/// prose. Python's str `\s` set is spelled out for the same reason as above.
+static LITERAL_URL: LazyLock<Regex> = LazyLock::new(|| {
+    let not = r#"[^\s\x{1C}-\x{1F}"'<>\\]"#;
+    let suffixes = MEDIA_SUFFIXES
+        .iter()
+        .map(|suffix| suffix.trim_start_matches('.'))
+        .collect::<Vec<_>>()
+        .join("|");
+    Regex::new(&format!(
+        r"(?i)((?:https?://|//|/){not}*?\.(?:{suffixes})(?:\?{not}*)?)"
+    ))
+    .expect("literal URL regex")
+});
+
+/// `_literal_urls(body)` — the third raw source, and the one that caught the
+/// PHP-escaped m3u8s (`\/`) that `json_unescape` exists for. Scanning happens
+/// *after* unescaping, on the whole body, tags included.
+pub fn literal_urls(body: &str) -> Vec<(String, String)> {
+    let text = json_unescape(body);
+    LITERAL_URL
+        .captures_iter(&text)
+        // Group 1 is the address; the full match is the same thing here, but
+        // Python reads `.group(1)` and the group is what makes the class
+        // boundaries testable.
+        .map(|cap| (cap[1].to_string(), "literal".to_string()))
+        .collect()
+}
+
+/// `_fetch_page(page_url)` — the only place this crate speaks HTTP as a
+/// *client*. Every failure shape (DNS, timeout, 4xx, 5xx, a body that cannot
+/// be read) is Python's `(URLError, OSError, ValueError) → ''`: a page we
+/// cannot read is an empty page, and the candidate list then says so.
+pub fn fetch_page(page_url: &str, opener: Option<&dyn Fn(&str) -> String>) -> String {
+    if let Some(opener) = opener {
+        // `opener(page_url) or ''` — an empty answer stays empty.
+        return opener(page_url);
+    }
+    let response = ureq::get(page_url)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+        .config()
+        .timeout_connect(Some(Duration::from_secs(SCRAPE_TIMEOUT_SECS)))
+        .timeout_recv_response(Some(Duration::from_secs(SCRAPE_TIMEOUT_SECS)))
+        .build()
+        .call();
+    let Ok(response) = response else {
+        return String::new();
+    };
+    let mut body = response.into_body();
+    // `get_content_charset()` is `None` when the header carries no charset
+    // token; `''` and `None` must both mean "ask utf-8 next".
+    let charset = body.charset().unwrap_or_default().to_string();
+    let mut raw = Vec::new();
+    // `response.read(PAGE_MAX_BYTES)` truncates silently — it never errors, so
+    // a long page is a short page here, not a failed one.
+    if Read::take(body.as_reader(), PAGE_MAX_BYTES as u64)
+        .read_to_end(&mut raw)
+        .is_err()
+    {
+        return String::new();
+    }
+    decode_body(
+        &raw,
+        if charset.is_empty() {
+            None
+        } else {
+            Some(charset.as_str())
+        },
+    )
+}
+
+/// `scrape_page(page_url, body=None, opener=None)`.
+///
+/// The engine's whole claim: only what the HTML *states outright*. Three raw
+/// sources, merged in this order — parser attributes, `og:video`, literal
+/// suffixes — then made absolute against the **stem** (the page URL with its
+/// fragment removed), with the page itself and duplicates removed.
+///
+/// It feeds and **never closes**, which is the Python and is not an oversight.
+/// The reason was measured, because the obvious one is wrong: CPython's
+/// `check_for_whole_start_tag` refuses a partial start tag **even at `close()`**,
+/// so a page cut inside `<video src="…` leaves that attribute unsampled either
+/// way — closing here does *not* invent candidates. What `close()` does flush is
+/// buffered character data, and `<title>` is the only data this function reads,
+/// so the shape that is load-bearing is a page that ends inside its title. Both
+/// shapes are in the corpus (`scrape_tests.rs` `sp_10`–`sp_17`: six gain a title
+/// the reference never had, two answer identically either way). (The differential
+/// test for the parser itself does close, because that is what the oracle does.)
+///
+/// `absolute_url` can fail for one reason this port keeps loud rather than
+/// swallowing: a base URL whose *scheme* cannot be parsed is Python's
+/// `ValueError`, and it escapes `scrape_page` un-caught there, so it propagates
+/// here too.
+pub fn scrape_page(
+    page_url: Option<&str>,
+    body: Option<&str>,
+    opener: Option<&dyn Fn(&str) -> String>,
+) -> Result<Vec<Candidate>, PyUrlError> {
+    let text = match body {
+        Some(text) => text.to_string(),
+        None => match page_url {
+            Some(url) if !url.is_empty() => fetch_page(url, opener),
+            _ => String::new(),
+        },
+    };
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parser = crate::html::HtmlParser::new(PageParser::new());
+    parser.feed(&text);
+    let parser = parser.sink;
+    let mut raw = parser.found.clone();
+    raw.extend(meta_og_video(&text));
+    raw.extend(literal_urls(&text));
+
+    let stem = page_url.map(|url| url.split('#').next().unwrap_or("")).unwrap_or_default();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut found: Vec<Candidate> = Vec::new();
+    for (href, where_) in raw {
+        let Some(url) = absolute_url(stem, &href)? else {
+            continue;
+        };
+        // A relative `src` that resolves back to the page is not a media
+        // address, it is the page being pointed at itself.
+        if url.split('#').next().unwrap_or("") == stem || !seen.insert(url.clone()) {
+            continue;
+        }
+        found.push(Candidate {
+            label: where_,
+            title: if parser.page_title.is_empty() {
+                None
+            } else {
+                Some(parser.page_title.clone())
+            },
+            ..Candidate::new(url, "page".to_string())
+        });
+    }
+    Ok(found)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3702,3 +4074,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "scrape_tests.rs"]
+mod scrape_tests;

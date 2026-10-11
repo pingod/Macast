@@ -55,3 +55,11 @@ url = { workspace = true }
 # page-entry suffix `page_wording` strips. Why the patterns are worth a dependency
 # at all is the root manifest's note.
 regex = { workspace = true }
+# `_fetch_page` is the one place the receiver speaks HTTP as a *client*; the
+# manifest-level reasoning (timeouts, rustls-only, no gzip) lives next to the
+# dependency in the root Cargo.toml.
+ureq = { workspace = true }
+# No charset dependency: `decode_body` resolves the server's label by hand (lowercase,
+# normalize, then the measured alias table) and decodes through the generated tables in
+# `src/{gbk,cjk}.rs`. The root manifest records why the library that looked like the
+# obvious match was measured away.

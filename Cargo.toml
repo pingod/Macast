@@ -86,6 +86,36 @@ log = "0.4"
 rand = "0.8"
 url = "2"
 regex = "1"
+# Fetching the pasted page is the one place the receiver speaks HTTP as a *client*
+# (`media_resolve._fetch_page()`): a browser-shaped `User-Agent`, a 15 s timeout,
+# `read(PAGE_MAX_BYTES)` and "any 4xx/5xx means no page". ureq's defaults are
+# already that shape — `http_status_as_error: true` turns 4xx/5xx into `Err`, which
+# is Python's `HTTPError`, and `max_redirects: 10` is urllib's `max_redirections`
+# — and the per-request timeouts (`timeout_connect/recv_response/recv_body`) get the
+# same number as Python's `urlopen(timeout=…)`, set on the request rather than the
+# agent so the fetch seam stays a pure function of its arguments.
+#
+# `default-features = false, features = ["rustls"]` keeps the crypto story of this
+# workspace intact: that feature is `rustls-no-provider` + `rustls?/ring` +
+# `webpki-roots`, so the provider is the same `ring` pinned above and no `aws-lc-rs`
+# /CMake can enter the graph (see the rustls note; CMake must not appear on a
+# `cargo test` machine). gzip/brotli stay **off** on purpose: Python's urllib sends
+# no `Accept-Encoding` either, and a server answering a request *we* spelled
+# differently is a difference nobody can see. The `charset` feature stays off too —
+# `decode_body` mirrors `get_content_charset()` plus the `(charset, 'utf-8', 'gbk')`
+# chain by hand, so the parse happens where its fallbacks live (see `resolve.rs`).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# `decode_body`'s charset tables are **not** a dependency. The first shape tried was
+# `encoding_rs` (`Encoding::for_label` ↔ `codecs.lookup`, and its strict decoder is
+# Python's `UnicodeDecodeError`), and it was measured against CPython rather than
+# assumed: replaying every lead/trail cell of the four double-byte families through
+# it diverges from what `bytes.decode` actually returns — big5 5,144 cells, shift_jis
+# 2,795, cp932 841, gb18030 21, out of 32,386 cells per family. A wrong cell is not
+# an error on the cast card, it is silent mojibake in a title, so the tables live in
+# `macast-cast/src/{gbk,cjk}.rs` instead, generated from this interpreter and
+# re-measured over 505,120 worded rows (all five families: 0 divergent). `std`'s own
+# `str::from_utf8` still covers utf-8, and the single-byte labels are hand tables
+# because their whole alphabet is 256 cells. See `resolve.rs` for the chain.
 # `media_resolve.py` reaches for `re` in three places whose answer is a *match*,
 # not a parse: the refused-status matcher (`\b(?:40[134]|410)\b`, word boundaries
 # doing the work that `str::contains` would get wrong by matching inside "4010"),

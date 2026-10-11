@@ -66,6 +66,11 @@
 pub mod airplay;
 pub mod cert;
 pub mod channel;
+pub mod charmap;
+pub mod cjk;
+pub mod entities;
+pub mod gbk;
+pub mod html;
 pub mod proto;
 pub mod resolve;
 
