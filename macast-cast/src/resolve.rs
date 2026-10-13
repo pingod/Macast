@@ -46,7 +46,7 @@
 //! no Referer — and "the TV says it won't play" is the symptom.
 
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -586,12 +586,45 @@ fn unquote_ascii_run(run: &str) -> String {
 /// The port keeps the failure shape — callers that mirror Python's `try/except`
 /// catch it, and callers that mirror its *unguarded* calls turn it into the
 /// fallback value they use instead of a traceback.
+///
+/// It carries Python's own message because that message is what the job's card
+/// reads: `run()` writes 「解析出错：ValueError: <message>」, and three truth
+/// rows (`flow#19`, `err#6`, `err#7`) record the sentence
+/// `ValueError: Invalid IPv6 URL` in that field. Every wording below was
+/// measured against the oracle's interpreter (Python 3.12.15, `.venv/bin/python`)
+/// on the shape named at its raise site; only `UNMEASURED` was not, because no
+/// `ValueError` message exists for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PyUrlError;
+pub struct PyUrlError {
+    pub message: String,
+}
+
+/// `ValueError(f'Invalid IPv6 URL')` — CPython writes this at three places in
+/// `urlparse` (`urlsplit`'s bracket-parity check, and the two checks in
+/// `_check_bracketed_netloc`), all byte-identical.
+const INVALID_IPV6: &str = "Invalid IPv6 URL";
+
+/// The one site left with a generic wording: `split_netloc` slicing mid
+/// character. CPython raises `TypeError` there, not `ValueError`, and a `String`
+/// netloc cannot reach it — so there is no measured message to copy, and no
+/// truth row or probe drives it.
+const UNMEASURED: &str = "invalid URL";
+
+impl PyUrlError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn ipv6() -> Self {
+        Self::new(INVALID_IPV6)
+    }
+}
 
 impl std::fmt::Display for PyUrlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("invalid URL")
+        f.write_str(&self.message)
     }
 }
 
@@ -681,7 +714,7 @@ impl PySplitResult {
         allow_fragments: bool,
     ) -> Result<PySplit, PyUrlError> {
         if rest.starts_with("//") {
-            let (netloc, after) = split_netloc(&rest, 2).map_err(|_| PyUrlError)?;
+            let (netloc, after) = split_netloc(&rest, 2).map_err(|_| PyUrlError::new(UNMEASURED))?;
             rest = after;
             // A url with bracketed IPv6 literals in netloc must have matching
             // brackets; otherwise the ValueError("Invalid IPv6 URL") only
@@ -690,7 +723,7 @@ impl PySplitResult {
             let has_close = netloc.contains(']');
             if has_open != has_close {
                 // ValueError(f'Invalid IPv6 URL')
-                return Err(PyUrlError);
+                return Err(PyUrlError::ipv6());
             }
             if has_open {
                 check_bracketed_netloc(&netloc)?;
@@ -954,7 +987,13 @@ fn check_netloc(netloc: &str) -> Result<(), PyUrlError> {
                 .chars()
                 .any(|e| matches!(e, '/' | '?' | '#' | '@' | ':'))
         {
-            return Err(PyUrlError);
+            // ValueError(f'netloc {netloc!r} contains invalid characters '
+            //            'under NFKC normalization') -- CPython quotes the
+            // netloc with `'%s'`, not with `repr()`. Measured on 3.12.15.
+            return Err(PyUrlError::new(format!(
+                "netloc '{}' contains invalid characters under NFKC normalization",
+                netloc
+            )));
         }
     }
     Ok(())
@@ -968,12 +1007,12 @@ fn check_bracketed_netloc(netloc: &str) -> Result<(), PyUrlError> {
     match hostname_and_port.split_once('[') {
         Some((before_bracket, bracketed)) => {
             if !before_bracket.is_empty() {
-                return Err(PyUrlError);
+                return Err(PyUrlError::ipv6());
             }
             let hostname = match bracketed.split_once(']') {
                 Some((h, port)) => {
                     if !port.is_empty() && !port.starts_with(':') {
-                        return Err(PyUrlError);
+                        return Err(PyUrlError::ipv6());
                     }
                     h
                 }
@@ -1013,17 +1052,29 @@ fn check_bracketed_host(hostname: &str) -> Result<(), PyUrlError> {
             && b[pos] == b'.'
             && hostname.len() > pos + 1
             && !hostname[pos + 1..].contains('\n');
-        return if tail_ok { Ok(()) } else { Err(PyUrlError) };
+        return if tail_ok {
+            Ok(())
+        } else {
+            // ValueError('IPvFuture address is invalid')
+            Err(PyUrlError::new("IPvFuture address is invalid"))
+        };
     }
     // IPv4-in-brackets deliberately fails (checked before IPv6 so the error
     // shape matches Python's two separate raises).
     if hostname.parse::<std::net::Ipv4Addr>().is_ok() {
-        return Err(PyUrlError);
+        // ValueError('An IPv4 address cannot be in brackets')
+        return Err(PyUrlError::new("An IPv4 address cannot be in brackets"));
     }
     if py_ipv6_parses(hostname) {
         Ok(())
     } else {
-        Err(PyUrlError)
+        // ipaddress raises `ValueError(f'{addr!r} does not appear to be an
+        // IPv4 or IPv6 address')` -- `repr()` of the hostname, measured on
+        // 3.12.15 (`"no'pe" does not appear ...`).
+        Err(PyUrlError::new(format!(
+            "{} does not appear to be an IPv4 or IPv6 address",
+            py_repr_str(hostname)
+        )))
     }
 }
 
@@ -3080,6 +3131,570 @@ pub fn scrape_page(
     Ok(found)
 }
 
+// ---------------------------------------------------------------------------
+// Sixth sublayer: the resolve job — the step trace the page polls, the four
+// voices that explain an empty answer, and the card's 23 keys.
+// Every sentence here is the Python body in `macast/media_resolve.py`
+// (:1387–1559 for `ResolveJob`, :1560–1604 for `describe` and `resolve_now`)
+// read byte for byte; the differential corpus `/tmp/mr15c_truth.txt`
+// (md5 bb0a761962a395021a56c4e6b9e857d8, 162 rows) is the witness.
+//
+// Four places where this port and CPython genuinely differ, each also noted at
+// its own site:
+//   * `candidate.host` inside the measuring loop is unguarded in Python, so a
+//     bracketed netloc raises `ValueError: Invalid IPv6 URL` and `run()` turns
+//     it into 「解析出错：ValueError: Invalid IPv6 URL」. Rust's `host()` answers
+//     `""` and keeps measuring (truth row `__divergent__-host`).
+//   * `on_finish` runs inside a `try: … except Exception: pass` in Python.
+//     A Rust callback cannot raise, so the witness moved: the `finish-record`
+//     and `finish-boom` rows show the job's own state when it fired.
+//   * `self._lock` is gone. It guarded a real poll-vs-worker race, and the
+//     worker comes from `start()`, which this layer does not port (see below).
+//   * A bad *page* URL reaches the caller as `ResolveError`, not as a raw
+//     `ValueError` traceback — but its message is CPython's own: `PyUrlError`
+//     carries the measured sentence of the site that fired, because three truth
+//     rows (`flow#19`, `err#6`, `err#7`) record `ValueError: Invalid IPv6 URL`
+//     as the text a card reads. Only `UNMEASURED` has no oracle wording: the
+//     mid-character netloc slice, which a `String` netloc cannot reach.
+//
+// `start()` and its daemon thread are deliberately not ported: spawning is the
+// handler's job, and this layer is single threaded until that arrives — which
+// is also why `on_finish` is a plain `dyn Fn` and not `Fn + Send`. The clock is
+// an explicit `&dyn Fn() -> f64` because there is no ambient `time.time()` and
+// because `started`/`step_started` are read in `__init__` and in `_enter`.
+// ---------------------------------------------------------------------------
+
+/// `round(v, 1)` for a finite float: CPython rounds the exact binary value
+/// half-to-even and re-reads the decimal text, which is what `{:.1}` + parse
+/// does. `0.25` has to stay `0.2` and `0.15` has to stay `0.1` — both are in
+/// the truth file's `rnd` rows, and neither survives a "add 0.05 then truncate"
+/// shortcut.
+fn py_round1(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    match format!("{:.1}", value).parse::<f64>() {
+        Ok(rounded) => rounded,
+        Err(_) => value,
+    }
+}
+
+/// `round(bitrate / 1000)` with no `ndigits`: an `int` in Python, an `i64`
+/// here, and the same half-to-even rule (`1500` → 2, `2500` → 2, `3500` → 4).
+/// Falsy bitrates never reach this — the caller answers 0 before dividing.
+fn bitrate_kbps(bitrate: f64) -> i64 {
+    if !bitrate.is_finite() {
+        return 0;
+    }
+    match format!("{:.0}", bitrate / 1000.0).parse::<i64>() {
+        Ok(kbps) => kbps,
+        Err(_) => 0,
+    }
+}
+
+/// One candidate, in the 23 keys the card reads, in Python's order.
+///
+/// This can fail, and that is part of the contract: `'title'` runs
+/// `display_title` → `title_for_uri` → `urlsplit`, and CPython lets the
+/// `ValueError` out of here while `status()` is still assembling its dict.
+pub fn describe(candidate: &Candidate) -> Result<Value, PyUrlError> {
+    let probe = &candidate.probe;
+    let mut row = Map::new();
+    row.insert("url".to_string(), Value::String(candidate.url.clone()));
+    // The JSON key stays `origin`; the Rust field is `engine`, because
+    // `engine` is a keyword-shaped word to carry a provenance tag.
+    row.insert("origin".to_string(), Value::String(candidate.engine.clone()));
+    row.insert("label".to_string(), Value::String(candidate.label.clone()));
+    row.insert("title".to_string(), Value::String(display_title(candidate, "")?));
+    row.insert("container".to_string(), Value::String(container_label(candidate)));
+    // `probe.X if probe else ''` — and an absent probe is `Probe::new()` in
+    // this port, whose empty `Option`s unwrap to the same `''`.
+    row.insert(
+        "video_codec".to_string(),
+        Value::String(probe.video_codec.clone().unwrap_or_default()),
+    );
+    row.insert(
+        "audio_codec".to_string(),
+        Value::String(probe.audio_codec.clone().unwrap_or_default()),
+    );
+    row.insert("width".to_string(), Value::from(candidate.width() as u64));
+    row.insert("height".to_string(), Value::from(candidate.height() as u64));
+    row.insert(
+        "duration".to_string(),
+        Value::from(py_round1(candidate.duration())),
+    );
+    // `round(bitrate / 1000)` is an int; `0.0`, `-0.0` and `None` are all
+    // falsy in Python and all answer 0 here. Rust compares `-0.0 == 0.0`, so
+    // one guard covers the three.
+    row.insert(
+        "bitrate".to_string(),
+        match probe.bitrate {
+            Some(rate) if rate != 0.0 => Value::from(bitrate_kbps(rate)),
+            _ => Value::from(0i64),
+        },
+    );
+    row.insert("measured".to_string(), Value::Bool(probe.measured()));
+    row.insert("reach".to_string(), Value::String(probe.reach.clone()));
+    row.insert("live".to_string(), Value::Bool(probe.is_live));
+    row.insert("segmented".to_string(), Value::Bool(candidate.segmented()));
+    row.insert("last_resort".to_string(), Value::Bool(candidate.last_resort));
+    row.insert("reason".to_string(), Value::String(candidate.reason.clone()));
+    row.insert("mode".to_string(), Value::String(plan(candidate).to_string()));
+    row.insert("relay".to_string(), Value::String(relay_reason(candidate)));
+    // `sorted(dict)`: the *keys*, in code-point order.
+    let mut keys: Vec<String> = candidate.headers.keys().cloned().collect();
+    keys.sort();
+    row.insert(
+        "headers".to_string(),
+        Value::Array(keys.into_iter().map(Value::String).collect()),
+    );
+    // `bool(candidate.audio_url)` — an empty string is not a second track.
+    row.insert(
+        "merged".to_string(),
+        Value::Bool(
+            candidate
+                .audio_url
+                .as_deref()
+                .map_or(false, |url| !url.is_empty()),
+        ),
+    );
+    row.insert("audio_label".to_string(), Value::String(candidate.audio_label.clone()));
+    row.insert("silent".to_string(), Value::Bool(candidate.silent()));
+    Ok(Value::Object(row))
+}
+
+/// The Python exception that escaped a resolver step, kept as the two words
+/// `run()` needs: `type(exc).__name__` and `str(exc)`. The message is stored
+/// raw, so `''` (Python's `str(RuntimeError())`) renders as the trailing
+/// space in 「解析出错：RuntimeError: 」 exactly as CPython's format string does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveError {
+    pub kind: String,
+    pub message: String,
+}
+
+impl std::fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for ResolveError {}
+
+impl From<PyUrlError> for ResolveError {
+    fn from(exc: PyUrlError) -> ResolveError {
+        ResolveError {
+            kind: "ValueError".to_string(),
+            message: exc.to_string(),
+        }
+    }
+}
+
+/// One of the `**facts` that `_enter` writes after the step name and the clock.
+/// Python's `**kwargs` keeps the caller's order, and the order is the contract
+/// (`_enter('measure', from_ytdlp=…, engine_note=…)`), so facts are a slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepFact {
+    Scraped(usize),
+    FromYtdlp(usize),
+    EngineNote(String),
+    Measured(usize),
+}
+
+/// The cookie pair a job carries, owned: `Cookies<'_>` is a borrow, and a job
+/// outlives the call that made it, so the job keeps the strings and re-borrows
+/// on the way to the engine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JobCookies {
+    pub file: String,
+    pub browser: String,
+}
+
+impl JobCookies {
+    pub fn borrowed(&self) -> Cookies<'_> {
+        Cookies {
+            file: &self.file,
+            browser: &self.browser,
+        }
+    }
+}
+
+impl From<&Cookies<'_>> for JobCookies {
+    fn from(cookies: &Cookies<'_>) -> JobCookies {
+        JobCookies {
+            file: cookies.file.to_string(),
+            browser: cookies.browser.to_string(),
+        }
+    }
+}
+
+/// The collaborators `ResolveJob` asks for. Real code spawns `yt-dlp` and
+/// `ffprobe`; the differential oracle replaces all four, and every one of them
+/// receives `&ResolveJob` so a test can witness the ordering the Python source
+/// states — `_enter(...)` runs *before* the call, so the step name the engine
+/// is asked under is already the new one.
+///
+/// They return `Result` because the fake has to be able to raise: Python's
+/// `_resolve` lets any exception out and `run()` is the one that turns it into
+/// a sentence.
+pub trait ResolveOps {
+    fn scrape_page(&self, job: &ResolveJob, page_url: &str) -> Result<Vec<Candidate>, ResolveError>;
+    fn ytdlp_candidates(
+        &self,
+        job: &ResolveJob,
+        page_url: &str,
+        cookies: &Cookies<'_>,
+        sink: &mut Vec<String>,
+    ) -> Result<Vec<Candidate>, ResolveError>;
+    fn measure(&self, job: &ResolveJob, candidate: &mut Candidate) -> Result<Probe, ResolveError>;
+    fn rank(
+        &self,
+        job: &ResolveJob,
+        candidates: Vec<Candidate>,
+        ceiling: f64,
+    ) -> Result<Vec<Candidate>, ResolveError>;
+    /// `find_command('yt-dlp') is not None` — asked only when nothing else
+    /// spoke, because on a real machine it is a `PATH` walk.
+    fn has_ytdlp(&self) -> bool;
+    /// The two module constants, re-read on every pass like Python re-reads
+    /// them, so a test can move the cap between rows.
+    fn max_measured(&self) -> usize;
+    fn max_per_host(&self) -> usize;
+}
+
+/// The production wiring: the same four functions the layer above exports.
+pub struct RealResolveOps;
+
+impl ResolveOps for RealResolveOps {
+    fn scrape_page(&self, _job: &ResolveJob, page_url: &str) -> Result<Vec<Candidate>, ResolveError> {
+        scrape_page(Some(page_url), None, None).map_err(Into::into)
+    }
+
+    fn ytdlp_candidates(
+        &self,
+        _job: &ResolveJob,
+        page_url: &str,
+        cookies: &Cookies<'_>,
+        sink: &mut Vec<String>,
+    ) -> Result<Vec<Candidate>, ResolveError> {
+        Ok(ytdlp_candidates(page_url, None, cookies, Some(sink)))
+    }
+
+    fn measure(&self, _job: &ResolveJob, candidate: &mut Candidate) -> Result<Probe, ResolveError> {
+        Ok(measure(candidate, None))
+    }
+
+    fn rank(
+        &self,
+        _job: &ResolveJob,
+        candidates: Vec<Candidate>,
+        ceiling: f64,
+    ) -> Result<Vec<Candidate>, ResolveError> {
+        Ok(rank(candidates, ceiling))
+    }
+
+    fn has_ytdlp(&self) -> bool {
+        find_command("yt-dlp", None, None, None).is_some()
+    }
+
+    fn max_measured(&self) -> usize {
+        MAX_MEASURED
+    }
+
+    fn max_per_host(&self) -> usize {
+        MAX_MEASURED_PER_HOST
+    }
+}
+
+/// The steps a job walks through, in order.
+pub const STEPS: [&str; 4] = ["scrape", "ytdlp", "measure", "rank"];
+
+/// Kept next to `STEPS` because a new step with no label would render as an
+/// English word in a Chinese sentence.
+const STEP_LABELS: [(&str, &str); 6] = [
+    ("queued", "排队中"),
+    ("scrape", "抓取页面"),
+    ("ytdlp", "yt-dlp 解析页面"),
+    ("measure", "度量候选地址"),
+    ("rank", "排序"),
+    ("done", "完成"),
+];
+
+/// `STEP_LABELS.get(step, step)`: an unknown step is echoed, not blanked — the
+/// page would rather show a word it does not recognise than nothing.
+pub fn step_label(step: &str) -> String {
+    STEP_LABELS
+        .iter()
+        .find(|(name, _)| *name == step)
+        .map(|(_, label)| label.to_string())
+        .unwrap_or_else(|| step.to_string())
+}
+
+/// One page-resolution request, in the state the settings page polls.
+///
+/// The fields are `pub` because this is the shape the handler reads: `status()`
+/// is the wire format, and every caller that wants a slice of the job wants one
+/// of these. The Python job also carries `_thread`; that belongs to `start()`,
+/// which is not in this layer.
+pub struct ResolveJob {
+    pub page_url: String,
+    pub max_height: f64,
+    pub on_finish: Option<Box<dyn Fn(&ResolveJob)>>,
+    pub cookies: JobCookies,
+    pub note: String,
+    pub candidates: Vec<Candidate>,
+    pub error: String,
+    pub done: bool,
+    pub started: f64,
+    pub step: String,
+    pub step_started: f64,
+    pub scraped: usize,
+    pub from_ytdlp: usize,
+    pub measured: usize,
+    pub rejected: usize,
+    pub engine_note: String,
+    pub hidden_silent: usize,
+}
+
+impl ResolveJob {
+    /// `__init__`, in Python's assignment order, with `started` and
+    /// `step_started` taken from the same clock the caller is holding — the
+    /// second `__init__` line reads `self.started`, not a second `time.time()`.
+    pub fn new(
+        page_url: &str,
+        max_height: f64,
+        on_finish: Option<Box<dyn Fn(&ResolveJob)>>,
+        cookies: &Cookies<'_>,
+        note: &str,
+        started: f64,
+    ) -> ResolveJob {
+        ResolveJob {
+            page_url: page_url.to_string(),
+            max_height,
+            on_finish,
+            cookies: JobCookies::from(cookies),
+            note: note.to_string(),
+            candidates: Vec::new(),
+            error: String::new(),
+            done: false,
+            started,
+            step: "queued".to_string(),
+            step_started: started,
+            scraped: 0,
+            from_ytdlp: 0,
+            measured: 0,
+            rejected: 0,
+            engine_note: String::new(),
+            hidden_silent: 0,
+        }
+    }
+
+    /// `_enter(step, **facts)`: the step name moves first, then the clock,
+    /// then the facts in the order the caller wrote them.
+    fn enter(&mut self, step: &str, facts: &[StepFact], clock: &dyn Fn() -> f64) {
+        self.step = step.to_string();
+        self.step_started = clock();
+        for fact in facts {
+            match fact {
+                StepFact::Scraped(count) => self.scraped = *count,
+                StepFact::FromYtdlp(count) => self.from_ytdlp = *count,
+                StepFact::EngineNote(note) => self.engine_note = note.clone(),
+                StepFact::Measured(count) => self.measured = *count,
+            }
+        }
+    }
+
+    /// `_resolve()`: four steps, and `_enter(...)` always ahead of the call it
+    /// describes.
+    fn resolve(
+        &mut self,
+        ops: &dyn ResolveOps,
+        clock: &dyn Fn() -> f64,
+    ) -> Result<(), ResolveError> {
+        self.enter("scrape", &[], clock);
+        let scraped = ops.scrape_page(self, &self.page_url)?;
+        let scraped_len = scraped.len();
+        self.enter("ytdlp", &[StepFact::Scraped(scraped_len)], clock);
+
+        let mut notes: Vec<String> = Vec::new();
+        let resolved = ops.ytdlp_candidates(self, &self.page_url, &self.cookies.borrowed(), &mut notes)?;
+        let from_ytdlp = resolved.len();
+        // `notes[0] if notes else ''` — the engine's first sentence is the one
+        // the card quotes, whatever else it printed afterwards.
+        let engine_note = notes.into_iter().next().unwrap_or_default();
+        self.enter(
+            "measure",
+            &[StepFact::FromYtdlp(from_ytdlp), StepFact::EngineNote(engine_note)],
+            clock,
+        );
+
+        let mut pool = scraped;
+        pool.extend(resolved);
+        let pool = dedupe(pool);
+        if pool.is_empty() {
+            // `rejected` and `hidden_silent` stay 0: nothing was ever offered,
+            // so nothing was ever turned down.
+            let reason = Self::why_empty(&self.engine_note, &|| ops.has_ytdlp());
+            self.candidates = Vec::new();
+            self.error = format!("页面里没有读到视频地址{}", reason);
+            return Ok(());
+        }
+
+        let mut hosts: HashMap<String, usize> = HashMap::new();
+        let mut pool = pool;
+        for candidate in pool.iter_mut() {
+            if self.measured >= ops.max_measured() {
+                break;
+            }
+            let host = candidate.host();
+            // A per-host skip does not spend the global budget: the next
+            // address from the next host still gets its measurement.
+            if hosts.get(&host).copied().unwrap_or(0) >= ops.max_per_host() {
+                continue;
+            }
+            ops.measure(self, candidate)?;
+            *hosts.entry(host).or_insert(0) += 1;
+            let next = self.measured + 1;
+            self.enter("measure", &[StepFact::Measured(next)], clock);
+        }
+
+        let counted = self.measured;
+        self.enter("rank", &[StepFact::Measured(counted)], clock);
+        // `pool` is read for its length before `rank` takes it: the two
+        // sentences below count the pool, not whatever survived ranking.
+        let pool_len = pool.len();
+        let ranked = ops.rank(self, pool, self.max_height)?;
+        let (shown, hidden) = visible_rows(&ranked);
+        let shown_len = shown.len();
+        let hidden_len = hidden.len();
+        self.candidates = shown;
+        self.hidden_silent = hidden_len;
+        self.rejected = pool_len - shown_len;
+        if shown_len == 0 {
+            self.error = if hidden_len > 0 {
+                format!(
+                    "读到的 {} 个候选里，{} 条只有画面、又配不出能合并的声音，其余没有一个能通过判定",
+                    pool_len, hidden_len
+                )
+            } else {
+                format!("读到的 {} 个地址没有一个能通过判定（源站拒绝，或没有画面）", pool_len)
+            };
+        }
+        Ok(())
+    }
+
+    /// `run()`: a resolver must never take the app down, but it must say so in
+    /// a sentence the page can show rather than stopping mid-step.
+    ///
+    /// The `finally` half is not optional: `done` and `step = 'done'` are set
+    /// even when `_resolve` raised, `step_started` is *not* touched (so the
+    /// card reports how long the step that died was open), and `on_finish`
+    /// still fires. Python wraps that call in `except Exception: pass`; a Rust
+    /// callback cannot raise, so the two `finish-*` rows witness that it ran
+    /// once, on a job that was already finished.
+    pub fn run(&mut self, ops: &dyn ResolveOps, clock: &dyn Fn() -> f64) {
+        if let Err(exc) = self.resolve(ops, clock) {
+            self.error = format!("解析出错：{}", exc);
+        }
+        self.done = true;
+        self.step = "done".to_string();
+        if let Some(finish) = &self.on_finish {
+            finish(self);
+        }
+    }
+
+    /// `_why_empty()`: which of the four voices actually spoke.
+    ///
+    /// Order is the answer: the engine's own sentence first (and a note of
+    /// whitespace still counts — Python tests `if note:`, never
+    /// `if note.strip():`), then this machine's missing `yt-dlp`, then the
+    /// JavaScript hole. The last two are mutually exclusive, and the missing
+    /// binary's sentence must not carry `JS_HOLE`: on that machine no engine
+    /// ever ran, so "the site needs JavaScript" is a statement with no
+    /// witness behind it.
+    fn why_empty(note: &str, has_ytdlp: &dyn Fn() -> bool) -> String {
+        if !note.is_empty() {
+            return if engine_says_unsupported(note) {
+                format!("（yt-dlp 说：{}；{}）", note, JS_HOLE)
+            } else {
+                format!("（yt-dlp 说：{}）", note)
+            };
+        }
+        if !has_ytdlp() {
+            return "（这台机器没有装 yt-dlp，只能抓 HTML 里写明的地址）".to_string();
+        }
+        format!("（yt-dlp 这次也没有交出一个地址；{}）", JS_HOLE)
+    }
+
+    /// The dict the page polls: seventeen keys, in Python's order, with
+    /// `candidates` last so a refused URL in the card aborts the poll after the
+    /// counters have been read.
+    ///
+    /// `seconds` and `step_seconds` are two separate clock reads, exactly as in
+    /// Python — one fake clock value makes them indistinguishable, which is why
+    /// the `stat` rows pin `started` and `step_started` apart.
+    pub fn status(&self, clock: &dyn Fn() -> f64) -> Result<Value, PyUrlError> {
+        let problem = cookie_source_problem(&self.engine_note);
+        let mut row = Map::new();
+        row.insert("url".to_string(), Value::String(self.page_url.clone()));
+        row.insert("note".to_string(), Value::String(self.note.clone()));
+        row.insert("done".to_string(), Value::Bool(self.done));
+        row.insert("step".to_string(), Value::String(self.step.clone()));
+        row.insert("step_label".to_string(), Value::String(step_label(&self.step)));
+        row.insert(
+            "seconds".to_string(),
+            Value::from(py_round1(clock() - self.started)),
+        );
+        row.insert(
+            "step_seconds".to_string(),
+            Value::from(py_round1(clock() - self.step_started)),
+        );
+        row.insert("scraped".to_string(), Value::from(self.scraped as u64));
+        row.insert("from_ytdlp".to_string(), Value::from(self.from_ytdlp as u64));
+        row.insert("measured".to_string(), Value::from(self.measured as u64));
+        row.insert("rejected".to_string(), Value::from(self.rejected as u64));
+        row.insert("hidden_silent".to_string(), Value::from(self.hidden_silent as u64));
+        row.insert("engine_note".to_string(), Value::String(self.engine_note.clone()));
+        row.insert(
+            "cookie_problem".to_string(),
+            Value::String(problem.unwrap_or("").to_string()),
+        );
+        // `needs_cookies(note) and not cookie_source_problem(note)`: when the
+        // failure is ours, the card must not send the user off to install a
+        // browser extension.
+        row.insert(
+            "needs_cookies".to_string(),
+            Value::Bool(needs_cookies(&self.engine_note) && problem.is_none()),
+        );
+        row.insert("error".to_string(), Value::String(self.error.clone()));
+        let mut rows: Vec<Value> = Vec::with_capacity(self.candidates.len());
+        for candidate in &self.candidates {
+            rows.push(describe(candidate)?);
+        }
+        row.insert("candidates".to_string(), Value::Array(rows));
+        Ok(Value::Object(row))
+    }
+}
+
+/// `resolve_now(page_url, max_height=0, cookies=None)`: a synchronous resolve
+/// for a caller that can afford to wait.
+///
+/// It goes through `run()`, not `_resolve()` — so the job it returns is
+/// `done`, its step is `'done'`, and an engine that raised left a sentence
+/// behind instead of a half-walked job.
+pub fn resolve_now(
+    ops: &dyn ResolveOps,
+    clock: &dyn Fn() -> f64,
+    page_url: &str,
+    max_height: f64,
+    cookies: &Cookies<'_>,
+) -> ResolveJob {
+    let started = clock();
+    let mut job = ResolveJob::new(page_url, max_height, None, cookies, "", started);
+    job.run(ops, clock);
+    job
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3420,7 +4035,7 @@ mod tests {
 
         // A broken IPv6 netloc raises, exactly where Python's urlsplit does;
         // without a netloc the bracket is ordinary path text.
-        assert_eq!(title_for_uri("http://[::1", ""), Err(PyUrlError));
+        assert_eq!(title_for_uri("http://[::1", ""), Err(PyUrlError::ipv6()));
         assert_eq!(t("[::1/movie.mp4", ""), "movie");
     }
 
@@ -3539,13 +4154,13 @@ mod tests {
         assert_eq!(plan(&cand), "proxy");
         // display_title only touches the URL when the title is empty -- and
         // then the fallback is not consulted either, the parse raises first.
-        assert_eq!(display_title(&cand, ""), Err(PyUrlError));
-        assert_eq!(display_title(&cand, "fb"), Err(PyUrlError));
+        assert_eq!(display_title(&cand, ""), Err(PyUrlError::ipv6()));
+        assert_eq!(display_title(&cand, "fb"), Err(PyUrlError::ipv6()));
         cand.title = Some("T".to_string());
         assert_eq!(display_title(&cand, ""), Ok("T".to_string()));
         // 'http://]' is broken at the same place.
         let bracket = Candidate::new("http://]".to_string(), "page".to_string());
-        assert_eq!(display_title(&bracket, "fb"), Err(PyUrlError));
+        assert_eq!(display_title(&bracket, "fb"), Err(PyUrlError::ipv6()));
         assert_eq!(relay_reason(&bracket), "由 Macast 供流：签名地址会过期，交给电视自己取迟早 403");
         assert_eq!(plan(&bracket), "proxy");
     }
@@ -4582,3 +5197,7 @@ mod scrape_tests;
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+#[path = "job_tests.rs"]
+mod job_tests;
