@@ -30,15 +30,16 @@
 //!
 //! ## Red lines
 //!
-//! * `parse_range(None)` → `(0, None)` is a whole-file answer, status 200,
-//!   **no** `Content-Range`. 206 is only for a request that actually carried a
-//!   Range header.
-//! * A relay whose bytes are gone is refused (402/503), not answered with a
+//! * `parse_range(None)` → `(Some(0), None)` is a whole-file answer, status
+//!   200, **no** `Content-Range`. 206 is only for a request that actually
+//!   carried a Range header. The suffix form `bytes=-N` is *not* junk: it is
+//!   `(None, Some(N))` and it hands over the tail.
+//! * A relay whose bytes are gone is refused (502/503), not answered with a
 //!   lengthless 200 that leaves the player waiting forever.
 //! * `serve_plan` decides status/bounds before the socket opens. The decision is
 //!   callable from tests without opening a socket.
-//! * `wait_for_bytes` blocks **before** `send_response` is called. Once the
-//!   response line is out the only honest answer is a truncated one.
+//! * `wait_for_bytes_within` blocks **before** the response line is written.
+///   Once that line is out the only honest answer is a truncated one.
 
 use log::warn;
 use std::collections::{HashMap, HashSet};
