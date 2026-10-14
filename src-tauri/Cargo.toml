@@ -12,15 +12,19 @@ tauri-build = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tauri = { version = "2", features = [] }
-# The three crates this shell is the `Host` for: settings/logging/paths come from
+# The four crates this shell is the `Host` for: settings/logging/paths come from
 # `macast-core`, `macast-mpv`'s `player::Host` trait is the seam implemented
-# in `src/host.rs`, and `macast-upnp` owns the four seams (`StateStore`,
+# in `src/host.rs`, `macast-upnp` owns the four seams (`StateStore`,
 # `Renderer`, `Hooks`, `Broadcast`) that the receiver's SSDP/SOAP/GENA face calls
-# back into. Before this line the crate knew nothing about any of them, so the
+# back into, and `macast-cast` is the resolve/relay layer the management face
+# drives — it depends on `macast-upnp` and never the reverse, so this crate is
+# the only place in the workspace that can see both sides of that seam.
+# Before this line the crate knew nothing about any of them, so the
 # only implementations of those traits in the tree were macast-upnp's test doubles.
 macast-core = { workspace = true }
 macast-mpv = { workspace = true }
 macast-upnp = { workspace = true }
+macast-cast = { workspace = true }
 
 [features]
 default = ["custom-protocol"]

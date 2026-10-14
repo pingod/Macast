@@ -1551,6 +1551,41 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   拖动"。所以 `parse_range` 的返回值是 `(Option<u64>, Option<u64>)` 而不是 `(u64, Option<u64>)`——
   两种形状在纸上只差一个 `Option`，在答案上差整份文件。
 
+**Rust 侧把这一层接进管理面时量到的三件事**（2026-10-13，`macast-upnp/src/http.rs` 的路由表 +
+`src-tauri/src/host.rs` 的 `ShellManagement`，`scripts/verify_rust_receiver.sh` 14–17 节）：
+
+* **`parse_query` 不做百分号解码，而浏览器和 `curl --data-urlencode` 什么都编码。** 第一版
+  Rust 侧把 query 串按 `&`/`=` 切开就直接交出去，于是 `?query=cast&url=https%3A%2F%2Fhost%2Fa.mp4`
+  读到的地址是 `https%3A%2F%2Fhost%2F...` —— 它过不了"必须是绝对地址"那一问，用户听到的仍是
+  「不是一个完整的媒体地址」，而那句话读起来像**用户写错了**，不是像"我们没读他的字节"。
+  真 Python 侧这一路走 `urllib.parse.unquote_plus`，而它的**顺序是承重的**：
+  **先把 `+` 换成空格，再按字节切 `%`**，所以 `%2B` 与 `+` 是两个答案（`'a%2Bb+c'` → `'a+b c'`），
+  而 `%` 后面不是两个十六进制字符时**百分号原样留着、尾巴不再扫第二遍**（`'%zz'` → `'%zz'`），
+  单个坏字节只换**一个**替换字符（`'%C3%A9x%E7'` → `'éx\ufffd'` —— 那三个 `%` 项在字节层面
+  先拼成 `é x \xE7`，解码时才塌成一个 `\ufffd`；按字符处理会得到两个）。这三格都写进了
+  `unquote_plus` 的实现与用例，因为**它们从纸面上看都像"可以简化"**。
+  **一处刻意的偏离，写在 docstring 里而不是偷偷改掉**：cherrypy 对 query 用
+  `errors='strict'`，一个 `?url=%FF` 在它那里是 **404**（`lib/httputil.py:321-364`），而它的
+  form body 那条路（`_cpreqbody.py:143-166`）先重试声明的字符集；这一路**有损解码并继续路由**，
+  用户读到的是「不认识的字段」那一句而不是一个空白页。理由也写在那里：这一格不是
+  "发送端打错了"的判决点，而 404 不带正文、不带解释，是一台设备 mistype 一个字节
+  时最不该听到的答复。**"和参考实现不一样"必须是文档，不能是沉默**。
+* **验收脚本自己撒了两次谎，两次都长得像"产品坏了"。** ① 13 节投屏时传的是 `cast-title=`，
+  而**这一张脸的名字键叫 `title`**（`macast/protocol.py:2086`；`cast-title` 属于 POST `cast-uri`
+  那一张脸，`:2705`）—— 传错键不报错，只是"没意见"，于是 mpv 窗口永远读回 `media`，
+  而我第一版把它写成了 §4.2 那条命名接缝的回归；② 同一条用例断言 `message` 等于「已投屏」，
+  而成功文档的字面量是 `success`（`:1674-1696` 那一次 `{'code': 0, 'message': 'success', 'url': …, 'title': …}`）。
+  **两条都是改脚本、不改产品**，判据不变：窗口那一格仍然问 `force-media-title`，
+  **永远不问 `filename`**（中转地址末段注定是 `media`，那正是 `media - mpv` 的字面来源）。
+* **`origin` 不是可钉的读数：`dedupe()` 让 yt-dlp 那一行赢。** 15 节原来断言
+  `candidates.0.origin == "page"`、`label == "video:src"`，理由是"这一条是我们从 HTML 读到的"。
+  在装了 `yt-dlp` 的机器上它**红了**：`origin='ytdlp' label='mp4'` —— 而
+  `macast/media_resolve.py:1013-1028` 那条规则从来就是**同址两行时 ytdlp 那行留下**，
+  页面那一行只贡献它的 `<title>`（`page_wording()`）。所以这一格换成了问**规则**而不是问**引擎名**：
+  同一个地址**恰好占一行**，`origin ∈ {page, ytdlp}` 两者都算认账。**这是一条会随场上装了哪些包
+  换颜色的用例**（§4.2「假命令行工具的输出」与 Part 59 那条 `find_command` 打桩是同一族），
+  而它第一次写出来时钉的是**去重的那一败者** —— 全绿只因为写它的那台机器没装 yt-dlp。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

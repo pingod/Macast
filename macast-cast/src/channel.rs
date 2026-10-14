@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use macast_core::logging::Logger;
-use macast_upnp::store::{self, SharedBroadcast, SharedRenderer, SharedStore, StateStore};
+use macast_upnp::store::{self, SharedBroadcast, SharedRenderer, SharedStore};
 
 use crate::cert::Pair;
 use crate::proto::{
@@ -285,7 +285,7 @@ pub struct CastChannel {
     renderer: SharedRenderer,
     #[allow(dead_code)] // wired for broadcast when the wiring layer lands
     broadcast: SharedBroadcast,
-    pub(crate) ledger: Mutex<Ledger>,
+    ledger: Mutex<Ledger>,
     /// `connection id → stream`. Inserted after a successful handshake, removed
     /// when the client loop ends; `stop()` drops every entry, which closes the
     /// sockets.

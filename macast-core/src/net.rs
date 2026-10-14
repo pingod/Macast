@@ -607,6 +607,23 @@ pub fn advertised_addresses(setting: &Setting) -> Vec<String> {
     advertisable_addresses(&snapshot, &steering, &pin)
 }
 
+/// `Setting.get_advertisable_ip()` for callers that only have a `Setting`: the
+/// superset every interface with a gateway entry contributes, before discovery
+/// narrows it to the one that carries the default route.
+///
+/// `macast/media_relay.py` calls this `_advertisable_hosts()` and [`advertised_addresses`]
+/// `reachable_hosts()`, and `advertise_host()` asks for **both**: the second is the
+/// answer that is openable, the first is the answer that is merely printable, and
+/// the fallback from one to the other is what keeps a machine whose default route
+/// is unreadable from handing out no address at all.
+pub fn advertised_hosts(setting: &Setting) -> Vec<String> {
+    let snapshot = Snapshot::collect();
+    let steering = Steering::of(setting);
+    let rows = annotate(&snapshot.addrs, &snapshot.default_ifaces, &steering.pinned);
+    let pin = steering.resolved_pin(&rows);
+    get_advertisable_ip(&snapshot, &steering, &pin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

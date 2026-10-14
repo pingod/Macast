@@ -292,7 +292,11 @@ pub fn default_friendly_name() -> String {
     N.get_or_init(|| format!("Macast({})", hostname())).to_string()
 }
 
-fn hostname() -> String {
+/// This host's own name, the same one `default_friendly_name` puts inside
+/// `Macast(...)`. Public because the same-site check needs it too: the settings
+/// page may legitimately be opened on `pavia-macbook.local` (§4.7b — the name
+/// set is loopback ∪ advertised addresses ∪ **this host's names**).
+pub fn hostname() -> String {
     #[cfg(unix)]
     {
         use std::ffi::CStr;

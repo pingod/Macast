@@ -79,8 +79,12 @@ TOKEN_MARK="这个查询必须带"
 # receiver. `--noproxy` because a stray `http_proxy` in this shell would send a
 # loopback request to a proxy and produce a 000 that looks like a dead port.
 API_BODY=/tmp/verify_rust_receiver_api.json
-api_probe() {
-    API_STATUS=$(curl -s --noproxy '*' -m 8 -o "$API_BODY" -w '%{http_code}' "$@")
+API_LINE=""
+
+# Read `$API_BODY` and leave $API_CODE / $API_MSG behind. Split out from the
+# request so a POST (which needs a longer timeout than a GET probe) answers to
+# the same reader rather than a second copy of this parsing.
+parse_api_body() {
     API_LINE=$(python3 - "$API_BODY" <<'PY'
 import json, sys
 try:
@@ -96,9 +100,95 @@ if not isinstance(body, dict):
 print("%s\t%s" % (body.get("code", ""), body.get("message", "")))
 PY
 )
-    API_CODE=${API_LINE%%	*}
-    API_MSG=${API_LINE#*	}
+    # `IFS=$'\t' read` rather than `${VAR%%tab*}`: the latter needs a literal
+    # TAB byte in the script, and a literal TAB is the one character an editor
+    # silently converts to spaces.
+    IFS=$'\t' read -r API_CODE API_MSG <<< "$API_LINE"
 }
+
+api_probe() {
+    API_STATUS=$(curl -s --noproxy '*' -m 8 -o "$API_BODY" -w '%{http_code}' "$@")
+    parse_api_body
+}
+
+# One POST to the management API: `api_post <url> field=value...`.
+#
+# No token, deliberately: loopback **is** the management gate's admission for
+# these routes (AGENTS.md §4.7), so the meaningful assertion in sections 15-16 is
+# the **absence** of a gate sentence rather than the presence of a secret.
+# `-m 40` because `cast-resolved` runs the origin probe synchronously
+# (`probe_proxy`, up to `GROW_WAIT_SECONDS` = 20 on the remux arm).
+# The pair guard is load-bearing on this machine's bash 3.2: `"${args[@]}"` on an
+# **empty** array under `set -u` is a fatal error, so the function refuses the
+# call before it can expand one.
+api_post() {
+    [ "$#" -ge 2 ] || { echo "api_post needs at least one field=value pair" >&2; return 2; }
+    local _url=$1
+    shift
+    local _args=()
+    while [ "$#" -gt 0 ]; do _args+=(--data-urlencode "$1"); shift; done
+    API_STATUS=$(curl -s --noproxy '*' -m 40 -X POST -o "$API_BODY" -w '%{http_code}' \
+        "${_args[@]}" "$_url")
+    parse_api_body
+}
+
+# One dotted path into `$API_BODY`, in one of three readings:
+#   value  the scalar at that path, rendered the way Python renders it
+#   len    the length of a list or dict there
+#   keys   a dict's keys, comma-joined **in document order**
+#
+# `keys` is why this reader exists. The answer's field order is the document the
+# page reads (`Answer::with` chains in Python's write order), and a dict built by
+# `serde_json::Map` keeps insertion order only under `preserve_order` — so key
+# order is a property worth asserting, and CPython ≥3.7 dicts give it to us for
+# free on the way in. Lists are indexed by digits; a path that does not resolve
+# exits 1 **silently**, which is what makes `json_has` a one-liner.
+#
+# `"."` is the document itself. The relay serves its own row on its own port
+# (`/relay/<id>/status`) with no wrapper around it, so section 17 has to read
+# that row's keys — and no key name means "everything above me", which the loop
+# below would otherwise answer by not finding `''` in the top-level object.
+json_read() {
+    python3 - "$API_BODY" "$1" "$2" <<'PY'
+import json, sys
+how, dotted = sys.argv[2], sys.argv[3]
+try:
+    with open(sys.argv[1], "rb") as fh:
+        node = json.loads(fh.read().decode("utf-8", "replace"))
+except Exception:
+    raise SystemExit(1)
+parts = [] if dotted == "." else dotted.split(".")
+for part in parts:
+    if isinstance(node, list):
+        if not part.isdigit() or int(part) >= len(node):
+            raise SystemExit(1)
+        node = node[int(part)]
+    elif isinstance(node, dict):
+        if part not in node:
+            raise SystemExit(1)
+        node = node[part]
+    else:
+        raise SystemExit(1)
+if how == "len":
+    print(len(node))
+elif how == "keys":
+    if not isinstance(node, dict):
+        raise SystemExit(1)
+    print(",".join(node.keys()))
+elif isinstance(node, bool):
+    print("true" if node else "false")
+elif node is None:
+    print("null")
+elif isinstance(node, (list, dict)):
+    print(json.dumps(node, ensure_ascii=False))
+else:
+    print(node)
+PY
+}
+json_ask()  { json_read value "$1"; }
+json_len()  { json_read len "$1"; }
+json_keys() { json_read keys "$1"; }
+json_has()  { json_read value "$1" >/dev/null 2>&1; }
 
 # One SOAP call, the envelope built from the action name alone: the read actions
 # differ by nothing else, and four hand-copied envelopes is four chances for a
@@ -479,19 +569,50 @@ grep -q "NOTIFY /notif HTTP/1.1" /tmp/verify_rust_receiver_notify.txt \
 # handler does not, so this small one is written rather than borrowed.
 MEDPORT=$((PORT + 2))
 MEDIA_URL="http://127.0.0.1:$MEDPORT/clip.mp4"
+# The **page** this fixture also serves, for the resolve layer (sections 14-17).
+# It is one HTML document whose only media reference is the clip address above,
+# so `scrape_page` has exactly one candidate to hand back, with the label
+# `video:src` and the engine `page` (`media_resolve`'s HTML reader, ported at
+# `resolve.rs:3087`). `PAGE_TITLE` is the witness for "the name came from the
+# page, not from the last path segment" — AGENTS.md §4.2's naming seam, which is
+# what makes `title` and `force-media-title` assertible rather than a guess.
+PAGE_URL="http://127.0.0.1:$MEDPORT/page"
+PAGE_TITLE="Rust Relay Witness"
+MEDIA_LOG=/tmp/verify_rust_receiver_media.log
 CLIP_BYTES=""
 [ -s "$CLIP" ] && CLIP_BYTES=$(wc -c < "$CLIP" | tr -d ' ')
 if [ -n "$CLIP_BYTES" ]; then
-    python3 - "$CLIP" "$MEDPORT" <<'PY' > /tmp/verify_rust_receiver_media.log 2>&1 &
+    python3 - "$CLIP" "$MEDPORT" "$MEDIA_URL" "$PAGE_TITLE" <<'PY' > "$MEDIA_LOG" 2>&1 &
 import os, sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 path, port = sys.argv[1], int(sys.argv[2])
+video_url, page_title = sys.argv[3], sys.argv[4]
 size = os.path.getsize(path)
+# The `<title>` element is **closed** on purpose: `scrape_page` feeds the parser
+# and never calls `close()` (`resolve.rs:3072-3081` documents this), so an
+# unterminated title would never flush and `Candidate.title` would stay empty —
+# the fixture would then be lying about what the scraper can read.
+PAGE = ('<!doctype html><html><head><title>%s</title></head>'
+        '<body><video src="%s"></video></body></html>' % (page_title, video_url)).encode("utf-8")
 class Range(BaseHTTPRequestHandler):
     # HTTP/1.1 because the whole point is accurate framing: a keep-alive
     # connection that lies about Content-Length hangs the client's seek.
     protocol_version = "HTTP/1.1"
     def log_message(self, fmt, *args): pass
+    def _note(self):
+        # One line per request, path plus the Range we were **asked** for. The
+        # relay's Range translation (§4.14: a mutation that deleted it was 0-red
+        # until the origin started logging what it received) is only witnessed by
+        # a count taken across a relay read, so it has to be here and flushed —
+        # block-buffered stdout would put the line after the assertion reads it.
+        sys.stdout.write("REQ %s %s\n" % (self.path, self.headers.get("Range") or "-"))
+        sys.stdout.flush()
+    def _page(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(PAGE)))
+        self.end_headers()
+        self.wfile.write(PAGE)
     def _span(self):
         """(status, start, end): 200 whole, 206 part, 416 none."""
         header = self.headers.get("Range")
@@ -528,8 +649,15 @@ class Range(BaseHTTPRequestHandler):
                 chunk = fh.read(min(65536, left))
                 if not chunk: break
                 self.wfile.write(chunk); left -= len(chunk)
-    def do_GET(self): self._respond(True)
-    def do_HEAD(self): self._respond(False)
+    def do_GET(self):
+        self._note()
+        if self.path.startswith("/page"):
+            self._page()
+        else:
+            self._respond(True)
+    def do_HEAD(self):
+        self._note()
+        self._respond(False)
 ThreadingHTTPServer(("127.0.0.1", port), Range).serve_forever()
 PY
     MEDIA_PID=$!
@@ -731,9 +859,15 @@ if [ -z "$CLIP_BYTES" ]; then
     skip "no clip, so there is no playable address to cast"
 else
     TITLE_ARG="Rust-Verify-Title"
-    api_probe "$BASE/api?query=cast&url=$MEDIA_URL&cast-title=$TITLE_ARG&token=$EXTRACTED"
+    # This face spells the name `title`, not `cast-title`: the POST `cast-uri`
+    # route owns that key (`protocol.py:2705`), while the GET entry reads
+    # `kwargs.get('title','')` (`protocol.py:2086`). The port copies that split,
+    # so a harness that passes `cast-title` here gets a silent "no opinion" and
+    # a green-looking run that never asked the question. The success line is the
+    # reference's literal `'success'` (`_cast_url`, protocol.py:1696).
+    api_probe "$BASE/api?query=cast&url=$MEDIA_URL&title=$TITLE_ARG&token=$EXTRACTED"
     [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] \
-        && case "$API_MSG" in *"已投屏"*) true ;; *) false ;; esac \
+        && [ "$API_MSG" = "success" ] \
         && pass "the entry reports the cast" \
         || fail "the cast answered HTTP $API_STATUS code '$API_CODE': $API_MSG"
     ok=""
@@ -754,8 +888,326 @@ else
         sleep 0.25
     done
     [ -n "$ok" ] \
-        && pass "the window name follows the cast-title, not the last path segment" \
+        && pass "the window name follows the title, not the last path segment" \
         || fail "mpv force-media-title reads '$(mpv_ask force-media-title)', not $TITLE_ARG"
+fi
+
+# Section 14-17 share three facts, and each one is set inside the section that
+# earns it: `JOB` from resolve-page, then the relay's own address from
+# cast-resolved. They are pre-declared empty because `set -u` would otherwise
+# make a skipped section 14 (no clip) a crash in section 17 rather than a skip,
+# and a harness that dies mid-run hides every later check (AGENTS.md §4.14:
+# a `None` detail once cost Part 59 its last eight cases).
+JOB=""
+RELAY_URL=""
+RELAY_HOST=""
+RELAY_PORT=""
+RELAY_ID=""
+
+echo "== 14: resolve-page registers a job and answers with its id =="
+if [ -z "$CLIP_BYTES" ]; then
+    skip "no fixture page, so there is nothing to parse"
+else
+    # The document, not just the verdict: `Answer::with` chains in the
+    # reference's write order (`protocol.py:2855-2872`), and the page reads this
+    # row field by field — so a reordered answer is a page bug, not cosmetics.
+    api_post "$BASE/api" "resolve-page=$PAGE_URL"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] \
+        && pass "a posted page address is accepted" \
+        || fail "resolve-page answered HTTP $API_STATUS code '$API_CODE': $API_MSG"
+    [ "$(json_keys .)" = "code,message,job,url,note" ] \
+        && pass "the answer carries the reference's five keys, in order" \
+        || fail "resolve-page keys: $(json_keys .)"
+    JOB=$(json_ask job)
+    # `token_urlsafe(9)`: nine bytes are twelve url-safe characters. The length
+    # is asked because an empty id is a *reachable* failure shape here — the
+    # generator returns `''` when the system RNG fails, and every later poll
+    # would then answer 「没有这个解析任务」 for a job that is running.
+    [ -n "$JOB" ] && [ "${#JOB}" -eq 12 ] \
+        && pass "the job id is the twelve characters a nine-byte token encodes to" \
+        || fail "job id '$JOB' is not twelve characters"
+    [ "$(json_ask url)" = "$PAGE_URL" ] \
+        && pass "the answer names the address that was posted" \
+        || fail "resolve-page echoed '$(json_ask url)', not $PAGE_URL"
+    [ "$(json_ask note)" = "" ] \
+        && pass "a bare address earns no share-text note" \
+        || fail "note on a bare address: $(json_ask note)"
+    # No token was sent, and loopback **is** this route's admission (§4.7). The
+    # assertible fact is the **absence** of a refusal sentence — the same
+    # reading sections 9-12 use from the other side of the gate. A route that
+    # accidentally joined the token-gated list would say so right here.
+    case "$API_MSG" in
+        *"$MANAGEMENT_MARK"*|*"$TOKEN_MARK"*)
+            fail "a loopback resolve-page heard a gate sentence: $API_MSG" ;;
+        *) pass "resolve-page is served to loopback without a token" ;;
+    esac
+
+    # The three refusals the route can make before it ever spends a slot. Each
+    # is one sentence the user reads instead of a parse that cannot work, so
+    # the wording is the contract (`_post_resolve_page`, protocol.py:2820-2850).
+    api_post "$BASE/api" "resolve-page="
+    [ "$API_CODE" = "1" ] && [ "$API_MSG" = "请先填写网页地址" ] \
+        && pass "an empty field is refused by name" \
+        || fail "empty resolve-page answered code '$API_CODE': $API_MSG"
+    api_post "$BASE/api" "resolve-page=example.com/watch/7"
+    [ "$API_CODE" = "1" ] && [ "$API_MSG" = "地址要以 http:// 或 https:// 开头" ] \
+        && pass "a bare host is refused rather than handed to the engine as a search" \
+        || fail "bare host answered code '$API_CODE': $API_MSG"
+    api_post "$BASE/api" "resolve-page=看看这个视频很不错 值得一看哦"
+    [ "$API_CODE" = "1" ] && case "$API_MSG" in *"这段文字里没有找到网址"*) true ;; *) false ;; esac \
+        && pass "multi-word text with no address inside is refused by the other sentence" \
+        || fail "schemeless share text answered code '$API_CODE': $API_MSG"
+
+    # `resolve-status` is a **GET** in the management set (http.rs:430, next to
+    # `cast-info`). An id nobody registered answers the row-shape refusal, from
+    # loopback, with no token — and it must not consume a `RESOLVE_JOBS_MAX`
+    # slot: the reference only looks the id up (`_resolve_job`), the slot is
+    # spent at `resolve-page`. Section 15 proves that half by asking again.
+    api_probe "$BASE/api?query=resolve-status&job=nobody-registered-this"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "1" ] \
+        && [ "$API_MSG" = "没有这个解析任务（超时或已重启）" ] \
+        && pass "an unknown job id gets the row-shape refusal, not a 403" \
+        || fail "unknown job answered HTTP $API_STATUS code '$API_CODE': $API_MSG"
+    [ "$(json_ask job)" = "" ] && [ "$(json_ask status)" = "null" ] \
+        && pass "and the two empty shapes the page reads: job '' and status null" \
+        || fail "unknown job row is job='$(json_ask job)' status='$(json_ask status)'"
+    case "$API_MSG" in
+        *"$MANAGEMENT_MARK"*|*"$TOKEN_MARK"*)
+            fail "a loopback resolve-status heard a gate sentence: $API_MSG" ;;
+        *) pass "resolve-status is served to loopback without a token" ;;
+    esac
+fi
+
+echo "== 15: the job finishes and the page's own address is the candidate =="
+if [ -z "$CLIP_BYTES" ] || [ -z "$JOB" ]; then
+    skip "no job to poll"
+else
+    # The budget is wide on purpose. This machine's `yt-dlp` and `ffprobe` are
+    # not controlled here (§4.2: "空结果要说清是哪一种空" is exactly the case of
+    # a suite that made an installed package a measured fact), and the engine
+    # step's own ceiling is `YTDLP_TIMEOUT` = 120 s. A poll that gives up at 30
+    # seconds would read as "the resolver hangs" when the truth is a slow engine.
+    DONE=""
+    for _ in $(seq 1 600); do
+        api_probe "$BASE/api?query=resolve-status&job=$JOB"
+        [ "$(json_ask status.done)" = "true" ] && { DONE=1; break; }
+        sleep 0.25
+    done
+    [ -n "$DONE" ] \
+        && pass "the job reports itself done" \
+        || fail "the job never finished; last step label: '$(json_ask status.step_label)'"
+    # The seventeen keys, in the order `status()` writes them (resolve.rs:3670).
+    # `candidates` last is the shape the page's progress bar depends on: it reads
+    # the counters before it ever touches the list.
+    [ "$(json_keys status)" = \
+        "url,note,done,step,step_label,seconds,step_seconds,scraped,from_ytdlp,measured,rejected,hidden_silent,engine_note,cookie_problem,needs_cookies,error,candidates" ] \
+        && pass "the status row carries the reference's seventeen keys, in order" \
+        || fail "status keys: $(json_keys status)"
+    [ "$(json_ask job)" = "$JOB" ] \
+        && pass "a found row names the id that was asked for" \
+        || fail "status row answered for job '$(json_ask job)'"
+    # Only the facts the fixture owns are asked here. `measured` / `rejected`
+    # depend on whether this machine has `ffprobe`, and `engine_note` on whether
+    # it has `yt-dlp` — a check that changes colour with installed packages is a
+    # check that answers nothing (AGENTS.md §4.2).
+    [ "$(json_len status.candidates)" -ge 1 ] \
+        && pass "the page gave at least one candidate" \
+        || fail "no candidates: engine note is '$(json_ask status.engine_note)'"
+    [ "$(json_ask status.candidates.0.url)" = "$MEDIA_URL" ] \
+        && pass "the candidate is the address the HTML stated outright" \
+        || fail "candidate url: $(json_ask status.candidates.0.url)"
+    # Which engine owns the row is **not** a fixture fact. If this machine has
+    # `yt-dlp`, the engine answers with the very address the HTML states, and
+    # `dedupe()` (`macast/media_resolve.py:1013-1028`) lets the ytdlp row win —
+    # while the page still contributes its own `<title>` wording, which the next
+    # check asks for. So the machine-questionable facts here are the rule, not a
+    # value: the address occupies exactly one row, and its provenance names one of
+    # the two engines we actually run.
+    #
+    # This line used to pin `origin='page'` and `label='video:src'`. It was wrong
+    # twice over: it asserted the loser of the dedupe, and it was a check that
+    # changes colour with installed packages (AGENTS.md §4.2) — the very reason
+    # `measured` / `engine_note` are not asked above.
+    SAME=0
+    for _i in $(seq 0 "$(($(json_len status.candidates) - 1))"); do
+        [ "$(json_ask "status.candidates.$_i.url")" = "$MEDIA_URL" ] \
+            && SAME=$((SAME + 1))
+    done
+    [ "$SAME" = "1" ] \
+        && pass "one row for that address, however many engines found it" \
+        || fail "the address occupies $SAME rows, not one"
+    ORIGIN="$(json_ask status.candidates.0.origin)"
+    if [ "$ORIGIN" = "page" ] || [ "$ORIGIN" = "ytdlp" ]; then
+        pass "and the row names the engine that read it ('$ORIGIN')"
+    else
+        fail "candidate provenance: unknown engine '$ORIGIN'"
+    fi
+    # The title survived the parse. `<title>` is **closed** in the fixture for
+    # this reason (resolve.rs:3072: it feeds and never closes, and `close()` is
+    # what flushes buffered character data) — so this row is the machine's
+    # witness that the scraper keeps what the parser never flushed.
+    [ "$(json_ask status.candidates.0.title)" = "$PAGE_TITLE" ] \
+        && pass "the page's title came back with its address" \
+        || fail "candidate title: '$(json_ask status.candidates.0.title)'"
+    # A direct, unsegmented address is served by reverse-proxying the origin
+    # (`plan()`, resolve.rs:1882: merge > segmented > proxy). This is the value
+    # the next section's `relay.reason` sentence is derived from, so it belongs
+    # on the row rather than in the wording.
+    [ "$(json_ask status.candidates.0.mode)" = "proxy" ] \
+        && pass "and the plan for it is a reverse proxy, not a remux" \
+        || fail "candidate mode: '$(json_ask status.candidates.0.mode)'"
+fi
+
+echo "== 16: casting a candidate goes through our relay; the device arm refuses =="
+if [ -z "$CLIP_BYTES" ] || [ -z "$JOB" ]; then
+    skip "no job, so nothing to cast"
+else
+    api_post "$BASE/api" "cast-resolved=1" "job=$JOB" "candidate=0"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] && [ "$API_MSG" = "success" ] \
+        && pass "the cast is served" \
+        || fail "cast-resolved answered HTTP $API_STATUS code '$API_CODE': $API_MSG"
+    # `code,message,url,title` come from the same `_cast_url` method the GET
+    # entry uses (host.rs:1359-1366), and `relay,note` are appended after it
+    # with `message` rewritten **in place** — so this order is the reference's
+    # assignment order, not something the port chose.
+    [ "$(json_keys .)" = "code,message,url,title,relay,note" ] \
+        && pass "the answer is the local cast's document plus the relay row" \
+        || fail "cast-resolved keys: $(json_keys .)"
+    RELAY_URL=$(json_ask url)
+    # Decomposed, never rebuilt. The host may be this machine's LAN address and
+    # the port is the **relay's own** bound port (host.rs:1094: `port` is what
+    # the accept loop took, not the application port) — either half assumed
+    # here would be a second owner of a fact the answer already states.
+    _after=${RELAY_URL#http://}
+    RELAY_HOST=${_after%%:*}
+    RELAY_ID=$(printf '%s' "$_after" | cut -d/ -f3)
+    RELAY_PORT=$(printf '%s' "${_after#*:}" | cut -d/ -f1)
+    [ "$RELAY_URL" != "$MEDIA_URL" ] \
+        && pass "the player is handed our relay, never the origin address" \
+        || fail "the origin address reached the player: $RELAY_URL"
+    case "$RELAY_URL" in
+        *"/relay/"*"/media") pass "and it is a relay path with an id in it" ;;
+        *) fail "not a relay address: $RELAY_URL" ;;
+    esac
+    [ "$(json_ask title)" = "$PAGE_TITLE" ] \
+        && pass "the cast's name is the page's title" \
+        || fail "cast title: '$(json_ask title)'"
+    ok=""
+    for _ in $(seq 1 40); do
+        [ "$(track_uri)" = "$RELAY_URL" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "the player was handed exactly that relay address" \
+        || fail "TrackURI never became $RELAY_URL (reads '$(track_uri)')"
+    # The A/B against section 13 is the point: that cast wrote
+    # `Rust-Verify-Title`, this one writes the **page's** title with no
+    # `cast-title` argument at all. `filename` would answer `media` for the
+    # wrong reason (AGENTS.md §4.2 — the relay path's last segment is exactly
+    # the word that made mpv's window say `media - mpv`).
+    ok=""
+    for _ in $(seq 1 40); do
+        [ "$(mpv_ask force-media-title)" = "$PAGE_TITLE" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "and the window name follows the page, overwriting the earlier cast" \
+        || fail "mpv force-media-title reads '$(mpv_ask force-media-title)', not $PAGE_TITLE"
+
+    # The device arm. `target_push` does not exist in this crate yet (task #26),
+    # so the honest answer is a refusal that says which face is missing — and
+    # the player must still be on the **local** cast's address afterwards.
+    # Run second on purpose: "unchanged" only means something once there is a
+    # change to be unaffected by (the red line is that neither arm may touch our
+    # own playstate from the other one).
+    api_post "$BASE/api" "cast-resolved=1" "job=$JOB" "candidate=0" "target=tv"
+    [ "$API_CODE" = "1" ] \
+        && case "$API_MSG" in *"这台设备还投不了"*) true ;; *) false ;; esac \
+        && pass "the device arm refuses and names the missing face" \
+        || fail "device arm answered code '$API_CODE': $API_MSG"
+    [ "$(track_uri)" = "$RELAY_URL" ] \
+        && pass "and the refused device push left our own player alone" \
+        || fail "a refused device push moved our player to '$(track_uri)'"
+    [ "$(mpv_ask force-media-title)" = "$PAGE_TITLE" ] \
+        && pass "and it left the name alone too" \
+        || fail "a refused device push renamed the window to '$(mpv_ask force-media-title)'"
+fi
+
+echo "== 17: the relay serves the media off its own port, translated =="
+if [ -z "$CLIP_BYTES" ] || [ -z "$RELAY_URL" ]; then
+    skip "no relay, so there is nothing to read off it"
+else
+    RELAY_BASE="http://$RELAY_HOST:$RELAY_PORT/relay/$RELAY_ID"
+    RW=/tmp/verify_rust_receiver_relay_whole
+    RP=/tmp/verify_rust_receiver_relay_part
+    code=$(curl -s --noproxy '*' -m 20 -D "$RW.h" -o "$RW.bin" -w '%{http_code}' "$RELAY_BASE/media")
+    got=$(wc -c < "$RW.bin" | tr -d ' ')
+    [ "$code" = "200" ] && [ "$got" = "$CLIP_BYTES" ] \
+        && pass "a whole read through the relay answers 200 with every byte" \
+        || fail "relay whole read answered $code with $got of $CLIP_BYTES bytes"
+    # §4.8's red line, asked of the relay rather than of the origin: a read that
+    # carried **no** `Range` must not dress itself up as partial. The port's own
+    # version of that rule lives in `serve_plan` (relay.rs:249-308).
+    grep -qi "^content-length: $CLIP_BYTES" "$RW.h" \
+        && grep -qi "^accept-ranges: bytes" "$RW.h" \
+        && ! grep -qi "^content-range:" "$RW.h" \
+        && pass "the 200 carries the length and no Content-Range" \
+        || fail "the relay's 200 headers are wrong (length / Accept-Ranges / a stray Content-Range)"
+    code=$(curl -s --noproxy '*' -m 20 -D "$RP.h" -o "$RP.bin" -w '%{http_code}' \
+        -H 'Range: bytes=100-199' "$RELAY_BASE/media")
+    got=$(wc -c < "$RP.bin" | tr -d ' ')
+    [ "$code" = "206" ] && [ "$got" = "100" ] \
+        && pass "a viewer's Range answers 206 with exactly the hundred bytes asked" \
+        || fail "relay ranged read answered $code with $got bytes"
+    grep -qi "^content-range: bytes 100-199/$CLIP_BYTES" "$RP.h" \
+        && pass "and names the slice it served against the real total" \
+        || fail "the relay's 206 does not carry Content-Range bytes 100-199/$CLIP_BYTES"
+    # The translation itself: what the **origin** was asked for. This line is
+    # why `_note()` exists in the fixture (§4.14: deleting the translation was
+    # 0-red until the origin started logging what it received). Note what is
+    # **not** expected — a whole GET through the relay still asks the origin
+    # `bytes=0-<total-1>`, because `pipe_upstream` (relay.rs:1080) ranges the
+    # request whenever it has a known end. Only the second line is the seam.
+    ok=""
+    for _ in $(seq 1 40); do
+        grep -q "REQ /clip.mp4 bytes=100-199" "$MEDIA_LOG" 2>/dev/null && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "and the viewer's Range was translated to the origin, not dropped" \
+        || fail "the origin never saw 'bytes=100-199' (log: $(tail -3 "$MEDIA_LOG" 2>/dev/null | tr '\n' ' '))"
+
+    # The relay's own status face, on its own port, with no wrapper around the
+    # row (`relay_from_path`, relay.rs:995-1023 — GET on `/status` reads the
+    # store with `peek`, so it costs nobody a TTL touch).
+    api_probe "$RELAY_BASE/status"
+    [ "$API_STATUS" = "200" ] \
+        && pass "the relay answers /status on its own port" \
+        || fail "/status answered HTTP $API_STATUS"
+    [ "$(json_keys .)" = "id,title,mode,state,seekable,ranges,length,written,error,seconds,idle" ] \
+        && pass "and serves the eleven-key row, in order" \
+        || fail "/status keys: $(json_keys .)"
+    [ "$(json_ask id)" = "$RELAY_ID" ] && [ "$(json_ask title)" = "$PAGE_TITLE" ] \
+        && pass "the row is this relay's: its id and the page's title" \
+        || fail "/status row is id='$(json_ask id)' title='$(json_ask title)'"
+    # `length` came from the origin's own answer, not from ffprobe: the proxy
+    # probe is a HEAD/first-read against the source (`probe_proxy`, run
+    # synchronously inside `cast-resolved`). This is the fact behind
+    # `seekable`, and therefore behind the viewer being able to drag.
+    [ "$(json_ask length)" = "$CLIP_BYTES" ] && [ "$(json_ask seekable)" = "true" ] \
+        && pass "the relay knows the real length, so the viewer may seek" \
+        || fail "/status length='$(json_ask length)' seekable='$(json_ask seekable)', want $CLIP_BYTES/true"
+    [ "$(json_ask mode)" = "proxy" ] && [ "$(json_ask error)" = "" ] \
+        && pass "and says it is proxying with nothing to complain about" \
+        || fail "/status mode='$(json_ask mode)' error='$(json_ask error)'"
+
+    # An id nobody registered gets the 404, on the relay port — the half of the
+    # gate that is **not** about tokens: a random path is what this surface has.
+    code=$(curl -s --noproxy '*' -m 8 -o /dev/null -w '%{http_code}' \
+        "$RELAY_BASE-nope/media")
+    [ "$code" = "404" ] \
+        && pass "an unknown relay id is a 404, not a 200 with no bytes" \
+        || fail "an unknown relay id answered $code"
 fi
 
 echo

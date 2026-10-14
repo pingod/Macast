@@ -23,6 +23,19 @@
 //! `SetAVTransportURI` would without waiting for a phone to find us. What is
 //! still **not** here is Chromecast and AirPlay — those are different protocols,
 //! not the same one wearing a different hat.
+//!
+//! The web-address entry adds two things this file **owns** rather than
+//! implements: the `SETTING_DIR/relay` directory with its store and accept
+//! listener (`macast-cast/src/relay.rs`), and the resolve-job table
+//! ([`host::ResolveJobs`]). They are built here because `Management` is the only
+//! shape between the crates — `macast-cast` depends on `macast-upnp`, never the
+//! reverse, so the store a viewer's `/relay/<id>/media` reads and the table a
+//! `resolve-page` poll writes can only be held by the one crate that sees both
+//! sides. The reference puts them in the same place for the same reason
+//! (`macast/protocol.py:27` imports `media_relay`, not the other way round), and
+//! it tears the relay down with the service, **first** and before the status
+//! relabel (`macast/macast.py:1432-1439`) — because a remux of a live playlist is
+//! an ffmpeg that never finishes writing to the user's disk.
 
 mod host;
 
@@ -37,6 +50,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
+use macast_cast::relay;
 use macast_core::env;
 use macast_core::logging::{self, Logger};
 use macast_core::net;
@@ -79,6 +93,14 @@ const EXTRA_BIN_DIRS: [&str; 4] = [
 /// because both `start` methods take `&Arc<Self>` — the reference's services can
 /// be started and stopped from inside their own worker threads, and an `Arc`
 /// cloned into the thread is how that stays legal in Rust.
+///
+/// `relay` is the fourth handle and it is not a service in the same sense: the
+/// accept listener is already reachable by the time `Runtime` is built, and the
+/// handle here exists for the one thing that has to happen on the way out. It is
+/// the **store**, not the server, because `RelayServer` owns no stop handle
+/// (`macast-cast/src/relay.rs` starts its accept loop and sweeper as detached
+/// threads) while every `Relay::shutdown` the teardown needs lives behind
+/// `RelayStore::clear`.
 struct Runtime {
     player: Player,
     host: TauriHost,
@@ -88,6 +110,7 @@ struct Runtime {
     http: Arc<HttpServer>,
     ssdp: Arc<SsdpPlugin>,
     eventing: Arc<Eventing>,
+    relay: Arc<relay::RelayStore>,
 }
 
 impl Runtime {
@@ -103,13 +126,35 @@ impl Runtime {
     /// re-announcing a device that is not there for the length of its cache
     /// timeout, which is how a stopped Macast used to stay clickable on the TV
     /// for half a minute.
+    ///
+    /// The relay goes **first**, ahead of even the `byebye`, and that is the
+    /// reference's own order (`macast/macast.py:1432-1439` puts
+    /// `media_relay.stop_server()` at the top of `service_stop`, before the status
+    /// relabel, with the sentence 「a remux of a live HLS playlist is an ffmpeg
+    /// that never finishes and a temp file that never stops growing」 under it).
+    /// `RelayStore::clear` is the half of `stop_server` that carries that weight:
+    /// it calls `Relay::shutdown` for every row, which kills the ffmpeg child and
+    /// deletes its temp file.
+    ///
+    /// **The rest of `stop_server` has no Rust counterpart, and this is the place
+    /// that says so.** Python then does `_server.shutdown(); _server.server_close()`
+    /// and `store.stop_sweeper()` (`macast/media_relay.py:1120`); `RelayServer` here
+    /// exposes no stop handle and `RelayStore` no `stop_sweeper`, so the accept loop
+    /// and the sweep loop stay detached for the life of the process. That is safe
+    /// for the reason Python's comment is not: both loops only ever touch the store
+    /// this call has just emptied, and the process is exiting on the other side of
+    /// the one caller below. What would **not** be safe is a service restart —
+    /// `stop_services` would leave a listener on a port the next `RelayServer::start`
+    /// would not know about — and this shell has exactly one call site, the window
+    /// closing, so no path here restarts it.
     fn stop_services(&self) {
+        self.relay.clear();
         self.ssdp.stop();
         self.http.stop();
         self.eventing.stop();
         self.host.log.info(
-            "receiver stopped (SSDP byebye, HTTP face closed, GENA thread released); \
-             the player is untouched",
+            "receiver stopped (relay emptied, SSDP byebye, HTTP face closed, GENA thread \
+             released); the player is untouched",
         );
     }
 }
@@ -852,16 +897,67 @@ pub fn run() {
             // `DESCRIBE`s), so an `Err` here means "we would answer discovery with
             // garbage" and the face must not start. That is a build-time fact about
             // our own bundled XML, not a runtime condition.
+            //
+            // First, the two layers task #25 gives this file rather than a crate:
+            // the relay store with its listener, and the resolve-job table. Both
+            // are owned here because `Management` is the only shape that reaches
+            // them — `macast-cast` depends on `macast-upnp`, never the reverse, so
+            // the store a viewer's `/relay/<id>/media` reads cannot be named from
+            // the crate that serves it.
+            //
+            // `setting_path("relay", true)` creates the **config directory** and
+            // joins the name; the `relay/` subdirectory is not created by it, and
+            // nothing in `relay.rs` creates it either (measured: no `create_dir` in
+            // that file at all — `spawn_remux` writes straight into `temp_dir`).
+            // Hence the explicit second call, which is AGENTS.md §4.2
+            // 「写文件的代码要自己把目录建出来」 applied before it can hurt: the
+            // Python side creates it in `relay_dir()` (`macast/media_relay.py:741`),
+            // and on a first run here the symptom of skipping it would be every
+            // transcode-refused candidate arriving as a spawn error.
+            let relay_temp = paths::setting_path("relay", true)?;
+            fs::create_dir_all(&relay_temp)?;
+            // The two numbers are the reference's module constants, and they come
+            // from `relay.rs` rather than being re-typed here: `RELAY_MAX` is the
+            // eight concurrent relays, `RELAY_IDLE_TTL` the thirty idle minutes.
+            let relay_store =
+                Arc::new(relay::RelayStore::new(relay::RELAY_MAX, relay::RELAY_IDLE_TTL));
+            // **Eagerly**, where the reference is lazy (`ensure_server` is called
+            // from `media_url`): the bind is `0.0.0.0:0`, so an ephemeral port
+            // cannot be "already taken" and a refusal here means this process
+            // cannot make listening sockets at all — in which case `HttpServer` and
+            // SSDP fail too, and refusing the window costs nothing a real cast would
+            // have answered differently. Python goes lazy because its server is
+            // restartable with the service; `stop_services` has exactly one call
+            // site in this shell (the window closing), so that difference is
+            // unobservable here. `start` also runs `sweep_orphans` **before** the
+            // accept loop takes a connection, which is `ensure_server`'s order.
+            let relay_server =
+                relay::RelayServer::start(relay_store.clone(), relay_temp.clone())?;
+            // The port the listener **actually** bound, and it is not the
+            // application port: `cast_resolved` builds `/relay/<id>/media` with
+            // this number, because the relay does not live on the HTTP face.
+            let relay_port = relay_server.port;
+            // The table `resolve_page` writes and `resolve-status` polls. Empty at
+            // startup — the reference has no persistence either, which is why a
+            // poll after a restart answers 「没有这个解析任务（超时或已重启）」.
+            let resolve_jobs: host::ResolveJobs = Arc::new(Mutex::new(Vec::new()));
             let face = Face::new(
                 Arc::new(soap) as Arc<dyn Control>,
                 eventing.clone() as Arc<dyn Subscription>,
                 // The GET web-cast entry's hand on the player: another face on the
                 // same host + player pair, for the same reason `ShellRenderer` is —
                 // `cast_uri` has one implementation and two callers (the page's
-                // command and a `curl` on `/api?query=cast`).
+                // command and a `curl` on `/api?query=cast`). Since #25 it is also
+                // the hand on the relay and the job table, because `resolve_page`
+                // and `cast_resolved` are the same trait's other methods and the
+                // page polls them through this one object.
                 Arc::new(host::ShellManagement {
                     host: host.clone(),
                     player: player.clone(),
+                    store: relay_store.clone(),
+                    temp_dir: relay_temp,
+                    port: relay_port,
+                    jobs: Arc::clone(&resolve_jobs),
                 }) as Arc<dyn macast_upnp::http::Management>,
                 setting.clone(),
             )?;
@@ -879,6 +975,11 @@ pub fn run() {
             // the receiver; managed last, it finds nothing and the flag becomes the
             // only record of a request the user can see as "the phone found it and it
             // never answered".
+            // The port is read off `relay_server` above and the value is then
+            // dropped: `RelayServer` is a handle to nothing but its own fields, and
+            // `std::thread::spawn` detaches the accept loop, so the listener outlives
+            // it by design rather than by leak. The `Arc` the loop holds is
+            // `relay_store` below.
             app.manage(Runtime {
                 player: player.clone(),
                 host,
@@ -888,6 +989,7 @@ pub fn run() {
                 http: http.clone(),
                 ssdp: ssdp.clone(),
                 eventing: eventing.clone(),
+                relay: relay_store,
             });
 
             player.start();

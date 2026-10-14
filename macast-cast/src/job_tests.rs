@@ -8,7 +8,7 @@
 use super::*;
 use serde_json::{Map, Value};
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 fn strv(s: &str) -> Value { Value::String(s.to_owned()) }
 fn obj(pairs: &[(&str, Value)]) -> Value {
@@ -140,13 +140,15 @@ impl ResolveOps for FixtureOps {
 fn scenario(spec: Value) -> Value {
     let ops = FixtureOps { spec, trace: RefCell::new(Vec::new()), calls: Cell::new(0) };
     let s = &ops.spec;
-    let fired = Rc::new(RefCell::new(Vec::<Value>::new()));
+    let fired = Arc::new(Mutex::new(Vec::<Value>::new()));
     let recorder = fired.clone();
-    let callback: Option<Box<dyn Fn(&ResolveJob)>> = match s["on_finish"].as_str() {
-        Some("record") => Some(Box::new(move |j| recorder.borrow_mut().push(Value::Array(vec![strv(&j.step), Value::Bool(j.done), Value::from(j.candidates.len())])))),
+    // The finish callback travels with the job onto the thread that runs it, so
+    // the box is `Send` here exactly as it is in production.
+    let callback: Option<Box<dyn Fn(&ResolveJob) + Send>> = match s["on_finish"].as_str() {
+        Some("record") => Some(Box::new(move |j| recorder.lock().unwrap().push(Value::Array(vec![strv(&j.step), Value::Bool(j.done), Value::from(j.candidates.len())])))),
         // Rust callbacks cannot raise Python exceptions. Witness the same call
         // and final state as the Python callback that recorded then raised.
-        Some("boom") => Some(Box::new(move |j| recorder.borrow_mut().push(strv(&j.step)))),
+        Some("boom") => Some(Box::new(move |j| recorder.lock().unwrap().push(strv(&j.step)))),
         None => None,
         Some(other) => panic!("unknown callback {other}"),
     };
@@ -164,7 +166,7 @@ fn scenario(spec: Value) -> Value {
         Ok(status) => (text(&status), String::new()),
         Err(e) => (String::new(), format!("ValueError: {e}")),
     };
-    let fired = text(&Value::Array(fired.borrow().clone()));
+    let fired = text(&Value::Array(fired.lock().unwrap().clone()));
     obj(&[("name", s["name"].clone()), ("trace", strv(&text(&Value::Array(ops.trace.into_inner())))),
         ("fired", strv(&fired)),
         ("status", strv(&status)), ("raises", strv(&raises))])

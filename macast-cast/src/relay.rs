@@ -47,11 +47,12 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::resolve::{find_command, header_field, plan, Candidate};
+use crate::resolve::{find_command, header_field, plan, py_round1, Candidate};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -74,14 +75,34 @@ pub const GROW_POLL: Duration = Duration::from_millis(100);
 /// A relay lives until nobody reads it for this long (30 min).
 pub const RELAY_IDLE_TTL: f64 = 30.0 * 60.0;
 
+/// How often the idle-relay sweeper wakes — `media_relay.py`'s
+/// `start_sweeper(interval=60)`.
+pub const RELAY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Maximum simultaneous relays; oldest-LRU eviction.
 pub const RELAY_MAX: usize = 8;
 
 /// Bytes=0-0 probe of the origin's Range support.
 const RANGE_PROBE: &str = "bytes=0-0";
 
-/// Status codes that signal a definitive refusal from the origin.
-const REFUSED_CODES: &[u16] = &[401, 403, 404, 410];
+/// The status codes that mean "the origin said no" outright: 401, 403, 404, 410.
+///
+/// This is the **second copy** of that set — the first is
+/// [`crate::resolve::REFUSED_STATUS`], which writes it as a regex over a
+/// subprocess's stderr. Python has the same pair (`media_relay.REFUSED_STATUS`
+/// as a tuple, `media_resolve._REFUSED_STATUS` as the regex) and Part 59 pins
+/// them together; `refused_codes_match_the_resolver_regex` does the same here,
+/// so the two cannot drift apart silently.
+///
+/// What it does **not** decide is whether a relay is refused. In Python the
+/// tuple's only reader is `UpstreamError.refused` (`media_relay.py:199`), and
+/// nothing downstream consults that fact: `probe_proxy` catches the exception
+/// and fails the relay whatever the status was. The earlier draft of this
+/// function branched on the set instead — a non-refused status left the relay
+/// `Open` and `open_relay_with` returned `Ok`, which registered a relay that
+/// never got a byte from the origin. That is a port of a fact nobody in Python
+/// ever claimed, so the set is kept only as the cross-check it actually is.
+pub const REFUSED_CODES: &[u16] = &[401, 403, 404, 410];
 
 /// `-protocol_whitelist` for ffmpeg when reading manifests.
 const PROTOCOL_WHITELIST: &str = "file,http,https,tcp,tls,crypto,httpproxy,data";
@@ -95,6 +116,14 @@ const ADTS_TELLS: &[&str] = &["Malformed AAC bitstream", "aac_adtstoasc"];
 // ---------------------------------------------------------------------------
 // Content-Type tables
 // ---------------------------------------------------------------------------
+
+/// What "we do not know what this is" looks like on the wire (`UNKNOWN_TYPE` in
+/// `media_relay.py:133`). Two readers depend on this exact spelling: the suffix
+/// table's fallback below, and [`probe_proxy`], which treats it as "the suffix
+/// table said nothing, so the origin's own `Content-Type` is worth reading".
+/// Python writes the default into the dataclass (`content_type: str =
+/// UNKNOWN_TYPE`, :235), so the constant is the single truth on both sides.
+const UNKNOWN_TYPE: &str = "application/octet-stream";
 
 fn content_type_for_suffix(suffix: &str) -> &'static str {
     match suffix {
@@ -112,7 +141,7 @@ fn content_type_for_suffix(suffix: &str) -> &'static str {
         ".ogg" | ".opus" => "audio/ogg",
         ".wav"          => "audio/wav",
         ".flac"         => "audio/flac",
-        _               => "application/octet-stream",
+        _               => UNKNOWN_TYPE,
     }
 }
 
@@ -308,7 +337,12 @@ pub struct Relay {
     pub headers:      HashMap<String, String>,
     pub mode:         String,    // "proxy" or "remux"
     pub title:        String,
-    pub content_type: String,
+    /// Locks its own value: [`probe_proxy`] takes `&Relay` and learns the
+    /// declared type from the origin's answer, so the field can change after
+    /// registration while a viewer may be reading the response headers.
+    /// Python's dataclass field is plain (`content_type: str`, :235) because the
+    /// GIL makes the write atomic; here a `String` behind `&Relay` is not.
+    pub content_type: Mutex<String>,
     pub created:      f64,
     pub last_seen:    Arc<Mutex<f64>>,
     pub inner:        Arc<Mutex<RelayInner>>,
@@ -336,8 +370,10 @@ pub struct RelayInner {
 }
 
 impl RelayInner {
+    /// Python's `self.ranges and bool(self.length)`: a known zero-length stream
+    /// is not scrubable. `Option::is_some` would answer the other way.
     pub fn seekable(&self) -> bool {
-        self.ranges && self.length.is_some()
+        self.ranges && self.length.unwrap_or(0) != 0
     }
     pub fn size(&self) -> u64 {
         if self.path.is_empty() { return self.length.unwrap_or(0); }
@@ -361,22 +397,57 @@ impl Relay {
         *self.last_seen.lock().unwrap()
     }
 
-    pub fn status(&self) -> HashMap<String, String> {
+    /// The card's row for this relay: Python's `status()` dict, eleven keys, in
+    /// Python's order, with Python's types.
+    ///
+    /// Two shapes here are the whole reason this is not a `HashMap<String,
+    /// String>`: `length` and `written` are numbers that may be `null` — a proxy
+    /// relay that never got a `Content-Length` reports "nobody has said", which
+    /// the page renders differently from "zero bytes" — and `seekable`/`ranges`
+    /// are booleans. `serde_json`'s `Map` keeps insertion order (the workspace
+    /// turns on `preserve_order`) because the order *is* the document the page
+    /// reads.
+    ///
+    /// `written` follows Python's `size()`, which decides by `mode` rather than
+    /// by whether a path exists: a remux whose encoder has not spawned yet asks
+    /// `getsize('')` and gets 0, while a proxy asks `length` and may get nothing
+    /// to say. `seconds` and `idle` reuse `py_round1` — the same one-decimal,
+    /// half-to-even reading the resolve job's own seconds use, so one truth
+    /// point formats both.
+    pub fn status_json(&self) -> serde_json::Value {
         let inner = self.inner.lock().unwrap();
         let now = now_secs();
-        [
-            ("id",       self.relay_id.clone()),
-            ("title",    self.title.clone()),
-            ("mode",     self.mode.clone()),
-            ("state",    inner.state.as_str().to_string()),
-            ("seekable", inner.seekable().to_string()),
-            ("ranges",   inner.ranges.to_string()),
-            ("length",   inner.length.map(|n| n.to_string()).unwrap_or_default()),
-            ("written",  inner.size().to_string()),
-            ("error",    if !inner.error.is_empty() { inner.error.clone() } else { inner.probe_error.clone() }),
-            ("seconds",  format!("{:.1}", (now - self.created))),
-            ("idle",     format!("{:.1}", (now - self.last_seen_secs()))),
-        ].into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+        let written = if self.mode == "remux" {
+            serde_json::Value::from(
+                std::fs::metadata(&inner.path).map(|m| m.len()).unwrap_or(0),
+            )
+        } else {
+            match inner.length {
+                Some(n) => serde_json::Value::from(n),
+                None => serde_json::Value::Null,
+            }
+        };
+        let mut row = serde_json::Map::new();
+        row.insert("id".to_string(), serde_json::Value::String(self.relay_id.clone()));
+        row.insert("title".to_string(), serde_json::Value::String(self.title.clone()));
+        row.insert("mode".to_string(), serde_json::Value::String(self.mode.clone()));
+        row.insert("state".to_string(), serde_json::Value::String(inner.state.as_str().to_string()));
+        row.insert("seekable".to_string(), serde_json::Value::Bool(inner.seekable()));
+        row.insert("ranges".to_string(), serde_json::Value::Bool(inner.ranges));
+        row.insert("length".to_string(), match inner.length {
+            Some(n) => serde_json::Value::from(n),
+            None => serde_json::Value::Null,
+        });
+        row.insert("written".to_string(), written);
+        row.insert(
+            "error".to_string(),
+            serde_json::Value::String(
+                if !inner.error.is_empty() { inner.error.clone() } else { inner.probe_error.clone() },
+            ),
+        );
+        row.insert("seconds".to_string(), serde_json::Value::from(py_round1(now - self.created)));
+        row.insert("idle".to_string(), serde_json::Value::from(py_round1(now - self.last_seen_secs())));
+        serde_json::Value::Object(row)
     }
 
     /// Stop the encoder and delete the temp file. Called **after** removing
@@ -414,11 +485,19 @@ pub struct RelayStore {
     entries: Mutex<HashMap<String, Arc<Relay>>>,
     max:     usize,
     ttl:     f64,
+    /// Latched by `start_sweeper`: one sweep loop per store, for the life of
+    /// that store.
+    sweeper_run: AtomicBool,
 }
 
 impl RelayStore {
     pub fn new(max: usize, ttl: f64) -> Self {
-        Self { entries: Mutex::new(HashMap::new()), max, ttl }
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            max,
+            ttl,
+            sweeper_run: AtomicBool::new(false),
+        }
     }
 
     pub fn add(&self, relay: Arc<Relay>) -> Arc<Relay> {
@@ -461,6 +540,15 @@ impl RelayStore {
         self.find_locked(&map, relay_id).cloned()
     }
 
+    /// Is this id one of the live relays? The orphan sweep needs it to tell an
+    /// abandoned temp file from one somebody is still watching. The
+    /// device-facing lookup (`find_locked`) is the constant-time one because
+    /// there the id arrives from a URL; this asks about a name that came out of
+    /// our own temp directory, so it goes straight to the map.
+    pub fn contains(&self, relay_id: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(relay_id)
+    }
+
     pub fn drop_relay(&self, relay_id: &str) -> Option<Arc<Relay>> {
         let relay = self.entries.lock().unwrap().remove(relay_id)?;
         relay.shutdown();
@@ -472,11 +560,11 @@ impl RelayStore {
         for r in relays { r.shutdown(); }
     }
 
-    pub fn active(&self) -> Vec<HashMap<String, String>> {
+    pub fn active(&self) -> Vec<serde_json::Value> {
         let map = self.entries.lock().unwrap();
         let mut rs: Vec<_> = map.values().cloned().collect();
         rs.sort_by(|a, b| a.created.partial_cmp(&b.created).unwrap());
-        rs.iter().map(|r| r.status()).collect()
+        rs.iter().map(|r| r.status_json()).collect()
     }
 
     fn find_locked<'a>(&self, map: &'a HashMap<String, Arc<Relay>>, relay_id: &str) -> Option<&'a Arc<Relay>> {
@@ -502,18 +590,88 @@ impl RelayStore {
         dropped
     }
 
-    /// Sweep idle entries in a background thread; returns a stop handle.
-    pub fn start_sweeper(store: Arc<RelayStore>, interval: Duration) -> thread::JoinHandle<()> {
+    /// Drop remux temp files nobody is watching any more — Python's
+    /// `sweep_orphans`, called once when the listener starts.
+    ///
+    /// A clean shutdown empties the directory, but AGENTS.md §4.2 records that a
+    /// signal-killed Macast skips its cleanup — and a live HLS remux is an
+    /// ffmpeg that never ends, so its temp file would grow across every later
+    /// session unnoticed. Only files older than the idle TTL go: a *second*
+    /// running instance keeps its own file freshly written, so this cannot reach
+    /// into a stream somebody is watching (multi-instance is normal on this
+    /// LAN). Returns the paths removed, so the caller can log it and a test can
+    /// assert the age rule rather than the accident.
+    pub fn sweep_orphans(&self, dir: &Path, max_age: f64, now: f64) -> Vec<PathBuf> {
+        let mut removed = Vec::new();
+        // Python's `except OSError: return []` — a directory we cannot list is
+        // not a reason to say we deleted something.
+        let Ok(entries) = std::fs::read_dir(dir) else { return removed };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.ends_with(".mp4") {
+                continue;
+            }
+            if self.contains(&name[..name.len() - 4]) {
+                continue;
+            }
+            let age = match std::fs::metadata(&path).and_then(|m| {
+                m.modified().map(|t| now - t.duration_since(UNIX_EPOCH)
+                    .unwrap_or_default().as_secs_f64())
+            }) {
+                Ok(age) => age,
+                Err(_) => continue,
+            };
+            if age < max_age {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_err() {
+                continue;
+            }
+            removed.push(path);
+        }
+        if !removed.is_empty() {
+            warn!("relay: swept {} abandoned temp file(s)", removed.len());
+        }
+        removed
+    }
+
+    /// Expire idle relays even while nobody reads the page; `true` if this call
+    /// started the loop — Python's `start_sweeper`, whose "already have one"
+    /// guard matters because `ensure_server` is idempotent.
+    ///
+    /// The thread holds only a `Weak`, so dropping the store ends the loop
+    /// instead of leaking a strong reference for the life of the process. A
+    /// poisoned entries lock is skipped rather than fatal: silencing the sweep
+    /// would strand an ffmpeg and the temp file it keeps growing.
+    ///
+    /// An associated function, not a method: the loop needs an `Arc`, and
+    /// `self: &Arc<Self>` is not a legal receiver in stable Rust.
+    pub fn start_sweeper(store: &Arc<RelayStore>, interval: Duration) -> bool {
+        if store
+            .sweeper_run
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let weak: Weak<RelayStore> = Arc::downgrade(store);
         thread::Builder::new().name("RELAY_SWEEP".into()).spawn(move || {
             loop {
+                // Python's `while not self._stop.wait(interval)`: sleep first,
+                // then work — a relay registered a second ago is not idle.
                 thread::sleep(interval);
-                let dropped = {
-                    let mut map = store.entries.lock().unwrap();
-                    store.expire_locked(&mut map, None)
+                let Some(store) = weak.upgrade() else { return };
+                let dropped = match store.entries.lock() {
+                    Ok(mut map) => store.expire_locked(&mut map, None),
+                    Err(_) => continue,
                 };
-                for r in dropped { r.shutdown(); }
+                for relay in dropped {
+                    relay.shutdown();
+                }
             }
-        }).expect("spawn sweeper")
+        }).expect("spawn sweeper");
+        true
     }
 }
 
@@ -740,6 +898,10 @@ impl RelayServer {
     ) -> io::Result<Self> {
         let listener = TcpListener::bind("0.0.0.0:0")?;
         let port = listener.local_addr()?.port();
+        // `ensure_server`'s order, and it is load-bearing: the sweep runs before
+        // any viewer can reach the store, so a file it deletes is never one a
+        // request is about to open.
+        store.sweep_orphans(&temp_dir, RELAY_IDLE_TTL, now_secs());
         let store2 = Arc::clone(&store);
         let temp_dir2 = temp_dir.clone();
         thread::Builder::new().name("RELAY_HTTP".into()).spawn(move || {
@@ -756,6 +918,9 @@ impl RelayServer {
                 }
             }
         })?;
+        // And the loop that expires idle relays, last — Python puts it after the
+        // listener too, so the first thing the store sees is a sweep, not a race.
+        RelayStore::start_sweeper(&store, RELAY_SWEEP_INTERVAL);
         Ok(Self { store, port, temp_dir, grow_wait })
     }
 }
@@ -843,7 +1008,7 @@ fn handle_connection(stream: TcpStream, store: &RelayStore, _temp_dir: &Path, gr
 
     if tail == "status" {
         if method == "HEAD" { refuse(&mut stream, 405); return; }
-        let status = relay.status();
+        let status = relay.status_json();
         let body = serde_json::to_vec(&status).unwrap_or_default();
         send_response(&mut stream, 200, "OK", &[
             ("Content-Type", "application/json;charset=utf-8".to_string()),
@@ -885,7 +1050,7 @@ fn handle_connection(stream: TcpStream, store: &RelayStore, _temp_dir: &Path, gr
     // Build response headers
     let seekable = relay.inner.lock().unwrap().seekable();
     let _ = write!(stream, "HTTP/1.0 {} {}\r\n", sp.status, reason_phrase(sp.status));
-    let _ = write!(stream, "Content-Type: {}\r\n", relay.content_type);
+    let _ = write!(stream, "Content-Type: {}\r\n", relay.content_type.lock().unwrap());
     let _ = write!(stream, "Cache-Control: no-store\r\n");
     let _ = write!(stream, "X-Content-Type-Options: nosniff\r\n");
     let _ = write!(stream, "Accept-Ranges: {}\r\n", if seekable { "bytes" } else { "none" });
@@ -1014,7 +1179,15 @@ fn origin_agent() -> ureq::Agent {
         .into()
 }
 
-/// Probe the origin's Range support. Updates `relay.inner` in place.
+/// Ask the origin whether it honours Range, and how long the file is.
+///
+/// Updates `relay.inner` (and possibly `relay.content_type`) in place. The rule
+/// for what counts as a refusal is Python's, and it is broader than the
+/// refused-status set: **any** upstream error — any HTTP status, or not reaching
+/// the origin at all — fails the relay and returns `false`
+/// (`media_relay.py:480-483`). Treating a non-refused status as "open" would
+/// register a relay that never got a byte from the origin, and the viewer would
+/// then be served a 200 with nothing behind it.
 pub fn probe_proxy(relay: &Relay) -> bool {
     let (url, headers) = (relay.url.clone(), relay.headers.clone());
     let mut req = origin_agent().get(&url).header("Range", RANGE_PROBE);
@@ -1022,16 +1195,15 @@ pub fn probe_proxy(relay: &Relay) -> bool {
     let response = match req.call() {
         Ok(r)  => r,
         Err(ureq::Error::StatusCode(code)) => {
-            let refused = REFUSED_CODES.contains(&code);
-            let msg = format!("源站返回 {code}");
             let mut inner = relay.inner.lock().unwrap();
-            inner.probe_error = msg;
-            inner.state = if refused { RelayState::Failed } else { RelayState::Open };
-            return !refused;
+            inner.probe_error = format!("源站返回 {code}");
+            inner.state = RelayState::Failed;
+            return false;
         }
         Err(e) => {
             let mut inner = relay.inner.lock().unwrap();
             inner.probe_error = format!("无法连接源站：{e}");
+            inner.state = RelayState::Failed;
             return false;
         }
     };
@@ -1043,6 +1215,21 @@ pub fn probe_proxy(relay: &Relay) -> bool {
     let cl = response.headers().get("Content-Length")
         .and_then(|v| v.to_str().ok().and_then(|s| s.parse::<u64>().ok()));
 
+    // Python learns the declared type only when the suffix table gave it
+    // nothing (`media_relay.py:494-497`): a `/relay/<id>/media` URL has no
+    // suffix, so the origin's own `Content-Type` is the only statement about
+    // what this is — and a sender decides whether to play it by reading exactly
+    // that header (§4.1). The two questions are one lock-and-assign, not a read
+    // then a second write, so a viewer that arrives between them never sees an
+    // half-updated type.
+    let declared = ct.filter(|t| !t.is_empty() && t != UNKNOWN_TYPE);
+    if let Some(declared) = declared {
+        let mut type_slot = relay.content_type.lock().unwrap();
+        if type_slot.is_empty() || *type_slot == UNKNOWN_TYPE {
+            *type_slot = declared;
+        }
+    }
+
     let mut inner = relay.inner.lock().unwrap();
     if status == 206 {
         inner.ranges = true;
@@ -1050,9 +1237,6 @@ pub fn probe_proxy(relay: &Relay) -> bool {
     } else {
         inner.ranges = false;
         inner.length = cl;
-    }
-    if relay.content_type == "application/octet-stream" {
-        if let Some(t) = ct { if !t.is_empty() { /* would need mut relay */ } }
     }
     inner.state = RelayState::Open;
     true
@@ -1067,9 +1251,31 @@ fn total_from_content_range(value: &str) -> Option<u64> {
 // start_remux
 // ---------------------------------------------------------------------------
 
+/// Where ffmpeg lives on this machine, or `None` when it does not.
+fn find_ffmpeg() -> Option<String> {
+    find_command("ffmpeg", None, None, None)
+}
+
 pub fn start_remux(relay: &Arc<Relay>, temp_dir: &Path) -> bool {
-    let ffmpeg = find_command("ffmpeg", None, None, None);
-    let Some(ffmpeg) = ffmpeg else {
+    start_remux_with(relay, temp_dir, &find_ffmpeg)
+}
+
+/// `start_remux` with the binary lookup handed in.
+///
+/// A closure rather than a PATH edit for the reason `relay_tests::start_with`
+/// already gives for taking the binary directly: these tests run in parallel
+/// threads, and PATH is shared state a sibling clears out from under a case that
+/// just set it. And a case that wants "this machine has no ffmpeg" cannot buy it
+/// by emptying PATH at all — `find_command` also walks `extra_bin_dirs()` (brew,
+/// `/usr/local/bin`, …), so the answer would depend on what happens to be
+/// installed on the machine running the test. §4.2: the runner's accidental
+/// contents are not a tested fact.
+pub fn start_remux_with(
+    relay: &Arc<Relay>,
+    temp_dir: &Path,
+    ffmpeg: &dyn Fn() -> Option<String>,
+) -> bool {
+    let Some(ffmpeg) = ffmpeg() else {
         let mut inner = relay.inner.lock().unwrap();
         inner.state = RelayState::Failed;
         inner.error = "这台机器没有 ffmpeg，无法把清单流转封装".to_string();
@@ -1129,15 +1335,43 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// Register one resolved candidate and return its relay (or an error string).
+/// Register one resolved candidate and return its relay (or the refusal sentence).
 ///
-/// Mirrors Python `open_relay`: probe/spawn happens synchronously so the
-/// management POST can say "origin refused" in the same response.
+/// Mirrors Python `open_relay`, which has no ffmpeg seam at all: it just asks the
+/// machine. See [`open_relay_with`] for what the refusal sentences are and why one
+/// of them has no prefix.
 pub fn open_relay(
     candidate: &Candidate,
     title: &str,
     store: &Arc<RelayStore>,
     temp_dir: &Path,
+) -> Result<Arc<Relay>, String> {
+    open_relay_with(candidate, title, store, temp_dir, &find_ffmpeg)
+}
+
+/// `open_relay` with the ffmpeg lookup handed in, so a case can say "this machine
+/// has no ffmpeg" instead of hoping the runner has nothing installed. The remux
+/// arm is the only one that reaches for it, so a proxy case never asks.
+///
+/// Probe/spawn happens synchronously so the management POST can say "origin
+/// refused" in the same response.
+///
+/// The refused arms hand back **Python's caller's composition** —
+/// `relay.error or relay.probe_error or '源站拒绝了这条地址'` (`protocol.py:2937`)
+/// — with no 「中转启动失败：」 prefix. That prefix lives one line earlier in the
+/// reference (`protocol.py:2933`), in the arm that catches an *unexpected* raise
+/// out of `open_relay` itself; a Rust caller has no such arm, so prefixing it here
+/// would move the sentence off the path that produces it and the page would read a
+/// diagnosis of our own failure where the reference reports the origin's words.
+/// Both branches share the chain because Python composes it once, after the mode
+/// test: the fallback is reachable from either (a remux that fails without
+/// recording a reason is as unanswered as a proxy that does).
+pub fn open_relay_with(
+    candidate: &Candidate,
+    title: &str,
+    store: &Arc<RelayStore>,
+    temp_dir: &Path,
+    ffmpeg: &dyn Fn() -> Option<String>,
 ) -> Result<Arc<Relay>, String> {
     let p = plan(candidate);
     let mode = if p == "merge" { "remux" } else { p }.to_string();
@@ -1154,7 +1388,7 @@ pub fn open_relay(
         title:        if !title.is_empty() { title.to_string() }
                       else if !candidate.label.is_empty() { candidate.label.clone() }
                       else { candidate.host() },
-        content_type: content_type_for(candidate).to_string(),
+        content_type: Mutex::new(content_type_for(candidate).to_string()),
         created:      now_secs(),
         last_seen:    Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -1174,21 +1408,35 @@ pub fn open_relay(
     });
     store.add(Arc::clone(&relay));
     if mode == "remux" {
-        if !start_remux(&relay, temp_dir) {
+        if !start_remux_with(&relay, temp_dir, ffmpeg) {
             store.drop_relay(&relay.relay_id);
-            let err = relay.inner.lock().unwrap().error.clone();
-            return Err(err);
+            return Err(refusal(&relay.inner.lock().unwrap()));
         }
     } else {
         probe_proxy(&relay);
-        let state = relay.inner.lock().unwrap().state.clone();
-        if state == RelayState::Failed {
+        let inner = relay.inner.lock().unwrap();
+        if inner.state == RelayState::Failed {
+            let why = refusal(&inner);
+            drop(inner);
             store.drop_relay(&relay.relay_id);
-            let err = relay.inner.lock().unwrap().probe_error.clone();
-            return Err(format!("中转启动失败：{err}"));
+            return Err(why);
         }
     }
     Ok(relay)
+}
+
+/// Python's `relay.error or relay.probe_error or '源站拒绝了这条地址'`: the first
+/// non-empty word wins, and the last one is what the page reads when a relay died
+/// without recording why. An empty message would render as 「」 plus a sentence
+/// fragment, which is worse than saying the honest generic thing.
+fn refusal(inner: &RelayInner) -> String {
+    if !inner.error.is_empty() {
+        return inner.error.clone();
+    }
+    if !inner.probe_error.is_empty() {
+        return inner.probe_error.clone();
+    }
+    "源站拒绝了这条地址".to_string()
 }
 
 // ---------------------------------------------------------------------------

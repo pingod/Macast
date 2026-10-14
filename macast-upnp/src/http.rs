@@ -52,6 +52,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde_json::Value;
+
 use macast_core::logging::Logger;
 use macast_core::paths;
 use macast_core::setting::{self, Key, Setting};
@@ -139,6 +141,230 @@ const POST_HELPER_PARAMS: [&str; 13] = [
 /// the "unrecognised fields" answer the same way the helpers are.
 const FILE_ROUTE_PARAMS: [&str; 1] = ["plugin-file"];
 
+/// `POST /api` routes that are wired in this port, keyed by the action field
+/// they recognise (`protocol.py:2308-2336`, `POST_ROUTES`).
+///
+/// **Gate is management for resolve endpoints**: the URLs only ever travel to
+/// `yt-dlp`/`ffprobe` as argv arguments — they do not become shell commands or
+/// importable code, so these routes do NOT appear in `_CODE_EXECUTION_PARAMS`.
+///
+/// The table shape mirrors `protocol.py:2308-2336` one-for-one because "any
+/// endpoint not in the table falls through" (§4.7c). Precedence is position:
+/// the first matching field wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostAction {
+    ResolvePage,
+    CastResolved,
+    CastUrl,
+}
+
+struct PostRoute {
+    field:  &'static str,
+    gate:   &'static str,
+    action: PostAction,
+}
+
+/// The POST routes this port implements, in the shipped order.
+///
+/// `cast-uri` (the original direct-URL entry, ported for backwards compat) is
+/// kept at `GATE_MANAGEMENT`: same reasoning as `query=cast`, but POST removes
+/// the CSRF vector that makes GET need the token.
+///
+/// **Its position is load-bearing, not cosmetic.** Precedence is positional
+/// (`protocol.py:2310` puts it ahead of the two resolve routes at 2317/2318), so
+/// a request that carries both `cast-uri` and `resolve-page` runs `cast-uri` and
+/// never reaches the resolve job. Put `resolve-page` first and the same request
+/// silently starts a parse instead of casting -- and nothing else changes.
+const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
+    PostRoute { field: "cast-uri",        gate: "management", action: PostAction::CastUrl },
+    PostRoute { field: "resolve-page",    gate: "management", action: PostAction::ResolvePage },
+    PostRoute { field: "cast-resolved",   gate: "management", action: PostAction::CastResolved },
+];
+
+/// `site_of()` (`protocol.py:1491`): `(host, port)` out of a URL or `Host`
+/// value, `None` if unusable.
+///
+/// One normaliser for both sides of the same-site comparison, because the two
+/// spellings differ in exactly the ways that would otherwise silently mismatch:
+/// `Origin` is an absolute URL with no path, `Referer` has a path, and `Host`
+/// carries neither scheme nor path but does carry the port. Lowercased, a
+/// trailing dot dropped, a default 80/443 dropped so `http://host` and `host`
+/// agree, and IPv6 **without** its brackets (`[::1]` and `::1` are the same
+/// site).
+fn site_of(target: &str) -> Option<(String, Option<u16>)> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+    // A bare `Host` value has no scheme, so nothing tells us the port is 80.
+    let with_scheme = if target.contains("://") {
+        target.to_string()
+    } else {
+        format!("http://{target}")
+    };
+    let after_scheme = with_scheme
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or("");
+    // The authority ends at the first `/`, `?` or `#`.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    // `_userinfo` / `_hostinfo` both split on the **last** `@`, and a host name
+    // never contains one.
+    let authority = authority.rsplit('@').next().unwrap_or("");
+    // `urlsplit` raises for a netloc holding exactly one of `[` / `]`, which
+    // Python reads as "unusable".
+    if authority.contains('[') != authority.contains(']') {
+        return None;
+    }
+    let (host, port_str) = match authority.find('[') {
+        Some(start) => {
+            // `_check_bracketed_netloc`: no data before the opening bracket, and
+            // none between the closing bracket and the port delimiter.
+            if start != 0 {
+                return None;
+            }
+            let bracketed = &authority[start + 1..];
+            let end = bracketed.find(']')?;
+            let inner = &bracketed[..end];
+            let after = &bracketed[end + 1..];
+            if !after.is_empty() && !after.starts_with(':') {
+                return None;
+            }
+            // `_check_bracketed_host` asks `ipaddress` about the bracketed text,
+            // so an IPv4 in brackets and a name in brackets are both refused.
+            // The two directions are not equal here: refusing a bracketed IPv4
+            // is the one that matters, because `127.0.0.1` **is** one of the
+            // page's own names and a bracket around it must not buy it a pass.
+            // An IPv4-**mapped** IPv6 (`[::ffff:127.0.0.1]`) does carry a colon
+            // and Python does accept it, so it is not caught here.
+            if inner.parse::<std::net::Ipv4Addr>().is_ok()
+                || (!inner.contains(':') && !inner.starts_with('v'))
+            {
+                return None;
+            }
+            (
+                inner.to_string(),
+                after.strip_prefix(':').map(|s| s.to_string()),
+            )
+        }
+        // `_hostinfo()` partitions on the **first** colon, so `evil.test:abc`
+        // has host `evil.test` and an unusable port -- not host `evil.test:abc`
+        // with no port. An empty tail (`evil.test:`) is "no port".
+        None => match authority.split_once(':') {
+            Some((head, tail)) => (
+                head.to_string(),
+                if tail.is_empty() {
+                    None
+                } else {
+                    Some(tail.to_string())
+                },
+            ),
+            None => (authority.to_string(), None),
+        },
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port_str {
+        Some(p) => {
+            // `.port` raises unless the text `isdigit() and isascii()`, which
+            // rules out the `+80` that a numeric parse would happily take.
+            if p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            match p.parse::<u16>() {
+                Ok(v) if v != 80 && v != 443 => Some(v),
+                Ok(_) => None,
+                // Past 65535 Python raises "Port out of range".
+                Err(_) => return None,
+            }
+        }
+        None => None,
+    };
+    Some((host.to_ascii_lowercase().trim_end_matches('.').to_string(), port))
+}
+
+/// `_page_host_names()` (`protocol.py:1524`): the host names the settings page
+/// may legitimately be opened on.
+///
+/// The comparison is **not** "does this resolve to us" — under DNS rebinding the
+/// attacker's own domain *does* resolve to `127.0.0.1`, and that is the whole
+/// attack. So the list is the names this machine answers on regardless of what
+/// anyone's resolver says: loopback, the addresses we advertise on the LAN, and
+/// this host's own names.
+fn page_host_names(setting: &Setting) -> Vec<String> {
+    let mut names: Vec<String> = vec![
+        "127.0.0.1".into(),
+        "localhost".into(),
+        "::1".into(),
+    ];
+    // The mDNS-side list. It already falls back to the unfiltered DLNA address
+    // set, so one call covers both of Python's two `update()`s.
+    names.extend(macast_core::net::advertised_addresses(setting));
+    if let Ok(name) = std::str::from_utf8(paths::hostname().as_bytes()) {
+        let host = name.to_ascii_lowercase();
+        let host = host.trim_end_matches('.');
+        if !host.is_empty() {
+            names.push(host.to_string());
+            names.push(host.split('.').next().unwrap_or(host).to_string());
+            if !host.ends_with(".local") {
+                names.push(format!("{host}.local"));
+            }
+        }
+    }
+    names.retain(|n| !n.is_empty());
+    names
+}
+
+/// The refusal `_same_site()` raises (`protocol.py:1669`). It must say **both**
+/// where the caller came from and which address to use instead: a 403 that
+/// reads like a broken token sends the user to the wrong fix.
+fn cross_site_refusal(origin: &str, port: u16) -> String {
+    let host = match site_of(origin) {
+        Some((host, _)) => host,
+        None => return "无法识别的来源站点".to_string(),
+    };
+    format!(
+        "禁止跨站操作：这个请求来自「{host}」，而设置页只服务本机自己。\
+         如果你是从别的网址打开的页面，请改用 http://127.0.0.1:{port}/ 再试。"
+    )
+}
+
+/// `_same_site()` (`protocol.py:1641`): the **first** question every POST is
+/// asked, before the gate its route names (§4.7b, §4.7c).
+///
+/// * `Ok(None)` — no `Origin` and no `Referer`. That is **not a browser**: curl,
+///   a phone Shortcut, Home Assistant. Those callers stay judged by address and
+///   token alone, which is the gate they were already subject to.
+/// * `Ok(Some(()))` — the name in the header is one of ours.
+/// * `Err(sentence)` — cross-site, or a header we cannot read. Either way the
+///   caller answers with this and does not run the route.
+///
+/// **The port is deliberately not compared.** A page we serve on one port
+/// posting to another port of the same host is the same site for our purposes
+/// (there is no cookie here to ride), and pinning it would break the port
+/// fallback Macast itself does when 58880 is taken (§4.7b). `Origin` also wins
+/// over `Referer`: a page can choose its own `Referer`.
+fn same_site(req: &Request, setting: &Setting) -> Result<Option<()>, String> {
+    let origin = match req.header("Origin").or_else(|| req.header("Referer")) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let Some((host, _)) = site_of(&origin) else {
+        return Err(cross_site_refusal(&origin, setting::application_port(setting)));
+    };
+    if page_host_names(setting).iter().any(|n| *n == host) {
+        return Ok(Some(()));
+    }
+    Logger::named("Protocol").warning(&format!(
+        "blocked a cross-site API post from origin {origin}"
+    ));
+    Err(cross_site_refusal(&origin, setting::application_port(setting)))
+}
+
 /// Which `query=` values on `GET /api` are management actions, and what each
 /// one demands first.
 ///
@@ -158,12 +384,30 @@ enum Action {
     Cast,
     /// `query=cast-info`: the entry URL, **including the token**.
     CastInfo,
+    /// `query=resolve-status&job=<id>`: how far one background parse has got.
+    ResolveStatus,
 }
 
-/// The two answers this port implements out of the shipped management API's
+/// The three answers this port implements out of the shipped management API's
 /// fifteen GET queries. Each is a **cumulative** check, not a choice: see
 /// [`Face::gate_refusal`].
-const GET_MANAGEMENT_ROUTES: [GetRoute; 2] = [
+///
+/// **Two deviations from Python's *structure*, both recorded rather than copied
+/// silently** (`protocol.py:2066-2120`). First, Python asks the cast question
+/// *before* it consults the sensitive-query list, and that arm only requires
+/// `_token_present()` — so a LAN caller with no token hears the **cast** sentence.
+/// [`Face::gate_refusal`] is cumulative with the management question first, which
+/// is Python's own POST shape (`_gate_refusal`, `protocol.py:2594`), so the same
+/// caller hears the **management** sentence here: same verdict, different words.
+/// Second, Python gates `resolve-status` **inside** one combined membership test
+/// with eleven other sensitive queries (`status`, `log`, `log-download`,
+/// `log-modules`, `launch-param`, `interfaces`, `subscribers`, `module-settings`,
+/// `cast-info`, `resolve-status`, `resolve-cookies`, `cast-targets`) under a
+/// single `_management_allowed()` call — it is *not* per-route data the way the
+/// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
+/// §4.7c asks for; the consequence is that a fourth sensitive query must be added
+/// **here**, not to a list elsewhere, or it answers a LAN caller.
+const GET_MANAGEMENT_ROUTES: [GetRoute; 3] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -181,6 +425,18 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 2] = [
         // gone (AGENTS.md §4.7).
         gate: "management",
         action: Action::CastInfo,
+    },
+    GetRoute {
+        query: "resolve-status",
+        // `GATE_MANAGEMENT`, and this one is *not* a token gate even though it
+        // sits next to `cast` in the same face. Its answer carries the
+        // candidate list, and every row of that list holds the site's own
+        // signed, short-lived, header-requiring address (`describe()` writes
+        // `url`). A LAN passer-by polling this would be harvesting those. The
+        // relay is what keeps them away from the *television*; this gate is
+        // what keeps them away from everyone else on this network.
+        gate: "management",
+        action: Action::ResolveStatus,
     },
 ];
 
@@ -488,15 +744,88 @@ fn split_once_ascii(haystack: &str, needle: char) -> (&str, &str) {
     }
 }
 
-/// `a=1&b&c=` → `[("a","1"), ("b",""), ("c","")]`.
+/// A hex digit's value, or `None` — the two characters `_hextobyte` keys on.
+fn hex_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as u32),
+        b'a'..=b'f' => Some((byte - b'a' + 10) as u32),
+        b'A'..=b'F' => Some((byte - b'A' + 10) as u32),
+        _ => None,
+    }
+}
+
+/// `urllib.parse.unquote_plus` (UTF-8, `errors='replace'`).
+///
+/// `+` becomes a space **first**, on the whole string, so `%2B` arrives as a
+/// literal `+` while a written `+` is a space — the two are not the same
+/// character by the time anything reads them. Percent escapes are then decoded
+/// **at byte level**: the input is encoded UTF-8, split on `b'%'`, and an item
+/// contributes a byte only when its first two *bytes* are hex digits, so `%zz`
+/// and a trailing `%` stay literal and the remainder after a decoded byte is
+/// never re-scanned (the split already removed every `%`). A non-ASCII
+/// character therefore passes through untouched **and** joins a decoded byte in
+/// one buffer: `é%E7` is `é` followed by a lone `0xE7`, which is not valid
+/// UTF-8, so the final `from_utf8_lossy` — Python's `decode('utf-8',
+/// 'replace')` — hands back one replacement character.
+///
+/// Two deliberate deviations from the shipped receiver, both about what happens
+/// when a percent-decoded run is **not** valid UTF-8. cherrypy decodes query
+/// names with `errors='strict'` (`lib/httputil.py:321-364`) and lets a
+/// `UnicodeDecodeError` escape `process_query_string`, which answers **404** for
+/// the whole request; `process_urlencoded`
+/// (`_cpreqbody.py:143-166`) instead retries the body's declared charset before
+/// giving up. This port decodes lossily and keeps routing, so `?url=%FF` reads
+/// one replacement character and falls through to the ordinary
+/// "unrecognised fields" answer. No sender in this project's reach produces
+/// such a pair, and the alternative — a 404 with no body and no explanation —
+/// is a worse answer to hand a device that mistyped one byte.
+fn unquote_plus(text: &str) -> String {
+    if !text.contains('%') {
+        return text.replace('+', " ");
+    }
+    let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
+    let plus = text.replace('+', " ");
+    let mut parts = plus.as_bytes().split(|byte| *byte == b'%');
+    bytes.extend_from_slice(parts.next().unwrap_or(b""));
+    for item in parts {
+        let decoded = if item.len() >= 2 {
+            match (hex_value(item[0]), hex_value(item[1])) {
+                (Some(hi), Some(lo)) => Some(((hi << 4) | lo) as u8),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match decoded {
+            Some(byte) => {
+                bytes.push(byte);
+                bytes.extend_from_slice(&item[2..]);
+            }
+            None => {
+                bytes.push(b'%');
+                bytes.extend_from_slice(item);
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `a=1&b&c=` → `[("a","1"), ("b",""), ("c","")]`, both halves percent-decoded.
 ///
 /// A pair with no `=` keeps its name and an empty value; an **empty** pair
-/// (from `&&`, or a trailing `&`) is skipped. No percent-decoding: the only
-/// readers of these pairs are the `?query=` route keys and the form field names
-/// in the "unrecognised fields" answer, and both show the sender back what it
-/// wrote. cherrypy does decode, so a name containing a percent escape is
-/// spelled differently here — a deviation that changes only a message we
-/// invent, never a routing decision.
+/// (from `&&`, or a trailing `&`) is skipped.
+///
+/// The decoding is what makes a **browser** reach the routes at all: a
+/// `FormData` / `URLSearchParams` POST — and `curl --data-urlencode` — writes
+/// every `:` and `/` as `%3A` and `%2F`, so `url=https%3A%2F%2Fhost%2Fa.mp4`
+/// **is** an absolute address and must route as one. `query=cast` from an iOS
+/// Shortcut encodes the same way. cherrypy decodes on both paths
+/// (`lib/httputil.py:321-364` for the query string, `_cpreqbody.py:143-166` for
+/// the form body), so this is not a widening of what the shipped receiver
+/// accepts.
+///
+/// The path is a different story and stays undecoded — see
+/// [`Request::segments`] for why `%2E` must not become `.` there.
 fn parse_query(query_string: &str) -> Vec<(String, String)> {
     let mut pairs = Vec::new();
     for piece in query_string.split('&') {
@@ -504,7 +833,7 @@ fn parse_query(query_string: &str) -> Vec<(String, String)> {
             continue;
         }
         let (name, value) = split_once_ascii(piece, '=');
-        pairs.push((name.to_string(), value.to_string()));
+        pairs.push((unquote_plus(name), unquote_plus(value)));
     }
     pairs
 }
@@ -703,18 +1032,138 @@ pub trait Subscription: Send + Sync {
     fn remove(&self, sid: &str) -> u16;
 }
 
-/// The management seam: the two things `GET /api?query=…` can ask of the
-/// player, and the only way this port reaches anything that *does* something.
+/// One management answer, in the order the shipped handler builds it.
 ///
-/// It returns **sentences**, not a `serde_json::Value`, because the JSON shape
-/// is this file's business (the two-key `{code, message}` document, the 4-space
-/// indent, the `ensure_ascii` quoting) while the *content* of the sentence
-/// belongs to whoever drives the player. An `Err` is a refusal the caller
-/// should read, so it is a message too — never a status code.
+/// Python returns a **dict**, and a dict there remembers insertion order --
+/// `json.dumps` therefore prints the keys in the order the route wrote them.
+/// That order is what a caller reads, so it is not cosmetic:
+/// `_post_cast_resolved` reaches its success document through
+/// `_cast_url` (`code, message, url, title`) and then *assigns* `relay` and
+/// `note` and overwrites `message` **in place**, which keeps `message` in its
+/// original slot (`protocol.py:2935-2948`). A `HashMap` would answer the same
+/// six facts in a different order and every byte-level diff test would be a
+/// coin-flip.
+///
+/// So: `code` first, `message` second (always -- that is true of every shape in
+/// `protocol.py` that returns extras), then whatever this route added, in the
+/// order it added it. `fields` is a `Vec` and not a map precisely so that
+/// "in the order it added it" is a property of the type rather than of a
+/// feature flag.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub code:    i64,
+    pub message: String,
+    pub fields:  Vec<(String, Value)>,
+}
+
+impl Answer {
+    /// `code: 0` -- the thing happened, and this is the sentence for it.
+    pub fn ok(message: impl Into<String>) -> Answer {
+        Answer { code: 0, message: message.into(), fields: Vec::new() }
+    }
+
+    /// `code: 1` -- nothing happened. The status line is a separate question
+    /// (see [`json_answer`]); a refusal is *this* plus a 403, and a request the
+    /// dispatcher did not recognise is this plus a 200.
+    pub fn fail(message: impl Into<String>) -> Answer {
+        Answer { code: 1, message: message.into(), fields: Vec::new() }
+    }
+
+    /// Add one key after the ones already there. Chain in the order Python
+    /// writes them, not in alphabetical order.
+    pub fn with(mut self, name: &str, value: Value) -> Answer {
+        self.fields.push((name.to_string(), value));
+        self
+    }
+
+    /// A gate refusal: **`403` in the body's `code`**, which this port sends with
+    /// a **200** status line.
+    ///
+    /// That pairing is the shipped handler's, not a mistake of ours, and it is
+    /// **both** verbs: every POST answer — the same-site refusal, a file route's
+    /// gate refusal, a route's gate refusal — goes out through `return _body({'code':
+    /// 403, 'message': refusal})`, and `_body` is `json.dumps(res, indent=4).encode()`
+    /// inside `POST()`, which never sets a status (`protocol.py:2518`, `:2530`,
+    /// `:2539`). The three GET refusals are written the same way — `json.dumps({'code':
+    /// 403, …}, indent=4).encode()` with no status set either (`:2082`, `:2092`,
+    /// `:2104`) — so in Python a browser that fires an unauthorised GET also reads
+    /// **HTTP 200 with a body that says 403**.
+    ///
+    /// **This port does not follow it on GET**, and that is our deviation, not
+    /// Python's asymmetry: [`Face::gate_refusal`] answers 403 in the *status* with
+    /// `code: 1` and the Chinese sentence. Nine tests assert it, and the frontend
+    /// this port serves reads the status. `post()` therefore uses this shape where
+    /// Python does, and `api()` deliberately does not — the difference is documented
+    /// at each site rather than smoothed over.
+    pub fn denied(message: impl Into<String>) -> Answer {
+        Answer { code: 403, message: message.into(), fields: Vec::new() }
+    }
+}
+
+/// The management seam: the things `GET /api` and `POST /api` can ask of the
+/// player and of the resolver, and the only way this port reaches anything that
+/// *does* something.
+///
+/// It returns [`Answer`]s, not a `serde_json::Value` it wants printed, because
+/// the JSON shape is this file's business (the 4-space indent, the
+/// `ensure_ascii` quoting, which key comes first) while the *content* belongs to
+/// whoever drives the player. An `Answer` is therefore a **message plus the
+/// extra keys that route puts in its own dict** -- never a status code.
+///
+/// `cast_url` is the one method that answers with a `Result` instead of a whole
+/// `Answer`, and the difference is Python's: `_cast_url` returns either
+/// `{'code': 0, 'message': 'success', 'url':…, 'title':…}` or
+/// `{'code': 1, 'message': …}` and **nothing else** on the failure side, so a
+/// sentence is the entire failure. The three resolve methods below are not like
+/// that -- their refusals carry keys (`'job': ''`, `'status': None`), so they
+/// hand back a full `Answer` and this file never has to guess at their extras.
+///
+/// **Why the extra methods are `Answer`-shaped and not `String`** — the shipped
+/// key orders, quoted so a change here is a change against a witness:
+///
+/// * `_resolve_page` success (`protocol.py:2866-2867`):
+///   `{'code': 0, 'message': 'success', 'job': job_id, 'url': url, 'note': note}`
+///   and its full answer `{'code': 1, 'message': '已经有 {} 个解析在跑，请等其中一个结束'}`.
+/// * `_resolve_status` not-found (`:2893-2896`): `{'code': 1, 'message':
+///   '没有这个解析任务（超时或已重启）', 'job': '', 'status': None}`; found
+///   (`:2898-2899`): `{'code': 0, 'message': 'success', 'job': job_id, 'status':
+///   job.status()}`. Note `job` is the **empty string** in the first and the
+///   **id that was asked for** in the second, and `status` is `null` versus a
+///   seventeen-key object — the page reads both.
+/// * `_post_cast_resolved` (`:2904+`) refuses a missing job with
+///   `{'code': 1, 'message': '解析任务已经不在了，请重新解析'}`.
 pub trait Management: Send + Sync {
     /// Cast `url`, named `title` when the sender gave one (`cast-title`).
-    /// `Ok` is the sentence for `code: 0`, `Err` the sentence for `code: 1`.
-    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String>;
+    ///
+    /// `Ok` is the **whole success document** — `_cast_url`'s dict has the two
+    /// extras (`'url'`, `'title'`) and both callers write it whole, so the shell
+    /// that changed what is playing is the only one that can say what it played
+    /// (see [`Face::cast_url_answer`]). `Err` stays a bare **sentence**, because
+    /// that is all Python's failure dict carries.
+    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String>;
+
+    /// Start a background parse of the page (or share text) in `text`.
+    ///
+    /// The implementer owns everything the HTTP face must not decide: whether
+    /// `text` is an address at all (`looks_like_url` / `resolve_target`), the
+    /// random job id, the slot accounting (`RESOLVE_JOBS_MAX`, the TTL sweep,
+    /// which finished job gets evicted), and the `note` sentence that goes back
+    /// with it. `macast-upnp` cannot import `macast-cast` — the dependency runs
+    /// the other way — so this call is the only shape between them.
+    fn resolve_page(&self, text: &str) -> Answer;
+
+    /// The `query=resolve-status` answer for one job id, including the "there is
+    /// no such job" document. Empty `job_id` is a legitimate question: Python
+    /// looks up `kwargs.get('job')`, which is `None` for a poll typed without it.
+    fn resolve_status(&self, job_id: &str) -> Answer;
+
+    /// Relay one candidate of a finished parse and hand the relay address to a
+    /// device. `candidate` stays a **raw string**: which candidate index means
+    /// what, and what to say when it names nothing, is decided where the job's
+    /// candidate list lives (`'没有这个候选项'`), and this file must not become a
+    /// second owner of that answer. `target` empty means "this machine", the
+    /// only answer v0.18 had.
+    fn cast_resolved(&self, job: &str, candidate: &str, target: &str) -> Answer;
 }
 
 /// One name in [`GET_MANAGEMENT_ROUTES`]'s `gate` column, read at check time.
@@ -903,18 +1352,28 @@ impl Face {
     /// The shape is the shipped one: the query name is looked up in
     /// [`GET_MANAGEMENT_ROUTES`], an unknown name is **read back** rather than
     /// 404'd, and a known name pays its gate *before* anything reaches the
-    /// player. Two ordering calls are **ours**, because this port has no POST
-    /// management face to copy:
+    /// player. Two ordering calls sit around that shape, and now that the POST
+    /// half of this face exists ([`Face::post_api`]) each has a shipped answer to
+    /// be read against rather than invented:
     ///
+    /// * An unknown `query` is answered **before** the gate, and that is
+    ///   measured on both faces rather than chosen: Python's sensitive-list
+    ///   condition asks `query in (…) and not self._management_allowed()`
+    ///   (`protocol.py:2092-2093`), so a name the chain does not know never
+    ///   reaches a gate at all, and the POST walk asks the same question in the
+    ///   same order — `if kwargs.get(name) is None: continue`, *then*
+    ///   `_gate_refusal(gate)` (`:2534-2539`). Hiding which names we know is
+    ///   worth less to a caller than fixing their typo, and the value comes back
+    ///   inside a JSON string, not inside markup ([`unknown_query`] says why
+    ///   that is safe).
     /// * No `query` (absent, or there and empty) is a 200/`code: 1` that names
-    ///   the missing parameter. In Python `GET()` binds `key=''`, the whole
-    ///   `elif` chain falls through to the base handler, and that handler's
-    ///   answer is the same "没有可执行的操作" document [`Face::fall_through`]
-    ///   writes — so this is the shipped answer plus the name of what was absent.
-    /// * An unknown `query` is answered **before** the gate. Hiding which names
-    ///   we know is worth less to a caller than fixing their typo, and the value
-    ///   comes back inside a JSON string, not inside markup
-    ///   ([`unknown_query`] says why that is safe).
+    ///   the missing parameter. **This half is ours**: in Python an empty query
+    ///   matches none of the `elif` branches, `res` keeps the two-line endpoint
+    ///   index built at `protocol.py:2116-2119`, and `:2249` serves that dict —
+    ///   a 200 that says nothing and looks like data. The answer written here is
+    ///   the one the shipped face already gives when *no POST field* matched
+    ///   (§4.7c's fix for `{'code': 0, 'message': 'success'}`): say "nothing ran"
+    ///   and name what was missing.
     fn api(&self, req: &Request) -> Response {
         // An extra path segment is **a different call**. The shipped `GET` binds
         // its first route parameter as `key`, so `/api/extra` arrives as
@@ -940,10 +1399,13 @@ impl Face {
         match route.action {
             Action::Cast => self.cast_entry(req),
             Action::CastInfo => self.cast_info(),
+            Action::ResolveStatus => self.resolve_status_entry(req),
         }
     }
 
-    /// The gate that [`GET_MANAGEMENT_ROUTES`] names, resolved and paid.
+    /// The gate a route table names, resolved and paid — **the sentence only**,
+    /// because the two faces ship the same refusal in different envelopes
+    /// ([`Face::gate_refusal`] and [`Face::post_gate_refusal`]).
     ///
     /// `None` means "answer it". The two checks are **cumulative and ordered**:
     /// the token gate first pays the management check, so a LAN caller who typed
@@ -954,28 +1416,62 @@ impl Face {
     ///
     /// The order therefore chooses the **message**, never the verdict: swapping
     /// the two branches refuses exactly the same set of requests.
-    fn gate_refusal(&self, gate: &str, req: &Request) -> Option<Response> {
+    fn gate_denial(&self, gate: &str, req: &Request) -> Option<&'static str> {
         let Some(parsed) = Gate::parse(gate) else {
             // Fail closed. The caller gets the generic management sentence — a
             // typo in our own table is not information to hand out — while the
             // log gets the name, because the only person who can fix it is the
-            // one reading this file.
+            // one reading this file. The line says "route", not "GET route": the
+            // same table-reading mistake is possible on either face, and a log
+            // that names the wrong one sends the reader to the wrong table.
             self.log.error(&format!(
-                "GET route gate {gate:?} is not a gate this port knows; refusing the request"
+                "route gate {gate:?} is not a gate this port knows; refusing the request"
             ));
-            return Some(json_answer(403, 1, MANAGEMENT_REFUSAL));
+            return Some(MANAGEMENT_REFUSAL);
         };
         let token_ok = self.token_ok(req);
         if !is_loopback(&req.remote_ip) && !token_ok {
-            return Some(json_answer(403, 1, MANAGEMENT_REFUSAL));
+            return Some(MANAGEMENT_REFUSAL);
         }
         if matches!(parsed, Gate::Token) && !token_ok {
-            return Some(json_answer(403, 1, TOKEN_REFUSAL));
+            return Some(TOKEN_REFUSAL);
         }
         None
     }
 
+    /// [`Self::gate_denial`] in the **GET** envelope: HTTP **403** with `code: 1`.
+    ///
+    /// The deviation is recorded at [`Answer::denied`] — Python sends its GET
+    /// refusals as 200 + `code: 403` exactly as it sends POST's, and this port
+    /// answers GET refusals in the status because that is what the nine
+    /// differential rows and the frontend it serves both read.
+    fn gate_refusal(&self, gate: &str, req: &Request) -> Option<Response> {
+        Some(json_answer(403, 1, self.gate_denial(gate, req)?))
+    }
+
+    /// [`Self::gate_denial`] in the **POST** envelope: HTTP **200** with
+    /// `code: 403` in the body.
+    ///
+    /// This one is **not** a deviation — it is the shipped shape. Every POST
+    /// refusal leaves `POST()` through `_body({'code': 403, …})`, and `_body`
+    /// never sets a status (`protocol.py:2518`, `:2530`, `:2539`).
+    fn post_gate_refusal(&self, gate: &str, req: &Request) -> Option<Response> {
+        Some(answer_response(
+            200,
+            &Answer::denied(self.gate_denial(gate, req)?),
+        ))
+    }
+
     /// The token compared against the stored secret, in constant time.
+    ///
+    /// Two places, in the shipped order — `headers.get('X-Macast-Token') or
+    /// self._param('token')` (`protocol.py:1620`): a **non-empty** header wins,
+    /// and an empty one falls through to the parameter rather than answering
+    /// "no token". The parameter is [`param_value`], i.e. query first and the
+    /// form body behind it, because the settings page posts its token **in the
+    /// body** (AGENTS.md §4.7b: `:data="{ …, token: cast_info.token }"`). Reading
+    /// only the query string would have this port refuse the page that the whole
+    /// token gate exists to serve.
     ///
     /// Reads with [`Setting::peek`], **never** [`macast_core::token::api_token`]:
     /// that one generates *and saves* when there is no token, and a gate is asked
@@ -988,7 +1484,12 @@ impl Face {
     /// * A stored `Api_Token` that is not a non-empty string counts as absent: an
     ///   empty secret must not authenticate anyone. Same reading as the generator.
     fn token_ok(&self, req: &Request) -> bool {
-        let given = query_value(req, "token").unwrap_or_default();
+        let from_param = param_value(req, "token");
+        let given = req
+            .header("X-Macast-Token")
+            .filter(|value| !value.is_empty())
+            .or(from_param.as_deref())
+            .unwrap_or_default();
         if given.is_empty() {
             return false;
         }
@@ -1005,6 +1506,21 @@ impl Face {
     /// `query=cast&url=<绝对地址>`. A shortcut, a bookmark, or `curl` — anything
     /// that can open a URL but cannot speak DLNA (AGENTS.md §4.7).
     ///
+    /// Reads the two arguments and hands them to [`Face::cast_url_answer`], which
+    /// is the same `_cast_url` the POST route `cast-uri` runs. **The name's key is
+    /// this face's own**: `GET` reads `title` (`protocol.py:2086`) while the POST
+    /// route reads `cast-title` (`:2705`), and the shipped code never reconciles
+    /// them. Copying the POST key here would silently break every shortcut that
+    /// passes a name, so the divergence is in the reader, not in the answer.
+    fn cast_entry(&self, req: &Request) -> Response {
+        let url = query_value(req, "url").unwrap_or_default();
+        let title = query_value(req, "title").filter(|value| !value.is_empty());
+        self.cast_url_answer(&url, title.as_deref())
+    }
+
+    /// `_cast_url` (`protocol.py:1674-1695`): the checks and the call, shared by
+    /// both faces that can change what is playing.
+    ///
     /// The URL is checked for **shape**, not scheme: a non-empty scheme and a
     /// non-empty authority ([`is_absolute_url`]). A whitelist of `http`/`https`
     /// would be this port inventing a rule the reference does not have, and would
@@ -1012,28 +1528,39 @@ impl Face {
     /// refused shapes answer **without** touching the shell — a bad URL must not
     /// leave a half-change behind in the player's state.
     ///
-    /// `cast-title` is passed through when present and non-empty; the shell owns
-    /// what it does with a name (AGENTS.md §4.2: change the address, change the
-    /// name), so an empty one here means "no opinion", not "call it nothing".
-    fn cast_entry(&self, req: &Request) -> Response {
-        let url = query_value(req, "url").unwrap_or_default();
-        if url.trim().is_empty() {
+    /// **The address is stripped, the name is not** — and the difference is
+    /// load-bearing twice. Python writes `url = (url or '').strip()` and then uses
+    /// *that* value for the regex test, for `cast_uri`, and for the `'url'` key it
+    /// echoes back, while `title` travels exactly as the caller wrote it. So
+    /// `url= http://host/a.mp4 ` casts `http://host/a.mp4`, and a name with
+    /// padding around it keeps the padding into the player's window title. Tidying
+    /// the name here would be this port quietly disagreeing with what the other
+    /// half of the row echoes.
+    ///
+    /// **The success document belongs to the shell, and it is more than two keys.**
+    /// `_cast_url` returns `{'code': 0, 'message': 'success', 'url': url,
+    /// 'title': title}'` and both callers write that dict whole (`:2086`, `:2540`),
+    /// so the `Ok` arm ships the [`Answer`] the seam handed back rather than
+    /// re-wrapping its sentence into `{code, message}`. The two shape refusals
+    /// below keep the two-key writer: Python's own refusals from that same function
+    /// are `{'code': 1, 'message': …}` and nothing else.
+    fn cast_url_answer(&self, url: &str, title: Option<&str>) -> Response {
+        let url = url.trim();
+        if url.is_empty() {
             return json_answer(200, 1, "缺少参数 url：投屏入口需要一个完整的媒体地址。");
         }
-        if !is_absolute_url(&url) {
+        if !is_absolute_url(url) {
             return json_answer(
                 200,
                 1,
                 &format!(
                     "{} 不是一个完整的媒体地址：需要带协议和主机的绝对地址，例如 http://主机/路径。",
-                    truncate_chars(url.trim(), QUERY_ECHO_MAX)
+                    truncate_chars(url, QUERY_ECHO_MAX)
                 ),
             );
         }
-        let title = query_value(req, "cast-title")
-            .filter(|value| !value.is_empty());
-        match self.management.cast_url(&url, title.as_deref()) {
-            Ok(message) => json_answer(200, 0, &message),
+        match self.management.cast_url(url, title) {
+            Ok(answer) => answer_response(200, &answer),
             Err(why) => json_answer(200, 1, &why),
         }
     }
@@ -1063,6 +1590,25 @@ impl Face {
                 token
             ),
         )
+    }
+
+    /// `query=resolve-status&job=<id>` — how far one background parse has got.
+    ///
+    /// There is **no shape check here**, and that is the shipped behaviour:
+    /// `GET` hands `kwargs.get('job')` straight to `_resolve_status`, which does a
+    /// dict lookup and answers `None` for anything not in the table. A job id this
+    /// port has never seen is not an error to report to the caller — it is the
+    /// ordinary answer to "the parse you were watching is gone", and the page
+    /// polls this route a second later, so a `code: 1` here is a *state*, not a
+    /// malformed request.
+    ///
+    /// The whole document comes from the seam, including `job` and `status`. This
+    /// route is a **pure read**: it never starts, stops, or mutates a job, so an
+    /// unanswered poll cannot consume a slot (`RESOLVE_JOBS_MAX` is accounted at
+    /// `resolve-page` only).
+    fn resolve_status_entry(&self, req: &Request) -> Response {
+        let job_id = query_value(req, "job").unwrap_or_default();
+        answer_response(200, &self.management.resolve_status(&job_id))
     }
 
     /// `/dlna/<Service>.xml` — the SCPD documents.
@@ -1178,31 +1724,113 @@ impl Face {
                 omit_body: false,
             };
         }
+        if let Some(answered) = self.post_api(req) {
+            return answered;
+        }
         self.fall_through(req)
     }
 
-    /// A `POST` that is not an action route.
+    /// The **POST** management face: [`same_site`] first, then the route table.
+    ///
+    /// `None` means "no field in this request names a route this port knows",
+    /// which is [`Face::fall_through`]'s answer rather than a 404.
+    ///
+    /// **`_same_site()` is the first question, and it is asked once.** In Python
+    /// it is the first statement after the content type
+    /// (`protocol.py:2515-2518`), so a cross-site POST hears the cross-site
+    /// sentence *even when it also carries a field no route knows* — the order
+    /// decides which of the two refusals the caller reads, and this port keeps it.
+    /// Once rather than per route because the shipped loop asks it once too; the
+    /// per-route check is `_gate_refusal`, a different question about a different
+    /// thing (address and token, not who opened the browser).
+    ///
+    /// **The SOAP branch in [`Face::post`] never pays it**, and that is measured
+    /// rather than inferred: `DLNAHandler.POST` reads the body, tests
+    /// `param == 'action'`, and only otherwise calls `super().POST(...)`
+    /// (`protocol.py:3151-3160`), so a control point's `SetAVTransportURI` —
+    /// which arrives over plain HTTP from a television that sends no `Origin` and
+    /// no `Referer` — is never judged by this question. And per [`same_site`], a
+    /// request with neither is *not* a browser at all, so the two faces stay
+    /// reachable for the senders that cannot send the header.
+    ///
+    /// There is no path condition on any of this, which is also measured: the
+    /// base `Handler.POST` looks only at the fields, never at
+    /// `cherrypy.request.path_info`. So `POST /dmr/weird` with a cross-site
+    /// `Origin` is refused here exactly as it is refused there, and a
+    /// same-site-or-no-header POST to any path with no known field ends in
+    /// [`Face::fall_through`].
+    fn post_api(&self, req: &Request) -> Option<Response> {
+        if let Err(refusal) = same_site(req, &self.setting) {
+            // [`same_site`] has already written its own warning line, and the
+            // envelope is the shipped one: **200** with `code: 403` in the body
+            // (`protocol.py:2518` — `_body` never sets a status).
+            return Some(answer_response(200, &Answer::denied(refusal)));
+        }
+        for route in POST_MANAGEMENT_ROUTES {
+            // The route is selected by the **name**, whatever its value: Python
+            // asks `if kwargs.get(name) is None: continue` (`:2535`). So
+            // `cast-uri=` present-and-empty runs `cast-uri` and lets that route
+            // discover the url is missing, rather than falling through to an
+            // answer that reads the caller's own field name back to them.
+            if !param_present(req, route.field) {
+                continue;
+            }
+            if let Some(refusal) = self.post_gate_refusal(route.gate, req) {
+                return Some(refusal);
+            }
+            return Some(match route.action {
+                PostAction::CastUrl => self.cast_url_answer(
+                    &param_value(req, "cast-uri").unwrap_or_default(),
+                    param_value(req, "cast-title")
+                        .filter(|value| !value.is_empty())
+                        .as_deref(),
+                ),
+                // Everything that decides *what a page is* — whether the text is
+                // an address at all, which job slot it gets, what `note` comes
+                // back with it — belongs to the seam. This call hands over one
+                // string and prints the dict it gets.
+                PostAction::ResolvePage => answer_response(
+                    200,
+                    &self
+                        .management
+                        .resolve_page(&param_value(req, "resolve-page").unwrap_or_default()),
+                ),
+                // `candidate` and `job` travel as **raw strings** so that
+                // 「没有这个候选项」 keeps one owner — see [`Management`].
+                PostAction::CastResolved => answer_response(
+                    200,
+                    &self.management.cast_resolved(
+                        &param_value(req, "job").unwrap_or_default(),
+                        &param_value(req, "candidate").unwrap_or_default(),
+                        &param_value(req, "target").unwrap_or_default(),
+                    ),
+                ),
+            });
+        }
+        None
+    }
+
+    /// A `POST` that is not an action route **and not a management route**.
     ///
     /// In Python this is `return super(DLNAHandler, self).POST(...)`
-    /// (`protocol.py:3164`) — the base `Handler.POST`, whose body is the
-    /// **POST** management API. That half of the management face is **not**
-    /// ported, and the reason is structural rather than a backlog item: this
-    /// face's only POST routes are `POST /<service>/action`, which the SOAP
-    /// layer claims, so there is no field-driven management endpoint for the
-    /// shipped table's §4.7c gates to be attached to. Two consequences worth
-    /// naming instead of leaving silent — `_same_site()` and
-    /// `_CODE_EXECUTION_PARAMS` (§4.7b) have **no target** here, and the
-    /// fall-through below is therefore reached by *every* POST this port does
-    /// not recognise, including a well-formed form body.
+    /// (`protocol.py:3160`) arriving at the end of the base `Handler.POST`, after
+    /// `_same_site()`, the upload loop, and the whole `POST_ROUTES` walk. The
+    /// shipped table has **16** rows; [`POST_MANAGEMENT_ROUTES`] carries the three
+    /// this port has implemented, so a field Python knows and this port has not
+    /// ported yet (`clear-log`, `set-subtitle-show`, `mirror-action`,
+    /// `install-webrtc-extras`, …) lands here and is echoed as 不认识字段. That is
+    /// the honest half of a partial port: a page button whose backend does not
+    /// exist yet must not read as "saved", and §4.7c's original bug was exactly
+    /// `{'code': 0, 'message': 'success'}` on an unrecognised field.
     ///
-    /// The **GET** half, by contrast, *is* ported — see [`Face::api`]: the
-    /// web-cast entry and `cast-info`, with the same gate-is-data shape
-    /// (§4.7c) and the same fail-closed refusal. That asymmetry is the current
-    /// state of this port, and it is why the paragraph above says "no POST
-    /// management routes exist" rather than "the management API is missing".
+    /// The **file** upload loop (`protocol.py:2521-2533`) is not ported at all,
+    /// and its absence is what makes `plugin-file` reach the answer below: Python
+    /// dispatches uploads by field name *before* the route table, so it never
+    /// gets to `unknown` there. `FILE_ROUTE_PARAMS` exists to give this port the
+    /// same silence about that one name without pretending to serve it.
     ///
     /// What this method answers is what the base handler answers for any request
-    /// it does not recognise: **HTTP 200**, not 501 — `protocol.py:2543-2551`
+    /// it does not recognise: **HTTP 200**, not 501 — `protocol.py:2548-2551`
     /// builds `{'code': 1, 'message': '没有可执行的操作…'}` and returns it, and
     /// cherrypy turns a returned dict into a 200 with the JSON tool. A 501 here
     /// would be a *better* HTTP answer and a **worse** port: the point of the
@@ -1210,7 +1838,7 @@ impl Face {
     /// that also means "I refuse to implement this" would read differently to a
     /// sender that has already learned the 200/`code: 1` pair.
     ///
-    /// [`Face::api`]: Face::api
+    /// [`Management`]: crate::http::Management
     fn fall_through(&self, req: &Request) -> Response {
         let mut all = BTreeSet::new();
         for (name, _) in &req.query {
@@ -1453,13 +2081,14 @@ fn epoch_secs(when: SystemTime) -> i64 {
     }
 }
 
-/// The names an `application/x-www-form-urlencoded` body declares.
+/// The pairs an `application/x-www-form-urlencoded` body declares.
 ///
 /// Read **only** when the `Content-Type` says form-urlencoded, because that is
 /// the only body cherrypy merges into `kwargs`, and a SOAP envelope must not be
-/// scanned for field names. Values are ignored; only the names reach the
-/// "unrecognised fields" answer. Not percent-decoded — see [`parse_query`].
-fn form_field_names(req: &Request) -> Vec<String> {
+/// scanned for field names. Percent-decoded like the query string, from a lossy
+/// copy of the bytes — see [`unquote_plus`] for the one place that reading
+/// differs from cherrypy's.
+fn form_pairs(req: &Request) -> Vec<(String, String)> {
     let content_type = req.header("Content-Type").unwrap_or("");
     if !content_type
         .to_ascii_lowercase()
@@ -1467,14 +2096,23 @@ fn form_field_names(req: &Request) -> Vec<String> {
     {
         return Vec::new();
     }
-    // Names **by value**: the body lives in `req`, the text we parse is a lossy
+    // Pairs **by value**: the body lives in `req`, the text we parse is a lossy
     // copy of it, and a `&str` would have to borrow from a `String` this
     // function drops. The copy is the cheaper defect to own.
     let text = String::from_utf8_lossy(&req.body);
     parse_query(&text)
         .into_iter()
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
+}
+
+/// The names an `application/x-www-form-urlencoded` body declares — see
+/// [`form_pairs`]. Values are ignored here; only the names reach the
+/// "unrecognised fields" answer.
+fn form_field_names(req: &Request) -> Vec<String> {
+    form_pairs(req)
+        .into_iter()
         .map(|(name, _)| name)
-        .filter(|name| !name.is_empty())
         .collect()
 }
 
@@ -1494,6 +2132,53 @@ fn query_value(req: &Request, name: &str) -> Option<String> {
         .map(|(_, value)| value.clone())
 }
 
+/// One parameter, read the way cherrypy merges a request: **query first, then
+/// the form body**. `None` means nobody said that word at all.
+///
+/// The order is a measurement, not a preference. `process_query_string` runs
+/// **before** the body is processed and both write into **the same dict**
+/// (`_cprequest.py:700-701` then `:712-713`, which hands `RequestBody`
+/// `request_params=self.params` by reference at `:693`), and the second writer
+/// *appends* where the key is already there:
+///
+/// ```text
+/// if key in request_params:  ... list(...).append(value)
+/// else:                      request_params[key] = value
+/// ```
+/// (`_cpreqbody.py:988-996`, and `process_urlencoded` at `:143-166` does the
+/// same inside the body itself). So `?token=A` over a body `token=B` arrives as
+/// `['A', 'B']`, and the shipped reader takes the **first** element
+/// (`Handler._param`, `protocol.py:1597`) — which is the query's.
+///
+/// The consequence that matters for a gate: `?token=` (there, and empty) over a
+/// body `token=secret` gives `['', 'secret'][0] == ''`, and
+/// `headers.get(...) or self._param('token')` is therefore falsy. A caller who
+/// leaves an empty `token=` in the query string while putting the real secret in
+/// the form is **refused**, and this port refuses them too.
+fn param_value(req: &Request, name: &str) -> Option<String> {
+    if let Some(from_query) = query_value(req, name) {
+        return Some(from_query);
+    }
+    form_pairs(req)
+        .into_iter()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value)
+}
+
+/// Whether a request **names** a parameter, whatever value it carries.
+///
+/// This is the test the shipped route loop makes: `if kwargs.get(name) is None:
+/// continue` (`protocol.py:2535`). It asks the **key**, never the value, so
+/// `cast-uri=` (present and empty) *selects* that route and the route's own
+/// handler is the one that discovers the url is missing — the answer the user
+/// reads is 「缺少参数 url」, not a fall-through that reads their own field name
+/// back to them. A value-based match would fall through instead, and the two
+/// documents say opposite things about whether the request made sense.
+fn param_present(req: &Request, name: &str) -> bool {
+    req.query.iter().any(|(key, _)| key == name)
+        || form_pairs(req).iter().any(|(key, _)| key == name)
+}
+
 /// A JSON answer in the one shape [`py_json_dumps_indented`] measures.
 ///
 /// `code` is the shipped protocol's own field (`0` = it happened, `1` = nothing
@@ -1508,6 +2193,17 @@ fn json_answer(status: u16, code: i64, message: &str) -> Response {
         JSON_CONTENT_TYPE,
         py_json_dumps_indented(code, message).into_bytes(),
     )
+}
+
+/// [`json_answer`] for the routes whose dict carries more than two keys.
+///
+/// `_resolve_page` answers `{code, message, job, url, note}` and
+/// `_post_cast_resolved` reaches success through `_cast_url` and then adds
+/// `relay`/`note` — so a `(code, message)` pair cannot describe what the shipped
+/// handler writes, and the order of the rest is the route's own
+/// ([`Answer`]).
+fn answer_response(status: u16, answer: &Answer) -> Response {
+    Response::new(status, JSON_CONTENT_TYPE, answer_bytes(answer))
 }
 
 /// The accepted peer's address, **without** its port, and `''` when the OS
@@ -1618,16 +2314,107 @@ fn unknown_query(value: &str) -> Response {
     )
 }
 
+/// `json.dumps(obj, indent=4)` for an arbitrary document.
+///
+/// Written out rather than pulled from a serde formatter because **indent and
+/// key order are the wire format**: serde_json's pretty printer uses two spaces,
+/// and `serde_json::to_string` never inserts the newlines at all. The recursion
+/// is Python's own shape -- `_indent` levels of four spaces each, `,\n` between
+/// items (the item separator loses its space the moment `indent` is set), `": "`
+/// between key and value, and **`{}` / `[]` with no whitespace** for the empty
+/// containers.
+///
+/// Numbers go out through serde_json's `Display`, which is shortest-roundtrip
+/// like Python's `repr`, so a rounded `4.0` keeps its `.0` (`py_round1`'s answers
+/// are floats and an integer-looking elapsed time is a different document).
+/// `Value::Bool` and `Value::Null` agree with Python's `true`/`false`/`null`
+/// because JSON inherited those spellings from the same place.
+fn py_json_dumps(value: &Value) -> String {
+    dump_at(value, 0)
+}
+
+/// [`py_json_dumps`] at one nesting level. Split out so the pad width is the
+/// only arithmetic in the function, and so a test can reach a nested fragment.
+fn dump_at(value: &Value, level: usize) -> String {
+    let pad = " ".repeat((level + 1) * 4);
+    let close = " ".repeat(level * 4);
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => format!("\"{}\"", py_json_quote(text)),
+        Value::Array(items) => {
+            if items.is_empty() {
+                return "[]".to_string();
+            }
+            let mut out = String::from("[\n");
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&pad);
+                out.push_str(&dump_at(item, level + 1));
+            }
+            out.push('\n');
+            out.push_str(&close);
+            out.push(']');
+            out
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                return "{}".to_string();
+            }
+            let mut out = String::from("{\n");
+            for (index, (key, item)) in map.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&pad);
+                out.push('"');
+                out.push_str(&py_json_quote(key));
+                out.push_str("\": ");
+                out.push_str(&dump_at(item, level + 1));
+            }
+            out.push('\n');
+            out.push_str(&close);
+            out.push('}');
+            out
+        }
+    }
+}
+
+/// [`py_json_dumps_indented`] and [`answer_bytes`], given an [`Answer`].
+///
+/// The order is the one [`Answer`] documents: `code`, `message`, then the extra
+/// keys as they were added. `serde_json::Map` is insertion-ordered here because
+/// `preserve_order` is a workspace feature -- **and this is the one place that
+/// depends on it**, so the two-key layout test that measures
+/// [`py_json_dumps_indented`]'s 84-byte body is also the witness that the
+/// feature is on.
+fn answer_value(answer: &Answer) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert("code".to_string(), Value::from(answer.code));
+    map.insert("message".to_string(), Value::String(answer.message.clone()));
+    for (name, value) in &answer.fields {
+        map.insert(name.clone(), value.clone());
+    }
+    Value::Object(map)
+}
+
+/// The bytes `_body(...)` sends for an [`Answer`].
+fn answer_bytes(answer: &Answer) -> Vec<u8> {
+    py_json_dumps(&answer_value(answer)).into_bytes()
+}
+
 /// `json.dumps(obj, indent=4)` for the one two-key dict the base handler
-/// returns. Written out rather than pulled from a serde formatter because
-/// **indent and key order are the wire format**: serde_json's pretty printer
-/// uses two spaces, and a sorted-keys map would put `code` before `message` by
-/// luck rather than by rule.
+/// returns. Kept as a named function because it is the shape the measured
+/// bodies assert against, and because a caller that only has a sentence should
+/// not have to build an [`Answer`] to say it.
 fn py_json_dumps_indented(code: i64, message: &str) -> String {
-    format!(
-        "{{\n    \"code\": {code},\n    \"message\": \"{}\"\n}}",
-        py_json_quote(message)
-    )
+    let mut map = serde_json::Map::new();
+    map.insert("code".to_string(), Value::from(code));
+    map.insert("message".to_string(), Value::String(message.to_string()));
+    py_json_dumps(&Value::Object(map))
 }
 
 /// `json.dumps(..., ensure_ascii=True)`'s string encoder.
@@ -2083,6 +2870,7 @@ mod tests {
     const DUMPS_OK_BODY: &str = "{\n    \"code\": 0,\n    \"message\": \"ok\"\n}";
     const DUMPS_QUOTED_BODY: &str = "{\n    \"code\": 2,\n    \"message\": \"he said \\\"hi\\\"\"\n}";
     const REFUSAL_405_BODY: &str = "<html><body><h2>405 Method Not Allowed</h2></body></html>";
+    const DENIED_DOC: &str = "{\n    \"code\": 403,\n    \"message\": \"";
     const QUOTE_IN: &str = "a\"b\\c\nd\te\rf\u{8}g\u{c}h/i\u{1}j没k\u{1F600}";
     const QUOTE_OUT: &str = "a\\\"b\\\\c\\nd\\te\\rf\\bg\\fh/i\\u0001j\\u6ca1k\\ud83d\\ude00";
 
@@ -2381,9 +3169,19 @@ mod tests {
     /// only this file reads, so a test that asserts on the answer is asserting on
     /// the fake — the assertions below therefore check the **document** shape
     /// (`code` 0 vs 1) and the log, not the wording.
+    ///
+    /// The three resolve methods log **their arguments** the same way, and each
+    /// answers with the key order [`Management`] says the shipped face writes:
+    /// `job` before `url`/`note`, `job` before `status`. A test that wants to read
+    /// those extras back can then assert on **which keys came** and in what order
+    /// (the serializer prints `fields` in order), which is a fact about this file,
+    /// while the values themselves stay the fake's invention.
     struct FakeManagement {
         refuses: AtomicBool,
         calls: Mutex<Vec<(String, Option<String>)>>,
+        resolve_calls: Mutex<Vec<String>>,
+        status_calls: Mutex<Vec<String>>,
+        cast_resolved_calls: Mutex<Vec<(String, String, String)>>,
     }
 
     impl FakeManagement {
@@ -2391,6 +3189,9 @@ mod tests {
             FakeManagement {
                 refuses: AtomicBool::new(false),
                 calls: Mutex::new(Vec::new()),
+                resolve_calls: Mutex::new(Vec::new()),
+                status_calls: Mutex::new(Vec::new()),
+                cast_resolved_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -2404,10 +3205,25 @@ mod tests {
         fn calls(&self) -> Vec<(String, Option<String>)> {
             self.calls.lock().expect("calls").clone()
         }
+
+        fn resolve_calls(&self) -> Vec<String> {
+            self.resolve_calls.lock().expect("resolve calls").clone()
+        }
+
+        fn status_calls(&self) -> Vec<String> {
+            self.status_calls.lock().expect("status calls").clone()
+        }
+
+        fn cast_resolved_calls(&self) -> Vec<(String, String, String)> {
+            self.cast_resolved_calls
+                .lock()
+                .expect("cast-resolved calls")
+                .clone()
+        }
     }
 
     impl Management for FakeManagement {
-        fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String> {
+        fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String> {
             self.calls
                 .lock()
                 .expect("calls")
@@ -2415,7 +3231,54 @@ mod tests {
             if self.refuses.load(Ordering::SeqCst) {
                 return Err("播放器拒绝了这次投屏".to_string());
             }
-            Ok(format!("已投屏：{url}"))
+            Ok(Answer::ok("success")
+                .with("url", Value::String(url.to_string()))
+                .with("title", match title {
+                    Some(name) => Value::String(name.to_string()),
+                    None => Value::Null,
+                }))
+        }
+
+        fn resolve_page(&self, text: &str) -> Answer {
+            self.resolve_calls
+                .lock()
+                .expect("resolve calls")
+                .push(text.to_string());
+            Answer::ok("success")
+                .with("job", Value::String(format!("job-{}", text.chars().count())))
+                .with("url", Value::String(text.to_string()))
+                .with("note", Value::String("从分享原文里读到网址".to_string()))
+        }
+
+        fn resolve_status(&self, job_id: &str) -> Answer {
+            self.status_calls
+                .lock()
+                .expect("status calls")
+                .push(job_id.to_string());
+            if job_id.is_empty() {
+                return Answer::fail("没有这个解析任务（超时或已重启）")
+                    .with("job", Value::String(String::new()))
+                    .with("status", Value::Null);
+            }
+            Answer::ok("success")
+                .with("job", Value::String(job_id.to_string()))
+                .with(
+                    "status",
+                    serde_json::json!({"done": true, "step": 4}),
+                )
+        }
+
+        fn cast_resolved(&self, job: &str, candidate: &str, target: &str) -> Answer {
+            self.cast_resolved_calls
+                .lock()
+                .expect("cast-resolved calls")
+                .push((job.to_string(), candidate.to_string(), target.to_string()));
+            if job.is_empty() {
+                return Answer::fail("解析任务已经不在了，请重新解析");
+            }
+            Answer::ok("success")
+                .with("relay", Value::String(format!("/relay/{job}-{candidate}/media")))
+                .with("target", Value::String(target.to_string()))
         }
     }
 
@@ -2599,17 +3462,40 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_keeps_names_verbatim() {
+    fn parse_query_decodes_names_and_values() {
         crate::pin_test_dir();
-        let req = request("GET", "/?a=1&weird%20name=x&flag", &[]);
+        let req = request("GET", "/?a=1&weird%20name=x&flag&skip-me=&p=%2B+q&r=%zz&s=%", &[]);
         assert_eq!(
             req.query,
             vec![
                 ("a".to_string(), "1".to_string()),
-                ("weird%20name".to_string(), "x".to_string()),
+                // A name is decoded too, exactly as `unquote_plus(nv[0])` does.
+                ("weird name".to_string(), "x".to_string()),
                 ("flag".to_string(), "".to_string()),
+                // An empty pair is skipped, whatever it decodes to.
+                ("skip-me".to_string(), "".to_string()),
+                // `%2B` is a literal `+`; a written `+` is a space.
+                ("p".to_string(), "+ q".to_string()),
+                // Not two hex digits: the `%` stays and the item follows it.
+                ("r".to_string(), "%zz".to_string()),
+                // A trailing `%` has no two characters to read.
+                ("s".to_string(), "%".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn an_encoded_byte_joins_the_run_it_arrives_in() {
+        crate::pin_test_dir();
+        // The decode is byte-level, so `é` and a lone `0xE7` land in one buffer
+        // and the UTF-8 read hands back one replacement character — not the two
+        // characters a per-character decoder would invent.
+        let req = request("GET", "/?x=%C3%A9%E7", &[]);
+        assert_eq!(req.query[0].1, "é\u{FFFD}");
+        // `%C3%A9` on its own is a whole `é`, and a `%` that cannot start a
+        // sequence does not eat the characters after it.
+        let req = request("GET", "/?x=%C3%A9", &[]);
+        assert_eq!(req.query[0].1, "é");
     }
 
     #[test]
@@ -3567,21 +4453,51 @@ mod tests {
     }
 
     #[test]
-    fn query_values_arrive_exactly_as_typed() {
+    fn query_values_arrive_percent_decoded() {
         crate::pin_test_dir();
-        // Nothing on this path is percent-decoded, and that is the measured
-        // behaviour of the shipped receiver. `%2Fpath.mp4` therefore is **not** an
-        // address (a decoded slash would make it one), and `%20` survives
-        // `.trim()` — so both land on the shape refusal, not the missing-one.
-        let (face, management) = harness_management("no-decoding");
+        // This face decodes, and the answer changes shape because of it.
+        // `%2Fpath.mp4` becomes `/path.mp4` — still refused, but the echo carries
+        // the address the caller really sent, not the wire bytes. `%20` becomes a
+        // space, and the strip in [`Face::cast_url_answer`] then finds nothing, so
+        // the refusal is the missing-one rather than the bad-shape one. The two
+        // sentences are different questions, and a reader on the other end of a
+        // shortcut picks the wrong fix if we say the wrong one.
+        let (face, management) = harness_management("decoding");
         store_token(&face.setting, Some(SECRET));
-        for value in ["%2Fpath.mp4", "%20"] {
+        for (value, expected) in [
+            ("%2Fpath.mp4", json_body(1, &not_absolute("/path.mp4"))),
+            ("%20", json_body(1, MISSING_URL)),
+        ] {
             let target = format!("/api?query=cast&url={value}&token={SECRET}");
             let response = face.answer(&get_api(&target, LOCAL));
-            assert_eq!(response.status, 200);
-            assert_eq!(response.body, json_body(1, &not_absolute(value)), "{value}");
+            assert_eq!(response.status, 200, "{value}");
+            assert_eq!(response.body, expected, "{value}");
         }
         assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn an_encoded_address_is_still_an_address() {
+        crate::pin_test_dir();
+        // The reason decoding is load-bearing rather than cosmetic: a browser
+        // building this URL (`FormData`, `URLSearchParams`) and `curl
+        // --data-urlencode` percent-encode every `:` and `/`, so the only form of
+        // the address that ever arrives here is `https%3A%2F%2F…`. Read verbatim
+        // it has no scheme separator and no host, and the caller is told their
+        // perfect address "不是一个完整的媒体地址" — the entry this route exists
+        // for would be unusable from a browser.
+        let (face, management) = harness_management("encoded-cast");
+        store_token(&face.setting, Some(SECRET));
+        let target =
+            format!("/api?query=cast&url=https%3A%2F%2Fhost%2Fa.mp4&token={SECRET}");
+        let response = face.answer(&get_api(&target, LOCAL));
+        assert_eq!(response.status, 200);
+        assert!(response.body.starts_with(OK_DOC.as_bytes()));
+        assert_eq!(
+            management.calls(),
+            vec![("https://host/a.mp4".to_string(), None)],
+            "the shell is handed the decoded address"
+        );
     }
 
     #[test]
@@ -3626,20 +4542,31 @@ mod tests {
     fn the_name_travels_with_the_address() {
         crate::pin_test_dir();
         // AGENTS.md §4.2: the route that changes the player's address must change
-        // its name too. `cast-title` is the sender's own name for the media; an
-        // empty one means "no opinion", not "call it nothing".
+        // its name too. **This face's key for the name is `title`** (`:2086`), not
+        // the POST route's `cast-title` (`:2705`) -- the shipped code never
+        // reconciles the two, so a shortcut that passes `cast-title` here gets a
+        // silent "no opinion". An empty name means "no opinion", not
+        // "call it nothing".
         let (face, management) = harness_management("cast-title");
         store_token(&face.setting, Some(SECRET));
-        let named = format!("{CAST_TARGET}&cast-title=名称&token={SECRET}");
+        let named = format!("{CAST_TARGET}&title=名称&token={SECRET}");
         assert_eq!(face.answer(&get_api(&named, LOCAL)).status, 200);
         assert_eq!(
             management.calls()[0].1,
             Some("名称".to_string()),
             "the title the caller gave"
         );
-        let unnamed = format!("{CAST_TARGET}&cast-title=&token={SECRET}");
+        let unnamed = format!("{CAST_TARGET}&title=&token={SECRET}");
         assert_eq!(face.answer(&get_api(&unnamed, LOCAL)).status, 200);
         assert_eq!(management.calls()[1].1, None);
+        // The other face's key names nothing on this one.
+        let wrong_key = format!("{CAST_TARGET}&cast-title=名称&token={SECRET}");
+        assert_eq!(face.answer(&get_api(&wrong_key, LOCAL)).status, 200);
+        assert_eq!(
+            management.calls()[2].1,
+            None,
+            "cast-title is the POST face's spelling; here it is a helper param"
+        );
     }
 
     #[test]
@@ -3870,6 +4797,358 @@ mod tests {
         let response = face.answer(&get_api(&target, LOCAL));
         assert_eq!(response.status, 403);
         assert_eq!(response.body, json_body(1, TOKEN_REFUSAL));
+        assert!(management.calls().is_empty());
+    }
+
+    /// A `POST /api?…` whose body is a form, from a peer the caller names.
+    ///
+    /// `Content-Length` is computed from the body rather than written by hand,
+    /// because [`pre_route_status`] answers **411** for a POST that declares no
+    /// length -- and 411 is a *pre-route* status, so a test that forgot it does
+    /// not fail on the gate it meant to exercise but on a status line that came
+    /// from before the dispatcher ran. That reads like a broken gate and is a
+    /// broken fixture.
+    fn post_form(target: &str, body: &str, remote: &str, headers: &[(&str, &str)]) -> Request {
+        let length = body.as_bytes().len().to_string();
+        let mut all = vec![
+            ("Content-Type", "application/x-www-form-urlencoded"),
+            ("Content-Length", length.as_str()),
+        ];
+        all.extend_from_slice(headers);
+        let mut req = request_with_body("POST", target, &all, body.as_bytes());
+        req.remote_ip = remote.to_string();
+        req
+    }
+
+    /// A bodyless `POST /api?…` (`Content-Length: 0`), fields from the query only.
+    fn post_query(target: &str, remote: &str, headers: &[(&str, &str)]) -> Request {
+        let mut all = vec![("Content-Length", "0")];
+        all.extend_from_slice(headers);
+        let mut req = request("POST", target, &all);
+        req.remote_ip = remote.to_string();
+        req
+    }
+
+    #[test]
+    fn a_cross_site_post_hears_the_browser_question_at_http_200() {
+        crate::pin_test_dir();
+        // AGENTS.md §4.7b: the page is served from a name, so the question is
+        // asked against **names**. `evil.test` under DNS rebinding resolves to
+        // 127.0.0.1 and is still cross-site -- which is why the fixture here is
+        // a foreign name and not a foreign address.
+        let (face, management) = face_on_port_management("post-cross-site", TEST_PORT);
+        let response = face.answer(&post_form(
+            "/api",
+            "cast-uri=http://host/a.mp4",
+            LAN,
+            &[("Origin", "http://evil.test")],
+        ));
+        let body = text(&response.body);
+        assert_eq!(response.status, 200);
+        assert!(body.starts_with(DENIED_DOC), "{body}");
+        // ASCII survives `ensure_ascii`, so both halves of the sentence -- where
+        // you came from, and which address to use instead -- are assertable.
+        assert!(body.contains("evil.test"), "{body}");
+        assert!(body.contains("http://127.0.0.1:58993/"), "{body}");
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn the_browser_question_is_asked_once_and_before_the_table() {
+        crate::pin_test_dir();
+        // A cross-site request that also carries a field no route knows could
+        // hear two different sentences. `post_api` asks the browser question
+        // first and returns, so it hears the first -- and the fall-through
+        // document, which reads its own field name back to it, never appears.
+        let (face, management) = harness_management("post-once");
+        let response = face.answer(&post_form(
+            "/api",
+            "clear-log=1&cast-uri=http://host/a.mp4",
+            LAN,
+            &[("Origin", "http://evil.test")],
+        ));
+        let body = text(&response.body);
+        assert_eq!(response.status, 200);
+        assert!(body.starts_with(DENIED_DOC), "{body}");
+        assert!(body.contains("evil.test"), "{body}");
+        assert_ne!(response.body, FALL_THROUGH_BODY.as_bytes());
+        assert!(!body.contains("clear-log"), "{body}");
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn an_origin_port_is_not_compared() {
+        crate::pin_test_dir();
+        // The shipped code deliberately does not check the port: when 58880 is
+        // taken, Macast itself binds a random one, so pinning it would lock the
+        // real page out of its own management API -- and there is no cookie here
+        // to ride anyway.
+        let (face, management) = harness_management("post-origin-port");
+        let response = face.answer(&post_form(
+            "/api",
+            "resolve-page=http://host/watch",
+            LOCAL,
+            &[("Origin", "http://127.0.0.1:51234")],
+        ));
+        assert_eq!(response.status, 200);
+        assert!(text(&response.body).starts_with(OK_DOC), "{}", text(&response.body));
+        assert_eq!(management.resolve_calls(), vec!["http://host/watch".to_string()]);
+    }
+
+    #[test]
+    fn origin_wins_over_referer_in_both_directions() {
+        crate::pin_test_dir();
+        // A page chooses its own `Referer`, so `Referer` is only a fallback and
+        // `Origin` is the word that settles the answer -- including when the two
+        // disagree, which is exactly what an attacker would send.
+        let (face, management) = harness_management("post-origin-wins");
+        let refused = face.answer(&post_form(
+            "/api",
+            "cast-uri=http://host/a.mp4",
+            LOCAL,
+            &[("Origin", "http://evil.test"), ("Referer", "http://127.0.0.1:58880/")],
+        ));
+        assert!(text(&refused.body).starts_with(DENIED_DOC));
+        assert!(management.calls().is_empty());
+
+        let served = face.answer(&post_form(
+            "/api",
+            "cast-uri=http://host/a.mp4",
+            LOCAL,
+            &[("Origin", "http://127.0.0.1:58880/"), ("Referer", "http://evil.test/x")],
+        ));
+        assert!(text(&served.body).starts_with(OK_DOC), "{}", text(&served.body));
+        assert_eq!(management.calls().len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_origin_is_refused_rather_than_ignored() {
+        crate::pin_test_dir();
+        // Two shapes that do not parse: a port that is not a number, and a
+        // bracketed IPv6 host with no closing bracket. Both must be *refused*
+        // with the sentence that says so -- "could not read it" is not a pass,
+        // and it is not the cross-site sentence either, because that one names a
+        // host the caller never sent.
+        for origin in ["http://127.0.0.1:abc", "http://[::1"] {
+            let (face, management) = harness_management("post-bad-origin");
+            let response = face.answer(&post_form(
+                "/api",
+                "cast-uri=http://host/a.mp4",
+                LOCAL,
+                &[("Origin", origin)],
+            ));
+            assert_eq!(response.status, 200, "{origin}");
+            assert_eq!(
+                response.body,
+                json_body(403, "无法识别的来源站点"),
+                "{origin}"
+            );
+            assert!(management.calls().is_empty(), "{origin}");
+        }
+    }
+
+    #[test]
+    fn no_origin_means_not_a_browser_so_the_gate_is_the_address_or_the_token() {
+        crate::pin_test_dir();
+        // curl, a phone Shortcut, Home Assistant: no `Origin`, no `Referer`. The
+        // shipped code then falls through to the address-and-token gate rather
+        // than treating the absence as a cross-site hit.
+        let (face, management) = harness_management("post-no-origin-lan");
+        store_token(&face.setting, Some(SECRET));
+        let refused = face.answer(&post_form(
+            "/api",
+            "cast-uri=http://host/a.mp4",
+            LAN,
+            &[("Content-Type", "application/x-www-form-urlencoded")],
+        ));
+        assert_eq!(refused.status, 200);
+        assert_eq!(refused.body, json_body(403, MANAGEMENT_REFUSAL));
+        assert!(management.calls().is_empty());
+
+        let served = face.answer(&post_query(
+            "/api?cast-uri=http://host/a.mp4&cast-title=x",
+            LAN,
+            &[("X-Macast-Token", SECRET)],
+        ));
+        assert!(text(&served.body).starts_with(OK_DOC), "{}", text(&served.body));
+        assert_eq!(management.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_form_body_reaches_the_cast_route_trimmed_and_named() {
+        crate::pin_test_dir();
+        // The face trims the address (a form field arrives with the padding the
+        // caller typed) and passes the title through untouched. The answer the
+        // seam builds is forwarded as an indented document with its keys in the
+        // order the seam wrote them -- measured here, not asserted per field.
+        let (face, management) = harness_management("post-cast-form");
+        // A form body, not a query string: those spaces are legal inside a body
+        // and illegal in a request line, and `parse_query` keeps the padding
+        // verbatim either way, so the trim this test names is the face's work.
+        let response = face.answer(&post_form(
+            "/api",
+            "cast-uri=  http://host/a.mp4  &cast-title=名称",
+            LOCAL,
+            &[],
+        ));
+        let calls = management.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "http://host/a.mp4");
+        assert_eq!(calls[0].1.as_deref(), Some("名称"));
+        let expected = answer_bytes(
+            &Answer::ok("success")
+                .with("url", Value::String("http://host/a.mp4".to_string()))
+                .with("title", Value::String("名称".to_string())),
+        );
+        assert_eq!(response.body, expected);
+    }
+
+    #[test]
+    fn an_empty_cast_uri_selects_the_route_and_is_the_route_s_problem() {
+        crate::pin_test_dir();
+        // Route selection asks only whether the **name** is present
+        // (`protocol.py:2535`), so `cast-uri=` runs the route and the route
+        // discovers the missing address. The fall-through document would have
+        // echoed the caller's own field back and said something different.
+        let (face, management) = harness_management("post-empty-cast-uri");
+        let response = face.answer(&post_query("/api?cast-uri=", LOCAL, &[]));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, json_body(1, MISSING_URL));
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn an_empty_query_title_beats_a_body_title() {
+        crate::pin_test_dir();
+        // cherrypy merges query first and *appends* the body, so `cast-title=`
+        // over a body `cast-title=名称` arrives as `['', '名称']` and the first
+        // element is the query's empty one. The face then filters the empty
+        // string away, so the player is named with no title at all rather than
+        // with the one the caller also sent.
+        let (face, management) = harness_management("post-title-merge");
+        let response = face.answer(&post_form(
+            "/api?cast-uri=http://host/a.mp4&cast-title=",
+            "cast-title=名称",
+            LOCAL,
+            &[],
+        ));
+        let calls = management.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, None);
+        let expected = answer_bytes(
+            &Answer::ok("success")
+                .with("url", Value::String("http://host/a.mp4".to_string()))
+                .with("title", Value::Null),
+        );
+        assert_eq!(response.body, expected);
+    }
+
+    #[test]
+    fn the_resolve_route_hands_the_whole_text_to_the_seam() {
+        crate::pin_test_dir();
+        // The seam's contract is that it receives the pasted text **as typed** --
+        // share copy, wrapping sentence and all -- and that it alone decides
+        // whether that is an address. An empty field still selects the route
+        // (same rule as `cast-uri=`), and the seam then gets the empty string.
+        let (face, management) = harness_management("post-resolve-empty");
+        let empty = face.answer(&post_query("/api?resolve-page=", LOCAL, &[]));
+        assert_eq!(management.resolve_calls(), vec![String::new()]);
+        assert_ne!(empty.body, FALL_THROUGH_BODY.as_bytes());
+
+        let (face, management) = harness_management("post-resolve-text");
+        let pasted = "看看这个 https://host/watch/7，复制打开App";
+        let served = face.answer(&post_form("/api", &format!("resolve-page={pasted}"), LOCAL, &[]));
+        assert_eq!(management.resolve_calls(), vec![pasted.to_string()]);
+        let body = text(&served.body);
+        assert!(body.starts_with(OK_DOC), "{body}");
+        // Key order is the seam's insertion order, forwarded: job, url, note.
+        let job = body.find("\"job\"").expect("job key");
+        let url = body.find("\"url\"").expect("url key");
+        let note = body.find("\"note\"").expect("note key");
+        assert!(job < url && url < note, "{body}");
+    }
+
+    #[test]
+    fn the_cast_resolved_route_passes_all_three_coordinates() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("post-cast-resolved");
+        let response = face.answer(&post_query(
+            "/api?cast-resolved=1&job=7&candidate=2&target=tv",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(
+            management.cast_resolved_calls(),
+            vec![("7".to_string(), "2".to_string(), "tv".to_string())]
+        );
+        let body = text(&response.body);
+        assert!(body.starts_with(OK_DOC), "{body}");
+        assert!(body.contains("\"relay\""), "{body}");
+    }
+
+    #[test]
+    fn the_table_order_decides_when_a_request_names_several_actions() {
+        crate::pin_test_dir();
+        // Position is semantics: the first field present wins and the later rows
+        // do not run at all. Here the request body lists `cast-resolved` before
+        // `cast-uri`, so a table read in request order would start a relay cast
+        // and this one casts -- and only one seam is touched either way, which is
+        // the part a wrong precedence would silently double-run.
+        let (face, management) = harness_management("post-precedence-first");
+        let response = face.answer(&post_form(
+            "/api",
+            "cast-resolved=1&resolve-page=http://host/watch&cast-uri=http://host/a.mp4",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(management.calls().len(), 1);
+        assert!(management.resolve_calls().is_empty());
+        assert!(management.cast_resolved_calls().is_empty());
+        assert!(text(&response.body).starts_with(OK_DOC));
+
+        let (face, management) = harness_management("post-precedence-second");
+        face.answer(&post_form(
+            "/api",
+            "resolve-page=http://host/watch&cast-resolved=1&job=7",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(management.resolve_calls().len(), 1);
+        assert!(management.cast_resolved_calls().is_empty());
+        assert!(management.calls().is_empty());
+    }
+
+    #[test]
+    fn the_soap_path_never_pays_the_browser_question() {
+        crate::pin_test_dir();
+        // Measured, not inferred: the shipped DLNA handler's POST (`protocol.py:3154`)
+        // dispatches the action before anything about the API face runs, so a
+        // control point -- which is not a browser and does not send `Origin`, and
+        // whose request would fail if it did -- is unaffected. A test that put the
+        // same-site check in front of the SOAP branch would break every TV on the
+        // LAN while passing every API test above.
+        let setting = ported_setting("post-soap-exempt", TEST_PORT);
+        let control = Arc::new(FakeControl::soap_ok());
+        let management = Arc::new(FakeManagement::new());
+        let face = face_built(
+            setting,
+            control.clone(),
+            Arc::new(FakeSubscription::new()),
+            management.clone(),
+        );
+        let response = face.answer(&request_with_body(
+            "POST",
+            "/AVTransport/action",
+            &[
+                ("Origin", "http://evil.test"),
+                ("Content-Type", "application/x-www-form-urlencoded"),
+                ("Content-Length", "11"),
+            ],
+            b"<envelope/>",
+        ));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, crate::soap::SOAP_CONTENT_TYPE);
+        assert_eq!(control.calls(), 1);
         assert!(management.calls().is_empty());
     }
 }

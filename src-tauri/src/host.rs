@@ -31,18 +31,27 @@
 //!   record that the request happened.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
+use macast_cast::relay;
+use macast_cast::resolve;
 use macast_core::logging::{Level, Logger};
+use macast_core::net;
 use macast_core::paths;
 use macast_core::setting::{Key, Setting};
+use macast_core::token;
 use macast_mpv::argv;
 use macast_mpv::player::{Host, Player, StateCall};
+use macast_upnp::http::Answer;
 use macast_upnp::store::SharedBroadcast;
 
 /// `DLNAProtocol.SERVICE_STATE_OBSERVED` for the two services this shell can
@@ -818,19 +827,251 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
     }))
 }
 
-/// The [`macast_upnp::http::Management`] seam: the GET web-cast entry's hand on
-/// the player.
+/// `Handler.RESOLVE_JOBS_MAX` and `Handler.RESOLVE_JOB_TTL`
+/// (`macast/protocol.py:2726-2727`). They live here rather than in
+/// `macast-cast` because the trait says the implementer owns the slot accounting
+/// (`macast-upnp/src/http.rs:1074-1079`): the layer that decides *which* finished
+/// job is replaceable is the layer that knows a page is polling for a running one.
+const RESOLVE_JOBS_MAX: usize = 4;
+const RESOLVE_JOB_TTL: f64 = 30.0 * 60.0;
+
+/// The shell's clock, as a `f64` of seconds since the epoch, because
+/// [`resolve::ResolveJob::run`] and
+/// [`macast_cast::resolve::ResolveJob::status`] take `&dyn Fn() -> f64` while
+/// [`relay::Relay::status_json`] reads `SystemTime` itself. One seam so the two
+/// readings of "now" cannot drift apart inside one status document.
+fn now_secs() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// `Handler._resolve_jobs` (`macast/protocol.py:2725`): id → job, in the order
+/// they were inserted. A `Vec` rather than a map because Python's dict is
+/// insertion-ordered and [`prune_locked`] has to evict the **first** finished row
+/// — which is only a well-defined answer in a sequence.
 ///
-/// A newtype for the same reason [`ShellRenderer`] is one — the wording belongs
-/// to the HTTP face, not to [`Player`]. The trait answers with **sentences** and
-/// [`cast_uri`] answers with a JSON object, so this is the one place that turns
-/// "what happened" into the words a `curl` caller reads.
+/// What a row holds is a **published snapshot**, not the live job: a
+/// [`resolve::ResolveJob`] is `Send` but **not** `Sync`, so the running job cannot
+/// be shared between the worker thread and a polling HTTP thread at all. The
+/// snapshots come from [`PublishingOps`] (at every step the reference publishes a
+/// state change under) and from `on_finish`. The cost, stated plainly: a poll that
+/// arrives in the middle of the measure loop sees the row as of `enter("measure",
+/// …)`, whereas Python's reader touches the live object and sees partial counts.
+/// Nothing in the four sentences `status()` renders changes meaning — the counts
+/// it reports are the ones that were true at the last step boundary.
+pub type ResolveJobs = Arc<Mutex<Vec<(String, resolve::ResolveJob)>>>;
+
+/// `_publish`-shaped helper: replace the row for `id`, **only if it is still
+/// there**. A worker whose job was evicted (TTL, or the first-finished slot) keeps
+/// running in Python and keeps writing into an object nobody can reach; pushing on
+/// a miss would bring a thirty-minute-old job back into the table and hand the page
+/// an answer for a parse nobody asked for any more.
+fn publish(jobs: &ResolveJobs, id: &str, snapshot: resolve::ResolveJob) {
+    let mut table = lock(&jobs);
+    if let Some(row) = table.iter_mut().find(|(row_id, _)| row_id == id) {
+        row.1 = snapshot;
+    }
+}
+
+/// `Handler._prune_resolve_jobs` (`macast/protocol.py:2869-2884`, 「Lock held.」).
+/// First free anything older than the TTL, then take the slot if that left room.
+/// Only over the line **and** all still working counts as full: 「a finished job is
+/// replaceable, a running one is the answer some page is polling for」.
+fn prune_locked(table: &mut Vec<(String, resolve::ResolveJob)>) -> bool {
+    let deadline = now_secs() - RESOLVE_JOB_TTL;
+    table.retain(|(_, job)| job.started >= deadline);
+    if table.len() < RESOLVE_JOBS_MAX {
+        return true;
+    }
+    match table.iter().position(|(_, job)| job.done) {
+        Some(index) => {
+            table.remove(index);
+            true
+        }
+        None => false,
+    }
+}
+
+/// `Handler.COOKIE_JAR_NAME` (`macast/protocol.py:2729-2740`). Not in the settings
+/// JSON: a jar is 「a pile of session secrets」 while the settings file is 「the
+/// thing people export, attach to bug reports and paste into chats」, and yt-dlp
+/// **writes that file back** after every run.
+const COOKIE_JAR_NAME: &str = "resolve_cookies.txt";
+
+/// `Handler._cookie_jar_path` (`macast/protocol.py:2742-2743`):
+/// `os.path.join(SETTING_DIR, COOKIE_JAR_NAME)`. `ensure = false` — reading a jar
+/// must not create a directory, let alone the jar.
+fn cookie_jar_path() -> Option<PathBuf> {
+    paths::setting_path(COOKIE_JAR_NAME, false).ok()
+}
+
+/// `Handler._cookie_jar_text` (`macast/protocol.py:2745-2760`): read
+/// `COOKIE_JAR_MAX_BYTES + 1` bytes, swallow every OS error as the empty string,
+/// decode with replacement. The `+ 1` is the whole point — a jar on disk that is
+/// too big has to fail `cookie_jar_state` the same way an oversized **paste** does,
+/// instead of being silently truncated into something that parses.
+///
+/// This shell has no paste route yet (#26 owns `resolve-cookies`), so the result
+/// here is used for **emptiness only** — the same use `_cookie_settings` makes of
+/// it. The text is never echoed to a page or a log.
+fn cookie_jar_text() -> String {
+    let Some(path) = cookie_jar_path() else {
+        return String::new();
+    };
+    let Ok(file) = File::open(&path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(resolve::COOKIE_JAR_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return String::new();
+    };
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `Handler._cookie_browser_spec` (`macast/protocol.py:2762-2779`). Two rules,
+/// both load-bearing:
+///
+/// * **Presence is asked before the value is read.** [`Setting::get_str`] delegates
+///   to [`Setting::get`], which takes a missing key's default **into the table**
+///   for the next `save()` (AGENTS.md §4.2; `macast-core/src/setting.rs:335-440`).
+///   Python's guard is `if not Setting.has(...): return ''`, so the `has` here is
+///   that guard and not a stylistic choice.
+/// * **The whitelist is re-checked on every read**, not only on the way in. The
+///   value sits in the hand-editable advanced-settings JSON, so a stored string
+///   nobody validated is still possible; anything the engine does not recognise
+///   reads as "no browser", which is a real answer rather than a switch a
+///   subprocess would interpret on its own.
+fn cookie_browser_spec(setting: &Setting) -> String {
+    if !setting.has(Key::ResolveCookieBrowser) {
+        return String::new();
+    }
+    let stored = setting.get_str(Key::ResolveCookieBrowser, "");
+    resolve::cookie_browser_spec(&stored).unwrap_or_default()
+}
+
+/// `Handler._cookie_settings` (`macast/protocol.py:2781-2800`): both halves when
+/// both are set, and the file wins — that rule lives in
+/// [`resolve::cookie_arguments`], not here.
+///
+/// Note what `file` carries: the **path**, not the jar's text. Python builds
+/// `cookies['file'] = self._cookie_jar_path()`; the jar is only read to find out
+/// whether there is one. Handing the contents over would put session secrets in
+/// `--cookies`' position on a command line, where every process on the machine can
+/// read it.
+fn cookie_settings(setting: &Setting) -> resolve::JobCookies {
+    let jar_present = !cookie_jar_text().is_empty();
+    let path = cookie_jar_path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let browser = cookie_browser_spec(setting);
+    let file = if jar_present { path.as_str() } else { "" };
+    resolve::JobCookies::from(&resolve::Cookies { file, browser: &browser })
+}
+
+/// The worker's `ResolveOps`: the real engine, with a snapshot published into
+/// [`ResolveJobs`] **before** every call that follows an `_enter(...)`. That
+/// ordering is the trait doc's own sentence (`macast-cast/src/resolve.rs:3330-3336`)
+/// read from the other side — `_enter` runs before the call, so by the time the
+/// engine is being asked, the step name and `step_started` and the facts the
+/// caller passed have already moved; publishing first is what lets a poll see the
+/// step the work is actually in. `measure` is the case that matters: publishing
+/// before it is the only way a page gets `step = "measure"` plus the `FromYtdlp`
+/// and `EngineNote` counts, and with `MAX_MEASURED = 8` the extra clones are
+/// nothing.
+///
+/// `has_ytdlp` / `max_measured` / `max_per_host` delegate plain: no state moved
+/// (`has_ytdlp` runs inside the private `why_empty`, before the final `on_finish`
+/// publish, and the two caps are constants on this side).
+struct PublishingOps {
+    jobs: ResolveJobs,
+    id: String,
+}
+
+impl PublishingOps {
+    fn publish(&self, job: &resolve::ResolveJob) {
+        publish(&self.jobs, &self.id, job.snapshot());
+    }
+}
+
+impl resolve::ResolveOps for PublishingOps {
+    fn scrape_page(
+        &self,
+        job: &resolve::ResolveJob,
+        page_url: &str,
+    ) -> Result<Vec<resolve::Candidate>, resolve::ResolveError> {
+        self.publish(job);
+        resolve::RealResolveOps.scrape_page(job, page_url)
+    }
+
+    fn ytdlp_candidates(
+        &self,
+        job: &resolve::ResolveJob,
+        page_url: &str,
+        cookies: &resolve::Cookies<'_>,
+        sink: &mut Vec<String>,
+    ) -> Result<Vec<resolve::Candidate>, resolve::ResolveError> {
+        self.publish(job);
+        resolve::RealResolveOps.ytdlp_candidates(job, page_url, cookies, sink)
+    }
+
+    fn measure(
+        &self,
+        job: &resolve::ResolveJob,
+        candidate: &mut resolve::Candidate,
+    ) -> Result<resolve::Probe, resolve::ResolveError> {
+        self.publish(job);
+        resolve::RealResolveOps.measure(job, candidate)
+    }
+
+    fn rank(
+        &self,
+        job: &resolve::ResolveJob,
+        candidates: Vec<resolve::Candidate>,
+        ceiling: f64,
+    ) -> Result<Vec<resolve::Candidate>, resolve::ResolveError> {
+        self.publish(job);
+        resolve::RealResolveOps.rank(job, candidates, ceiling)
+    }
+
+    fn has_ytdlp(&self) -> bool {
+        resolve::RealResolveOps.has_ytdlp()
+    }
+
+    fn max_measured(&self) -> usize {
+        resolve::RealResolveOps.max_measured()
+    }
+
+    fn max_per_host(&self) -> usize {
+        resolve::RealResolveOps.max_per_host()
+    }
+}
+
+/// The [`macast_upnp::http::Management`] seam: the shell's hand on the player,
+/// the resolve jobs, and the relay store.
+///
+/// A newtype for the same reason [`ShellRenderer`] is one — the wording belongs to
+/// the HTTP face, not to [`Player`]. The trait answers with **whole documents**
+/// now, mirroring the four reference routes one for one: `_cast_url`'s success dict
+/// with its two extras, and `_resolve_page` / `_resolve_status` /
+/// `_post_cast_resolved` with their measured key orders
+/// (`macast-upnp/src/http.rs:1030-1061`). [`cast_uri`] still answers with a JSON
+/// object of its own, so this is the place that turns "what happened to the player"
+/// into the document a `curl` caller reads.
 ///
 /// It runs **on an HTTP worker thread**, which is not a new situation for this
 /// shell: every [`ShellRenderer`] method the SOAP layer calls arrives on a worker
 /// thread too, and `cast_uri` touches only the state table and the player — no
 /// AppKit, no `AppHandle`. The reference's GET entry is the same shape (it is a
 /// CherryPy handler calling the same sequence), so no marshalling is added here.
+/// The two routes that *do* reach outside that set are `resolve-page`, which hands
+/// the work to a thread of its own, and `cast-resolved`, which asks the network —
+/// both also synchronous handlers in the reference.
 ///
 /// `title` is handed over verbatim, including `None`: [`cast_uri`] falls back to
 /// [`title_for_uri`] when the caller said nothing, which is §4.2's
@@ -839,24 +1080,316 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
 pub struct ShellManagement {
     pub host: TauriHost,
     pub player: Player,
+    /// The store `/relay/<id>/media` is served from, and the same `Arc` the
+    /// accept loop holds.
+    pub store: Arc<relay::RelayStore>,
+    /// `SETTING_DIR/relay`, created by `main.rs` before the server started
+    /// (AGENTS.md §4.2「写文件的代码要自己把目录建出来」 — `spawn_remux` hands the
+    /// path straight to ffmpeg and the sweep that runs before the accept loop
+    /// reads the directory).
+    pub temp_dir: PathBuf,
+    /// The port the relay's accept loop actually bound. Not the application port:
+    /// the reference serves `/relay` off the same CherryPy tree, while this shell
+    /// has one listener per concern, so the address handed to the player is built
+    /// from **this** number.
+    pub port: u16,
+    pub jobs: ResolveJobs,
 }
 
 impl macast_upnp::http::Management for ShellManagement {
-    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<String, String> {
-        let sent = cast_uri(
-            &self.host,
-            &self.player,
-            url,
-            title.unwrap_or(""),
-        )?;
-        let read = |key: &str| -> &str { sent.get(key).and_then(Value::as_str).unwrap_or("") };
-        Ok(format!(
-            "已投屏：{}（名字：{}，第 {}/{} 首）",
-            read("uri"),
-            read("title"),
-            sent["track"],
-            sent["total"],
-        ))
+    /// `_cast_url` (`macast/protocol.py:1674-1695`).
+    ///
+    /// The `Err` half is deliberately not the reason: Python catches every
+    /// exception out of the sequence, logs `cast url error: %s` at ERROR, and
+    /// answers `{'code': 1, 'message': 'cast failed'}`. A raw string in the HTTP
+    /// document would be this shell leaking an internal sentence the reference
+    /// never shows — the reason belongs in the log, which is where §4.10 sent every
+    /// other one of them.
+    ///
+    /// The success document's `'url'` is the **trimmed** address (the value
+    /// [`cast_uri`] actually handed the player, so the page reports what plays),
+    /// while `'title'` is the caller's argument as passed — `''` when the caller
+    /// said nothing. Not the name we derived for the player: that would make this
+    /// route's answer depend on a fallback the caller never wrote.
+    fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String> {
+        match cast_uri(&self.host, &self.player, url, title.unwrap_or("")) {
+            Ok(sent) => {
+                // `logger.info('cast url from web endpoint: %s', url)`, and only on
+                // this arm — the reference logs the success, not the attempt.
+                let uri = sent.get("uri").and_then(Value::as_str).unwrap_or("");
+                self.host
+                    .log
+                    .info(&format!("cast url from web endpoint: {uri}"));
+                Ok(
+                    Answer::ok("success")
+                        .with("url", json!(uri))
+                        .with("title", json!(title.unwrap_or(""))),
+                )
+            }
+            Err(why) => {
+                self.host
+                    .log
+                    .error(&format!("cast url error: {why}"));
+                Err("cast failed".to_string())
+            }
+        }
+    }
+
+    /// `_resolve_page` (`macast/protocol.py:2828-2867`), in that method's order:
+    /// validate → resolve the address → build the job → take an id → **then** the
+    /// lock, which covers only the prune and the insert → start the work → log.
+    ///
+    /// `max_height` is `0.0` because it is a constructor default in the reference
+    /// (`media_resolve.py:1397`) and this route never passes one
+    /// (`protocol.py:2855-2856`); `rank(pool, 0.0)` means "no ceiling".
+    fn resolve_page(&self, text: &str) -> Answer {
+        let stripped = text.trim();
+        if stripped.is_empty() {
+            return Answer::fail("请先填写网页地址");
+        }
+        let (url, found) = match resolve::resolve_target(stripped) {
+            Ok(pair) => pair,
+            // `PyUrlError`'s `Display` is Python's `ValueError` message, and the
+            // module doc's deviation (host.rs:1-31) is that an unknown shape is
+            // logged rather than raised. This one has no unknown shape: the two
+            // raises it can make are the ones Python renders into the page too.
+            Err(why) => {
+                self.host
+                    .log
+                    .error(&format!("resolve target failed for {stripped}: {why}"));
+                return Answer::fail(&why.to_string());
+            }
+        };
+        if url.is_empty() {
+            if stripped.split_whitespace().count() == 1 {
+                return Answer::fail("地址要以 http:// 或 https:// 开头");
+            }
+            return Answer::fail(
+                "这段文字里没有找到网址；请连分享原文一起贴进来，但要包含以 http:// 或 https:// 开头的地址",
+            );
+        }
+        let note =
+            if url == stripped { String::new() } else {
+                format!("从分享原文里读到 {found} 个网址，解析第一个：{url}")
+            };
+
+        let job_id = token::token_urlsafe(9);
+        if job_id.is_empty() {
+            // `token_urlsafe` swallows an RNG failure by returning the empty
+            // string. An empty id would be a row every poll answers
+            // 「没有这个解析任务」 for, so say what failed instead.
+            self.host
+                .log
+                .error("could not generate a resolve job id (no system randomness)");
+            return Answer::fail("本机没能生成解析任务编号，请重试");
+        }
+
+        let jobs = Arc::clone(&self.jobs);
+        let spawn_id = job_id.clone();
+        let spawn_url = url.clone();
+        let cookies = cookie_settings(&self.host.setting);
+        let note_for_job = note.clone();
+        let started = now_secs();
+        let finish_jobs = Arc::clone(&jobs);
+        let finish_id = job_id.clone();
+        let log = self.host.log.clone();
+
+        let mut job = resolve::ResolveJob::new(
+            &url,
+            0.0,
+            Some(Box::new(move |running| {
+                publish(&finish_jobs, &finish_id, running.snapshot());
+            })),
+            &cookies.borrowed(),
+            &note_for_job,
+            started,
+        );
+
+        {
+            let mut table = lock(&jobs);
+            if !prune_locked(&mut table) {
+                return Answer::fail(&format!(
+                    "已经有 {RESOLVE_JOBS_MAX} 个解析在跑，请等其中一个结束"
+                ));
+            }
+            table.push((job_id.clone(), job.snapshot()));
+        }
+
+        let spawn = thread::Builder::new().name("MacastResolve".to_string()).spawn(
+            move || {
+                let ops = PublishingOps {
+                    jobs: Arc::clone(&jobs),
+                    id: spawn_id,
+                };
+                job.run(&ops, &now_secs);
+                // `on_finish` published the last state; this line is the log the
+                // reference writes after `job.start()`, kept here because a worker
+                // that died mid-parse should be visible in the file too.
+                log.info(&format!("resolve worker finished: {spawn_url}"));
+            },
+        );
+
+        match spawn {
+            Ok(_) => {
+                self.host
+                    .log
+                    .info(&format!("resolving page: {url}"));
+                Answer::ok("success")
+                    .with("job", json!(job_id))
+                    .with("url", json!(url))
+                    .with("note", json!(note))
+            }
+            Err(why) => {
+                // The row was inserted above and the worker never ran, so the
+                // snapshot would sit at `step = "queued"` for the whole TTL and
+                // every poll would report a parse that is not happening. The lock
+                // is on `self.jobs`, not the local `jobs`: that clone already moved
+                // into the worker closure with the job, and it is the same table.
+                let mut table = lock(&self.jobs);
+                table.retain(|(id, _)| *id != job_id);
+                drop(table);
+                self.host
+                    .log
+                    .error(&format!("could not start the resolve worker for {url}: {why}"));
+                Answer::fail("解析没能开始：本机起不了后台线程，请稍后重试")
+            }
+        }
+    }
+
+    /// `_resolve_status` (`macast/protocol.py:2890-2899`). The two shapes are the
+    /// contract: 「没有这个解析任务（超时或已重启）」 carries `job: ""` and
+    /// `status: null`, while a found row carries the **id that was asked for** and
+    /// a seventeen-key object.
+    ///
+    /// An unanswered poll cannot consume a slot — the reference's GET route only
+    /// looks the id up (`_resolve_job`, `protocol.py:2886-2888`) and
+    /// `RESOLVE_JOBS_MAX` is spent at `resolve-page`.
+    fn resolve_status(&self, job_id: &str) -> Answer {
+        let table = lock(&self.jobs);
+        match table.iter().find(|(id, _)| id == job_id) {
+            None => Answer::fail("没有这个解析任务（超时或已重启）")
+                .with("job", json!(""))
+                .with("status", Value::Null),
+            Some((_, job)) => {
+                // A [`resolve::ResolveJob`] is not `Clone` (its `on_finish` is a
+                // `Box<dyn Fn>`), so the row cannot be moved out and rendered
+                // outside the lock the way Python's reader can. Holding it for the
+                // duration of `status()` is the deviation: a poll can briefly delay
+                // a publish, and nothing else — the job itself is only ever mutated
+                // by its own worker.
+                match job.status(&now_secs) {
+                    Ok(status) => Answer::ok("success")
+                        .with("job", json!(job_id))
+                        .with("status", status),
+                    Err(why) => {
+                        self.host
+                            .log
+                            .error(&format!("resolve status failed for {job_id}: {why}"));
+                        Answer::fail(&why.to_string())
+                    }
+                }
+            }
+        }
+    }
+
+    /// `_post_cast_resolved` (`macast/protocol.py:2904-2948`).
+    ///
+    /// `candidate` is a **raw string** because the reference converts it in the
+    /// handler and answers 「没有这个候选项」 for anything that is not an index into
+    /// the finished job's list. One divergence worth naming: Python's `int()`
+    /// accepts `" 3 "`, while [`str::parse`] does not, so a padded index that would
+    /// cast here answers 「没有这个候选项」. A malformed index that survives
+    /// (`"3_0"`) lands on the same final answer in both.
+    fn cast_resolved(&self, job: &str, candidate: &str, target: &str) -> Answer {
+        let table = lock(&self.jobs);
+        let Some((_, row)) = table.iter().find(|(id, _)| id == job) else {
+            return Answer::fail("解析任务已经不在了，请重新解析");
+        };
+        if !row.done {
+            return Answer::fail(&format!(
+                "还在解析中（{}），请等它完成",
+                resolve::step_label(&row.step)
+            ));
+        }
+        let Ok(index) = candidate.parse::<i64>() else {
+            return Answer::fail("没有这个候选项");
+        };
+        if index < 0 || index as usize >= row.candidates.len() {
+            return Answer::fail("没有这个候选项");
+        }
+        // `Candidate` is `Clone` (`resolve.rs:297`), so the row can be read here
+        // and released before the network work below. `candidates` is a fresh Vec
+        // in Python (`list(job.candidates)`) for the same reason.
+        let pick = row.candidates[index as usize].clone();
+        let page_url = row.page_url.clone();
+        drop(table);
+
+        let title = match resolve::display_title(&pick, &page_url) {
+            Ok(name) => name,
+            Err(why) => {
+                self.host
+                    .log
+                    .error(&format!("display title failed for {}: {why}", pick.url));
+                return Answer::fail(&why.to_string());
+            }
+        };
+
+        let relay = match relay::open_relay(&pick, &title, &self.store, &self.temp_dir) {
+            Ok(relay) => relay,
+            Err(why) => {
+                // Both of the reference's two failure arms arrive here as one
+                // sentence (`relay.rs:1359-1368`), and both already dropped the
+                // relay from the store. 「中转启动失败：」 belongs to the arm that
+                // catches an *unexpected* raise out of `open_relay`, which a Rust
+                // caller does not have — prefixing it would put the reference's
+                // diagnosis of itself on the origin's words.
+                self.host
+                    .log
+                    .error(&format!("relay start failed for {}: {why}", pick.url));
+                return Answer::fail(why);
+            }
+        };
+
+        let host = relay::choose_advertise_host(
+            &net::advertised_hosts(&self.host.setting),
+            &net::advertised_addresses(&self.host.setting),
+        );
+        let url = relay::media_url(&relay, &host, self.port);
+
+        let mut answer = if target.is_empty() || target == "local" {
+            // `_cast_relayed`'s first arm calls `_cast_url(url, title)`, so this
+            // route's local answer comes from the same method as the GET entry's —
+            // one owner for that document, including its log lines.
+            match self.cast_url(&url, Some(&title)) {
+                Ok(answer) => answer,
+                Err(why) => Answer::fail(why),
+            }
+        } else {
+            // No device-push seam exists in this crate yet (`grep target_push` in
+            // `macast-cast/src` is empty): that is task #26's cast-targets face.
+            // Refusing is the honest answer; the relay we just opened is not one.
+            Answer::fail(
+                "这台设备还投不了：本机的 Rust 壳还没接上设备发送面（下一步的 cast-targets），请改用「本机」。",
+            )
+        };
+
+        if answer.code != 0 {
+            // Python: `if result.get('code') != 0: media_relay.store.drop(...);
+            // return result` (`protocol.py:2942-2944`). A cast the renderer refused
+            // must not leave a stream nobody is playing squatting one of
+            // `RELAY_MAX` slots for half an hour.
+            self.store.drop_relay(&relay.relay_id);
+            return answer;
+        }
+
+        // Then the two extras and the overwritten message, in the reference's
+        // order: `message` keeps its original slot because `_post_cast_resolved`
+        // assigns `relay` and `note` and rewrites `message` **in place**.
+        answer = answer
+            .with("relay", relay.status_json())
+            .with("note", json!(resolve::relay_reason(&pick)));
+        answer.message = "success".to_string();
+        answer
     }
 }
 

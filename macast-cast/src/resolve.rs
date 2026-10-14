@@ -3157,10 +3157,11 @@ pub fn scrape_page(
 //     as the text a card reads. Only `UNMEASURED` has no oracle wording: the
 //     mid-character netloc slice, which a `String` netloc cannot reach.
 //
-// `start()` and its daemon thread are deliberately not ported: spawning is the
-// handler's job, and this layer is single threaded until that arrives — which
-// is also why `on_finish` is a plain `dyn Fn` and not `Fn + Send`. The clock is
-// an explicit `&dyn Fn() -> f64` because there is no ambient `time.time()` and
+// `start()` and its daemon thread are deliberately not ported here: spawning is
+// the handler's job. But the handler now does spawn, on another thread, and a
+// job has to cross that boundary — which is why `on_finish` is `Fn + Send`
+// rather than the plain `dyn Fn` this layer started with. The clock is an
+// explicit `&dyn Fn() -> f64` because there is no ambient `time.time()` and
 // because `started`/`step_started` are read in `__init__` and in `_enter`.
 // ---------------------------------------------------------------------------
 
@@ -3169,7 +3170,7 @@ pub fn scrape_page(
 /// does. `0.25` has to stay `0.2` and `0.15` has to stay `0.1` — both are in
 /// the truth file's `rnd` rows, and neither survives a "add 0.05 then truncate"
 /// shortcut.
-fn py_round1(value: f64) -> f64 {
+pub(crate) fn py_round1(value: f64) -> f64 {
     if !value.is_finite() {
         return value;
     }
@@ -3439,7 +3440,7 @@ pub fn step_label(step: &str) -> String {
 pub struct ResolveJob {
     pub page_url: String,
     pub max_height: f64,
-    pub on_finish: Option<Box<dyn Fn(&ResolveJob)>>,
+    pub on_finish: Option<Box<dyn Fn(&ResolveJob) + Send>>,
     pub cookies: JobCookies,
     pub note: String,
     pub candidates: Vec<Candidate>,
@@ -3463,7 +3464,7 @@ impl ResolveJob {
     pub fn new(
         page_url: &str,
         max_height: f64,
-        on_finish: Option<Box<dyn Fn(&ResolveJob)>>,
+        on_finish: Option<Box<dyn Fn(&ResolveJob) + Send>>,
         cookies: &Cookies<'_>,
         note: &str,
         started: f64,
@@ -3624,6 +3625,41 @@ impl ResolveJob {
             return "（这台机器没有装 yt-dlp，只能抓 HTML 里写明的地址）".to_string();
         }
         format!("（yt-dlp 这次也没有交出一个地址；{}）", JS_HOLE)
+    }
+
+    /// A copy of the job's current state, safe to read from another thread.
+    ///
+    /// This exists for the poll: `status()` reads the clock twice
+    /// (`seconds`/`step_seconds`), so a published snapshot must be a *job*, not a
+    /// pre-rendered map, or the two readings would be computed at the publishing
+    /// moment instead of the reading one — which is what Python does when
+    /// `_resolve_status` calls `job.status()` on the request thread. Copying here
+    /// also keeps `py_round1` crate-private and reproduces the seventeen-key order
+    /// through the one function that owns it.
+    ///
+    /// `on_finish` is dropped rather than copied: it is a `Box<dyn Fn>` (so the
+    /// job is not `Clone`), and a snapshot is never the run that fires a
+    /// completion callback.
+    pub fn snapshot(&self) -> ResolveJob {
+        ResolveJob {
+            page_url: self.page_url.clone(),
+            max_height: self.max_height,
+            on_finish: None,
+            cookies: self.cookies.clone(),
+            note: self.note.clone(),
+            candidates: self.candidates.clone(),
+            error: self.error.clone(),
+            done: self.done,
+            started: self.started,
+            step: self.step.clone(),
+            step_started: self.step_started,
+            scraped: self.scraped,
+            from_ytdlp: self.from_ytdlp,
+            measured: self.measured,
+            rejected: self.rejected,
+            engine_note: self.engine_note.clone(),
+            hidden_silent: self.hidden_silent,
+        }
     }
 
     /// The dict the page polls: seventeen keys, in Python's order, with

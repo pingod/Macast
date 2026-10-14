@@ -363,21 +363,6 @@ fn msg_source(h: &Harness, conn_id: usize) -> String {
     msg.source_id
 }
 
-/// The source id of the first frame, without draining — the same question
-/// `msg_source` asks, for tests that still need the frames afterwards.
-fn peek_source(h: &Harness, conn_id: usize) -> String {
-    let frames = h
-        .channel
-        .test_outbox
-        .lock()
-        .unwrap()
-        .get(&conn_id)
-        .cloned()
-        .unwrap_or_default();
-    assert!(!frames.is_empty());
-    parse_cast_message(&frames[0][FRAME_HEADER_LEN..]).source_id
-}
-
 // -- dispatch -------------------------------------------------------------
 
 #[test]

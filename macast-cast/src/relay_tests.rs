@@ -184,7 +184,7 @@ fn dummy_relay(id: &str) -> Arc<Relay> {
         headers:      HashMap::new(),
         mode:         "proxy".to_string(),
         title:        "test".to_string(),
-        content_type: "video/mp4".to_string(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created:      now_secs(),
         last_seen:    Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -279,7 +279,7 @@ fn make_relay_server(content: &[u8], mode: &str) -> (RelayServer, Arc<RelayStore
         headers:      HashMap::new(),
         mode:         mode.to_string(),
         title:        "Test".to_string(),
-        content_type: "video/mp4".to_string(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created:      now_secs(),
         last_seen:    Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -560,7 +560,7 @@ fn probe_proxy_learns_ranges_and_length_from_a_206() {
         headers: HashMap::new(),
         mode: "proxy".into(),
         title: String::new(),
-        content_type: "application/octet-stream".into(),
+        content_type: Mutex::new("application/octet-stream".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -586,7 +586,7 @@ fn probe_proxy_keeps_the_length_and_drops_the_ranges_fact() {
         headers: HashMap::new(),
         mode: "proxy".into(),
         title: String::new(),
-        content_type: "application/octet-stream".into(),
+        content_type: Mutex::new("application/octet-stream".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -660,7 +660,7 @@ fn remux_relay(id: &str, dir: &Path, audio_url: &str, audio_codec: &str) -> Arc<
         headers: HashMap::new(),
         mode: "remux".into(),
         title: String::new(),
-        content_type: "video/mp4".into(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -856,7 +856,7 @@ fn eviction_kills_the_encoder_and_takes_its_file() {
         headers: HashMap::new(),
         mode: "remux".into(),
         title: String::new(),
-        content_type: "video/mp4".into(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs() - 100.0)),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -898,7 +898,7 @@ fn quick_server(content: &[u8], mode: &str, budget_ms: u64) -> (RelayServer, Arc
         headers: HashMap::new(),
         mode: mode.into(),
         title: String::new(),
-        content_type: "video/mp4".into(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -1024,7 +1024,7 @@ fn the_viewers_range_is_translated_into_the_origins_range() {
         headers: HashMap::new(),
         mode: "proxy".into(),
         title: String::new(),
-        content_type: "video/mp4".into(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -1066,7 +1066,7 @@ fn a_proxy_without_range_support_gets_the_whole_file_asked_for() {
         headers: HashMap::new(),
         mode: "proxy".into(),
         title: String::new(),
-        content_type: "video/mp4".into(),
+        content_type: Mutex::new("video/mp4".to_string()),
         created: now_secs(),
         last_seen: Arc::new(Mutex::new(now_secs())),
         inner: Arc::new(Mutex::new(RelayInner {
@@ -1086,4 +1086,354 @@ fn a_proxy_without_range_support_gets_the_whole_file_asked_for() {
     assert!(!hdrs.contains_key("content-range"));
     assert_eq!(hdrs.get("content-length").map(|s| s.as_str()), Some("1024"));
     assert!(seen.lock().unwrap().is_empty(), "no Range is forwarded when the origin ignores it");
+}
+
+// ---------------------------------------------------------------------------
+// the proxy path when the origin does not cooperate
+// ---------------------------------------------------------------------------
+
+/// A loopback origin that answers **one** request and then disappears.
+///
+/// The header block ends with a blank line — `origin_server`'s doc records what
+/// its absence cost: a raw `read_to_end` client is satisfied by EOF, ureq is not.
+///
+/// One `accept` is the fixture's whole lifetime because the proxy probe asks
+/// exactly once. A two-connection stub would leave a socket waiting for whoever
+/// comes next, which is how a relay test ends up answering a sibling's request.
+fn one_shot_origin(
+    status: u16,
+    reason: &str,
+    content_type: Option<&str>,
+    body: usize,
+) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let typed = match content_type {
+        Some(t) => format!("Content-Type: {t}\r\n"),
+        None => String::new(),
+    };
+    let reason = reason.to_string();
+    thread::spawn(move || {
+        let Ok((mut s, _)) = listener.accept() else { return };
+        let mut buf = [0u8; 2048];
+        let _ = s.read(&mut buf);
+        let head = format!("HTTP/1.0 {status} {reason}\r\n{typed}Content-Length: {body}\r\n\r\n");
+        let payload = vec![b'x'; body];
+        let _ = s.write_all(head.as_bytes());
+        let _ = s.write_all(&payload);
+    });
+    port
+}
+
+/// A scratch directory per fixture, numbered so parallel tests never share one.
+///
+/// `make_relay_server`'s doc carries the original lesson: a directory shared
+/// between rows means one row reads another's `<id>.mp4` and passes for the
+/// wrong reason while the real failure lands on a row that never wrote a file.
+static SEQ3: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn temp_dir_for(tag: &str) -> PathBuf {
+    let n = SEQ3.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("macast-relay-{tag}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Backdate a file's mtime.
+///
+/// `std::fs::File::set_modified` (stable since 1.75, and here it takes `&self`)
+/// rather than a `filetime` dependency or a shell `touch`: the age rule is the
+/// thing under test, so the fixture has to state the age, not arrange it through
+/// a second toolchain.
+fn age_file(path: &Path, seconds: u64) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(SystemTime::now() - Duration::from_secs(seconds))
+        .unwrap();
+}
+
+/// The ffmpeg seam for a relay that must never ask for a binary.
+///
+/// A proxy candidate goes through `probe_proxy` and nothing else; if this is
+/// called, the mode decision moved and the row below is measuring something
+/// other than what it says.
+fn no_ffmpeg_needed() -> Option<String> {
+    panic!("a proxy relay never asks for ffmpeg");
+}
+
+/// The ffmpeg seam for a machine that has no binary on it.
+fn no_ffmpeg_here() -> Option<String> {
+    None
+}
+
+/// A relay whose origin is `port`, with `content_type` already in the field.
+fn probe_relay(port: u16, content_type: &str) -> Arc<Relay> {
+    Arc::new(Relay {
+        relay_id: "probe1".into(),
+        url: format!("http://127.0.0.1:{port}/media"),
+        headers: HashMap::new(),
+        mode: "proxy".into(),
+        title: String::new(),
+        content_type: Mutex::new(content_type.to_string()),
+        created: now_secs(),
+        last_seen: Arc::new(Mutex::new(now_secs())),
+        inner: Arc::new(Mutex::new(RelayInner {
+            ranges: false, length: None, error: String::new(), probe_error: String::new(),
+            path: String::new(), state: RelayState::Open,
+            audio_url: String::new(), audio_headers: HashMap::new(),
+            audio_codec: String::new(), adtstoasc: false, ffmpeg: String::new(), proc: None,
+        })),
+    })
+}
+
+/// A relay that never spoke, with the two message slots set by the caller.
+fn inner_with(error: &str, probe_error: &str) -> RelayInner {
+    RelayInner {
+        ranges: false, length: None,
+        error: error.into(), probe_error: probe_error.into(),
+        path: String::new(), state: RelayState::Failed,
+        audio_url: String::new(), audio_headers: HashMap::new(),
+        audio_codec: String::new(), adtstoasc: false,
+        ffmpeg: String::new(), proc: None,
+    }
+}
+
+#[test]
+fn a_refused_origin_is_refused_in_its_own_words_and_the_relay_is_dropped() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(403, "Forbidden", None, 0);
+    let store = Arc::new(RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL));
+    let dir = temp_dir_for("refuse403");
+    let cand = cand_with(&format!("http://127.0.0.1:{port}/x.mp4"), None);
+    assert_eq!(plan(&cand), "proxy");
+
+    let outcome = open_relay_with(&cand, "", &store, &dir, &no_ffmpeg_needed);
+    let Err(why) = outcome else { panic!("a 403 origin must not register a relay") };
+    // Python's sentence, unprefixed: 「中转启动失败：」 belongs to the caller that
+    // catches an unexpected raise (`protocol.py:2933`), not to the path that
+    // produces this answer on purpose.
+    assert_eq!(why, "源站返回 403");
+    assert!(store.active().is_empty(), "a failed relay must leave no slot behind");
+}
+
+#[test]
+fn a_five_hundred_is_refused_though_no_refused_list_contains_it() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(500, "Internal Server Error", None, 0);
+    let store = Arc::new(RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL));
+    let dir = temp_dir_for("refuse500");
+    let cand = cand_with(&format!("http://127.0.0.1:{port}/x.mp4"), None);
+
+    let outcome = open_relay_with(&cand, "", &store, &dir, &no_ffmpeg_needed);
+    let Err(why) = outcome else {
+        panic!("500 is not in the refused-status set, but it is not a playable relay either");
+    };
+    assert_eq!(why, "源站返回 500");
+    assert!(store.active().is_empty());
+}
+
+#[test]
+fn not_reaching_the_origin_is_a_failure_that_says_so() {
+    crate::pin_test_dir();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let store = Arc::new(RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL));
+    let dir = temp_dir_for("refuseconn");
+    let cand = cand_with(&format!("http://127.0.0.1:{port}/x.mp4"), None);
+
+    let outcome = open_relay_with(&cand, "", &store, &dir, &no_ffmpeg_needed);
+    let Err(why) = outcome else { panic!("nothing is listening on {port}") };
+    assert!(
+        why.starts_with("无法连接源站："),
+        "the reader has to know the origin was never reached, not that it refused: {why}"
+    );
+    assert!(store.active().is_empty());
+}
+
+#[test]
+fn a_reachable_origin_still_registers() {
+    crate::pin_test_dir();
+    let port = origin_server(4096, true);
+    let store = Arc::new(RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL));
+    let dir = temp_dir_for("refuseok");
+    let cand = cand_with(&format!("http://127.0.0.1:{port}/x.mp4"), None);
+
+    let outcome = open_relay_with(&cand, "", &store, &dir, &no_ffmpeg_needed);
+    assert!(outcome.is_ok(), "the three refusals above need a positive control");
+    let relay = outcome.unwrap();
+    assert_eq!(relay.mode, "proxy");
+    assert_eq!(store.active().len(), 1);
+}
+
+#[test]
+fn a_manifest_without_a_transmuxer_is_refused_before_it_is_kept() {
+    crate::pin_test_dir();
+    let store = Arc::new(RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL));
+    let dir = temp_dir_for("nofmpeg");
+    let cand = cand_with("http://a/v.m3u8", None);
+    assert_eq!(plan(&cand), "remux");
+
+    let outcome = open_relay_with(&cand, "", &store, &dir, &no_ffmpeg_here);
+    let Err(why) = outcome else { panic!("no ffmpeg means no remux relay") };
+    assert_eq!(why, "这台机器没有 ffmpeg，无法把清单流转封装");
+    assert!(store.active().is_empty(), "the slot taken before the spawn attempt is given back");
+}
+
+#[test]
+fn refused_codes_are_exactly_the_set_the_resolver_matches() {
+    crate::pin_test_dir();
+    assert_eq!(REFUSED_CODES, &[401u16, 403, 404, 410][..]);
+    for code in REFUSED_CODES {
+        assert!(
+            crate::resolve::REFUSED_STATUS.is_match(&code.to_string()),
+            "{code} must be a status the resolver also refuses"
+        );
+    }
+    // The two relay refusals above (403 and 500) differ here: the relay's rule is
+    // "any error", this set is only the statuses that *mean* refusal.
+    for other in ["500", "1404", "4041"] {
+        assert!(
+            !crate::resolve::REFUSED_STATUS.is_match(other),
+            "{other} is not one of the refused statuses"
+        );
+    }
+}
+
+#[test]
+fn refusal_prefers_the_first_slot_that_spoke() {
+    crate::pin_test_dir();
+    assert_eq!(refusal(&inner_with("源站返回 403", "无法连接源站：x")), "源站返回 403");
+    assert_eq!(refusal(&inner_with("", "无法连接源站：x")), "无法连接源站：x");
+    // Unreachable through `open_relay` — both writers set a message — so this
+    // calls the helper directly. It is the sentence a viewer hears when the
+    // relay died without speaking, and silence would render as 「」 plus a
+    // sentence fragment.
+    assert_eq!(refusal(&inner_with("", "")), "源站拒绝了这条地址");
+}
+
+// ---------------------------------------------------------------------------
+// which Content-Type ends up on the relay
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_origin_type_is_adopted_over_the_placeholder() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(200, "OK", Some("video/quicktime; codecs=avc1.640028"), 8);
+    let relay = probe_relay(port, UNKNOWN_TYPE);
+    assert!(probe_proxy(&relay));
+    assert_eq!(
+        relay.content_type.lock().unwrap().as_str(),
+        "video/quicktime",
+        "a `/relay/<id>/media` URL has no suffix, so the origin's word is the only statement"
+    );
+}
+
+#[test]
+fn the_origin_type_never_overwrites_a_type_we_already_know() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(200, "OK", Some("video/quicktime"), 8);
+    let relay = probe_relay(port, "video/mp4");
+    assert!(probe_proxy(&relay));
+    assert_eq!(relay.content_type.lock().unwrap().as_str(), "video/mp4");
+}
+
+#[test]
+fn octet_stream_is_not_a_statement_about_type() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(200, "OK", Some(UNKNOWN_TYPE), 8);
+    let relay = probe_relay(port, "");
+    assert!(probe_proxy(&relay));
+    assert_eq!(
+        relay.content_type.lock().unwrap().as_str(),
+        "",
+        "adopting the catch-all type would turn 「无声明」 into 「声明了无声明」"
+    );
+}
+
+#[test]
+fn an_absent_content_type_is_adopted_as_nothing() {
+    crate::pin_test_dir();
+    let port = one_shot_origin(200, "OK", None, 8);
+    let relay = probe_relay(port, UNKNOWN_TYPE);
+    assert!(probe_proxy(&relay));
+    assert_eq!(relay.content_type.lock().unwrap().as_str(), UNKNOWN_TYPE);
+}
+
+// ---------------------------------------------------------------------------
+// the idle sweeper and the boot-time orphan sweep
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_sweeper_expires_an_idle_relay_and_takes_its_temp_file_with_it() {
+    crate::pin_test_dir();
+    let dir = temp_dir_for("sweeper");
+    // No `RelayServer` here on purpose: `start_with_budget` sweeps at boot, and
+    // that one-shot sweep would race the periodic loop this row is watching.
+    let store = Arc::new(RelayStore::new(RELAY_MAX, 0.01));
+    let relay = remux_relay("swept", &dir, "", "");
+    let path = dir.join("swept.mp4");
+    std::fs::write(&path, b"y").unwrap();
+    store.add(relay);
+
+    assert!(RelayStore::start_sweeper(&store, Duration::from_millis(20)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if store.peek("swept").is_none() && !path.exists() { break; }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // `peek`, not `get`: the row must not be what keeps the entry alive.
+    assert!(store.peek("swept").is_none(), "the idle relay should have expired");
+    // Python's witness is `proc.killed is True`; the half of it Rust can measure
+    // is that the encoder's temp file is gone with the entry.
+    assert!(!path.exists(), "the temp file goes with the expired relay");
+}
+
+#[test]
+fn the_sweeper_loop_starts_once_per_store() {
+    crate::pin_test_dir();
+    // A long TTL so nothing expires: this row is about the latch, not the work.
+    let store = Arc::new(RelayStore::new(RELAY_MAX, 3600.0));
+    assert!(RelayStore::start_sweeper(&store, Duration::from_millis(50)));
+    assert!(!RelayStore::start_sweeper(&store, Duration::from_millis(50)));
+    // Python proves idempotence by counting threads (`threading.enumerate()`).
+    // Rust has no portable thread enumeration, so the latch's return value is the
+    // whole answer — and the row above is what proves the loop actually runs.
+}
+
+#[test]
+fn the_start_time_sweep_takes_only_old_unowned_mp4_files() {
+    crate::pin_test_dir();
+    let dir = temp_dir_for("orphans");
+    let old = dir.join("orphan-old.mp4");
+    let live = dir.join("watched-live.mp4");
+    let text = dir.join("keepme.txt");
+    let young = dir.join("orphan-young.mp4");
+    for path in [&old, &live, &text, &young] {
+        std::fs::write(path, b"y").unwrap();
+    }
+    age_file(&old, 4000);
+    age_file(&live, 4000);
+    age_file(&text, 4000);
+
+    let store = RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL);
+    store.add(dummy_relay("watched-live"));
+
+    let removed = store.sweep_orphans(&dir, RELAY_IDLE_TTL, now_secs());
+    assert_eq!(removed, vec![old.clone()], "only the old, unowned .mp4 is an orphan");
+    assert!(live.exists(), "a stem the store owns is not abandoned, however old it is");
+    assert!(text.exists(), "sweeping relay files is not sweeping the directory");
+    assert!(young.exists(), "another running instance may have written this a moment ago");
+}
+
+#[test]
+fn the_sweep_of_a_directory_we_cannot_list_claims_nothing() {
+    crate::pin_test_dir();
+    let dir = temp_dir_for("sweep-missing");
+    let store = RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL);
+    let missing = dir.join("sub"); // never created
+    assert!(
+        store.sweep_orphans(&missing, RELAY_IDLE_TTL, now_secs()).is_empty(),
+        "a directory we cannot open is not a directory we cleaned"
+    );
 }
