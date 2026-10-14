@@ -490,6 +490,14 @@ impl Link {
     /// three-way handshake is done from this side's point of view long before the
     /// other end calls `accept`. So `true` here means "mpv created its IPC socket",
     /// not "mpv is serving it" — see the note on [`Link::connect`].
+    ///
+    /// This reads the kernel and **not** [`Link::is_closed`], so it is a question about
+    /// descriptors, not about our own decisions. Measured on this Mac (2026-10-14) for a
+    /// stream unix socket that had been connected: after our own [`Link::close`] runs
+    /// `shutdown(2)`, and again after the peer closes, `getpeername(2)` raises
+    /// `[Errno 22] Invalid argument` rather than `ENOTCONN`, so `false` answers both.
+    /// What it raises on Linux has not been measured here, which is why callers that need
+    /// "did *we* close this" ask [`Link::is_closed`] instead of relying on this alone.
     pub fn is_connected(&self) -> bool {
         let mut storage = unsafe { std::mem::zeroed::<libc::sockaddr_storage>() };
         let mut length = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;

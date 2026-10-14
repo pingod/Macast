@@ -132,10 +132,11 @@ api_post() {
     parse_api_body
 }
 
-# One dotted path into `$API_BODY`, in one of three readings:
+# One dotted path into `$API_BODY`, in one of four readings:
 #   value  the scalar at that path, rendered the way Python renders it
 #   len    the length of a list or dict there
 #   keys   a dict's keys, comma-joined **in document order**
+#   join   a list's members, 、-joined
 #
 # `keys` is why this reader exists. The answer's field order is the document the
 # page reads (`Answer::with` chains in Python's write order), and a dict built by
@@ -175,6 +176,17 @@ elif how == "keys":
     if not isinstance(node, dict):
         raise SystemExit(1)
     print(",".join(node.keys()))
+elif how == "join":
+    # A list's members, 、-joined. `json_ask` on a list would print
+    # `json.dumps`' rendering — `["a", "b"]`, with a space after every comma —
+    # while the Rust answer serialises with none, so a literal comparison would
+    # fail on the whitespace and say nothing about the browser list. Joining the
+    # members here means section 18 compares **the names and their order**, which
+    # is the half of `COOKIE_BROWSERS` that `--cookies-from-browser` actually
+    # carries into argv.
+    if not isinstance(node, list):
+        raise SystemExit(1)
+    print("、".join(str(item) for item in node))
 elif isinstance(node, bool):
     print("true" if node else "false")
 elif node is None:
@@ -185,10 +197,11 @@ else:
     print(node)
 PY
 }
-json_ask()  { json_read value "$1"; }
-json_len()  { json_read len "$1"; }
-json_keys() { json_read keys "$1"; }
-json_has()  { json_read value "$1" >/dev/null 2>&1; }
+json_ask()   { json_read value "$1"; }
+json_len()   { json_read len "$1"; }
+json_keys()  { json_read keys "$1"; }
+json_join()  { json_read join "$1"; }
+json_has()   { json_read value "$1" >/dev/null 2>&1; }
 
 # One SOAP call, the envelope built from the action name alone: the read actions
 # differ by nothing else, and four hand-copied envelopes is four chances for a
@@ -226,6 +239,76 @@ try:
 except Exception:
     value = ""
 sys.stdout.write(value if isinstance(value, str) else "")
+PY
+}
+
+# One key out of the temp settings file, same reason as `stored_token`: the
+# endpoints that *write* these keys are the ones under test, so asking them
+# "did you store it" would be asking the suspect to testify. Prints nothing and
+# exits non-zero when the key is absent — which is the answer section 18 wants
+# after an `off` (`Setting::unset`, not a stored `false`).
+stored_setting() {
+    python3 - "$SDIR/macast_setting.json" "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "rb") as fh:
+        value = json.load(fh)[sys.argv[2]]
+except Exception:
+    raise SystemExit(1)
+sys.stdout.write(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False))
+PY
+}
+
+# The cookie constants, read out of the **Python** module at run time.
+#
+# 每个数字问两遍 (AGENTS.md §4.13): the browser list and the jar's size cap are
+# decisions owned by `macast/media_resolve.py`. Section 18's expected values have
+# to come from that owner and not from the Rust constant the code under test also
+# reads — comparing the answer to the same file it came from asks nothing.
+#
+# Three lines out: the names as a JSON list, the cap as a number, the names joined
+# by 、. The evaluator is hand-written instead of `ast.literal_eval` because
+# `COOKIE_JAR_MAX_BYTES` is spelled `256 * 1024` — an `ast.BinOp`, which
+# literal_eval rejects outright on this machine's Python. And a scan that finds
+# one name but not the other **fails** rather than printing an empty expectation
+# for the caller to happily compare against nothing.
+py_cookie_constants() {
+    python3 - "$REPO/macast/media_resolve.py" <<'PY'
+import ast, json, sys
+
+WANT = ("COOKIE_BROWSERS", "COOKIE_JAR_MAX_BYTES")
+found = {}
+with open(sys.argv[1], encoding="utf-8") as fh:
+    tree = ast.parse(fh.read())
+for node in tree.body:
+    if not isinstance(node, ast.Assign):
+        continue
+    for target in node.targets:
+        if isinstance(target, ast.Name) and target.id in WANT:
+            found[target.id] = node.value
+if sorted(found) != sorted(WANT):
+    raise SystemExit(1)
+
+
+def value(node):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Tuple):
+        return tuple(value(child) for child in node.elts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        return value(node.left) * value(node.right)
+    raise SystemExit(1)
+
+
+names = value(found["COOKIE_BROWSERS"])
+cap = value(found["COOKIE_JAR_MAX_BYTES"])
+if not isinstance(names, tuple) or not names or not all(isinstance(n, str) for n in names):
+    raise SystemExit(1)
+if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1024:
+    raise SystemExit(1)
+print(json.dumps(list(names), ensure_ascii=False))
+print(cap)
+print("、".join(names))
 PY
 }
 
@@ -310,6 +393,9 @@ cleanup() {
     }
     [ -z "$KEEP" ] && [ -n "${SDIR:-}" ] && rm -rf "$SDIR" 2>/dev/null
     rm -f /tmp/verify_rust_receiver_notify.txt 2>/dev/null
+    rm -f /tmp/verify_rust_receiver_jar_good.txt \
+          /tmp/verify_rust_receiver_jar_garbage.txt \
+          /tmp/verify_rust_receiver_jar_big.txt 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -1208,6 +1294,258 @@ else
     [ "$code" = "404" ] \
         && pass "an unknown relay id is a 404, not a 200 with no bytes" \
         || fail "an unknown relay id answered $code"
+fi
+
+echo "== 18: the cookie panel — counts in, counts out, values only on disk =="
+# This is the one card in the whole surface whose payload is somebody's live
+# session credential, so the checks are ordered around one question: **did the
+# secret stay where the user put it?** Everything the API may say about the jar is
+# a count, a name, or a path (AGENTS.md §4.14). The two facts that decide every
+# expectation below — the browser whitelist and the size cap — are read out of the
+# Python module that owns them, not out of the Rust constant the code under test
+# also reads (§4.13: 每个数字问两遍).
+PYOUT=$(py_cookie_constants)
+if [ -z "$PYOUT" ]; then
+    skip "the Python cookie constants (section 18 reads its expectations from them)"
+else
+    CAP=$(sed -n '2p' <<< "$PYOUT")
+    NAMES=$(sed -n '3p' <<< "$PYOUT")
+    JAR="$SDIR/resolve_cookies.txt"
+    JAR_GOOD=/tmp/verify_rust_receiver_jar_good.txt
+    JAR_GARBAGE=/tmp/verify_rust_receiver_jar_garbage.txt
+    JAR_BIG=/tmp/verify_rust_receiver_jar_big.txt
+
+    # (a) the cold read. `path` is the one string here that came off the
+    # filesystem, and it is allowed because it is where the user would look to
+    # check our count — so it has to be the real path, not a plausible one.
+    api_probe "$BASE/api?query=resolve-cookies"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] \
+        && pass "loopback is admitted to the cookie panel (management, not code-execution)" \
+        || fail "the panel answered HTTP $API_STATUS code '$API_CODE'"
+    case "$API_MSG" in
+        *"$MANAGEMENT_MARK"*) fail "loopback heard the management sentence: $API_MSG" ;;
+        *) pass "and no gate sentence, because none of these routes hand us code to run" ;;
+    esac
+    [ "$(json_keys .)" = "code,message,state" ] \
+        && pass "the panel document is code, message, state" \
+        || fail "panel keys: $(json_keys .)"
+    [ "$(json_keys state)" = "jar,cookies,bad,path,browser,browsers,max_bytes,yt_dlp" ] \
+        && pass "and the state row has the reference's eight keys, in its order" \
+        || fail "state keys: $(json_keys state)"
+    [ "$(json_join state.browsers)" = "$NAMES" ] \
+        && pass "the browser list is the Python whitelist — names **and** order" \
+        || fail "browsers: $(json_join state.browsers), want $NAMES"
+    [ "$(json_ask state.max_bytes)" = "$CAP" ] \
+        && pass "and so is the jar's size cap" \
+        || fail "max_bytes: $(json_ask state.max_bytes), want $CAP"
+    [ "$(json_ask state.path)" = "$JAR" ] \
+        && pass "the card names the file the user would check us against" \
+        || fail "state.path: $(json_ask state.path), want $JAR"
+    [ "$(json_ask state.jar)" = "false" ] && [ "$(json_ask state.cookies)" = "0" ] \
+        && pass "a machine that never held a jar says so, rather than erroring" \
+        || fail "cold state: jar='$(json_ask state.jar)' cookies='$(json_ask state.cookies)'"
+    json_has state.yt_dlp \
+        && pass "and it reports whether the engine is installed at all" \
+        || fail "state.yt_dlp is missing — the card cannot say 'no engine here'"
+
+    # (b) one paste, four shapes of line. The `#HttpOnly_` row is the one that
+    # used to be read as a comment (the reference's own bug: a browser export marks
+    # its session cookies that way, so treating the prefix as a comment rejects the
+    # only file this panel exists to accept) — and `#HttpOnly_# …` must stay a
+    # comment, or the count promises a login state the engine never loads.
+    printf '# Netscape HTTP Cookie File\n' > "$JAR_GOOD"
+    printf '#HttpOnly_# also a comment\n' >> "$JAR_GOOD"
+    printf '\n' >> "$JAR_GOOD"
+    printf '#HttpOnly_.example.com\tTRUE\t/\tTRUE\t0\tsess\tSECRETVALUE1\n' >> "$JAR_GOOD"
+    printf '.example.com\tTRUE\t/\tFALSE\t0\tplain\tSECRETVALUE2\n' >> "$JAR_GOOD"
+    printf 'short\trow\n' >> "$JAR_GOOD"
+    api_post "$BASE/api" "resolve-cookies@$JAR_GOOD"
+    [ "$API_CODE" = "0" ] \
+        && pass "a mixed jar is accepted on the strength of its cookies, not its lines" \
+        || fail "paste refused: $API_MSG"
+    [ "$(json_keys .)" = "code,message,cookies,bad" ] \
+        && pass "and the success document carries the two counts" \
+        || fail "save keys: $(json_keys .)"
+    [ "$API_MSG" = "已保存 2 条 cookie，另有 1 行看不懂（一并存了）" ] \
+        && pass "the sentence says both numbers, including the one that was skipped" \
+        || fail "save wording: $API_MSG"
+    api_probe "$BASE/api?query=resolve-cookies"
+    [ "$(json_ask state.jar)" = "true" ] \
+        && [ "$(json_ask state.cookies)" = "2" ] \
+        && [ "$(json_ask state.bad)" = "1" ] \
+        && pass "the panel re-reads the file and agrees with what it just said" \
+        || fail "panel after save: jar='$(json_ask state.jar)' cookies='$(json_ask state.cookies)' bad='$(json_ask state.bad)'"
+
+    # (c) the credential checks. 0600 because the file is handed to a subprocess
+    # and read back by whoever owns this disk; the leak scan covers the three
+    # places a count-reporting surface can still write a value: the settings JSON,
+    # the app log, and the per-module logs directory — plus the panel document we
+    # are holding, which is the one a screenshot of the card would show.
+    [ -e "$JAR" ] && [ ! -e "$JAR.tmp" ] \
+        && pass "the jar is in place and no half-written temp file was left behind" \
+        || fail "jar exists: $([ -e "$JAR" ] && echo yes || echo no), temp exists: $([ -e "$JAR.tmp" ] && echo yes || echo no)"
+    [ "$(stat -f '%Lp' "$JAR")" = "600" ] \
+        && pass "0600, as a credential cache must be" \
+        || fail "jar mode is $(stat -f '%Lp' "$JAR" 2>/dev/null)"
+    leaked=""
+    for probe in "$SDIR/macast_setting.json" "$SDIR/macast.log" "$SDIR"/logs/*.log "$API_BODY"; do
+        [ -f "$probe" ] || continue
+        grep -q -E 'SECRETVALUE[12]' "$probe" && leaked="$leaked $(basename "$probe")"
+    done
+    [ -z "$leaked" ] \
+        && pass "neither cookie value appears in the settings file, either log, or the panel read" \
+        || fail "leaked into:$leaked"
+
+    # (d) + (e) the two refusals, each with the same witness: the jar on disk is
+    # still the one from (b). A paste that is refused must not be a paste that
+    # silently replaced the working credential — that is the whole reason the
+    # validation runs before anything is opened.
+    JAR_MD5=$(md5 -q "$JAR")
+    printf 'not a cookie line\nnor this one\nor this\n' > "$JAR_GARBAGE"
+    api_post "$BASE/api" "resolve-cookies@$JAR_GARBAGE"
+    [ "$API_CODE" = "1" ] && [ "$(json_keys .)" = "code,message" ] \
+        && pass "a jar with nothing readable in it is refused, with no counts to mislead" \
+        || fail "garbage jar answered code '$API_CODE' keys '$(json_keys .)'"
+    [ "$API_MSG" = "这份文件里没有一条能读懂的 cookie（3 行看不懂）。要 Netscape 格式：每行 7 个 TAB 分隔的字段" ] \
+        && pass "and it says how many lines it could not read, so the user can open the file" \
+        || fail "garbage wording: $API_MSG"
+    head -c "$((CAP + 1))" /dev/zero | tr '\0' 'a' > "$JAR_BIG"
+    api_post "$BASE/api" "resolve-cookies@$JAR_BIG"
+    [ "$API_CODE" = "1" ] \
+        && pass "a 200 MB paste is a disk problem, so the cap refuses at the door" \
+        || fail "oversized jar answered code '$API_CODE': $API_MSG"
+    [ "$API_MSG" = "cookie 文件太大了（上限 $((CAP / 1024)) KB）" ] \
+        && pass "and the number in that sentence is the cap the panel just published" \
+        || fail "oversized wording: $API_MSG"
+    [ "$(md5 -q "$JAR")" = "$JAR_MD5" ] \
+        && pass "and both refusals left the saved jar byte-for-byte the good one" \
+        || fail "a refused paste overwrote the credential file"
+
+    # (f)–(h) the browser field. `名字:资料目录` is the shape that exists because
+    # Vivaldi keeps its cookie database outside the default profile directory, so
+    # the answer has to be: accept it byte-for-byte, and refuse the two things this
+    # panel will not pass into argv (`+keyring`, `::container`) — separately, so
+    # each branch is actually asked.
+    SPEC=vivaldi:/tmp/macast-verify-profile
+    api_post "$BASE/api" "resolve-cookie-browser=$SPEC"
+    [ "$API_CODE" = "0" ] \
+        && pass "a browser with a data directory is accepted, not just a bare name" \
+        || fail "spec refused: $API_MSG"
+    [ "$API_MSG" = "已设为 $SPEC，但本机存过 cookie 文件，解析仍以文件为准（清除文件后才会用浏览器）" ] \
+        && pass "and says out loud that the file still outranks it in argv" \
+        || fail "override wording: $API_MSG"
+    [ "$(stored_setting Resolve_Cookie_Browser)" = "$SPEC" ] \
+        && pass "the profile half is stored byte-for-byte (it is a path, not a name)" \
+        || fail "stored Resolve_Cookie_Browser: '$(stored_setting Resolve_Cookie_Browser 2>/dev/null)'"
+    api_probe "$BASE/api?query=resolve-cookies"
+    [ "$(json_ask state.browser)" = "$SPEC" ] \
+        && pass "and the panel reads the same string back" \
+        || fail "state.browser: '$(json_ask state.browser)'"
+    api_post "$BASE/api" "resolve-cookie-browser=chrome+keyring"
+    [ "$API_CODE" = "1" ] \
+        && [ "$API_MSG" = "不认识「chrome+keyring」这个浏览器，可选：$NAMES" ] \
+        && pass "a keyring suffix is refused, and the refusal lists the real choices" \
+        || fail "keyring refusal: code '$API_CODE' msg '$API_MSG'"
+    api_post "$BASE/api" "resolve-cookie-browser=vivaldi::Default"
+    [ "$API_CODE" = "1" ] \
+        && pass "a container suffix is refused too — its name is valid, so the whitelist alone would let it through" \
+        || fail "container suffix answered code '$API_CODE': $API_MSG"
+    case "$API_MSG" in
+        *"我们只认到浏览器名字为止"*) pass "and it says which half failed, not 'I don't know that browser'" ;;
+        *) fail "container wording: $API_MSG" ;;
+    esac
+    [ "$(stored_setting Resolve_Cookie_Browser)" = "$SPEC" ] \
+        && pass "and a refusal never touched the stored value" \
+        || fail "the refused spec was stored anyway"
+
+    # (i)–(k) clear, clear again, off. The second clear is a **success** — the
+    # caller's goal is "no jar", and a machine that never had one has reached it.
+    # `off` then has to **unset** the key rather than store a false (§4.2).
+    api_post "$BASE/api" "resolve-cookies-clear=1"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "已清除 cookie 文件，下次解析改用 $SPEC" ] \
+        && pass "clearing the jar hands the next parse to the browser, and says so" \
+        || fail "clear answered code '$API_CODE' msg '$API_MSG'"
+    [ ! -e "$JAR" ] \
+        && pass "the file is gone (move, not a zeroed copy — nothing holds the credential)" \
+        || fail "the jar is still on disk after a clear"
+    api_probe "$BASE/api?query=resolve-cookies"
+    [ "$(json_ask state.jar)" = "false" ] && [ "$(json_ask state.cookies)" = "0" ] \
+        && pass "and the panel agrees, on the same read that reports the browser" \
+        || fail "panel after clear: jar='$(json_ask state.jar)'"
+    api_post "$BASE/api" "resolve-cookies-clear=1"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "本机没有保存过 cookie 文件" ] \
+        && pass "clearing twice is a success, not an error someone has to explain" \
+        || fail "second clear answered code '$API_CODE' msg '$API_MSG'"
+    api_post "$BASE/api" "resolve-cookie-browser=off"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "不再从浏览器读取 cookie" ] \
+        && pass "'off' is accepted as its own answer" \
+        || fail "off answered code '$API_CODE' msg '$API_MSG'"
+    if stored_setting Resolve_Cookie_Browser > /dev/null 2>&1; then
+        fail "off stored a value instead of unsetting the key: '$(stored_setting Resolve_Cookie_Browser)'"
+    else
+        pass "and the key is absent, not a stored false (§4.2)"
+    fi
+    api_probe "$BASE/api?query=resolve-cookies"
+    [ "$(json_ask state.browser)" = "" ] \
+        && pass "so the panel reads an empty browser, and the card can say 'off'" \
+        || fail "state.browser after off: '$(json_ask state.browser)'"
+fi
+
+echo "== 19: the device dropdown answers with a refusal that is a full document =="
+# This shell has no `target_push` seam yet (task #22), so the honest answer to
+# "which device?" is a refusal — but the card must still be able to **stop
+# spinning**. The reference's refusal shape ships `searching` and `known` as
+# `false` rather than leaving them out, because the page reads them as booleans
+# and a missing key is a spinner that never ends.
+api_probe "$BASE/api?query=cast-targets"
+[ "$API_STATUS" = "200" ] && [ "$API_CODE" = "1" ] \
+    && pass "the device list answers, as a refusal, and loopback is admitted" \
+    || fail "cast-targets answered HTTP $API_STATUS code '$API_CODE'"
+case "$API_MSG" in
+    *"这台设备还投不了"*) pass "and it names the missing face rather than a network problem" ;;
+    *) fail "refusal wording: $API_MSG" ;;
+esac
+case "$API_MSG" in
+    *"$MANAGEMENT_MARK"*) fail "loopback heard the management sentence: $API_MSG" ;;
+    *) pass "and no gate sentence, since nothing here runs code" ;;
+esac
+[ "$(json_keys .)" = "code,message,targets" ] \
+    && pass "the refusal is wrapped the same way the success document would be" \
+    || fail "cast-targets keys: $(json_keys .)"
+[ "$(json_keys targets)" = "items,searching,known" ] \
+    && pass "and the target row ships all three keys, in the reference's order" \
+    || fail "targets keys: $(json_keys targets)"
+[ "$(json_len targets.items)" = "0" ] \
+    && pass "with no rows in it — the local row belongs to the success document" \
+    || fail "items has $(json_len targets.items) row(s) in a refusal"
+[ "$(json_ask targets.searching)" = "false" ] && [ "$(json_ask targets.known)" = "false" ] \
+    && pass "and both booleans are present and false, so the card stops polling" \
+    || fail "searching='$(json_ask targets.searching)' known='$(json_ask targets.known)'"
+REFUSED="$API_MSG"
+api_probe "$BASE/api?query=cast-targets&refresh=1"
+[ "$API_MSG" = "$REFUSED" ] && [ "$(json_ask targets.searching)" = "false" ] \
+    && pass "asked to re-search it says the same thing, and starts no probe" \
+    || fail "refresh=1 changed the answer: '$API_MSG' searching='$(json_ask targets.searching)'"
+if [ -n "$LAN" ]; then
+    for q in cast-targets resolve-cookies; do
+        api_probe "http://$LAN:$PORT/api?query=$q"
+        [ "$API_STATUS" = "403" ] \
+            && pass "a LAN caller is refused $q" \
+            || fail "a LAN caller got HTTP $API_STATUS from $q"
+        case "$API_MSG" in
+            *"$MANAGEMENT_MARK"*) pass "and hears the management sentence for $q" ;;
+            *) fail "$q refusal wording: $API_MSG" ;;
+        esac
+        # The `path` key makes this one worth checking on this surface
+        # specifically: a card that names a file on disk tells a LAN caller where
+        # the credential cache lives, which the count-only promise does not cover.
+        case "$API_MSG" in
+            *"$SDIR"*) fail "the $q refusal leaked the config directory path" ;;
+            *) pass "and the $q refusal names no path on this machine" ;;
+        esac
+    done
+else
+    skip "no reachable non-loopback address to ask from (section 19's LAN half)"
 fi
 
 echo

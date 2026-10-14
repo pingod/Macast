@@ -369,6 +369,15 @@ impl Player {
         slot.as_ref().map(|c| c.id()).filter(|p| *p != 0)
     }
 
+    /// Whether a write sent now would reach a player that is reading it. What each half
+    /// sees, and what has not been measured about the kernel's half, is in
+    /// [`Player::set_media_url`].
+    fn socket_carries_writes(&self) -> bool {
+        guard(&self.shared.link)
+            .as_ref()
+            .map_or(false, |link| !link.is_closed() && link.is_connected())
+    }
+
     /// `MPVRenderer.start()`: `running = True`, one INFO line, then the two
     /// threads in the reference's order.
     pub fn start(&self) {
@@ -510,24 +519,51 @@ impl Player {
     /// compares against the enum's `4`, so the number `4.0` means fullscreen and the
     /// string `"4"` does not.
     ///
-    /// A hand-off that arrives **before the first connect** is put in
-    /// [`Shared::pending_reload`] so the socket that is on its way can load it. The
-    /// reference has no such case: its `mpvipc_start` subscription is armed only by
-    /// `reload()`, so a cast that lands during the connect sleep writes to a `None`
-    /// socket, logs `sendCommand: …`, and is never loaded — which is exactly what this
-    /// port did on a real receiver (AGENTS.md §4.1's 「连上了但什么都没播」, with the
-    /// mpv side of it here rather than in the renderer). The slot is armed **before**
-    /// the attempt, not after it reports the drop: a connect that lands between the
-    /// dropped send and a later arm would find nothing waiting, and losing the media is
-    /// the failure this exists to end. The worst case of the chosen order is that both
-    /// that reconnect and this call load the same url — a reload of a file that was
-    /// about to play, not a cast that never plays.
+    /// A hand-off that arrives while the socket **cannot carry it** is put in
+    /// [`Shared::pending_reload`] so the socket that is on its way can load it. That
+    /// is more windows than "there is no socket yet": [`connect_once`] installs the
+    /// link before it connects, exactly as the reference assigns `self.ipc_sock`
+    /// before `connect()`, so a failed connect leaves an *unconnected* link in the
+    /// slot — and during the reconnect sleep the slot still holds whatever the last
+    /// attempt left there. The reference has no such case: its `mpvipc_start`
+    /// subscription is armed only by `reload()`, so a cast that lands during the
+    /// connect sleep writes to a socket that is not connected, logs `sendCommand: …`,
+    /// and is never loaded — which is exactly what this port did on a real receiver
+    /// (AGENTS.md §4.1's 「连上了但什么都没播」, with the mpv side of it here rather
+    /// than in the renderer; the witness was five `sendCommand: [Errno 57] Socket is
+    /// not connected` lines while the DLNA transport state stayed `PAUSED_PLAYBACK`
+    /// for a full minute). The slot is armed **before** the attempt, not after it
+    /// reports the drop: a connect that lands between the dropped send and a later
+    /// arm would find nothing waiting, and losing the media is the failure this exists
+    /// to end. The worst case of the chosen order is that both that reconnect and this
+    /// call load the same url — a reload of a file that was about to play, not a cast
+    /// that never plays.
+    ///
+    /// Two questions decide "cannot carry it", and each sees something the other cannot.
+    /// [`Link::is_connected`] asks the kernel the fact a failed write reports as
+    /// `ENOTCONN`, and it is the **only** question that can see a link that was never
+    /// connected — the window [`connect_once`] creates by installing the link before it
+    /// connects (and, on Windows, a `Some` with no handle). [`Link::is_closed`] is the
+    /// only question that does not depend on what the kernel says about a socket we have
+    /// already decided is dead: `close()` is a `shutdown(Shutdown::Both)` that
+    /// deliberately keeps the descriptor — the read loop holds an `Arc` of the same
+    /// socket — so without the flag a hand-off arriving after a `Session::Ended` would be
+    /// written to a socket nobody reads and, reading as "delivered", would never be
+    /// parked.
+    ///
+    /// Measured on this Mac (2026-10-14, a direct `getpeername(2)` probe): after our own
+    /// `shutdown(2)`, **and** after the peer closes, it raises `[Errno 22] Invalid
+    /// argument` rather than `ENOTCONN`. So on macOS the two questions agree about the
+    /// closed link and the first one alone would park it — which is why the second one is
+    /// still asked: what `getpeername` answers for a shut-down unix socket on Linux is a
+    /// kernel opinion this port has **not** measured, and the read loop's close is a fact
+    /// we set ourselves, on the very object being read here.
     pub fn set_media_url(&self, url: &str, start: Option<&str>) {
         if pyops::py_eq(&self.shared.host.player_size(), &json!(4)) {
             self.send_command(&command::fullscreen());
         }
         let live = self.media_live();
-        if guard(&self.shared.link).is_none() {
+        if !self.socket_carries_writes() {
             *guard(&self.shared.pending_reload) = Some(url.to_string());
         }
         self.send_command(&command::loadfile(url, start, live));
@@ -3561,6 +3597,175 @@ mod tests {
         );
         assert_eq!(&all[3..13], &session_setup()[..], "{:?}", all);
         assert_eq!(h.host.count_containing("mpv loadfile"), 1);
+        assert!(
+            guard(&h.player.shared.pending_reload).is_none(),
+            "the replay is spent by the connection that read it"
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn an_unconnected_socket_does_not_carry_the_cast() {
+        // The shape `connect_once` actually leaves behind, and the one the live
+        // verifier caught this fix missing (`/tmp/vrr_18_19.txt`: five
+        // `sendCommand: [Errno 57] Socket is not connected` lines, then
+        // `TransportState never read PLAYING`). The slot is installed **before** the
+        // connect, because `mpv.py:404` assigns `self.ipc_sock = socket.socket(...)`
+        // before it calls `.connect()` — so during that window `is_none()` answers
+        // "there is a socket" while the only true fact is "there is a socket object".
+        // Parking on `is_none()` alone lets a cast land on a descriptor with no peer,
+        // get logged away, and never be replayed: the hand-off is swallowed rather
+        // than held.
+        //
+        // This is also the fixture with teeth for the kernel half of
+        // `socket_carries_writes`: drop `is_connected()` from that conjunction and this
+        // test goes red, because the link here is not one `is_closed()` knows anything
+        // about. The closed-link fixture below cannot make the same claim on this Mac —
+        // see the note written there.
+        let mut h = harness(|_, _| {});
+        *guard(&h.player.shared.link) = Some(Link::created().expect("a raw unix socket"));
+        assert!(
+            !guard(&h.player.shared.link)
+                .as_ref()
+                .unwrap()
+                .is_connected(),
+            "the fixture is a descriptor the kernel has no peer for"
+        );
+
+        h.player.set_media_url(MEDIA_URL, None);
+        h.player.set_media_title("某部片子");
+        assert_eq!(
+            guard(&h.player.shared.pending_reload).as_deref(),
+            Some(MEDIA_URL),
+            "an unconnected socket carries no bytes, so the cast has to be held"
+        );
+
+        // Both halves of the sentence, in both directions. What the write really
+        // raised (the platform table is `a_failed_connect_leaves_an_unconnected_socket`'s,
+        // measured rather than derived from `libc::ENOTCONN`), and — just as load
+        // bearing — what it must **not** have raised: the `NoneType` text belongs to an
+        // empty slot, and reading this window as that one is exactly how the bug hid.
+        let errors = h.host.at(Level::Error);
+        let expected: &str = if cfg!(target_os = "linux") {
+            "[Errno 107] Transport endpoint is not connected"
+        } else {
+            "[Errno 57] Socket is not connected"
+        };
+        assert!(
+            errors.iter().any(|line| line.ends_with(expected)),
+            "the dropped write is still reported: {:?}",
+            errors
+        );
+        assert!(
+            !errors.iter().any(|line| line.contains("NoneType")),
+            "the slot was not empty: {:?}",
+            errors
+        );
+
+        h.start();
+        wait_until("the replay and the session's ten observations", || {
+            h.fake.commands().len() >= 13
+        });
+        let all = h.fake.commands();
+        assert_eq!(
+            &all[..3],
+            &[
+                json!(["loadfile", MEDIA_URL, "replace"]),
+                json!(["set_property", "title", "某部片子"]),
+                json!(["set_property", "force-media-title", "某部片子"]),
+            ][..],
+            "{:?}",
+            all
+        );
+        assert_eq!(&all[3..13], &session_setup()[..], "{:?}", all);
+        assert_eq!(h.host.count_containing("mpv loadfile"), 1);
+        assert!(
+            guard(&h.player.shared.pending_reload).is_none(),
+            "the replay is spent by the connection that read it"
+        );
+        h.stop();
+    }
+
+    #[test]
+    fn a_socket_we_closed_does_not_carry_the_cast() {
+        // The second question `socket_carries_writes` asks, and the window it is the only
+        // witness for: a descriptor that is still open, still has a peer's inode behind
+        // it, and has been shut down by **us**. `close()` deliberately does not drop it —
+        // the read loop holds an `Arc` of the same socket — so the flag is the one fact
+        // about this link that does not depend on what the kernel thinks of a dead
+        // socket, and it is what makes the `[Errno 9] Bad file descriptor` line below the
+        // honest report of a write that was attempted and then parked.
+        //
+        // **Honest coverage note**: on this Mac `is_connected()` answers `false` for this
+        // fixture too — `getpeername(2)` raises `[Errno 22] Invalid argument` once we have
+        // shut the socket down, measured 2026-10-14, and the first version of this test
+        // asserted the opposite because it had been written from a claim nobody had
+        // asked the kernel about. Measured with the two mutations of
+        // `socket_carries_writes`: dropping the kernel half turns **this** test's sister
+        // red (1 red), dropping `is_closed()` turns **0** red here, because parking is
+        // still carried by the kernel's answer and the `[Errno 9]` line is written by
+        // `send_all`, which reads the same flag the predicate does. So this fixture is not
+        // a witness for the flag on macOS — it is the Linux half of that claim that has
+        // never been asked here, and the flag is still what the reference models as
+        // `ipc_sock = None`, so it is the half this port is never wrong to ask.
+        let mut h = harness(|_, _| {});
+        // The fake's listener is bound at harness creation, so this connect reaches its
+        // backlog without the player being involved, and we never write through the
+        // socket before closing it — no `await_connection` is owed here.
+        let link = Link::created().expect("a raw unix socket");
+        link.connect(h.fake.path())
+            .expect("connect to the bound listener");
+        assert!(
+            link.is_connected(),
+            "the fixture is a link the kernel still counts as connected"
+        );
+        assert!(!link.is_closed(), "and not one we have closed yet");
+        link.close();
+        assert!(
+            link.is_closed(),
+            "close() sets the flag while keeping the descriptor"
+        );
+
+        *guard(&h.player.shared.link) = Some(link);
+
+        h.player.set_media_url(MEDIA_URL, None);
+        h.player.set_media_title("某部片子");
+        assert_eq!(
+            guard(&h.player.shared.pending_reload).as_deref(),
+            Some(MEDIA_URL),
+            "a socket we shut down carries nothing, whatever the kernel says about it"
+        );
+        let errors = h.host.at(Level::Error);
+        assert!(
+            errors
+                .iter()
+                .any(|line| line.starts_with("sendCommand: ")
+                    && line.ends_with("[Errno 9] Bad file descriptor")),
+            "the write was attempted through the closed slot: {:?}",
+            errors
+        );
+        assert!(
+            !errors.iter().any(|line| line.contains("NoneType")),
+            "the slot was not empty: {:?}",
+            errors
+        );
+
+        h.start();
+        wait_until("the replay and the session's ten observations", || {
+            h.fake.commands().len() >= 13
+        });
+        let all = h.fake.commands();
+        assert_eq!(
+            &all[..3],
+            &[
+                json!(["loadfile", MEDIA_URL, "replace"]),
+                json!(["set_property", "title", "某部片子"]),
+                json!(["set_property", "force-media-title", "某部片子"]),
+            ][..],
+            "{:?}",
+            all
+        );
+        assert_eq!(&all[3..13], &session_setup()[..], "{:?}", all);
         assert!(
             guard(&h.player.shared.pending_reload).is_none(),
             "the replay is spent by the connection that read it"

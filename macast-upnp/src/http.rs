@@ -156,6 +156,12 @@ enum PostAction {
     ResolvePage,
     CastResolved,
     CastUrl,
+    /// `resolve-cookies=<jar text>`: validate and save the whole jar.
+    SaveCookies,
+    /// `resolve-cookies-clear=`: drop the saved jar.
+    ClearCookies,
+    /// `resolve-cookie-browser=<spec>`: set or clear the browser reading.
+    SetCookieBrowser,
 }
 
 struct PostRoute {
@@ -179,6 +185,16 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     PostRoute { field: "cast-uri",        gate: "management", action: PostAction::CastUrl },
     PostRoute { field: "resolve-page",    gate: "management", action: PostAction::ResolvePage },
     PostRoute { field: "cast-resolved",   gate: "management", action: PostAction::CastResolved },
+    // The three cookie routes, `protocol.py:2325-2327`, straight after the two
+    // resolve routes they belong to. Management-gated and **not** `GATE_CODE`,
+    // which is the distinction worth keeping in mind when reading this: the jar
+    // is data handed to yt-dlp as a *file path this code chose*, and the browser
+    // value goes through `cookie_browser_spec` before it reaches argv. Neither
+    // request hands us something that runs (AGENTS.md §4.7b's family is the one
+    // where it does).
+    PostRoute { field: "resolve-cookies",       gate: "management", action: PostAction::SaveCookies },
+    PostRoute { field: "resolve-cookies-clear", gate: "management", action: PostAction::ClearCookies },
+    PostRoute { field: "resolve-cookie-browser", gate: "management", action: PostAction::SetCookieBrowser },
 ];
 
 /// `site_of()` (`protocol.py:1491`): `(host, port)` out of a URL or `Host`
@@ -386,9 +402,13 @@ enum Action {
     CastInfo,
     /// `query=resolve-status&job=<id>`: how far one background parse has got.
     ResolveStatus,
+    /// `query=resolve-cookies`: the cookie panel's read — counts and names only.
+    ResolveCookies,
+    /// `query=cast-targets&refresh=`: the 网页地址投屏 card's device list.
+    CastTargets,
 }
 
-/// The three answers this port implements out of the shipped management API's
+/// The five answers this port implements out of the shipped management API's
 /// fifteen GET queries. Each is a **cumulative** check, not a choice: see
 /// [`Face::gate_refusal`].
 ///
@@ -405,9 +425,9 @@ enum Action {
 /// `cast-info`, `resolve-status`, `resolve-cookies`, `cast-targets`) under a
 /// single `_management_allowed()` call — it is *not* per-route data the way the
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
-/// §4.7c asks for; the consequence is that a fourth sensitive query must be added
+/// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 3] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 5] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -437,6 +457,30 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 3] = [
         // what keeps them away from everyone else on this network.
         gate: "management",
         action: Action::ResolveStatus,
+    },
+    GetRoute {
+        query: "resolve-cookies",
+        // `GATE_MANAGEMENT`, and the reason is the `path` key. The answer is
+        // built to carry **counts, never values** (`_cookie_state` in
+        // `protocol.py:2794-2818`), but it does name the file on disk and the
+        // browser spec this machine is configured to read. That is a map of
+        // where this user's session cookies live, which is not something a LAN
+        // passer-by gets to ask for. AGENTS.md §4.7 is blunt about the general
+        // shape: this face being management-gated is not a licence to hand out
+        // a second secret in the same response.
+        gate: "management",
+        action: Action::ResolveCookies,
+    },
+    GetRoute {
+        query: "cast-targets",
+        // `GATE_MANAGEMENT` in Python, and here it is a row like every other
+        // query rather than an arm of an `if`. Its answer is a device list, so
+        // on the face of it there is nothing secret — but the shipped gate is
+        // the shipped behaviour, and a route that answers LAN callers while its
+        // neighbours refuse them is the exact structural hole AGENTS.md §4.7c
+        // was written to close.
+        gate: "management",
+        action: Action::CastTargets,
     },
 ];
 
@@ -1114,9 +1158,13 @@ impl Answer {
 /// `Answer`, and the difference is Python's: `_cast_url` returns either
 /// `{'code': 0, 'message': 'success', 'url':…, 'title':…}` or
 /// `{'code': 1, 'message': …}` and **nothing else** on the failure side, so a
-/// sentence is the entire failure. The three resolve methods below are not like
-/// that -- their refusals carry keys (`'job': ''`, `'status': None`), so they
-/// hand back a full `Answer` and this file never has to guess at their extras.
+/// sentence is the entire failure. The eight methods below are not like that --
+/// their refusals carry keys (`'job': ''`, `'status': None`, `'targets': {…}`),
+/// so they hand back a full `Answer` and this file never has to guess at their
+/// extras. **`'targets'` on a refusal is the load-bearing one**: a page that reads
+/// `targets.items` before it reads `code` gets `undefined` rather than an empty
+/// list if the refusal is built as a bare sentence, and the card then spins
+/// forever on a list that was never going to arrive.
 ///
 /// **Why the extra methods are `Answer`-shaped and not `String`** — the shipped
 /// key orders, quoted so a change here is a change against a witness:
@@ -1132,6 +1180,29 @@ impl Answer {
 ///   seventeen-key object — the page reads both.
 /// * `_post_cast_resolved` (`:2904+`) refuses a missing job with
 ///   `{'code': 1, 'message': '解析任务已经不在了，请重新解析'}`.
+/// * `query=resolve-cookies` (`:2183-2191`): `{'code': 0, 'message': 'success',
+///   'state': self._cookie_state()}`, and `_cookie_state` (`:2794-2818`) writes
+///   **eight keys in this order** — `jar`, `cookies`, `bad`, `path`, `browser`,
+///   `browsers`, `max_bytes`, `yt_dlp`. `browsers` is `list(COOKIE_BROWSERS)`, so
+///   the array order is that tuple's alphabetical order, and `yt_dlp` is a
+///   **boolean about this machine**, not about the request.
+/// * `query=cast-targets` (`:2192-2199` → `:1765-1794`): success
+///   `{'code': 0, 'message': 'success', 'targets': state}`; both refusals —
+///   「应用还在启动，请一秒后再试」/「没有可用的设备发现插件…」 (`:1754-1763`) and
+///   「读取设备列表失败：{e}」 — are the same two-line dict **plus**
+///   `'targets': {'items': [], 'searching': False, 'known': False}`. `state['items']`
+///   is `[self._local_target()] + 插件的 items` (`:1793`), and `_local_target()`
+///   (`:1796-1807`) is `{'id': 'local', 'kind': 'local', 'name': …, 'address': ''}`.
+/// * `_post_resolve_cookies` (`:2986-3030`) success
+///   `{'code': 0, 'message': '已保存 {} 条 cookie{}', 'cookies': cookies, 'bad': bad}`
+///   — the two counts are **after** the message, and the message is the only place
+///   the suffix 「，另有 {} 行看不懂（一并存了）」 appears. Every failure is
+///   `{'code': 1, 'message': …}` with **no extras**.
+/// * `_post_resolve_cookies_clear` (`:3032-3043`) and `_post_resolve_cookie_browser`
+///   (`:3045-3081`) each answer exactly `{'code': 0|1, 'message': …}`: nothing else
+///   in those two dicts, which is why they are `Answer`s with no fields rather than
+///   `String`s — the shape still has to be written somewhere, and writing it in the
+///   face keeps one owner for the whole table.
 pub trait Management: Send + Sync {
     /// Cast `url`, named `title` when the sender gave one (`cast-title`).
     ///
@@ -1164,6 +1235,86 @@ pub trait Management: Send + Sync {
     /// second owner of that answer. `target` empty means "this machine", the
     /// only answer v0.18 had.
     fn cast_resolved(&self, job: &str, candidate: &str, target: &str) -> Answer;
+
+    /// The `query=resolve-cookies` panel read: **counts and names, never values**.
+    ///
+    /// The eight-key document is the implementer's, because the facts in it live
+    /// where the jar lives: whether `SETTING_DIR/resolve_cookies.txt` is on disk,
+    /// how many lines `cookie_jar_state` can read, which browser spec this machine
+    /// is configured to read, and whether *this* machine has `yt-dlp` installed at
+    /// all. `macast-upnp` cannot ask any of those, and must not learn the path.
+    ///
+    /// **What this route must never put in the answer**: a cookie value, a line of
+    /// the jar, or anything from `macast_setting.json` beyond the browser *name*.
+    /// AGENTS.md §4.14 fixes that as a red line -- the settings file is something
+    /// users export and paste into bug reports, and a jar is a live session
+    /// credential for someone else's site. `path` is allowed precisely because it
+    /// is where the user would look to check our count, not what they would send us.
+    fn cookie_state(&self) -> Answer;
+
+    /// The `query=cast-targets` device list, from the caches only.
+    ///
+    /// `refresh` has already been read off the wire by the face: Python's rule
+    /// (`protocol.py:1776-1777`) is that the flag arrives as query-string **text**, so truth is
+    /// a name (`'1'`/`'true'`/`'yes'`/`'on'`, stripped and lowered) and
+    /// `?refresh=0` means "do not search". That normalization is the face's business
+    /// -- the same place that reads `job` and `candidate` -- so the implementer gets
+    /// a decision rather than a string it has to second-guess.
+    ///
+    /// `true` means "start the plugin's background search and answer with whatever
+    /// the caches hold **right now**"; it never means "block until a probe finishes".
+    /// Python's reason (`:1771-1777`) is worth keeping: a synchronous SSDP+mDNS
+    /// round trip would hold a request worker for about three seconds to say
+    /// nothing the next poll would not say anyway.
+    ///
+    /// The implementer also owns the **first row**: `local` means "hand it to
+    /// whichever renderer is selected", and its `name` is that renderer's title --
+    /// 「本机」 is not one thing, so the card has to say which machine pressing 投屏
+    /// will actually reach. Both refusal documents carry an empty `targets` (see the
+    /// trait doc); a shell with no device-discovery face says so in words rather
+    /// than inventing devices.
+    fn cast_targets(&self, refresh: bool) -> Answer;
+
+    /// Validate `text` as a whole Netscape jar and make it the saved one.
+    ///
+    /// All of the deciding is the implementer's -- `cookie_jar_state`'s
+    /// `(cookies, bad)` and the `ValueError` sentence, the 0600 write to a temporary
+    /// name and the atomic replace, and `os.makedirs` of the settings directory --
+    /// because the **file** is the product here, not the answer. Two rules travel
+    /// with it (§4.14): validation happens **before** the write, since a malformed
+    /// jar is not an error to yt-dlp (it resolves anonymously and returns *fewer*
+    /// addresses, which reads as "this page has no video"); and no backup of the
+    /// previous jar is kept, deliberately -- a feature that overwrites a credential
+    /// cache should not leave copies of every session it ever held.
+    ///
+    /// The message is built from the counts, so the counts have to come back in the
+    /// same document (`'cookies'`, `'bad'`): the card re-reads them from the answer
+    /// rather than polling `resolve-cookies` again.
+    fn save_cookies(&self, text: &str) -> Answer;
+
+    /// Drop the saved jar. Three distinct answers, all `code: 0` or all refusals:
+    /// there was nothing to remove (「本机没有保存过 cookie 文件」 — a *success*, because
+    /// the caller's goal is "no jar"), removal failed (an `OSError`, named), and the
+    /// one that matters for the panel — after clearing, the next parse reads from
+    /// the browser if one is configured, and that sentence must say **which**.
+    fn clear_cookies(&self) -> Answer;
+
+    /// Set or clear `Resolve_Cookie_Browser` from `text`, one raw field.
+    ///
+    /// `text` is the whole field, not a browser name: the shipped grammar is
+    /// `BROWSER[:profile]`, and the two sides of that colon are decided
+    /// differently — the name half is lowercased and must be in the whitelist,
+    /// the profile half is the user's path and is **kept byte-for-byte**. So this
+    /// method cannot take a `&str` name; the whitelist re-check and the rejection
+    /// of `+keyring` / `::container` / a leading `-` all belong to the reader
+    /// (`cookie_browser_spec`), and a face that split the string first would
+    /// become a second owner of that grammar (AGENTS.md §4.14: the write gate and
+    /// the read gate have to agree on one table).
+    ///
+    /// Six spellings mean "off" (`('', '0', 'off', 'none', '关闭', '不用')` on the
+    /// lowercased text, `:3058`) and unset the key rather than storing `false`
+    /// — §4.2's rule that a disabled setting is *absent*, not `False`.
+    fn set_cookie_browser(&self, text: &str) -> Answer;
 }
 
 /// One name in [`GET_MANAGEMENT_ROUTES`]'s `gate` column, read at check time.
@@ -1400,6 +1551,8 @@ impl Face {
             Action::Cast => self.cast_entry(req),
             Action::CastInfo => self.cast_info(),
             Action::ResolveStatus => self.resolve_status_entry(req),
+            Action::ResolveCookies => self.cookie_state_entry(),
+            Action::CastTargets => self.cast_targets_entry(req),
         }
     }
 
@@ -1611,6 +1764,37 @@ impl Face {
         answer_response(200, &self.management.resolve_status(&job_id))
     }
 
+    /// `GET ?query=resolve-cookies` — the cookie card's one read.
+    ///
+    /// No parameters at all: `:2183-2191` is
+    /// `{'code': 0, 'message': 'success', 'state': self._cookie_state()}` and
+    /// nothing on the request line enters it. What the caller learns about the
+    /// machine (`yt_dlp`, the jar's byte size) is a fact about **this host**, so
+    /// the answer cannot be steered by a LAN peer — which matters because this
+    /// document names a **file path on disk**.
+    fn cookie_state_entry(&self) -> Response {
+        answer_response(200, &self.management.cookie_state())
+    }
+
+    /// `GET ?query=cast-targets` — the device dropdown's one read.
+    ///
+    /// `refresh` is the only parameter, and it is read as **text truth**, not as
+    /// a boolean: `:1776-1777` turns whatever the query string carried into a
+    /// string, strips and lowercases it, and compares against
+    /// `('1', 'true', 'yes', 'on')`. So `?refresh=0` means "do **not** search",
+    /// while `?refresh=TRUE` means search, and `?refresh=` (present and empty)
+    /// means do not search. Collapsing that into "the parameter is there" would
+    /// make every poll that passes `refresh=0` kick off a fresh SSDP+mDNS round
+    /// trip — which is the expensive thing this normalization exists to avoid.
+    /// The normalization lives **here**, in the face, so the shell receives a
+    /// decision it can be tested against rather than a wire encoding.
+    fn cast_targets_entry(&self, req: &Request) -> Response {
+        answer_response(
+            200,
+            &self.management.cast_targets(query_flag(req, "refresh")),
+        )
+    }
+
     /// `/dlna/<Service>.xml` — the SCPD documents.
     ///
     /// `Last-Modified` **then** `Accept-Ranges: bytes`, which is the measured
@@ -1805,6 +1989,28 @@ impl Face {
                         &param_value(req, "target").unwrap_or_default(),
                     ),
                 ),
+                // The jar arrives as **one string** and the whole of it is the
+                // field's value: Python reads `kwargs.get('resolve-cookies')`
+                // and hands the text to `save_cookie_jar` without touching it
+                // (`protocol.py:2990-2996`). Counting the cookies, judging an
+                // empty jar, and writing 0600 are the seam's decisions — the
+                // face only names the field it read.
+                PostAction::SaveCookies => answer_response(
+                    200,
+                    &self.management.save_cookies(
+                        &param_value(req, "resolve-cookies").unwrap_or_default(),
+                    ),
+                ),
+                // No argument at all: the presence of the field *is* the request.
+                PostAction::ClearCookies => answer_response(200, &self.management.clear_cookies()),
+                // Same shape as save — one string in, one dict out, and the
+                // grammar of `名字:资料目录` is decided behind the seam.
+                PostAction::SetCookieBrowser => answer_response(
+                    200,
+                    &self.management.set_cookie_browser(
+                        &param_value(req, "resolve-cookie-browser").unwrap_or_default(),
+                    ),
+                ),
             });
         }
         None
@@ -1815,7 +2021,7 @@ impl Face {
     /// In Python this is `return super(DLNAHandler, self).POST(...)`
     /// (`protocol.py:3160`) arriving at the end of the base `Handler.POST`, after
     /// `_same_site()`, the upload loop, and the whole `POST_ROUTES` walk. The
-    /// shipped table has **16** rows; [`POST_MANAGEMENT_ROUTES`] carries the three
+    /// shipped table has **16** rows; [`POST_MANAGEMENT_ROUTES`] carries the six
     /// this port has implemented, so a field Python knows and this port has not
     /// ported yet (`clear-log`, `set-subtitle-show`, `mirror-action`,
     /// `install-webrtc-extras`, …) lands here and is echoed as 不认识字段. That is
@@ -2130,6 +2336,38 @@ fn query_value(req: &Request, name: &str) -> Option<String> {
         .iter()
         .find(|(key, _)| key == name)
         .map(|(_, value)| value.clone())
+}
+
+/// Whether a query parameter carries a **yes**, read the way the shipped card
+/// reads it: as text, not as presence.
+///
+/// ```python
+/// if isinstance(refresh, str):
+///     refresh = refresh.strip().lower() in ('1', 'true', 'yes', 'on')
+/// ```
+///
+/// (`protocol.py:1776-1777`, and the docstring above it says the plain words:
+/// 「`?refresh=0` means "do not search"」.) So four names mean yes, everything
+/// else means no — including the **empty** value, which a form or a hand-written
+/// URL leaves behind more often than anyone admits. Absent is no.
+///
+/// Two deviations from Python, both inherited from [`query_value`] rather than
+/// chosen here:
+///
+/// - **A repeated key.** cherrypy merges `?refresh=0&refresh=0` into a *list*,
+///   so `isinstance(refresh, str)` is false and the normalization is skipped
+///   entirely — and a non-empty list is truthy, so that request **searches**
+///   there. Here it does not. The shipped behaviour on a repeated flag is an
+///   accident of Python's truthiness, and no test can ask it.
+/// - **`strip()`** runs before `lower()` on the whole text, so `%20true%20` is
+///   yes. Percent-decoding already happened upstream, so this sees the spaces.
+fn query_flag(req: &Request, name: &str) -> bool {
+    query_value(req, name)
+        .map(|value| {
+            let text = value.trim().to_lowercase();
+            matches!(text.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }
 
 /// One parameter, read the way cherrypy merges a request: **query first, then
@@ -3176,12 +3414,27 @@ mod tests {
     /// those extras back can then assert on **which keys came** and in what order
     /// (the serializer prints `fields` in order), which is a fact about this file,
     /// while the values themselves stay the fake's invention.
+    ///
+    /// The five cookie/target methods log the same way, and each answers with the
+    /// key order [`Management`] says the shipped face writes: `state` after
+    /// `message`, `targets` after `message`, `message` **before** `cookies`/`bad`
+    /// (Python formats that message *from* the counts it then also sends, so a
+    /// document that carries the counts first has inverted the dependency).
+    /// `cast_targets` answers with the `refresh` bool it received written into
+    /// `searching`, and `save_cookies`/`set_cookie_browser` answer with values
+    /// derived from the **whole raw field** — so a test can see that this file
+    /// split nothing and decoded nothing beyond reading the parameter.
     struct FakeManagement {
         refuses: AtomicBool,
         calls: Mutex<Vec<(String, Option<String>)>>,
         resolve_calls: Mutex<Vec<String>>,
         status_calls: Mutex<Vec<String>>,
         cast_resolved_calls: Mutex<Vec<(String, String, String)>>,
+        cookie_state_calls: AtomicUsize,
+        targets_calls: Mutex<Vec<bool>>,
+        save_cookies_calls: Mutex<Vec<String>>,
+        clear_cookies_calls: AtomicUsize,
+        browser_calls: Mutex<Vec<String>>,
     }
 
     impl FakeManagement {
@@ -3192,6 +3445,11 @@ mod tests {
                 resolve_calls: Mutex::new(Vec::new()),
                 status_calls: Mutex::new(Vec::new()),
                 cast_resolved_calls: Mutex::new(Vec::new()),
+                cookie_state_calls: AtomicUsize::new(0),
+                targets_calls: Mutex::new(Vec::new()),
+                save_cookies_calls: Mutex::new(Vec::new()),
+                clear_cookies_calls: AtomicUsize::new(0),
+                browser_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -3219,6 +3477,26 @@ mod tests {
                 .lock()
                 .expect("cast-resolved calls")
                 .clone()
+        }
+
+        fn cookie_state_calls(&self) -> usize {
+            self.cookie_state_calls.load(Ordering::SeqCst)
+        }
+
+        fn targets_calls(&self) -> Vec<bool> {
+            self.targets_calls.lock().expect("targets calls").clone()
+        }
+
+        fn save_cookies_calls(&self) -> Vec<String> {
+            self.save_cookies_calls.lock().expect("save calls").clone()
+        }
+
+        fn clear_cookies_calls(&self) -> usize {
+            self.clear_cookies_calls.load(Ordering::SeqCst)
+        }
+
+        fn browser_calls(&self) -> Vec<String> {
+            self.browser_calls.lock().expect("browser calls").clone()
         }
     }
 
@@ -3279,6 +3557,67 @@ mod tests {
             Answer::ok("success")
                 .with("relay", Value::String(format!("/relay/{job}-{candidate}/media")))
                 .with("target", Value::String(target.to_string()))
+        }
+
+        fn cookie_state(&self) -> Answer {
+            self.cookie_state_calls.fetch_add(1, Ordering::SeqCst);
+            Answer::ok("success").with(
+                "state",
+                serde_json::json!({
+                    "jar": true,
+                    "cookies": 2,
+                    "bad": 0,
+                    "path": "/tmp/resolve_cookies.txt",
+                    "browser": "",
+                    "browsers": ["brave", "chrome", "chromium", "edge", "firefox",
+                                 "opera", "safari", "vivaldi", "whale"],
+                    "max_bytes": 262144,
+                    "yt_dlp": true,
+                }),
+            )
+        }
+
+        fn cast_targets(&self, refresh: bool) -> Answer {
+            self.targets_calls.lock().expect("targets calls").push(refresh);
+            Answer::ok("success").with(
+                "targets",
+                serde_json::json!({
+                    "items": [{ "id": "local", "kind": "local",
+                                "name": "MPV Renderer", "address": "" }],
+                    "searching": refresh,
+                    "known": true,
+                }),
+            )
+        }
+
+        fn save_cookies(&self, text: &str) -> Answer {
+            self.save_cookies_calls
+                .lock()
+                .expect("save calls")
+                .push(text.to_string());
+            if text.is_empty() {
+                return Answer::fail("这份文件里没有一条能读懂的 cookie（0 行看不懂）");
+            }
+            let lines = text.lines().count();
+            Answer::ok(format!("已保存 {lines} 条 cookie"))
+                .with("cookies", serde_json::json!(lines))
+                .with("bad", serde_json::json!(0))
+        }
+
+        fn clear_cookies(&self) -> Answer {
+            self.clear_cookies_calls.fetch_add(1, Ordering::SeqCst);
+            Answer::ok("本机没有保存过 cookie 文件")
+        }
+
+        fn set_cookie_browser(&self, text: &str) -> Answer {
+            self.browser_calls
+                .lock()
+                .expect("browser calls")
+                .push(text.to_string());
+            if text.is_empty() {
+                return Answer::ok("不再从浏览器读取 cookie");
+            }
+            Answer::ok(format!("下次解析会从 {text} 读取 cookie"))
         }
     }
 
@@ -4725,7 +5064,7 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 2);
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 5);
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -4739,20 +5078,457 @@ mod tests {
                 route.gate
             );
         }
+        for action in [
+            Action::Cast,
+            Action::CastInfo,
+            Action::ResolveStatus,
+            Action::ResolveCookies,
+            Action::CastTargets,
+        ] {
+            assert_eq!(
+                GET_MANAGEMENT_ROUTES
+                    .iter()
+                    .filter(|r| r.action == action)
+                    .count(),
+                1,
+                "{action:?} must be reachable by exactly one query name"
+            );
+        }
+        // `cast` is the one row whose gate is *not* management, and the reason is
+        // the whole of AGENTS.md §4.7: a `<img>` tag on any webpage can issue
+        // this GET, so "it came from this machine" buys it nothing. If a future
+        // edit re-labels this row `"management"`, the token requirement is gone
+        // and nothing else in this file notices -- so this is the row that has to
+        // be pinned by name rather than by the loop above.
         assert_eq!(
             GET_MANAGEMENT_ROUTES
                 .iter()
-                .filter(|r| r.action == Action::Cast)
-                .count(),
-            1
+                .find(|r| r.action == Action::Cast)
+                .expect("cast")
+                .gate,
+            "token"
+        );
+    }
+
+    #[test]
+    fn the_post_route_table_is_well_formed() {
+        crate::pin_test_dir();
+        // The GET table is a `[GetRoute; N]` so its length is a compile-time fact;
+        // this one is a `&[PostRoute]` slice, which means an empty scan here would
+        // agree with anything. Same two questions, same reason: unique field names
+        // (a duplicate would shadow the later one forever) and a gate every row can
+        // actually be parsed to.
+        assert!(POST_MANAGEMENT_ROUTES.len() >= 6);
+        let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
+        fields.sort_unstable();
+        fields.dedup();
+        assert_eq!(fields.len(), POST_MANAGEMENT_ROUTES.len());
+        for route in POST_MANAGEMENT_ROUTES.iter() {
+            assert!(!route.field.is_empty());
+            assert!(
+                Gate::parse(route.gate).is_some(),
+                "{} carries a gate name this port cannot read: {:?}",
+                route.field,
+                route.gate
+            );
+        }
+        for action in [
+            PostAction::CastUrl,
+            PostAction::ResolvePage,
+            PostAction::CastResolved,
+            PostAction::SaveCookies,
+            PostAction::ClearCookies,
+            PostAction::SetCookieBrowser,
+        ] {
+            assert_eq!(
+                POST_MANAGEMENT_ROUTES
+                    .iter()
+                    .filter(|r| r.action == action)
+                    .count(),
+                1,
+                "{action:?} must be reachable by exactly one field name"
+            );
+        }
+        // **Position is semantics**, and unlike the GET table there is no other
+        // place a reader can see it: dispatch walks this slice in order and the
+        // first *present* field wins, so a two-field request is served by whichever
+        // row comes earlier. The shipped order (`protocol.py:2310-2327`) puts the
+        // direct cast ahead of the parse, the parse ahead of the cast-of-a-parse,
+        // and the three cookie routes in save/clear/browser order. Re-sorted -- say
+        // by an editor that thinks a table of names should be alphabetical -- the
+        // file still compiles, every route still works alone, and only a request
+        // carrying two actions changes behaviour. That is exactly the class of drift
+        // AGENTS.md §4.7c calls "structurally invisible", so it is pinned here as a
+        // comparison rather than as a fixed sequence: a later row must still land
+        // where `protocol.py` puts it, and these pairs stay true when it does.
+        let index = |name: &str| {
+            POST_MANAGEMENT_ROUTES
+                .iter()
+                .position(|r| r.field == name)
+                .unwrap_or_else(|| panic!("no {name} row"))
+        };
+        for (earlier, later) in [
+            ("cast-uri", "resolve-page"),
+            ("resolve-page", "cast-resolved"),
+            ("cast-resolved", "resolve-cookies"),
+            ("resolve-cookies", "resolve-cookies-clear"),
+            ("resolve-cookies-clear", "resolve-cookie-browser"),
+        ] {
+            assert!(
+                index(earlier) < index(later),
+                "{earlier} must be dispatched before {later}"
+            );
+        }
+        // And the dispatch code has to actually honour the order it is written in:
+        // see `only_the_earlier_of_two_posted_actions_runs`.
+    }
+
+    #[test]
+    fn only_the_earlier_of_two_posted_actions_runs() {
+        crate::pin_test_dir();
+        // The table's order is only semantics if the scanner walks it in order.
+        // `resolve-page` is ahead of `resolve-cookies`, so a body carrying both
+        // starts exactly one parse and saves nothing -- and the reverse pairing
+        // (`cast-uri` ahead of everything) is what §4.7c means by "precedence".
+        let (face, management) = harness_management("post-precedence");
+        let response = face.answer(&post_form(
+            "/api",
+            "resolve-page=http://host/watch&resolve-cookies=1",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            management.resolve_calls(),
+            vec!["http://host/watch".to_string()]
+        );
+        assert!(
+            management.save_cookies_calls().is_empty(),
+            "the later row must not also run"
+        );
+    }
+
+    #[test]
+    fn the_cookie_state_read_is_refused_before_the_disk_is_read() {
+        crate::pin_test_dir();
+        // `query=resolve-cookies` answers with **counts**, but the counts sit
+        // next to `path` -- the file on disk -- and the browser spec this machine
+        // is configured to read (AGENTS.md §4.14: the jar never enters
+        // `macast_setting.json`, so the settings file is not where this map is).
+        // A LAN passer-by must therefore hear the management sentence and the
+        // seam must not be called at all: a refused read that still reads is the
+        // same hole as a refused cast that still casts.
+        let (face, management) = harness_management("cookie-state-gate");
+        let response = face.answer(&get_api("/api?query=resolve-cookies", LOCAL));
+        assert_eq!(response.status, 200);
+        // Whole bytes, with the document re-typed here rather than re-derived by
+        // calling the seam again: that would prove nothing about the pass-through
+        // and would move the counters this test reads.
+        let expected = answer_bytes(&Answer::ok("success").with(
+            "state",
+            serde_json::json!({
+                "jar": true,
+                "cookies": 2,
+                "bad": 0,
+                "path": "/tmp/resolve_cookies.txt",
+                "browser": "",
+                "browsers": ["brave", "chrome", "chromium", "edge", "firefox",
+                             "opera", "safari", "vivaldi", "whale"],
+                "max_bytes": 262144,
+                "yt_dlp": true,
+            }),
+        ));
+        assert_eq!(response.body, expected);
+        assert_eq!(management.cookie_state_calls(), 1);
+
+        let refused = face.answer(&get_api("/api?query=resolve-cookies", LAN));
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.body, json_body(1, MANAGEMENT_REFUSAL));
+        assert_eq!(
+            management.cookie_state_calls(),
+            1,
+            "the refusal must not have read the disk"
+        );
+        let body = text(&refused.body);
+        assert!(!body.contains("resolve_cookies.txt"), "{body}");
+
+        store_token(&face.setting, Some(SECRET));
+        let opened = face.answer(&get_api(
+            &format!("/api?query=resolve-cookies&token={SECRET}"),
+            LAN,
+        ));
+        assert_eq!(opened.status, 200);
+        assert_eq!(opened.body, expected);
+        assert_eq!(management.cookie_state_calls(), 2);
+    }
+
+    #[test]
+    fn the_refresh_flag_is_a_text_question_answered_before_the_seam() {
+        crate::pin_test_dir();
+        // Python reads this one as a **string** (`protocol.py:1776-1777`): the
+        // page polls `cast-targets` with no flag at all, and only the「重新搜索」
+        // button sends `refresh=1`. Collapsing the question to "was the parameter
+        // there" would turn every `refresh=0` poll into an SSDP + mDNS round trip,
+        // so the truth table is asserted through the bool the seam received --
+        // `searching` in the answer is that same bool written back, so the
+        // document equality below asks the second half: was it forwarded?
+        let (face, management) = harness_management("cast-targets-refresh");
+        for (flag, expected) in [
+            ("&refresh=1", true),
+            ("&refresh=true", true),
+            ("&refresh=YES", true),
+            ("&refresh=On", true),
+            ("&refresh=%20true%20", true),
+            ("&refresh=0", false),
+            ("&refresh=", false),
+            ("&refresh=no", false),
+            ("", false),
+        ] {
+            let target = format!("/api?query=cast-targets{flag}");
+            let response = face.answer(&get_api(&target, LOCAL));
+            assert_eq!(response.status, 200, "{target}");
+            let calls = management.targets_calls();
+            assert_eq!(calls.last().copied(), Some(expected), "{target}");
+            let document = answer_bytes(&Answer::ok("success").with(
+                "targets",
+                serde_json::json!({
+                    "items": [{ "id": "local", "kind": "local",
+                                "name": "MPV Renderer", "address": "" }],
+                    "searching": expected,
+                    "known": true,
+                }),
+            ));
+            assert_eq!(response.body, document, "{target}");
+        }
+        // A refused list read must not start a search either.
+        let before = management.targets_calls().len();
+        let refused = face.answer(&get_api("/api?query=cast-targets&refresh=1", LAN));
+        assert_eq!(refused.status, 403);
+        assert_eq!(refused.body, json_body(1, MANAGEMENT_REFUSAL));
+        assert_eq!(management.targets_calls().len(), before);
+    }
+
+    #[test]
+    fn a_pasted_jar_reaches_the_seam_as_one_undivided_text() {
+        crate::pin_test_dir();
+        // Three shapes a face can wreck on the way to the shell, all of them
+        // invisible if the test only asks "did a save happen":
+        //   * a line beginning `#HttpOnly_` is a **cookie**, not a comment
+        //     (AGENTS.md §4.14 -- treating it as a comment rejects an entire real
+        //     export, because session cookies are usually all of that shape);
+        //   * tabs and newlines arrive percent-encoded, and a parser that
+        //     decodes the query but not the body hands the shell literal `%09`;
+        //   * the field is **not trimmed** here -- `protocol.py:3000` reads
+        //     `kwargs.get('resolve-cookies')` and passes the text on untouched.
+        let (face, management) = harness_management("post-jar");
+        let jar = "#HttpOnly_host.example\tFALSE\t/\tTRUE\t0\tSESSIONID\tabc\n\
+                   host.example\tFALSE\t/\tFALSE\t0\ttiny\tvalue with spaces\n\
+                   # a comment line";
+        let body = concat!(
+            "resolve-cookies=%23HttpOnly_host.example%09FALSE%09%2F%09TRUE%090",
+            "%09SESSIONID%09abc%0Ahost.example%09FALSE%09%2F%09FALSE%090%09tiny",
+            "%09value%20with%20spaces%0A%23%20a%20comment%20line",
+        );
+        let response = face.answer(&post_form("/api", body, LOCAL, &[]));
+        assert_eq!(response.status, 200);
+        assert_eq!(management.save_cookies_calls(), vec![jar.to_string()]);
+        // The document the stub built is forwarded byte-for-byte. Its message
+        // text is the stub's own arithmetic and asserts nothing about the
+        // product; what this equality pins is the **pass-through and key order**
+        // (AGENTS.md §4.14: `message` is formatted *from* the counts it also
+        // carries, so `message`, `cookies`, `bad` in that order).
+        let expected = answer_bytes(
+            &Answer::ok("已保存 3 条 cookie")
+                .with("cookies", serde_json::json!(3))
+                .with("bad", serde_json::json!(0)),
+        );
+        assert_eq!(response.body, expected);
+        assert_ne!(response.body, FALL_THROUGH_BODY.as_bytes());
+
+        // Padding and a leading `#` survive a `+`-encoded round trip untouched.
+        face.answer(&post_form("/api", "resolve-cookies=+%23a+", LOCAL, &[]));
+        assert_eq!(
+            management.save_cookies_calls()[1],
+            " #a ",
+            "the face trims a media address, not a pasted jar"
+        );
+
+        // An empty field still **selects** the route (`param_present` only asks
+        // for the name), so the shell is the one that says "nothing readable".
+        let empty = face.answer(&post_query("/api?resolve-cookies=", LOCAL, &[]));
+        assert_eq!(empty.status, 200);
+        assert_eq!(management.save_cookies_calls().len(), 3);
+        assert_eq!(
+            management.save_cookies_calls()[2],
+            String::new(),
+            "the route runs and the seam gets the empty text"
         );
         assert_eq!(
-            GET_MANAGEMENT_ROUTES
-                .iter()
-                .filter(|r| r.action == Action::CastInfo)
-                .count(),
-            1
+            empty.body,
+            json_body(1, "这份文件里没有一条能读懂的 cookie（0 行看不懂）")
         );
+    }
+
+    #[test]
+    fn clearing_the_jar_and_naming_a_browser_are_two_routes() {
+        crate::pin_test_dir();
+        // Both are "one field, no arguments worth parsing" in shape but not in
+        // meaning: `resolve-cookies-clear` carries nothing at all (its presence
+        // *is* the request), while `resolve-cookie-browser` carries a grammar the
+        // face must not interpret (`名字:资料目录`, and the off spellings are
+        // decided behind the seam at `protocol.py:3058`).
+        let (face, management) = harness_management("post-cookie-routes");
+        let cleared = face.answer(&post_query("/api?resolve-cookies-clear=1", LOCAL, &[]));
+        assert_eq!(cleared.status, 200);
+        assert_eq!(management.clear_cookies_calls(), 1);
+        assert_eq!(
+            cleared.body,
+            answer_bytes(&Answer::ok("本机没有保存过 cookie 文件"))
+        );
+        assert!(management.browser_calls().is_empty(), "the wrong route ran");
+
+        let named = face.answer(&post_form(
+            "/api",
+            "resolve-cookie-browser=safari",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(named.status, 200);
+        assert_eq!(management.cookie_state_calls(), 0);
+        assert_eq!(
+            named.body,
+            answer_bytes(&Answer::ok("下次解析会从 safari 读取 cookie"))
+        );
+
+        face.answer(&post_form("/api", "resolve-cookie-browser=", LOCAL, &[]));
+        face.answer(&post_form(
+            "/api",
+            "resolve-cookie-browser=%20safari%20",
+            LOCAL,
+            &[],
+        ));
+        // Three calls, the third still padded: this face does not read the
+        // grammar, so it cannot decide that ` safari ` means `safari`.
+        assert_eq!(
+            management.browser_calls(),
+            vec!["safari".to_string(), String::new(), " safari ".to_string()]
+        );
+        assert_eq!(
+            management.clear_cookies_calls(),
+            1,
+            "the field name decides which route, not the value"
+        );
+    }
+
+    #[test]
+    fn a_lan_post_of_a_cookie_field_is_refused_at_http_200() {
+        crate::pin_test_dir();
+        // The POST envelope is the other one: HTTP 200 with `code: 403` inside,
+        // because `_body` never sets a status (AGENTS.md §4.7c). Loopback **is**
+        // the admission for these three rows -- they are `GATE_MANAGEMENT`, not
+        // the `GATE_CODE` family, since neither writes anything that runs
+        // (`protocol.py:2325-2327`). This test therefore cannot tell a management
+        // row from a code row by behaviour: only `Gate::Token` has the second,
+        // token-specific check. What it does pin is that a LAN caller without the
+        // secret writes nothing and that the secret **in the body** counts --
+        // which is how the settings page posts it.
+        let (face, management) = harness_management("cookie-lan");
+        for field in [
+            "resolve-cookies=x",
+            "resolve-cookies-clear=1",
+            "resolve-cookie-browser=safari",
+        ] {
+            let response = face.answer(&post_form("/api", field, LAN, &[]));
+            assert_eq!(response.status, 200, "{field}");
+            assert_eq!(response.body, json_body(403, MANAGEMENT_REFUSAL), "{field}");
+        }
+        assert!(management.save_cookies_calls().is_empty());
+        assert_eq!(management.clear_cookies_calls(), 0);
+        assert!(management.browser_calls().is_empty());
+
+        store_token(&face.setting, Some(SECRET));
+        let in_body = face.answer(&post_form(
+            "/api",
+            &format!("resolve-cookie-browser=safari&token={SECRET}"),
+            LAN,
+            &[],
+        ));
+        assert_eq!(in_body.status, 200);
+        assert!(
+            in_body
+                .body
+                .starts_with(OK_DOC.as_bytes()),
+            "{}",
+            text(&in_body.body)
+        );
+        assert_eq!(management.browser_calls(), vec!["safari".to_string()]);
+
+        // `?token=` present-but-empty outranks a body token: cherrypy merges the
+        // query first and the body value is *appended*, and `Handler._param`
+        // takes element `[0]` -- so this is a refusal, not a mistyped secret.
+        // The fixture has to carry the **real** secret in the body for this to
+        // ask anything: without it the request would be refused for the wrong
+        // reason and the case would be the trivial one below.
+        let hollow = face.answer(&post_form(
+            "/api?token=",
+            &format!("resolve-cookie-browser=safari&token={SECRET}"),
+            LAN,
+            &[],
+        ));
+        assert_eq!(hollow.status, 200);
+        assert_eq!(hollow.body, json_body(403, MANAGEMENT_REFUSAL));
+        let beaten = face.answer(&post_form(
+            "/api",
+            "resolve-cookie-browser=opera&token=not-the-secret",
+            LAN,
+            &[],
+        ));
+        assert_eq!(beaten.status, 200);
+        assert_eq!(beaten.body, json_body(403, MANAGEMENT_REFUSAL));
+        assert_eq!(
+            management.browser_calls(),
+            vec!["safari".to_string()],
+            "the refused call must not have written"
+        );
+    }
+
+    #[test]
+    fn a_status_poll_passes_the_job_id_and_the_refusal_reads_nothing() {
+        crate::pin_test_dir();
+        // The page polls `resolve-status&job=<id>` once a second while a parse
+        // runs. This face does not know the job table -- that lives behind the
+        // seam -- so the only thing it can get wrong is the id it hands over, and
+        // "there is no such job" must stay the seam's sentence, not a fall-through.
+        let (face, management) = harness_management("resolve-status");
+        let polling = face.answer(&get_api("/api?query=resolve-status&job=7", LOCAL));
+        assert_eq!(polling.status, 200);
+        assert_eq!(management.status_calls(), vec!["7".to_string()]);
+        assert_eq!(
+            polling.body,
+            answer_bytes(
+                &Answer::ok("success")
+                    .with("job", Value::String("7".to_string()))
+                    .with("status", serde_json::json!({"done": true, "step": 4}))
+            )
+        );
+
+        let blank = face.answer(&get_api("/api?query=resolve-status&job=", LOCAL));
+        assert_eq!(management.status_calls()[1], String::new());
+        let missing = face.answer(&get_api("/api?query=resolve-status", LOCAL));
+        assert_eq!(management.status_calls()[2], String::new());
+        let refused = answer_bytes(
+            &Answer::fail("没有这个解析任务（超时或已重启）")
+                .with("job", Value::String(String::new()))
+                .with("status", Value::Null),
+        );
+        assert_eq!(blank.body, refused);
+        assert_eq!(missing.body, refused);
+        assert_ne!(missing.body, FALL_THROUGH_BODY.as_bytes());
+
+        let lan = face.answer(&get_api("/api?query=resolve-status&job=7", LAN));
+        assert_eq!(lan.status, 403);
+        assert_eq!(lan.body, json_body(1, MANAGEMENT_REFUSAL));
+        assert_eq!(management.status_calls().len(), 3);
     }
 
     #[test]

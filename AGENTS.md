@@ -1586,6 +1586,52 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   换颜色的用例**（§4.2「假命令行工具的输出」与 Part 59 那条 `find_command` 打桩是同一族），
   而它第一次写出来时钉的是**去重的那一败者** —— 全绿只因为写它的那台机器没装 yt-dlp。
 
+**Rust 侧接 cookie 面板与设备下拉时量到的四件事**（2026-10-14，`macast-upnp/src/http.rs` 的
+`GET_MANAGEMENT_ROUTES` / `POST_MANAGEMENT_ROUTES` + `src-tauri/src/host.rs` 的
+`cookie_state` / `save_cookies` / `clear_cookies` / `set_cookie_browser` / `cast_targets`，
+`scripts/verify_rust_receiver.sh` 18–19 节，共 **22 + 13** 条，整跑 **133 条 / EXIT=0**）：
+
+* **"还没有这一面"必须答成一份完整的文档，而不是一个空。** `query=cast-targets` 在这个壳里落在
+  #22（渲染器插件的 `target_push` 面）之前，所以它答的是参考实现的那句拒绝原话，但**形状是参考实现的**：
+  `targets = {"items": [], "searching": false, "known": false}` —— 两个布尔**必须存在且为假**，
+  少了它们页面就以为"还在搜"而**永远轮下去**。一次不答复与一份说清局限的答复，对卡片是两种命运；
+  这一格由 19 节按**键的集合与顺序**逐项比对，而不是只断言"有拒绝消息"。
+  而且拒绝**不许点名本机路径**（局域网调用者读到的那句话里不能出现配置目录），这条也是按串查过的。
+* **投屏交接窗口在 connect **之前**就存在，所以"槽位有没有东西"不是一个真问题。**
+  `connect_once` 逐字照 `mpv.py:404` 走 —— 那里 `self.ipc_sock = socket.socket(...)` 先赋值、
+  再 `.connect()`，所以中途 `is_none()` 答"没有 socket"而唯一的事实是"有一个 socket 对象"。
+  真机第一跑（`/tmp/vrr_18_19.txt`）就是靠这一格红回来的：五条
+  `sendCommand: [Errno 57] Socket is not connected` 之后 `TransportState never read PLAYING（saw: PAUSED_PLAYBACK ×60）`
+  —— 投屏**被写进了一根没有对端的描述符**，日志记下了，而恢复机制根本不知道它来过。
+  判据从 `is_none()` 换成 `socket_carries_writes()` = `!link.is_closed() && link.is_connected()`，
+  即"这一刻写下去能不能被读到"，而不是"手里有没有一个对象"。
+* **同一句谓词的两问各自看得到对方看不到的东西，而其中一问在这台 Mac 上没有见证者 —— 两半都要留字。**
+  `is_connected()` 是唯一能看见"从没连上过"的那一问；`is_closed()` 是唯一**不依赖内核意见**的那一问，
+  因为 `close()` 是 `shutdown(Both)` 而**故意不丢掉描述符**（读循环持有同一根 socket 的 `Arc`），
+  少了它，一次 `Session::Ended` 之后到达的投屏会被写进没人读的 socket，并**读成"已经交出去了"**。
+  **这台机器实测**（2026-10-14，直接问 `getpeername(2)`）：我们自己 `shutdown(2)` 之后、以及对端关掉之后，
+  它抛的都是 `[Errno 22] Invalid argument` 而**不是** `ENOTCONN`（`sendall` 两种情况都是 `[Errno 32] Broken pipe`）。
+  所以 macOS 上两问对"关掉的链接"给同一个答复，第二问在这里看起来是多余的 ——
+  **而 Linux 那一半从未被这台机器问过**，所以照旧问，且这句话写进 `set_media_url` 与 `Link::is_connected` 的
+  docstring，不留给"看起来更简洁"的下一次重写。
+  第一版的用例正是反着错的：它断言"我们关掉之后内核仍然认它有对端"，那条陈述是从计划里抄的、
+  **没问过机器**，跑起来当场红（§4.13 那句"一个没被机器问过的数字"的内核版本）。
+  两支定点变异体的读数（各一条命令，`/tmp` 备份还原 + md5 校验）：删掉内核那一问红 **1** 条
+  （未连接的套接字那一格），删掉 `is_closed()` 红 **0** 条 —— 因为"关掉"那一格的停放仍由内核的答案承担，
+  而那句 `[Errno 9] Bad file descriptor` 是 `send_all` 自己读的同一个标志。**这条 0 红是覆盖空洞，不是"覆盖够"**
+  （§4.14 中转那一节那条同一条），已按原样记在测试的注里，而不是去补一条假见证。
+* **cookie 是凭据，所以它的 Rust 侧落点全在"拒绝也不许动磁盘"这一类判据上。** jar 以
+  `OpenOptionsExt::mode(0o600)` 写成 `<name>.tmp` 再 `std::fs::rename` 原子换过（**不备份旧的那份** ——
+  一个会主动覆盖凭据的功能不该留下副本），面板/日志/HTTP **只报条数、名字与路径，永不报值**；
+  `COOKIE_JAR_MAX_BYTES`（256 KiB）**只在粘贴时**拒，读取路径自己不受它管；
+  行解析照 `MozillaCookieJar._really_load` 的顺序（先字节判空，再在**原始行**的 index 0 剥 `#HttpOnly_`，
+  然后才跳空行与 `#`，够 7 个 TAB 字段且第 0 字段非空才算 cookie）；
+  浏览器白名单**读侧与写侧各查一次**（那个值坐在可手改的高级设置 JSON 里）；
+  "关"是一组值 `["", "0", "off", "none", "关闭", "不用"]` ⇒ `unset` 而不是存一个 `false`（§4.2 那条）。
+  18 节是**有状态的一整趟**（冷读 → 粘贴 → 权限与泄漏 → 垃圾行 → 超限 → 设浏览器 → 两种拒绝形状 →
+  清空 → 再清空 → 关 → 复读），**两次拒绝都用 md5 对着这一节早先存下的 jar 比过字节**，
+  所以"拒绝之后文件原地不动"这句话不是断言，是读数。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

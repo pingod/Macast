@@ -32,7 +32,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -913,9 +913,11 @@ fn cookie_jar_path() -> Option<PathBuf> {
 /// too big has to fail `cookie_jar_state` the same way an oversized **paste** does,
 /// instead of being silently truncated into something that parses.
 ///
-/// This shell has no paste route yet (#26 owns `resolve-cookies`), so the result
-/// here is used for **emptiness only** — the same use `_cookie_settings` makes of
-/// it. The text is never echoed to a page or a log.
+/// Three readers, and none of them echoes the text: `query=resolve-cookies`'s
+/// `jar` key and its counts, [`cookie_settings`]'s "is there a file at all", and
+/// `set_cookie_browser`'s "will this switch actually take effect" — which asks only
+/// whether a jar exists. The values themselves never go near a page or a log
+/// (AGENTS.md §4.14).
 fn cookie_jar_text() -> String {
     let Some(path) = cookie_jar_path() else {
         return String::new();
@@ -972,6 +974,109 @@ fn cookie_settings(setting: &Setting) -> resolve::JobCookies {
     let browser = cookie_browser_spec(setting);
     let file = if jar_present { path.as_str() } else { "" };
     resolve::JobCookies::from(&resolve::Cookies { file, browser: &browser })
+}
+
+/// One sentence, two readers: [`ShellManagement::cast_targets`]'s refusal document
+/// and the device arm of [`ShellManagement::cast_resolved`]. Sharing it is the
+/// point — a dropdown that says "this shell cannot reach a device" next to a cast
+/// answer that pretends otherwise is the failure AGENTS.md §4.8 names (两处答案不一致
+/// 比没有数字更糟), and it is exactly what two hand-copied sentences drift into.
+///
+/// The 「这台设备还投不了」 prefix is load-bearing for a different reason:
+/// `scripts/verify_rust_receiver.sh` §16 asserts it, so a rewrite that drops it
+/// turns a green run into a red one for no product change.
+const DEVICE_PUSH_UNAVAILABLE: &str = "这台设备还投不了：本机的 Rust 壳还没有设备发送面（`grep -r target_push macast-cast/src` 是空的，那是 #22 的渲染器插件面），请改用「本机」。";
+
+/// The name Python prints in front of an OS error: `type(exc).__name__`
+/// (`macast/protocol.py:3005`, `:3041`). Both sentences a user can read quote it
+/// — 「保存失败：PermissionError: …」 — so this is a contract with a **string**, not a
+/// style choice: the four names are what a cookie file can actually hit (it is a
+/// write into the config directory, so `FileNotFoundError` from a vanished parent,
+/// `PermissionError` from a foreign-owned jar, and the two directory-shaped ones
+/// from someone replacing the file with a directory). Everything else answers
+/// `OSError`, which is also Python's answer for the remaining kinds.
+///
+/// One honest deviation, and it lives in the message rather than the name: Rust's
+/// `io::Error` Display is `Permission denied (os error 13)` where Python renders
+/// `[Errno 13] Permission denied: '/path'`. Both name the errno; the path is not
+/// repeated here because the write failure is logged at ERROR with the path (the
+/// reference's `logger.error('cookie jar write failed for %s: %s', path, exc)`), so
+/// the sentence that reaches the page stays short and the log stays complete.
+fn oserror_name(err: &std::io::Error) -> &'static str {
+    match err.kind() {
+        std::io::ErrorKind::NotFound => "FileNotFoundError",
+        std::io::ErrorKind::PermissionDenied => "PermissionError",
+        std::io::ErrorKind::IsADirectory => "IsADirectoryError",
+        std::io::ErrorKind::NotADirectory => "NotADirectoryError",
+        _ => "OSError",
+    }
+}
+
+/// `os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)`
+/// (`macast/protocol.py:3003-3004`). The mode is the red line: a jar is session
+/// secrets, and a 0644 file is readable by every account on the machine
+/// (AGENTS.md §4.14). Two facts about `mode()` that match `open(2)` and therefore
+/// match Python: it only applies when the file is **created** (a stale `.tmp` from
+/// an earlier crash keeps its own bits — same in Python), and the umask filters it.
+#[cfg(unix)]
+fn open_jar_temp(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// The same shape without the mode argument, because **Windows has no POSIX mode
+/// bits**: the file inherits the parent directory's ACL — which is also exactly
+/// what Python's `os.open(…, 0o600)` does there, where the mode is documented as
+/// only meaningful on Unix. Keeping both halves the same function keeps the half
+/// that *does* matter (the atomic replace below) identical code on both platforms.
+#[cfg(not(unix))]
+fn open_jar_temp(path: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+/// The write half of `Handler._post_resolve_cookies` (`macast/protocol.py:3000-3012`),
+/// in the reference's order and with its two deliberate properties:
+///
+/// 1. **The directory is created before anything is opened in it** —
+///    `os.makedirs(SETTING_DIR, exist_ok=True)`. `paths::setting_path("", true)` is
+///    that line: `rel = ""` yields the directory itself, `ensure = true` runs
+///    `create_dir_all` (AGENTS.md §4.2 「写文件的代码要自己把目录建出来」 — a shipped
+///    build once failed to start its Cast receiver for exactly this omission).
+/// 2. **No backup of the previous jar.** AGENTS.md §4.14: a feature that will
+///    overwrite the file on purpose should not also keep a copy of it around,
+///    because the copy is the same pile of secrets in a second place.
+///
+/// Write to `resolve_cookies.txt.tmp`, then `std::fs::rename` over the destination.
+/// `rename` is `os.replace`: atomic within one filesystem, so a parse running
+/// concurrently reads either the whole previous jar or the whole new one, never
+/// the first kilobyte of a half-written file. On Windows `std::fs::rename` is
+/// `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING)`, so the replace-over-existing
+/// behaviour is the same and no fallback branch is needed.
+///
+/// The trailing-newline rule is Python's (`text if text.endswith('\n') else text +
+/// '\n'`): a paste that ends mid-line without a newline would leave that last line
+/// unterminated, and the next `--cookies` reader would see a truncated field.
+fn write_cookie_jar(text: &str) -> std::io::Result<()> {
+    let dir = paths::setting_path("", true)?;
+    let path = paths::setting_path(COOKIE_JAR_NAME, false)?;
+    let temporary = dir.join(format!("{COOKIE_JAR_NAME}.tmp"));
+    {
+        let mut file = open_jar_temp(&temporary)?;
+        file.write_all(text.as_bytes())?;
+        if !text.ends_with('\n') {
+            file.write_all(b"\n")?;
+        }
+    }
+    std::fs::rename(&temporary, &path)
 }
 
 /// The worker's `ResolveOps`: the real engine, with a snapshot published into
@@ -1365,12 +1470,10 @@ impl macast_upnp::http::Management for ShellManagement {
                 Err(why) => Answer::fail(why),
             }
         } else {
-            // No device-push seam exists in this crate yet (`grep target_push` in
-            // `macast-cast/src` is empty): that is task #26's cast-targets face.
-            // Refusing is the honest answer; the relay we just opened is not one.
-            Answer::fail(
-                "这台设备还投不了：本机的 Rust 壳还没接上设备发送面（下一步的 cast-targets），请改用「本机」。",
-            )
+            // The same sentence the device dropdown gives ([`DEVICE_PUSH_UNAVAILABLE`]),
+            // from the same constant. Refusing is the honest answer; the relay we just
+            // opened is not one, and the `code != 0` branch below drops it.
+            Answer::fail(DEVICE_PUSH_UNAVAILABLE)
         };
 
         if answer.code != 0 {
@@ -1390,6 +1493,188 @@ impl macast_upnp::http::Management for ShellManagement {
             .with("note", json!(resolve::relay_reason(&pick)));
         answer.message = "success".to_string();
         answer
+    }
+
+    /// `_cookie_state` (`macast/protocol.py:2794-2818`) — the panel read:
+    /// **counts and names, never values**.
+    ///
+    /// The eight keys are in the reference's order, and the document is this
+    /// shell's to build because every fact in it lives where the jar lives.
+    /// `path` is the one string here that came off the filesystem: it is allowed
+    /// because it is where the user would look to check our count, not what they
+    /// would send us (§4.14 — the settings JSON gets exported into bug reports,
+    /// and a jar is someone's live session credential).
+    ///
+    /// `cookie_jar_state`'s `Err` is not a refusal on this path. Reading a jar
+    /// that is too big reports zero counts with `jar` still true, so the card can
+    /// say "oversized, and the next parse will not use it" — the size cap is only
+    /// a refusal when a human is *pasting* it (`save_cookies` below), where the
+    /// caller can still fix it.
+    fn cookie_state(&self) -> Answer {
+        let text = cookie_jar_text();
+        let (cookies, bad) = match resolve::cookie_jar_state(&text) {
+            Ok(counts) => counts,
+            Err(_) => (0, 0),
+        };
+        Answer::ok("success").with(
+            "state",
+            json!({
+                "jar": !text.is_empty(),
+                "cookies": cookies,
+                "bad": bad,
+                "path": cookie_jar_path()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                "browser": cookie_browser_spec(&self.host.setting),
+                "browsers": resolve::COOKIE_BROWSERS,
+                "max_bytes": resolve::COOKIE_JAR_MAX_BYTES,
+                "yt_dlp": resolve::ResolveOps::has_ytdlp(&resolve::RealResolveOps),
+            }),
+        )
+    }
+
+    /// `_cast_targets` (`macast/protocol.py:1765-1794`) — a refusal, in words.
+    ///
+    /// The Rust shell has no plugin manager and no `target_push` seam yet (task
+    /// #22), so there is no cache to answer from and no background search to
+    /// start. `_refresh` is therefore unread here: the honest answer to "should I
+    /// search?" is "there is nothing to search with", and a `false` on the way to
+    /// a probe would be a fact this shell does not have.
+    ///
+    /// Both halves of the document come from the reference's own refusal shape
+    /// (`_url_target_unavailable`, `:1754-1763`): `items` empty, `searching` and
+    /// `known` **false** rather than absent — the page reads those two as booleans,
+    /// and a missing key renders as a spinner that never stops. The `local` row is
+    /// deliberately not shipped here either: it belongs to the success document,
+    /// whose name comes from a renderer title this shell does not own yet.
+    fn cast_targets(&self, _refresh: bool) -> Answer {
+        Answer::fail(DEVICE_PUSH_UNAVAILABLE).with(
+            "targets",
+            json!({ "items": [], "searching": false, "known": false }),
+        )
+    }
+
+    /// `_post_resolve_cookies` (`macast/protocol.py:2986-3030`): validate the
+    /// whole jar, then make it the saved one.
+    ///
+    /// The order is the product. `cookie_jar_state` runs **before** anything is
+    /// opened, because a malformed jar is not an error to yt-dlp — it resolves
+    /// anonymously and returns *fewer* addresses, which reads to the user as "this
+    /// page has no video". And no copy of the previous jar is kept, deliberately:
+    /// a feature that overwrites a credential cache must not leave a copy of every
+    /// session it ever held.
+    ///
+    /// Every failure document is `{'code': 1, 'message': …}` with **no extras** —
+    /// the counts only ride along with the success, whose message is built from
+    /// them.
+    fn save_cookies(&self, text: &str) -> Answer {
+        let (cookies, bad) = match resolve::cookie_jar_state(text) {
+            Ok(counts) => counts,
+            Err(why) => return Answer::fail(why),
+        };
+        if cookies == 0 {
+            return Answer::fail(format!(
+                "这份文件里没有一条能读懂的 cookie（{bad} 行看不懂）。要 Netscape 格式：\
+                 每行 7 个 TAB 分隔的字段"
+            ));
+        }
+        if let Err(err) = write_cookie_jar(text) {
+            // `logger.error('cookie jar write failed for %s: %s', path, exc)` —
+            // the path goes to the log, not the page, because Rust's `io::Error`
+            // Display has no room for it (see [`oserror_name`]).
+            let path = cookie_jar_path()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.host
+                .log
+                .error(&format!("cookie jar write failed for {path}: {err}"));
+            return Answer::fail(format!("保存失败：{}: {err}", oserror_name(&err)));
+        }
+        self.host
+            .log
+            .info(&format!("saved {cookies} cookies ({bad} unreadable lines) for page resolve"));
+        let suffix = if bad > 0 {
+            format!("，另有 {bad} 行看不懂（一并存了）")
+        } else {
+            String::new()
+        };
+        Answer::ok(format!("已保存 {cookies} 条 cookie{suffix}"))
+            .with("cookies", json!(cookies))
+            .with("bad", json!(bad))
+    }
+
+    /// `_post_resolve_cookies_clear` (`macast/protocol.py:3032-3043`). Three
+    /// answers, and the first one is a **success**: the caller's goal is "no jar",
+    /// so a machine that never had one has already reached it. Nothing is logged —
+    /// the reference logs nothing here either, and a page-driven remove is not an
+    /// event worth a line.
+    fn clear_cookies(&self) -> Answer {
+        let Some(path) = cookie_jar_path() else {
+            return Answer::ok("本机没有保存过 cookie 文件");
+        };
+        if let Err(err) = std::fs::remove_file(&path) {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Answer::ok("本机没有保存过 cookie 文件");
+            }
+            return Answer::fail(format!("删除失败：{}: {err}", oserror_name(&err)));
+        }
+        let browser = cookie_browser_spec(&self.host.setting);
+        let suffix = if browser.is_empty() {
+            String::new()
+        } else {
+            format!("，下次解析改用 {browser}")
+        };
+        Answer::ok(format!("已清除 cookie 文件{suffix}"))
+    }
+
+    /// `_post_resolve_cookie_browser` (`macast/protocol.py:3045-3081`): one raw
+    /// field, `名字[:资料目录]`.
+    ///
+    /// "Off" **unsets** the key instead of storing `false` (§4.2 — a disabled
+    /// setting is absent, and `Setting::get` would otherwise take the literal into
+    /// the table). The name half is lowercased and whitelisted; the profile half is
+    /// the user's path and travels byte-for-byte to
+    /// [`resolve::cookie_browser_spec`], which is the only owner of that grammar —
+    /// splitting it here would make this file a second write gate disagreeing with
+    /// the read gate.
+    ///
+    /// The two refusals are ordered as the reference orders them, and the second
+    /// one says which half failed: a user who typed `vivaldi:C:\Users\…` and hears
+    /// "I don't know that browser" goes looking for a browser by that name.
+    fn set_cookie_browser(&self, text: &str) -> Answer {
+        let text = text.trim();
+        if ["", "0", "off", "none", "关闭", "不用"].contains(&text.to_lowercase().as_str()) {
+            self.host.setting.unset(Key::ResolveCookieBrowser);
+            return Answer::ok("不再从浏览器读取 cookie");
+        }
+        let name = text
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if !resolve::COOKIE_BROWSERS.contains(&name.as_str()) {
+            return Answer::fail(format!(
+                "不认识「{name}」这个浏览器，可选：{}",
+                resolve::COOKIE_BROWSERS.join("、")
+            ));
+        }
+        let spec = resolve::cookie_browser_spec(text).unwrap_or_default();
+        if spec.is_empty() {
+            return Answer::fail(format!(
+                "「{text}」我们只认到浏览器名字为止：后面可以跟一段「:资料目录」（那个浏览器\
+                 存放 cookie 的目录），但不能是 +钥匙串、::容器，也不能以 - 开头"
+            ));
+        }
+        self.host.setting.set(Key::ResolveCookieBrowser, json!(spec));
+        if !cookie_jar_text().is_empty() {
+            // Said out loud because the file outranks the browser in argv: without
+            // this the switch reads as broken rather than as overridden.
+            return Answer::ok(format!(
+                "已设为 {spec}，但本机存过 cookie 文件，解析仍以文件为准（清除文件后才会用浏览器）"
+            ));
+        }
+        Answer::ok(format!("下次解析会从 {spec} 读取 cookie"))
     }
 }
 
