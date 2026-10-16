@@ -18,12 +18,17 @@ pub mod setting;
 pub mod timefmt;
 pub mod token;
 pub mod trash;
+pub mod url;
 
 pub use env::{player_env, PlayerEnv, PROXY_ENV_VARS};
 pub use logging::Logger;
 pub use net::{unadvertisable_reason, InterfaceRow, Snapshot, Steering};
 pub use setting::{Key, Setting};
 pub use trash::TrashError;
+pub use url::{
+    PySplit, PyUrlError, host_is_loopback, py_repr_str, py_urljoin, py_urlparse, py_urlsplit,
+    py_urlunparse, py_urlunsplit,
+};
 
 /// Everything the receiver needs that is not a protocol.
 ///

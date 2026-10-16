@@ -63,3 +63,28 @@ ureq = { workspace = true }
 # normalize, then the measured alias table) and decodes through the generated tables in
 # `src/{gbk,cjk}.rs`. The root manifest records why the library that looked like the
 # obvious match was measured away.
+#
+# The mDNS browser cannot be written with `std::net::UdpSocket` alone, and the reason is
+# an **ordering** fact, not a missing API: `std` binds first and only then hands you the
+# socket, so there is no way to `setsockopt` before the bind. Binding 5353 needs two
+# options decided *before* that call — `SO_REUSEPORT` (the block below) and joining the
+# group — and `socket2` is the crate that lets a socket exist before it is bound. It also
+# supplies `join_multicast_v4(&Ipv4Addr, &Ipv4Addr)` in its **default** feature set
+# (`socket.rs:1312`), which is why this workspace can decline `features = ["all"]` here and
+# still name the group. The IO itself goes back through `std`: `impl From<Socket>
+# for net::UdpSocket` exists (`socket.rs:2479`), and socket2's own `recv_from` wants a
+# `&mut [MaybeUninit<u8>]` (`:528`) — a signature that would push unsafe into a parser that
+# has no reason to hold any.
+socket2 = { workspace = true }
+
+# One `setsockopt` that `socket2` cannot make for us, for the same reason
+# `macast-upnp` carries it: `SO_REUSEPORT` is behind `features = ["all"]` there, and
+# this workspace declines that feature (see `macast-upnp/Cargo.toml` and
+# `src/sock.rs`). The mDNS browser binds **5353**, which the operating system will
+# not hand to a second binder without it — and on this LAN there *is* a second binder,
+# because every other Macast and every other Chromecast-ish receiver on the machine
+# wants that same port. Failing to set it is not a cosmetic loss: the bind fails, the
+# browse returns nothing, and the device list reads "no devices found" while the
+# network is full of them (AGENTS.md §4.1's "搜到但投不上" family, one layer down).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

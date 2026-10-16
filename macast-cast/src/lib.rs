@@ -48,9 +48,16 @@
 //! * [`airplay`] — the AirPlay RTSP receiver on 7000: the eleven methods,
 //!   session management, `Content-Location` parsing (header and SDP body),
 //!   port fallback, and the `RendererCallback` seam the player answers through.
+//! * [`mdns`] — the wire codec and the **browser**: `decode_name` with RFC 1035
+//!   compression pointers, `parse_message`, the PTR→SRV→A/TXT ledger with
+//!   RFC 6762 §10.1 goodbye handling, and `discover_cast`, which finds the
+//!   *senders'* receivers on 5353 so the settings page has devices to name.
+//!   Reading a reply is not the same job as broadcasting our own receiver, and
+//!   the broadcast side is still ahead of this module.
 //! * *(next)* `setup` — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a
 //!   **bare** UUID in `ssdp_udn`, `params=` filtering, `/setup/icon.png`.
-//! * *(next)* `mdns` — the `_googlecast._tcp` announcement and its TXT records.
+//! * *(next)* the `_googlecast._tcp` **announcement** — our own receiver's PTR,
+//!   SRV and TXT records, broadcast unsolicited so senders can find it.
 //!
 //! ## The one thing to know before editing
 //!
@@ -71,9 +78,11 @@ pub mod cjk;
 pub mod entities;
 pub mod gbk;
 pub mod html;
+pub mod mdns;
 pub mod proto;
 pub mod resolve;
 pub mod relay;
+pub mod targets;
 
 pub use cert::{
     ensure_in_setting_dir, ensure_pair, CertError, Pair, Source, CAST_CERT_FILE, CAST_KEY_FILE,
@@ -96,6 +105,15 @@ pub use airplay::{
     get_header, info_plist, parse_content_location, random_mac, reason_phrase, AirPlayReceiver,
     AirPlayState, RendererCallback, RtspRequest, AIRPLAY_PORT, AIRPLAY_SERVICE, FEATURES,
     IDLE_TIMEOUT_SECONDS, REASON_PHRASES, SUPPORTED_METHODS,
+};
+
+pub use targets::{
+    describe_renderer, discover_renderers, local_name, locations_in, parse_description,
+    port_suffix, ssdp_request, ssdp_search, sweep_renderers, Describer, DlnaDevice, Fetcher,
+    HttpDescriber, HttpFetcher, RealSearcher, RealSweeps, Searcher, SsdpWire, Table, TargetItem,
+    AVTRANSPORT_SUFFIX, CAST_SEARCH_THREAD, DESCRIPTION_MAX_BYTES, DLNA_SEARCH_TARGETS,
+    DLNA_SEARCH_THREAD, DLNA_SERVICE, LOGGER_NAME, SEARCH_TIMEOUT, SSDP_ADDR, SSDP_PORT,
+    SSDP_READ_MAX, SSDP_RECV_TIMEOUT,
 };
 
 /// The config directory **this crate's tests** log into, pinned per process.

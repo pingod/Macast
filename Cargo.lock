@@ -1741,6 +1741,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "macast-cast"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "macast-core",
  "macast-upnp",
@@ -1750,6 +1751,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde_json",
+ "socket2",
  "ureq",
  "url",
 ]
@@ -1798,6 +1800,7 @@ dependencies = [
  "quick-xml",
  "serde_json",
  "socket2",
+ "ureq",
 ]
 
 [[package]]

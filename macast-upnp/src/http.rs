@@ -46,7 +46,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
@@ -2478,10 +2478,14 @@ fn peer_ip(stream: &TcpStream) -> String {
 /// the arm to read. Implementing it would be dead code that reads like
 /// coverage, so it is recorded here instead.
 fn is_loopback(remote_ip: &str) -> bool {
-    remote_ip
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
+    // The predicate has **one** owner (`macast_core::url`), because the same
+    // question is about to be asked from the other direction: the description
+    // reader compares a `LOCATION` host against the peer that answered it.
+    // There it is `urlsplit`'s `hostname`, which may carry a `%scope` and may
+    // not be an address at all, so that owner answers three states — true,
+    // false, "not an IP literal". **This** call site is where the third state
+    // becomes `false`, and the paragraph above is why.
+    macast_core::host_is_loopback(remote_ip).unwrap_or(false)
 }
 
 /// Does this string carry enough structure to be handed to the renderer?
@@ -5044,8 +5048,9 @@ mod tests {
     #[test]
     fn the_peer_address_is_read_without_its_port() {
         crate::pin_test_dir();
-        // `is_loopback` parses an `IpAddr`; `127.0.0.1:52344` parses as nothing,
-        // so the port has to come off before the question is asked.
+        // `127.0.0.1:52344` is not an IP literal, so the owner answers the third
+        // state and this gate reads it as `false`; the port has to come off
+        // before the question is asked.
         assert!(is_loopback("::1"));
         assert!(!is_loopback(""));
         assert!(!is_loopback("9.9.9.9"));

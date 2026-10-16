@@ -1541,12 +1541,16 @@ impl macast_upnp::http::Management for ShellManagement {
     /// search?" is "there is nothing to search with", and a `false` on the way to
     /// a probe would be a fact this shell does not have.
     ///
-    /// Both halves of the document come from the reference's own refusal shape
-    /// (`_url_target_unavailable`, `:1754-1763`): `items` empty, `searching` and
+    /// Both halves of the document come from the reference's own refusal path:
+    /// `_url_target_unavailable` (`:1754-1763`) supplies the words, and `:1781`
+    /// appends `{'items': [], 'searching': False, 'known': False}` to them —
+    /// `items` empty, `searching` and
     /// `known` **false** rather than absent — the page reads those two as booleans,
     /// and a missing key renders as a spinner that never stops. The `local` row is
     /// deliberately not shipped here either: it belongs to the success document,
     /// whose name comes from a renderer title this shell does not own yet.
+    /// `scripts/verify_rust_receiver.sh:1512-1523` is what asks for that shape;
+    /// nothing in this file checks it.
     fn cast_targets(&self, _refresh: bool) -> Answer {
         Answer::fail(DEVICE_PUSH_UNAVAILABLE).with(
             "targets",

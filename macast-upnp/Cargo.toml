@@ -10,6 +10,16 @@ repository.workspace = true
 macast-core = { workspace = true }
 serde_json = { workspace = true }
 quick-xml = { workspace = true }
+# `describe_renderer` is the one place this crate speaks HTTP as a *client*: it
+# fetches the device description that a M-SEARCH answer pointed at. **Declining
+# the system proxy is *this* crate's reason to own the dependency** — Python
+# builds the opener with an empty `ProxyHandler` for exactly that
+# (`cast_local_file.py::describe_renderer`), and AGENTS.md §4.2 measured what
+# happens when a client does not: the request never leaves the laptop, and the
+# receiver reports `io: Peer disconnected`, which reads to the user as "there is
+# no renderer on this network". The manifest-level reasoning (timeouts,
+# rustls-only, no gzip) lives next to the dependency in the root Cargo.toml.
+ureq = { workspace = true }
 # `socket2` is here because of the *order* Python's SSDP receiver uses: create the
 # socket, set `SO_REUSE*`, only **then** bind UDP/1900. `std::net::UdpSocket`
 # cannot do that — binding is how you get a socket — so the options that decide
