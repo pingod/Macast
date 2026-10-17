@@ -611,17 +611,11 @@ pub trait Fetcher: Send + Sync {
 /// The agent the description is fetched with: **no proxy**, once, instead of
 /// inheriting whatever this machine exports.
 ///
-/// Same reason as `relay.rs:1165-1180` (AGENTS.md §4.1's mpv `502` row and §4.2's
-/// `io: Peer disconnected` row are the same坑 at both ends), and same reason as
-/// Python's `build_opener(ProxyHandler({}))` at `:1198`. 3 seconds, because
-/// `describe_renderer`'s default is 3.0.
+/// Same decision as `relay.rs:1165` and Python's `build_opener(ProxyHandler({}))`
+/// at `:1198`, and it has one owner (`resolve::no_proxy_agent`); what differs here
+/// is only the budget — 3 seconds, because `describe_renderer`'s default is 3.0.
 fn description_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .proxy(None)
-        .user_agent(crate::resolve::USER_AGENT)
-        .timeout_global(Some(SEARCH_TIMEOUT))
-        .build()
-        .into()
+    crate::resolve::no_proxy_agent(SEARCH_TIMEOUT)
 }
 
 /// The fetcher that speaks HTTP.

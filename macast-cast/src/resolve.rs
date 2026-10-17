@@ -207,6 +207,33 @@ pub fn console_flags(platform: Option<&str>) -> u32 {
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/// An HTTP client that speaks as us and **detours through nothing**.
+///
+/// The one owner of the "no proxy" decision for this crate. Three callers need
+/// it — the relay fetching an origin (`relay.rs`), the device reading a
+/// renderer's description (`targets.rs`), and the sender POSTing a SOAP envelope
+/// (`push.rs`) — and a fourth `proxy(None)` written from scratch is how the
+/// decision quietly stops applying to one of them.
+///
+/// The reason is AGENTS.md §4.1's oldest row and §4.2's newest one, which are the
+/// same坑 at both ends: this machine's Wi-Fi proxy makes a LAN request answer
+/// `io: Peer disconnected`, and mpv inheriting `http_proxy` made a local address
+/// answer `HTTP error 502`. Both read as "there is nothing on this network",
+/// which is a sentence about our client, not about the device. Python reaches the
+/// same place with `build_opener(ProxyHandler({}))` (`cast_local_file.py:1198`).
+///
+/// Only the timeout varies by caller, so it is the parameter: an origin probe can
+/// afford 30 seconds, a device description cannot afford to stall a search, and a
+/// SOAP envelope should answer in the time the user watched the page for.
+pub(crate) fn no_proxy_agent(timeout: std::time::Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .proxy(None)
+        .user_agent(USER_AGENT)
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
+}
+
 /// castor's `Reach`: how far reading the origin got, as a fact about the origin
 /// rather than about the media.
 pub const REACH_UNPROVEN: &str = "unproven";
@@ -1380,12 +1407,28 @@ fn py_float(s: &str) -> Option<f64> {
 /// `_number(value)`: `float(value)` except `(TypeError, ValueError) → 0.0`.
 /// A bool becomes 1.0/0.0 exactly as Python's `float(True)` does.
 fn number(v: &Value) -> f64 {
+    number_or(v, 0.0)
+}
+
+/// The one owner of Python's `number(value, default)` from
+/// `cast_local_file.py:1791` — `float(value)` except that a `TypeError` or
+/// `ValueError` hands back **the caller's** default. The distinction is the
+/// point: a settings file that says `"Timeout": 0` means zero seconds (Python
+/// computes `float(0)` and keeps it), while `"Timeout": "abc"` means the caller
+/// never got an answer and must fall back to 5.0. A reader that collapses both
+/// to 0.0 sends every mistyped install into a connection that times out
+/// immediately, and the user reads that as "this device doesn't work".
+///
+/// `resolve.rs` itself always asks for 0.0 — every one of its numbers is a
+/// measurement where "no answer" and "zero" render the same way — which is why
+/// [`number`] stays a one-line wrapper instead of a second behaviour.
+pub(crate) fn number_or(v: &Value, default: f64) -> f64 {
     match v {
-        Value::Null => 0.0,
+        Value::Null => default,
         Value::Bool(b) => *b as u8 as f64,
-        Value::Number(n) => n.as_f64().unwrap_or(0.0),
-        Value::String(s) => py_float(s).unwrap_or(0.0),
-        _ => 0.0,
+        Value::Number(n) => n.as_f64().unwrap_or(default),
+        Value::String(s) => py_float(s).unwrap_or(default),
+        _ => default,
     }
 }
 

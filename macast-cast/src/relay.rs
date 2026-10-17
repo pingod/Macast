@@ -1168,15 +1168,10 @@ fn pipe_file(
 /// mpv inherited `http_proxy`. An origin that only accepts a signed URL with a
 /// Referer is exactly the case where a detour through a local proxy breaks, and
 /// the symptom would again be "the TV says it won't play" rather than "we used
-/// a proxy". So the agent is built with none, once, instead of inheriting
-/// whatever the session happens to export.
+/// a proxy". The decision itself has one owner — `resolve::no_proxy_agent` —
+/// and this only supplies the 30-second budget an origin probe can afford.
 fn origin_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .proxy(None)
-        .user_agent(crate::resolve::USER_AGENT)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into()
+    crate::resolve::no_proxy_agent(Duration::from_secs(30))
 }
 
 /// Ask the origin whether it honours Range, and how long the file is.

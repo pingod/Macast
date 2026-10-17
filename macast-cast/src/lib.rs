@@ -80,6 +80,7 @@ pub mod gbk;
 pub mod html;
 pub mod mdns;
 pub mod proto;
+pub mod push;
 pub mod resolve;
 pub mod relay;
 pub mod targets;
@@ -154,3 +155,72 @@ pub(crate) fn pin_test_dir() {
         macast_core::paths::set_setting_dir_override(&dir);
     });
 }
+
+/// One test's turn at the **process-wide** DEBUG threshold, with the gate that
+/// makes the turn actually belong to it.
+///
+/// `macast_core::logging::THRESHOLD` is a `static AtomicU8` shared by every
+/// thread in the test binary (logging.rs:69), and [`macast_core::logging::Logger::log`]
+/// early-returns on `level < threshold()` **before** touching the file. So a
+/// DEBUG witness file that is empty is not "the write has not landed yet" — the
+/// writes are synchronous (`rotate_write` appends per record) — it is "some other
+/// thread put the threshold back to INFO while I was reading it".
+///
+/// That is exactly what this crate measured before this type existed:
+/// **5 red out of 24 parallel full-crate runs (~21%)**, always `601 passed;
+/// 1 failed`, always one of the two `mdns_tests` DEBUG witnesses
+/// (`mdns_tests.rs:677` / `:721`), every panic body ending `witness was:` and
+/// then nothing. The same 602 tests run **0 red out of 12 serial
+/// (`--test-threads=1`) runs**. The colliding writer was `targets_tests`'s
+/// threshold reset firing inside an `mdns` window.
+///
+/// This is AGENTS.md §4.2 「并行跑的用例共享夹具路径，单跑绿、整组红」 with the
+/// shared fixture being a **global in another crate** rather than a path, and the
+/// "single test passes" half of it showing up as *module-level* green: running
+/// `mdns_tests` alone is 20/20, because the only thing it collides with lives in
+/// `targets_tests`. A per-module run is therefore not evidence here, and the
+/// reading that convicted it had to come from repeating the whole crate.
+///
+/// The gate is held for the whole window, so at most one test is in DEBUG at a
+/// time, and `Drop` restores INFO **before** releasing the lock — otherwise the
+/// next test's `armed()` could set DEBUG while this one's restore was still
+/// pending on another thread and the two would swap again, one level apart.
+///
+/// `set_threshold` is therefore only allowed to be called here;
+/// `proto::tests::only_lib_rs_touches_the_log_threshold` audits that, because a
+/// raw pair added anywhere else re-creates the flake and no test in this crate
+/// can be trusted to catch it — by construction, it is intermittent.
+#[cfg(test)]
+pub(crate) struct DebugWindow {
+    // Dropped *after* the `Drop` body, which is the ordering the doc above
+    // depends on: restore INFO, then let the next waiter in.
+    _gate: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl DebugWindow {
+    /// Wait for the gate, then raise the threshold to DEBUG for the turn of the
+    /// caller. The returned value must be bound to a **variable** (not `_`), or
+    /// the drop happens on this line and the window is closed before the log
+    /// record is written.
+    pub(crate) fn armed() -> DebugWindow {
+        // Poisoned is fine and expected: a test that panicked inside a window
+        // left the threshold at DEBUG, which is the one thing the next holder
+        // must not inherit — so take the lock anyway and set the level.
+        let gate = DEBUG_WINDOW_GATE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        macast_core::logging::set_threshold(macast_core::logging::Level::Debug);
+        DebugWindow { _gate: gate }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DebugWindow {
+    fn drop(&mut self) {
+        macast_core::logging::set_threshold(macast_core::logging::Level::Info);
+    }
+}
+
+#[cfg(test)]
+static DEBUG_WINDOW_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());

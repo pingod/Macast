@@ -32,7 +32,7 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use macast_core::logging::{read_tail, set_threshold, Level, Logger};
+use macast_core::logging::{read_tail, Logger};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use super::*;
@@ -614,7 +614,7 @@ fn q_an_unknown_record_type_is_skipped_and_the_stream_resyncs() {
     // where the rdata began: that is the whole point of the line, and it is the
     // one number a capture is searched with.
     let (logger, path) = witness("mdns_witness_skip_unknown");
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let first = rr(SERVICE_TYPE, TYPE_PTR, CLASS_IN, 120, &wire_name("a._googlecast._tcp.local."));
     let hinfo = rr("a.local.", 13 /* HINFO */, CLASS_IN, 120, &[0x01, 0x41]);
     let third = rr("host.local.", TYPE_A, CLASS_IN, 120, &[192, 0, 2, 7]);
@@ -646,7 +646,6 @@ fn q_an_unknown_record_type_is_skipped_and_the_stream_resyncs() {
          we tried to read: \n{}",
         text
     );
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -659,7 +658,7 @@ fn q_c_a_known_type_that_fails_to_decode_names_the_domain_and_the_resynced_offse
     // went wrong. A fixture with a self-referencing-looking pointer is the
     // cheapest read that fails inside `name()` without also refusing the packet.
     let (logger, path) = witness("mdns_witness_undecoded");
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let first = rr(SERVICE_TYPE, TYPE_PTR, CLASS_IN, 120, &wire_name("a._googlecast._tcp.local."));
     // A PTR whose only rdata is a pointer to offset 0x3FF: past this packet, so
     // the name read refuses, while the declared rdlength still frames the record.
@@ -684,7 +683,6 @@ fn q_c_a_known_type_that_fails_to_decode_names_the_domain_and_the_resynced_offse
         "witness was:\n{}",
         text
     );
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -701,7 +699,7 @@ fn r_a_record_that_overruns_its_rdlength_is_dropped_and_the_offset_jumps_to_end(
     // the next record, so resyncing to `end` cannot put the cursor back — and
     // that asymmetry is why this test is built the way it is.
     let (logger, path) = witness("mdns_witness_imbalance");
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let mut record_bytes = wire_name("i.local.");
     record_bytes.extend_from_slice(&TYPE_PTR.to_be_bytes());
     record_bytes.extend_from_slice(&CLASS_IN.to_be_bytes());
@@ -734,7 +732,6 @@ fn r_a_record_that_overruns_its_rdlength_is_dropped_and_the_offset_jumps_to_end(
          asymmetry is copied, not fixed: \n{}",
         text
     );
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -1929,7 +1926,7 @@ fn z_d_the_reuse_options_are_set_and_the_debug_lines_say_mdns() {
     // "SSDP cannot set SO_REUSEPORT" would send whoever reads the log to the
     // SSDP server.
     let (logger, path) = witness("mdns_witness_reuse");
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).expect("a UDP socket opens");
     set_reuse_for_mdns(&sock, &logger);
     let text = lines(&path);
@@ -1949,7 +1946,6 @@ fn z_d_the_reuse_options_are_set_and_the_debug_lines_say_mdns() {
         "on unix both options are set: {}",
         text
     );
-    set_threshold(Level::Info);
 }
 
 #[test]

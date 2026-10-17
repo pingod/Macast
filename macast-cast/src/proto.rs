@@ -404,10 +404,31 @@ mod tests {
     /// diff; a test added without the pin makes the audit ask for more than it
     /// finds, and a test deleted silently makes this floor stale, which is the
     /// one thing the number is here to catch. **A new module with tests moves
-    /// this number**, and 65 is the measured count with [`crate::channel`] in it
-    /// — 35 channel + 18 proto + 12 cert — plus the test that asks whether a
-    /// missing directory actually gets made.
-    const TESTS_IN_THIS_CRATE: usize = 65;
+    /// this number.**
+    ///
+    /// 603 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 603, and the scanner below counts 603 `#[test]`
+    /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
+    /// check that neither is reading a stale file (it is deliberately
+    /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
+    /// the scan because they sit in `src/` itself). The largest contributors are
+    /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
+    /// `airplay_tests` 60, `push_tests` 46, `resolve` 39, `channel_tests` 36, and
+    /// this file 19. The previous value, 602, was carried by the same two
+    /// instruments until `only_lib_rs_touches_the_log_threshold` was added; and
+    /// `601 passed; 1 failed` in an older run is a *602-test* run with one
+    /// failure, not a third floor — the sum of passed and failed is what has to
+    /// reach this number.
+    ///
+    /// **The stale half of this cell belongs to the record**: the value two floors
+    /// ago was 65 — "35 channel + 18 proto + 12 cert" — and it was never brought
+    /// back here while seven later modules were added. That is not a harmless under-floor: `scanned >= floor` with a floor 537 below the truth
+    /// means the audit cannot see a deleted module at all, and the one thing the
+    /// number exists to catch stops being caught. So a round that adds tests must
+    /// move this constant in the same pass, and a round that removes a whole file
+    /// of tests must move it down — either way, from the measurement, never from a
+    /// diff.
+    const TESTS_IN_THIS_CRATE: usize = 603;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the
@@ -847,6 +868,80 @@ mod tests {
             scanned >= TESTS_IN_THIS_CRATE,
             "only {scanned} tests were scanned; the floor is {TESTS_IN_THIS_CRATE} \
              (this crate's measured count) — an empty scan is not a pass"
+        );
+    }
+
+    /// The process-wide log threshold has exactly one owner in this crate.
+    ///
+    /// The setter in `macast_core::logging` writes a `static AtomicU8` shared by
+    /// every test thread, so a test that raises the level to DEBUG and lowers it
+    /// back on a line of its own is not "polite" — it is a window that another
+    /// thread can close mid-turn. That is how this crate lost **5 runs out of 24**
+    /// parallel ones (**0 out of 12** serial) before [`crate::DebugWindow`]
+    /// existed: always an `mdns_tests` DEBUG witness reading an empty file,
+    /// because `Logger::log` returns on `level < threshold()` **before** writing,
+    /// and a neighbouring test had just put INFO back.
+    ///
+    /// A raw pair anywhere else re-creates the flake, and — this is why the rule
+    /// is a scan rather than a behavioural test — the flake it recreates is
+    /// **intermittent**, so no assertion in this crate can be trusted to catch
+    /// it. What is catchable is the text: only `lib.rs` may name that setter at
+    /// all, comments included, so prose cannot smuggle the pattern back in as
+    /// "an example". The two needles are built by concatenation for the same
+    /// reason: a scanner that contains its own offender would report a clean
+    /// crate by matching itself out of existence — and, with the rule as written,
+    /// `proto.rs` *is* one of the scanned files.
+    #[test]
+    fn only_lib_rs_touches_the_log_threshold() {
+        crate::pin_test_dir();
+        let setter = format!("set_{}", "threshold");
+        let armed = format!("DebugWindow::{}()", "armed");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("read {}: {e}", root.display()))
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "rs").unwrap_or(false))
+            .collect::<Vec<_>>();
+        files.sort();
+        let mut offenders: Vec<String> = Vec::new();
+        let mut windows = 0usize;
+        let mut owner_calls = 0usize;
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let is_owner = path.file_name().map(|n| n == "lib.rs").unwrap_or(false);
+            for (index, line) in text.lines().enumerate() {
+                if line.contains(&setter) && !is_owner {
+                    offenders.push(format!("{}:{}", path.display(), index + 1));
+                }
+                // Counted only in the owner, and only as a *call*, so the sentence
+                // in `lib.rs`'s own doc that names the setter as the thing to avoid
+                // elsewhere is not mistaken for a second window.
+                if is_owner && line.contains(&format!("{setter}(")) {
+                    owner_calls += 1;
+                }
+                if line.contains(&armed) && !line.contains(&format!("format!(")) {
+                    windows += 1;
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "the log threshold is process-wide; open a DEBUG window with the crate \
+             guard instead — {offenders:?}"
+        );
+        // The two floors are this crate's measured state, and they are what stops
+        // the scan from reporting success on an empty reading: the owner really
+        // calls the setter twice (raise in `armed`, restore in `Drop`), and there
+        // really are twelve DEBUG windows — 4 in `mdns_tests`, 8 in
+        // `targets_tests`.
+        assert_eq!(
+            owner_calls, 2,
+            "lib.rs was expected to own exactly the raise and the restore, got {owner_calls}"
+        );
+        assert!(
+            windows >= 12,
+            "only {windows} DEBUG windows were found; the floor is 12 — a scan that \
+             finds nothing is not a pass"
         );
     }
 }

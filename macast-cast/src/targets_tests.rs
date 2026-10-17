@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use macast_core::logging::{read_tail, set_threshold, Level, Logger};
+use macast_core::logging::{read_tail, Logger};
 
 use super::*;
 
@@ -96,30 +96,12 @@ fn lines(path: &std::path::Path) -> String {
     read_tail(path, 200).text
 }
 
-/// Raise the process-wide threshold to DEBUG for the turn of one test.
-///
-/// A guard rather than a `set_threshold(Debug)` … `set_threshold(Info)` pair
-/// because the threshold is a **global**: the bare pair leaks DEBUG into whatever
-/// runs in parallel, and — worse — never restores itself when the assertion in
-/// the middle fails, so every later test in the process reads a log with an
-/// unexpected extra line in it. Both directions are the §4.2 family 「并行跑的用
-/// 例共享夹具路径，单跑绿、整组红」, and this file already has the pair form in a
-/// few places where it happens to be inert (nothing logs); this is the shape to
-/// use when the test's whole verdict **is** a DEBUG record.
-struct DebugThreshold;
-
-impl DebugThreshold {
-    fn armed() -> DebugThreshold {
-        set_threshold(Level::Debug);
-        DebugThreshold
-    }
-}
-
-impl Drop for DebugThreshold {
-    fn drop(&mut self) {
-        set_threshold(Level::Info);
-    }
-}
+// The DEBUG window is the crate-level `crate::DebugWindow` (lib.rs), not a
+// local guard here: the threshold is a process-wide `AtomicU8` in
+// `macast_core::logging`, so a guard that only restores the level still lets
+// two tests share the one global at once. That collision is what this file
+// used to cause in `mdns_tests` — 5 red out of 24 parallel full-crate runs,
+// 0 out of 12 serial — and the reading is recorded on `DebugWindow`.
 
 /// Poll an atomic until it reaches `want`, or give up after ~2 s and let the
 /// caller's assertion fail honestly. There is no shared `wait_until` in this
@@ -700,7 +682,7 @@ fn b_the_location_header_is_read_case_insensitively_and_stripped() {
 #[test]
 fn b_the_prefix_test_is_the_literal_http_and_it_is_lax() {
     crate::pin_test_dir();
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     // Three cases that look like one question and are two.
     //
     // `httpX://` **passes** — the filter is `starts_with("http")`, not a scheme
@@ -718,7 +700,6 @@ fn b_the_prefix_test_is_the_literal_http_and_it_is_lax() {
     // `ftp://` fails the same way.
     let ftp = "Location: ftp://a/x\r\n".to_string();
     assert!(locations_in(&ftp, "1.2.3.4").is_empty());
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -897,7 +878,7 @@ fn c_a_hard_receive_error_breaks_with_a_count_of_what_was_found() {
     // default INFO threshold swallows the record and the test reads an empty file
     // (the first run of this row was red exactly that way, and it looked like the
     // product never logged).
-    let _debug = DebugThreshold::armed();
+    let _debug = crate::DebugWindow::armed();
     let mut wire = FakeWire::new()
         .with_reply("Location: http://a/one\r\n", "10.0.0.2")
         .failing(io::ErrorKind::PermissionDenied)
@@ -924,7 +905,7 @@ fn c_a_hard_receive_error_breaks_with_a_count_of_what_was_found() {
 fn c_an_empty_search_counts_zero_in_that_sentence() {
     crate::pin_test_dir();
     let (log, path) = witness("targets-c-zero-found");
-    let _debug = DebugThreshold::armed();
+    let _debug = crate::DebugWindow::armed();
     let mut wire = FakeWire::new().failing(io::ErrorKind::Interrupted);
     let found = ssdp_search(&mut wire, "st", SEARCH_WINDOW, &log).unwrap();
     assert!(found.is_empty());
@@ -1125,7 +1106,7 @@ fn g_first_text_is_first_match_and_empty_is_still_a_match() {
 fn g_the_device_url_decides_the_host_and_the_peer_is_only_a_fallback() {
     crate::pin_test_dir();
     let (log, path) = witness("targets-g-host-source");
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     // `http:///desc.xml` — an empty authority. Python's `urlsplit` gives hostname
     // `None`, so the host becomes `peer_ip`, and the origin rebuilt for a
     // root-relative control URL uses the **peer**, not the empty string that the
@@ -1151,7 +1132,6 @@ fn g_the_device_url_decides_the_host_and_the_peer_is_only_a_fallback() {
     )
     .unwrap();
     assert_eq!(named.1, "http://livingroom-tv.local:49152/cm.xml");
-    set_threshold(Level::Info);
     assert!(lines(&path).is_empty(), "{}", lines(&path));
 }
 
@@ -1469,7 +1449,7 @@ fn h_an_unreadable_control_url_is_an_error_about_the_control_url() {
 #[test]
 fn h_an_unparsable_document_is_a_debug_line_that_quotes_the_parser() {
     crate::pin_test_dir();
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let (log, path) = witness("targets-h-bad-xml");
     // Two roots is the shape `scpd::Dom::parse` refuses; its error is a plain
     // `String`, so the assertion can bind the prefix that is ours without quoting
@@ -1486,7 +1466,6 @@ fn h_an_unparsable_document_is_a_debug_line_that_quotes_the_parser() {
     let text = lines(&path);
     assert!(text.contains("cannot parse http://10.0.0.7/d: "), "{text}");
     assert!(text.contains("[DEBUG]"), "{text}");
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -1528,7 +1507,7 @@ fn h_whitespace_in_a_value_is_trimmed_but_inside_the_name_is_kept() {
 #[test]
 fn i_an_unreadable_description_is_a_debug_line_and_no_renderer() {
     crate::pin_test_dir();
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let (log, path) = witness("targets-i-read-fail");
     let fetcher = FakeFetcher::refusing("connection closed before message completed");
     let got = describe_renderer(&fetcher, "http://10.0.0.7:80/d.xml", "10.0.0.7", &log);
@@ -1539,7 +1518,6 @@ fn i_an_unreadable_description_is_a_debug_line_and_no_renderer() {
         "{text}"
     );
     assert!(text.contains("[DEBUG]"), "{text}");
-    set_threshold(Level::Info);
 }
 
 #[test]
@@ -1624,7 +1602,7 @@ fn i_the_real_fetcher_reads_a_real_listener_through_the_proxy_none_agent() {
 #[test]
 fn i_a_closed_listener_is_a_debug_line_not_a_panic() {
     crate::pin_test_dir();
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let (log, path) = witness("targets-i-closed");
     // Bind and drop immediately so the port is real and nothing is listening: the
     // refusal is `Err` from ureq, which `describe_renderer` turns into one DEBUG
@@ -1637,7 +1615,6 @@ fn i_a_closed_listener_is_a_debug_line_not_a_panic() {
     assert!(HttpDescriber.describe(&url, "192.168.99.9", &log).is_none());
     let text = lines(&path);
     assert!(text.contains(&format!("cannot read {url}: ")), "{text}");
-    set_threshold(Level::Info);
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,7 +1746,7 @@ fn j_an_unreadable_control_url_is_skipped_with_a_debug_line() {
     // reachable the moment the `Describer` is not `parse_description` — which is
     // exactly the seam the trait exists for, and the shape a future third
     // describer (or a cached ledger row) can hand us.
-    set_threshold(Level::Debug);
+    let _debug = crate::DebugWindow::armed();
     let (log, path) = witness("targets-j-resplit");
     let searcher = FakeSearcher::answering(vec![
         vec![("http://10.0.0.2:80/d".to_string(), "10.0.0.2".to_string())],
@@ -1791,7 +1768,6 @@ fn j_an_unreadable_control_url_is_skipped_with_a_debug_line() {
         "{text}"
     );
     assert!(text.contains("[DEBUG]"), "{text}");
-    set_threshold(Level::Info);
 }
 
 #[test]

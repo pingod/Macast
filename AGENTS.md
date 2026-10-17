@@ -1632,6 +1632,95 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   清空 → 再清空 → 关 → 复读），**两次拒绝都用 md5 对着这一节早先存下的 jar 比过字节**，
   所以"拒绝之后文件原地不动"这句话不是断言，是读数。
 
+**Rust 侧移植发送端这一层时量到的事**（2026-10-17，`macast-cast/src/push.rs` ←
+`cast_local_file.py` 的 `CastSender` / `DlnaSender` / `push_url_to`，
+见证用例在 `macast-cast/src/push_tests.rs`，**46** 条；`cargo test -p macast-cast --lib`
+整跑 **603 passed / 0 failed**）：
+
+* **两只计数仪器必须给出同一个数，而 `grep` 那只会骗人。** `--list` 数出 603，
+  按字面量扫 `src/*.rs` 里 `#[test]` 也数出 603；`grep -cx '#[test]'` 给出 **610** ——
+  因为 `[test]` 在 POSIX 括号类里是**六个单字符的集合**，不是字面量（它把 `#[testX]`
+  这类不存在的行也算得进去，多出的 7 是它把别的东西数重了）。计数坐在
+  `proto.rs:431` 的 `TESTS_IN_THIS_CRATE: usize = 603`，而**这个常量本身是承重的**：
+  那条全仓扫描用例要求"扫到的用例数 ≥ 常量"，所以常量留在旧值（这一轮是
+  65 → 602 → 603 三级台阶）时新增的用例**不会被要求先钉日志目录**，
+  而套件照样全绿 —— **一个过低的地板不是"少问一句"，是"这一格从此无人提问"**。
+  各文件贡献（同一趟按文件扫出，加总 603）：`airplay_tests` 60、`cert` 12、
+  `channel_tests` 36、`charmap_tests` 2、`engine_tests` 17、`job_tests` 162、
+  `mdns_tests` 66、`proto` 19、`push_tests` 46、`relay_tests` 63、`resolve` 39、
+  `scrape_tests` 6、`targets_tests` 75。
+* **八支定点变异，逐支的读数与红在哪一条**（每支一条命令，`/tmp` 备份 + 还原 +
+  md5 回到 `61122cf4…`，日志留在 `/tmp/mut_*.txt`；这一节的每个数都能从那批文件重算）：
+  ① 把 `SOAPAction` 的值去掉那对引号 ⇒ **1** 红（`the_dlna_headers_are_the_ones_python_sends`）；
+  ② 把 `local_name(tag).ends_with("response")` 改成按**原始标签**比对 ⇒ **4** 红
+  （`the_dlna_arm_asks_for_the_transport_state_by_local_name`、
+  `a_non_xml_transport_state_keeps_the_last_state_and_warns`、
+  `the_instance_id_echo_teaches_the_next_envelope`、
+  `an_unknown_target_kind_pushes_over_the_wire_it_does_speak`）—— 四而不是 1 是**结构性连带**：
+  这三个读答复的地方共用同一个 `local_name` 判据，而最后那一条问的是"不认识的目标种类
+  仍然走它真的会说的那条线"；③ `MAX_HANDOFFS = 4 → 5` ⇒ **1** 红
+  （`a_fifth_handoff_closes_the_first`），**而且必须连着记一件事**：同一模块里那条
+  `the_ledger_size_is_a_property_of_the_constant` 断的是"推 `MAX_HANDOFFS + 1` 次之后
+  `handoff_count() == MAX_HANDOFFS`"，**它对任何上限值都成立**，所以在那一支下它是**设计上**的绿，
+  不是漏测 —— 这条账本用法的常量在测试里只能被"再推一个"那种形状问；
+  ④ `"streamType": if live { "LIVE" }` 翻成 `BUFFERED` ⇒ **1** 红
+  （`a_live_push_promises_LIVE_on_the_wire`）；⑤ 去掉 `playerState` 那次 `to_uppercase()`
+  ⇒ **1** 红（`the_player_state_is_upper_cased`），而**这一支第一次是编译错误不是变异体**：
+  删掉 `.to_uppercase()` 把 `String` 变成 `&str`，`E0308` 之后**一条用例都没跑**，
+  而只看退出码时它与"这一格没人问"长得一模一样 —— 变异体必须**同型替换**；
+  ⑥ 把 `remember()` 的 `drain(..keep_from)` 翻成 `drain(keep_from..)` ⇒ **5** 红
+  （`a_fifth_handoff_closes_the_first`、`handoffs_evict_the_oldest_only_past_the_cap`、
+  `two_presses_are_two_handoffs`、`the_full_cast_push_reaches_the_device_and_the_handoff_list`、
+  `a_thread_that_does_not_own_the_ledger_leaves_it_alone`），**而红法不是"驱逐了错的那一个"**：
+  `len ≤ 上限` 时 `keep_from == 0`，`drain(0..)` 把**整个账本倒空**，
+  于是每条断言读回的都是 `left: 0, right: 1` —— 症状是"每一次成功投屏都交不出 socket"。
+  这一支量到的是"保留这件事存在"，**不是**"保留哪一头"，写在这里是因为它会误导下一个人
+  去以为 5 红是"方向"的牙；⑦⑧ 见下面那条"撤回的 0 红"。
+* **两支曾在本文件的注释里记为「0 红」，本轮对现有用例重测，各答 1 红，旧句子已撤回。**
+  把 `build_didl` 的门 `duration != 0.0` 翻成 `duration > 0.0` ⇒ **1** 红
+  （`build_didl_writes_zero_clock_for_an_infinite_duration`），而且红在**负无穷那一行** ——
+  `+inf > 0.0` 为真，两种判据下都过，所以这个见证的全部重量落在负数/NaN 行上；
+  把 `connect()` 里 `let _ = self.recv()?;` 的 `?` 删掉 ⇒ **1** 红
+  （`a_device_that_never_answers_the_challenge_is_not_a_connected_sender`），
+  因为读照样失败，但没有 `?` 时 `connect()` 交回一个**自认为已连接**的发送端，
+  而那句 `.err().expect(...)` 正是唯一问得出这件事的位置。两处读数现在**写在提问的那两条用例里**，
+  模块头只留"这两支重测过、旧判定没有复现"这一句。**同一族还有一格永远问不到，两半都要留字**：
+  `connect()` 的两个 arm 在本文件里是**不可达**而不是未测 —— `"没有可用的地址"` 需要
+  `to_socket_addrs()` 返回 `Ok` 且迭代器**为空**（调用方能给出的名字要么解析要么报错，
+  没有"解析成零个地址"的夹具），`"目标地址无法作为 TLS 服务器名"` 需要 `ServerName::try_from`
+  在**已经解析成功之后**失败（rustls 在解析之前就不认空名与坏名）。
+* **两族新的"共享夹具"碰撞，都是 §4.2「并行跑的用例共享夹具路径，单跑绿、整组红」的成员。**
+  ① **账本所有权**：一次**成功**的 cast push 会把活的 TLS socket 停进进程级
+  `handoffs()`，而脚本设备在它被排空之前**看不到 EOF** —— 所以这个模块用
+  `static PUSH_GATE: Mutex<()>` + `OWNS_PUSH_LEDGER` 把账本串行化，并用
+  `wait_closed(&device, want)`（5 秒上限）而不是抓一瞬间来判"socket 真的交出去了"。
+  ② **日志阈值**：`macast_core::logging` 的 `static THRESHOLD: AtomicU8`（`logging.rs:69`，
+  默认 Info）是**进程级**的，而 `Logger::log` 在 `level < threshold()` 时提前返回 ——
+  于是**一个空的见证文件证明的是"被过滤了"，永远不是"字节没刷盘"**（这句是本轮最贵的一格，
+  因为它把"读不到"读成"写不出"就往产品里改）。`targets_tests` 里裸写 DEBUG 的配对落在
+  `mdns_tests` 的 DEBUG 窗口内 ⇒ **并发整 crate 5 红 / 24 次**（红的永远是
+  `mdns_tests.rs:677` 与 `:721` 那两条），**串行 12 次 0 红**。修法是 crate 级
+  `#[cfg(test)] static DEBUG_WINDOW_GATE: Mutex<()>` + RAII `DebugWindow`
+  （**Drop 体在 guard 字段析构之前**把阈值放回 INFO —— 顺序反了就等于在窗口里放行了别人），
+  而它的强制手段是**文本扫描**（`proto.rs` 的 `only_lib_rs_touches_the_log_threshold`，
+   needles 用 `format!` 拼接因为 `proto.rs` 自己也在扫描范围内；地板 `owner_calls == 2` 与
+  `windows >= 12` = 4 个 mdns + 8 个 targets）。**为什么不是行为用例**：复发是**间歇性**的，
+  一条计时用例今天问不到，而"只有 `lib.rs` 能动阈值"这句话本来就是一个静态事实。
+* **三个"一个主人"的收敛（本轮顺手做掉的，都是"预算是参数、策略是主人"那个形状）**：
+  `resolve::no_proxy_agent(timeout)`（清代理是策略，超时由调用方给）、
+  `resolve::number_or(v, default)`（对应 Python `number(value, default)`，
+  `cast_local_file.py:1791`）、`macast-core` 的键表新增 `Key::Timeout`（26 → 27 条），
+  因为 `cast_local_file.py:164` 声明了 `Timeout = 15` 而 `Setting.get` 按
+  `property.name` 索引那份共享 dict —— **不加这个键，投屏超时就只能是一个没人认领的字面量**。
+  `push.rs:148-151` 因此是 `number_or(&setting.get(Key::Timeout, json!(5)), DEFAULT_TIMEOUT_SECONDS)`，
+  而不是第三处自己解析 JSON。
+* **`push.rs` 在这一轮一个字节都没改**（八支变异的 md5 全部回到 `61122cf4…`），
+  五处红法都由**用例**补齐而不是放宽断言 —— 包括那条 `a_fifth_handoff_closes_the_first`：
+  它第一版红在 `left: [] right: [0]`，修法是给测试加 `wait_closed`，
+  而不是把断言改成" eventual "。**以及本分支从未推送 ⇒ 上面 603 条与这八个读数没有任何 CI 见证过**
+  （§16 第 2 条那句"这台机器的读数只来自这台机器"在这里同样成立）。
+
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

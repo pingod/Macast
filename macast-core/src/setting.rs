@@ -60,6 +60,16 @@ pub enum Key {
     ApiToken,
     GithubCnMirror,
     ResolveCookieBrowser,
+    // The one key a *renderer plugin* owns. It is not a member of the Python
+    // core's `SettingProperty` enum at all: `macast/plugins/renderer/
+    // cast_local_file.py:164` declares its own enum with `Timeout = 15`, and
+    // `Setting.get` keys the shared dict on `property.name` (`macast/utils.py:
+    // 522`), so the socket timeout for device hand-offs lands in
+    // `macast_setting.json` under the bare name `"Timeout"`. It is in this
+    // table because the Rust sender has to read the same file the same way —
+    // a user who set 15 seconds there would otherwise get a 5-second timeout
+    // and a 「投给「X」失败：timed out」 that names neither his setting nor us.
+    Timeout,
     // The five keys `macast_renderer/mpv.py` owns. They are here rather than in
     // that crate because this file is one table with one writer: a player key
     // declared on the far side of the crate boundary would be a second source
@@ -97,6 +107,7 @@ impl Key {
             Key::ApiToken => "Api_Token",
             Key::GithubCnMirror => "Github_CN_Mirror",
             Key::ResolveCookieBrowser => "Resolve_Cookie_Browser",
+            Key::Timeout => "Timeout",
             Key::PlayerHw => "PlayerHW",
             Key::PlayerSize => "PlayerSize",
             Key::PlayerPosition => "PlayerPosition",
@@ -111,7 +122,7 @@ impl Key {
     }
 
     /// Every key, in declaration order.
-    pub fn all() -> [Key; 26] {
+    pub fn all() -> [Key; 27] {
         [
             Key::Usn,
             Key::CheckUpdate,
@@ -134,6 +145,7 @@ impl Key {
             Key::ApiToken,
             Key::GithubCnMirror,
             Key::ResolveCookieBrowser,
+            Key::Timeout,
             Key::PlayerHw,
             Key::PlayerSize,
             Key::PlayerPosition,
@@ -635,6 +647,7 @@ mod tests {
                 "Api_Token",
                 "Github_CN_Mirror",
                 "Resolve_Cookie_Browser",
+                "Timeout",
                 "PlayerHW",
                 "PlayerSize",
                 "PlayerPosition",
