@@ -59,6 +59,13 @@ use macast_core::paths;
 use macast_core::setting::{self, Key, Setting};
 use macast_core::timefmt;
 use macast_core::token;
+// The query-string reader moved to `macast_core::url` on 2026-10-18, when the
+// Chromecast setup face (`macast-cast/src/setup.rs`, `?params=a,b`) became its
+// second reader. Same reason as everything else in that module: `macast-cast`
+// depends on `macast-upnp` and never the reverse, so a rule both faces must
+// agree on cannot be private to either — and the rule that would have drifted
+// first is whether `%2B` is a `+` or a space.
+use macast_core::url::{parse_query, split_once_ascii};
 
 /// The refusal pages. CherryPy's own four bodies (1983, 1274, 1737, 1739 bytes
 /// in the witness set) are a traceback-shaped HTML with a `<pre>` of the
@@ -779,107 +786,6 @@ fn declared_length(headers: &[(String, String)]) -> Option<i64> {
         Ok(value) if value >= 0 => Some(value),
         _ => None,
     }
-}
-
-fn split_once_ascii(haystack: &str, needle: char) -> (&str, &str) {
-    match haystack.find(needle) {
-        Some(index) => (&haystack[..index], &haystack[index + 1..]),
-        None => (haystack, ""),
-    }
-}
-
-/// A hex digit's value, or `None` — the two characters `_hextobyte` keys on.
-fn hex_value(byte: u8) -> Option<u32> {
-    match byte {
-        b'0'..=b'9' => Some((byte - b'0') as u32),
-        b'a'..=b'f' => Some((byte - b'a' + 10) as u32),
-        b'A'..=b'F' => Some((byte - b'A' + 10) as u32),
-        _ => None,
-    }
-}
-
-/// `urllib.parse.unquote_plus` (UTF-8, `errors='replace'`).
-///
-/// `+` becomes a space **first**, on the whole string, so `%2B` arrives as a
-/// literal `+` while a written `+` is a space — the two are not the same
-/// character by the time anything reads them. Percent escapes are then decoded
-/// **at byte level**: the input is encoded UTF-8, split on `b'%'`, and an item
-/// contributes a byte only when its first two *bytes* are hex digits, so `%zz`
-/// and a trailing `%` stay literal and the remainder after a decoded byte is
-/// never re-scanned (the split already removed every `%`). A non-ASCII
-/// character therefore passes through untouched **and** joins a decoded byte in
-/// one buffer: `é%E7` is `é` followed by a lone `0xE7`, which is not valid
-/// UTF-8, so the final `from_utf8_lossy` — Python's `decode('utf-8',
-/// 'replace')` — hands back one replacement character.
-///
-/// Two deliberate deviations from the shipped receiver, both about what happens
-/// when a percent-decoded run is **not** valid UTF-8. cherrypy decodes query
-/// names with `errors='strict'` (`lib/httputil.py:321-364`) and lets a
-/// `UnicodeDecodeError` escape `process_query_string`, which answers **404** for
-/// the whole request; `process_urlencoded`
-/// (`_cpreqbody.py:143-166`) instead retries the body's declared charset before
-/// giving up. This port decodes lossily and keeps routing, so `?url=%FF` reads
-/// one replacement character and falls through to the ordinary
-/// "unrecognised fields" answer. No sender in this project's reach produces
-/// such a pair, and the alternative — a 404 with no body and no explanation —
-/// is a worse answer to hand a device that mistyped one byte.
-fn unquote_plus(text: &str) -> String {
-    if !text.contains('%') {
-        return text.replace('+', " ");
-    }
-    let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
-    let plus = text.replace('+', " ");
-    let mut parts = plus.as_bytes().split(|byte| *byte == b'%');
-    bytes.extend_from_slice(parts.next().unwrap_or(b""));
-    for item in parts {
-        let decoded = if item.len() >= 2 {
-            match (hex_value(item[0]), hex_value(item[1])) {
-                (Some(hi), Some(lo)) => Some(((hi << 4) | lo) as u8),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        match decoded {
-            Some(byte) => {
-                bytes.push(byte);
-                bytes.extend_from_slice(&item[2..]);
-            }
-            None => {
-                bytes.push(b'%');
-                bytes.extend_from_slice(item);
-            }
-        }
-    }
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// `a=1&b&c=` → `[("a","1"), ("b",""), ("c","")]`, both halves percent-decoded.
-///
-/// A pair with no `=` keeps its name and an empty value; an **empty** pair
-/// (from `&&`, or a trailing `&`) is skipped.
-///
-/// The decoding is what makes a **browser** reach the routes at all: a
-/// `FormData` / `URLSearchParams` POST — and `curl --data-urlencode` — writes
-/// every `:` and `/` as `%3A` and `%2F`, so `url=https%3A%2F%2Fhost%2Fa.mp4`
-/// **is** an absolute address and must route as one. `query=cast` from an iOS
-/// Shortcut encodes the same way. cherrypy decodes on both paths
-/// (`lib/httputil.py:321-364` for the query string, `_cpreqbody.py:143-166` for
-/// the form body), so this is not a widening of what the shipped receiver
-/// accepts.
-///
-/// The path is a different story and stays undecoded — see
-/// [`Request::segments`] for why `%2E` must not become `.` there.
-fn parse_query(query_string: &str) -> Vec<(String, String)> {
-    let mut pairs = Vec::new();
-    for piece in query_string.split('&') {
-        if piece.is_empty() {
-            continue;
-        }
-        let (name, value) = split_once_ascii(piece, '=');
-        pairs.push((unquote_plus(name), unquote_plus(value)));
-    }
-    pairs
 }
 
 /// The gate that runs **before dispatch**, and therefore before a body is read.
@@ -2292,8 +2198,8 @@ fn epoch_secs(when: SystemTime) -> i64 {
 /// Read **only** when the `Content-Type` says form-urlencoded, because that is
 /// the only body cherrypy merges into `kwargs`, and a SOAP envelope must not be
 /// scanned for field names. Percent-decoded like the query string, from a lossy
-/// copy of the bytes — see [`unquote_plus`] for the one place that reading
-/// differs from cherrypy's.
+/// copy of the bytes — see [`macast_core::url::unquote_plus`] for the one place
+/// that reading differs from cherrypy's.
 fn form_pairs(req: &Request) -> Vec<(String, String)> {
     let content_type = req.header("Content-Type").unwrap_or("");
     if !content_type
@@ -3839,13 +3745,6 @@ mod tests {
         // sequence does not eat the characters after it.
         let req = request("GET", "/?x=%C3%A9", &[]);
         assert_eq!(req.query[0].1, "é");
-    }
-
-    #[test]
-    fn split_once_ascii_on_the_first_only() {
-        crate::pin_test_dir();
-        assert_eq!(split_once_ascii("a=b=c", '='), ("a", "b=c"));
-        assert_eq!(split_once_ascii("plain", '='), ("plain", ""));
     }
 
     #[test]

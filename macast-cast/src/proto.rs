@@ -406,19 +406,25 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 603 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 603, and the scanner below counts 603 `#[test]`
+    /// 633 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 633, and the scanner below counts 633 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
     /// check that neither is reading a stale file (it is deliberately
     /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
     /// the scan because they sit in `src/` itself). The largest contributors are
     /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
-    /// `airplay_tests` 60, `push_tests` 46, `resolve` 39, `channel_tests` 36, and
-    /// this file 19. The previous value, 602, was carried by the same two
-    /// instruments until `only_lib_rs_touches_the_log_threshold` was added; and
+    /// `airplay_tests` 60, `push_tests` 46, `resolve` 39, `channel_tests` 36,
+    /// `setup_tests` 30, this file 19, `engine_tests` 17 and `cert` 12. The
+    /// previous value, 603, was carried by the same two instruments until
+    /// `setup.rs` landed with its own module;
     /// `601 passed; 1 failed` in an older run is a *602-test* run with one
     /// failure, not a third floor — the sum of passed and failed is what has to
     /// reach this number.
+    ///
+    /// And a name filter is not a census: `--lib setup` reports **32** tests,
+    /// because two older `airplay::tests` rows have "setup" in their names while
+    /// `setup_tests.rs` itself holds 30. The floor is the crate number, and the
+    /// only readings that may be compared with it are `--list` and the scan.
     ///
     /// **The stale half of this cell belongs to the record**: the value two floors
     /// ago was 65 — "35 channel + 18 proto + 12 cert" — and it was never brought
@@ -428,7 +434,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 603;
+    const TESTS_IN_THIS_CRATE: usize = 633;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

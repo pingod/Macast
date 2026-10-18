@@ -1660,6 +1660,204 @@ else
     skip "no reachable non-loopback address to ask from (section 19's LAN half)"
 fi
 
+echo "== 20: the setup face answers senders on 8008, and on 8443 if it got that port too =="
+# **Read the answer, not the ask** — the same rule §17 applies to the relay's
+# port. The shell logs which numbers it actually bound; a sender hardcodes 8008
+# (`dial.py:25-26`), so "8008 or nothing" can only be checked from that line and
+# never from the constant. A face on 8010 would be a green test and a dead device.
+#
+# Three outcomes are legitimate here and each is asserted with its own evidence,
+# because the fourth — silence — is the one that would read like a product bug:
+#   * bound → the document, the filter, the icon, the verbs, and 8443 if it came up;
+#   * refused → the WARNING line must name the reason (another program holds 8008,
+#     which is exactly the state on a machine running the Python app);
+#   * unreported → that is the failure.
+#
+# Which file that line lives in is itself a fact worth naming rather than
+# guessing: the app-level summary goes to the shell's own log while the module's
+# lines (`Cast HTTPS setup server on 8443`, the refusal sentences) are claimed
+# into `logs/Chromecast.log` — `AGENTS.md` §4.10b's "one record, one file". So
+# the reader looks across both, and then asserts the split holds.
+log_grep() {
+    # $1 = a fixed string. Searches the shared log and every claimed module file.
+    grep -ahF "$1" "$SDIR/macast.log" "$SDIR"/logs/*.log 2>/dev/null
+}
+
+SETUP_REPORT=$(log_grep 'setup face: ' | tail -1)
+SETUP_HTTP_PORT=$(printf '%s' "$SETUP_REPORT" | sed -n 's/.*HTTP on \([0-9][0-9]*\).*/\1/p')
+SETUP_HTTPS_PORT=$(printf '%s' "$SETUP_REPORT" | sed -n 's/.*HTTPS \([0-9][0-9]*\).*/\1/p')
+SH=/tmp/verify_rust_receiver_setup
+
+setup_probe() {
+    # $1 = path, $2 = header file. The body goes to $API_BODY so this section
+    # reads it with the same `json_*` helpers the API sections use; nothing after
+    # §20 depends on a previous probe, and every check below re-probes first.
+    API_STATUS=$(curl -s --noproxy '*' -m 8 -D "$2" -o "$API_BODY" -w '%{http_code}' \
+        "http://127.0.0.1:$SETUP_HTTP_PORT$1")
+    parse_api_body
+}
+
+# `AGENTS.md` §4.10b's rule, asserted rather than trusted: a record belongs to one
+# file. The module claimed `logs/Chromecast.log`, so none of its rows may also sit
+# in the shared `macast.log` — the duplicate is exactly how "where do I look"
+# comes back, and it is how the shared file filled to 40 MB/day once before.
+if [ -n "$(grep -ahE 'Cast setup|Cast HTTPS setup|No TLS certificate' \
+      "$SDIR/macast.log" 2>/dev/null)" ]; then
+    fail "a Chromecast-module line also landed in macast.log (one record, two files)"
+else
+    pass "the module's rows stay in their claimed file and out of the shared log"
+fi
+
+if [ -n "$SETUP_HTTP_PORT" ]; then
+    pass "the face reported the port it bound ($SETUP_HTTP_PORT), not the one it asked for"
+    [ "$SETUP_HTTP_PORT" = "8008" ] \
+        && pass "and it is the number a sender knocks on" \
+        || fail "setup face on $SETUP_HTTP_PORT: no sender will ever find it"
+
+    setup_probe /setup/eureka_info "$SH.h"
+    [ "$API_STATUS" = "200" ] \
+        && pass "eureka_info answers 200 to a plain GET" \
+        || fail "eureka_info answered HTTP $API_STATUS"
+    grep -q '^HTTP/1.0 200' "$SH.h" \
+        && pass "over an HTTP/1.0 status line (no keep-alive, like the reference)" \
+        || fail "status line: $(head -1 "$SH.h")"
+    grep -qi '^server: Macast/' "$SH.h" \
+        && pass "and the Server line names us" \
+        || fail "Server header: $(grep -i '^server:' "$SH.h" | tr -d '\r')"
+    grep -qi '^server:.*Python' "$SH.h" \
+        && fail "it claimed to be CPython: $(grep -i '^server:' "$SH.h" | tr -d '\r')" \
+        || pass "and it does not claim to be CPython"
+    [ "$(json_keys .)" = "name,device_info,ssdp_udn,version,build_version,connected,settings" ] \
+        && pass "the seven top-level keys, in the reference's order" \
+        || fail "eureka keys: $(json_keys .)"
+    [ "$(json_keys device_info)" = "manufacturer,model_name,product_name,friendly_name,ssdp_udn,mac_address,capabilities" ] \
+        && pass "device_info is nested, with its own order kept" \
+        || fail "device_info keys: $(json_keys device_info)"
+    [ "$(json_keys device_info.capabilities)" = "display_supported,audio_supported,video_out,audio_out,multizone_supported" ] \
+        && pass "capabilities spells multizone_supported last, rather than omitting it" \
+        || fail "capabilities keys: $(json_keys device_info.capabilities)"
+    [ "$(json_ask device_info.capabilities.multizone_supported)" = "false" ] \
+        && pass "and its value is false — an absent key reads as multi-room to pychromecast" \
+        || fail "multizone_supported: $(json_ask device_info.capabilities.multizone_supported)"
+
+    # The USN, compared against the file the app wrote rather than a shape: a
+    # `uuid:` prefix here is what made Macast invisible on the host-scanning path.
+    UDN=$(json_ask ssdp_udn)
+    STORED_USN=$(stored_setting USN 2>/dev/null || echo "")
+    case "$UDN" in
+        uuid:*) fail "ssdp_udn carries the uuid: prefix: $UDN" ;;
+        *) pass "and ssdp_udn is bare, the way UUID() parses it" ;;
+    esac
+    if [ -n "$STORED_USN" ] && [ "$UDN" = "$STORED_USN" ]; then
+        pass "the same USN the settings file holds, so discovery and this face agree"
+    elif [ -n "$STORED_USN" ]; then
+        fail "eureka says $UDN while the settings file says $STORED_USN"
+    else
+        fail "the settings file has no Usn to compare against (udn: $UDN)"
+    fi
+
+    # The filter, asked the way the real client asks it (`dial.py:157`).
+    setup_probe '/setup/eureka_info?params=device_info,name' "$SH.f.h"
+    [ "$(json_keys .)" = "name,device_info" ] \
+        && pass "params=device_info,name answers in the document's order, not the caller's" \
+        || fail "filtered keys: $(json_keys .)"
+    setup_probe '/setup/eureka_info?params=multizone' "$SH.m.h"
+    [ "$API_STATUS" = "200" ] && [ "$(json_keys .)" = "" ] \
+        && pass "an unknown name is a 200 with an empty object, not a 404" \
+        || fail "params=multizone answered HTTP $API_STATUS keys '$(json_keys .)'"
+    setup_probe '/setup/eureka_info?params=' "$SH.b.h"
+    [ "$(json_keys .)" = "name,device_info,ssdp_udn,version,build_version,connected,settings" ] \
+        && pass "and ?params= is no filter at all — parse_qs drops the blank" \
+        || fail "blank params keys: $(json_keys .)"
+
+    # The icon: a type, **no** length, and no body. `Content-Length: 0` would be a
+    # truer description of the bytes and a divergence from the shape clients were
+    # written against, so the omission is the assertion.
+    setup_probe /setup/icon.png "$SH.i.h"
+    [ "$API_STATUS" = "200" ] \
+        && pass "icon.png answers 200" \
+        || fail "icon.png answered HTTP $API_STATUS"
+    grep -qi '^content-type: image/png' "$SH.i.h" \
+        && pass "with image/png" \
+        || fail "icon headers: $(tr -d '\r' < "$SH.i.h")"
+    grep -qi '^content-length' "$SH.i.h" \
+        && fail "it declared a length: $(grep -i '^content-length' "$SH.i.h" | tr -d '\r')" \
+        || pass "and no Content-Length, exactly as the reference writes it"
+
+    setup_probe /setup/nothing "$SH.4.h"
+    [ "$API_STATUS" = "404" ] \
+        && pass "an unknown path is a 404" \
+        || fail "unknown path answered HTTP $API_STATUS"
+    code=$(curl -s --noproxy '*' -m 8 -o /dev/null -w '%{http_code}' -X POST \
+        "http://127.0.0.1:$SETUP_HTTP_PORT/setup/eureka_info")
+    [ "$code" = "501" ] \
+        && pass "a POST is refused outright — this face has no verb" \
+        || fail "POST answered HTTP $code"
+
+    # The face is **ungated** by design (module header): it says what the device
+    # is, to anyone on the subnet, and carries nothing secret. Both halves of that
+    # sentence have to hold, or the absence of a gate is an accident.
+    if [ -n "$LAN" ]; then
+        LAN_CODE=$(curl -s --noproxy '*' -m 8 -o "$SH.lan.json" -w '%{http_code}' \
+            "http://$LAN:$SETUP_HTTP_PORT/setup/eureka_info")
+        [ "$LAN_CODE" = "200" ] \
+            && pass "a LAN caller is answered — the face publishes identity, not control" \
+            || fail "a LAN caller got HTTP $LAN_CODE from eureka_info"
+        if grep -q 'Api_Token\|'"$SDIR" "$SH.lan.json"; then
+            fail "the LAN answer leaked a token name or a path on this machine"
+        else
+            pass "and what it answers holds no token and no path"
+        fi
+    else
+        skip "no reachable non-loopback address to ask from (section 19's LAN half)"
+    fi
+
+    # 8443: same document or a stated reason. pychromecast's `get_cast_type` asks
+    # only the encrypted twin, so a missing 8443 costs the `manufacturer` field —
+    # and the log must say which of its three reasons applied.
+    if [ -n "$SETUP_HTTPS_PORT" ]; then
+        [ "$SETUP_HTTPS_PORT" = "8443" ] \
+            && pass "8443 came up on the number clients hardcode" \
+            || fail "HTTPS setup on $SETUP_HTTPS_PORT: no client will reach it"
+        TLS_CODE=$(curl -sk --noproxy '*' -m 12 -o "$SH.tls.json" -w '%{http_code}' \
+            "https://127.0.0.1:$SETUP_HTTPS_PORT/setup/eureka_info")
+        [ "$TLS_CODE" = "200" ] \
+            && pass "the TLS twin answers over a real handshake" \
+            || fail "https eureka_info answered HTTP $TLS_CODE"
+        # Byte-for-byte against a **fresh** plain fetch, because one document
+        # should have one owner: a TLS arm built from its own copy of the answer
+        # would be the same lie in a second place. Fresh rather than reusing
+        # `$API_BODY`, which the probes above have already overwritten twice.
+        setup_probe /setup/eureka_info "$SH.plain2.h"
+        if [ -s "$SH.tls.json" ] && cmp -s "$SH.tls.json" "$API_BODY"; then
+            pass "and the encrypted answer is the same bytes as the plain one"
+        else
+            fail "8008 and 8443 disagree about the document ($(wc -c < "$SH.tls.json" | tr -d ' ') vs $(wc -c < "$API_BODY" | tr -d ' ') bytes)"
+        fi
+    elif printf '%s' "$SETUP_REPORT" | grep -q 'HTTPS not started'; then
+        if [ -n "$(grep -ahE 'Cast HTTPS setup|No TLS certificate available' \
+              "$SDIR/macast.log" "$SDIR"/logs/*.log 2>/dev/null)" ]; then
+            pass "8443 is down and the log says why (senders lose the manufacturer field)"
+        else
+            fail "8443 is down with no reason in the log: $SETUP_REPORT"
+        fi
+    else
+        fail "the log never said whether 8443 came up: $SETUP_REPORT"
+    fi
+elif printf '%s' "$SETUP_REPORT" | grep -q 'not listening on 8008'; then
+    # The legitimate second outcome: somebody else owns 8008 — most often the
+    # Python Macast on the same machine — and the face binds nothing rather than
+    # walking into 8009, which is the Cast socket's port.
+    if [ -n "$(grep -ahF 'Cast setup face did not start' \
+          "$SDIR/macast.log" "$SDIR"/logs/*.log 2>/dev/null)" ]; then
+        pass "8008 was taken and the face said so instead of binding a neighbour"
+    else
+        fail "the face is down but no WARNING names the reason: $SETUP_REPORT"
+    fi
+else
+    fail "the log never said what the setup face did: '$SETUP_REPORT'"
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

@@ -51,6 +51,7 @@ use serde_json::{json, Value};
 use tauri::{Manager, State};
 
 use macast_cast::relay;
+use macast_cast::setup;
 use macast_cast::targets;
 use macast_core::env;
 use macast_core::logging::{self, Logger};
@@ -112,6 +113,11 @@ struct Runtime {
     ssdp: Arc<SsdpPlugin>,
     eventing: Arc<Eventing>,
     relay: Arc<relay::RelayStore>,
+    /// The Chromecast setup face (8008, and 8443 when a certificate came up).
+    /// `Option` because the plain listener may be refused (someone else holds
+    /// 8008) and `SetupServer` itself already carries "is 8443 up" in
+    /// `https_port`; the outer `Option` is only "did this run get a face at all".
+    setup: Mutex<Option<setup::SetupServer>>,
 }
 
 impl Runtime {
@@ -152,6 +158,23 @@ impl Runtime {
         self.relay.clear();
         self.ssdp.stop();
         self.http.stop();
+        // The setup face closes with the other two HTTP faces rather than first:
+        // a sender that already read `eureka_info` has our USN and 8009 for the
+        // length of its cache, and there is no goodbye to send on this face — it
+        // is a document, not an announcement. The SSDP `byebye` above is the one
+        // that actually tells the LAN we are gone.
+        if let Some(mut server) = self
+            .setup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let port = server.port;
+            server.shutdown();
+            self.host
+                .log
+                .info(&format!("setup face on {port} closed; 8443 goes with it"));
+        }
         self.eventing.stop();
         self.host.log.info(
             "receiver stopped (relay emptied, SSDP byebye, HTTP face closed, GENA thread \
@@ -979,6 +1002,75 @@ pub fn run() {
             // it reaches *this* struct's `stop_services`.
             let ssdp = SsdpPlugin::new(Arc::new(host.clone()) as SharedHooks, setting.clone());
 
+            // The Chromecast setup face (8008, plus 8443 when a certificate
+            // exists). Its lines belong to the module's own log file: Python's
+            // `protocol_cast.py:35` writes through `logging.getLogger("Chromecast")`,
+            // which `logsplit` claims, so claiming here is what keeps §4.10b's
+            // "one record, one file" true instead of dropping these rows into
+            // `macast.log` beside the DLNA ones.
+            let cast_log = Logger::named(setup::LOGGER_NAME);
+            let _cast_log_path = cast_log.claim();
+            // The certificate is the shared `macast.*` pair when one is already
+            // there and our own otherwise (`ensure_in_setting_dir` owns that rule,
+            // including "a broken foreign pair is reported by name and left
+            // alone"). A pair we cannot load is not a reason to lose the plain
+            // face, so the failure path hands `None` down and the module logs the
+            // reference's own sentence about 8443.
+            let setup_config = match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
+                Ok(pair) => match pair.server_config() {
+                    Ok(config) => Some(config),
+                    Err(e) => {
+                        cast_log.warning(&format!(
+                            "Cast HTTPS setup: the certificate will not load ({}); answering over 8008 only",
+                            e.message()
+                        ));
+                        None
+                    }
+                },
+                Err(e) => {
+                    cast_log.warning(&format!(
+                        "Cast HTTPS setup: no certificate available ({}); answering over 8008 only",
+                        e.message()
+                    ));
+                    None
+                }
+            };
+            // **Started unconditionally**, which is a gap this shell has already
+            // and not one this face introduces: the DLNA receiver answers
+            // regardless of `Macast_Protocols`, because the protocol enable list
+            // is read for the status document only. When that list becomes a gate,
+            // this line and the HTTP/SSDP starts above are the places that have to
+            // read it — and until then a user who "disabled Chromecast" in the
+            // page still gets a listener on 8008 answering what the device is.
+            // What it answers is deliberately nothing secret: name, USN, version.
+            let setup_server = match setup::SetupServer::start(
+                setting.clone(),
+                Arc::clone(&cast_log),
+                setup_config,
+            ) {
+                Ok(server) => Some(server),
+                Err(e) => {
+                    cast_log.warning(&format!(
+                        "Cast setup face did not start: {e} — senders that probe 8008 will get nothing"
+                    ));
+                    None
+                }
+            };
+            // One summary line's worth of facts, taken **before** the handle moves
+            // into the managed `Runtime`: the answer has to be the bound numbers,
+            // and after the move there is nothing left here to ask.
+            let setup_report = setup_server.as_ref().map(|face| {
+                format!(
+                    "HTTP on {}, HTTPS {}",
+                    face.port,
+                    match face.https_port {
+                        Some(port) => port.to_string(),
+                        None => "not started".to_string(),
+                    }
+                )
+            });
+            let setup = Mutex::new(setup_server);
+
             // Managed before anything is started, and this ordering is load-bearing
             // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
             // `Hooks::stop_service`, which resolves the services through
@@ -1001,6 +1093,7 @@ pub fn run() {
                 ssdp: ssdp.clone(),
                 eventing: eventing.clone(),
                 relay: relay_store,
+                setup,
             });
 
             player.start();
@@ -1020,6 +1113,14 @@ pub fn run() {
                 http.bound_port(),
                 if ssdp.ssdp().is_running() { "announcing" } else { "did not start" },
             ));
+            // Same rule for the setup face: report the bound number, not the
+            // requested one, and say plainly when 8443 is not there — a user
+            // comparing this line with a sender's "Failed to determine cast type"
+            // warning is reading the two halves of one fact.
+            match &setup_report {
+                Some(text) => log.info(&format!("setup face: {text}")),
+                None => log.info("setup face: not listening on 8008"),
+            }
             log.info(&format!("renderer log: {}", log_path.display()));
             Ok(())
         })

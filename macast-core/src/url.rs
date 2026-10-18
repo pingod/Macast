@@ -793,6 +793,164 @@ pub fn host_is_loopback(text: &str) -> Option<bool> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The query-string reader
+// ---------------------------------------------------------------------------
+
+// Moved here from `macast-upnp/src/http.rs` on 2026-10-18 for the same reason
+// the rest of this module exists: `setup.rs` (the Chromecast `?params=` filter
+// on 8008/8443) reads a query string too, and the reference implements both
+// with `urllib.parse` — `parse_qs(urlparse(path).query)` there, cherrypy's
+// `process_query_string` and `process_urlencoded` here. Two readers of one
+// decoding rule is AGENTS.md §4.14's `advertise_host` story waiting to be
+// repeated, and the version that would have drifted first is the interesting
+// one: whether `%2B` is a `+` or a space.
+
+/// Split on the **first** `needle` only; no `needle` means the whole string and
+/// an empty tail (so a caller never has to branch on "was there a `=`").
+///
+/// `b=c=d` on `=` is `("b", "c=d")` — which is what makes a query value allowed
+/// to contain an equals sign, as a base64 token or a `Signature=` does.
+pub fn split_once_ascii(haystack: &str, needle: char) -> (&str, &str) {
+    match haystack.find(needle) {
+        Some(index) => (&haystack[..index], &haystack[index + 1..]),
+        None => (haystack, ""),
+    }
+}
+
+/// A hex digit's value, or `None` — the two characters `_hextobyte` keys on.
+fn hex_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as u32),
+        b'a'..=b'f' => Some((byte - b'a' + 10) as u32),
+        b'A'..=b'F' => Some((byte - b'A' + 10) as u32),
+        _ => None,
+    }
+}
+
+/// `urllib.parse.unquote_plus` (UTF-8, `errors='replace'`).
+///
+/// `+` becomes a space **first**, on the whole string, so `%2B` arrives as a
+/// literal `+` while a written `+` is a space — the two are not the same
+/// character by the time anything reads them. Percent escapes are then decoded
+/// **at byte level**: the input is encoded UTF-8, split on `b'%'`, and an item
+/// contributes a byte only when its first two *bytes* are hex digits, so `%zz`
+/// and a trailing `%` stay literal and the remainder after a decoded byte is
+/// never re-scanned (the split already removed every `%`). A non-ASCII
+/// character therefore passes through untouched **and** joins a decoded byte in
+/// one buffer: `é%E7` is `é` followed by a lone `0xE7`, which is not valid
+/// UTF-8, so the final `from_utf8_lossy` — Python's `decode('utf-8',
+/// 'replace')` — hands back one replacement character.
+///
+/// Two deliberate deviations from the shipped receiver, both about what happens
+/// when a percent-decoded run is **not** valid UTF-8. cherrypy decodes query
+/// names with `errors='strict'` (`lib/httputil.py:321-364`) and lets a
+/// `UnicodeDecodeError` escape `process_query_string`, which answers **404** for
+/// the whole request; `process_urlencoded`
+/// (`_cpreqbody.py:143-166`) instead retries the body's declared charset before
+/// giving up. This port decodes lossily and keeps routing, so `?url=%FF` reads
+/// one replacement character and falls through to the ordinary
+/// "unrecognised fields" answer. No sender in this project's reach produces
+/// such a pair, and the alternative — a 404 with no body and no explanation —
+/// is a worse answer to hand a device that mistyped one byte.
+pub fn unquote_plus(text: &str) -> String {
+    if !text.contains('%') {
+        return text.replace('+', " ");
+    }
+    let mut bytes: Vec<u8> = Vec::with_capacity(text.len());
+    let plus = text.replace('+', " ");
+    let mut parts = plus.as_bytes().split(|byte| *byte == b'%');
+    bytes.extend_from_slice(parts.next().unwrap_or(b""));
+    for item in parts {
+        let decoded = if item.len() >= 2 {
+            match (hex_value(item[0]), hex_value(item[1])) {
+                (Some(hi), Some(lo)) => Some(((hi << 4) | lo) as u8),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        match decoded {
+            Some(byte) => {
+                bytes.push(byte);
+                bytes.extend_from_slice(&item[2..]);
+            }
+            None => {
+                bytes.push(b'%');
+                bytes.extend_from_slice(item);
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// `a=1&b&c=` → `[("a","1"), ("b",""), ("c","")]`, both halves percent-decoded.
+///
+/// A pair with no `=` keeps its name and an empty value; an **empty** pair
+/// (from `&&`, or a trailing `&`) is skipped.
+///
+/// The decoding is what makes a **browser** reach the routes at all: a
+/// `FormData` / `URLSearchParams` POST — and `curl --data-urlencode` — writes
+/// every `:` and `/` as `%3A` and `%2F`, so `url=https%3A%2F%2Fhost%2Fa.mp4`
+/// **is** an absolute address and must route as one. `query=cast` from an iOS
+/// Shortcut encodes the same way. cherrypy decodes on both paths
+/// (`lib/httputil.py:321-364` for the query string, `_cpreqbody.py:143-166` for
+/// the form body), so this is not a widening of what the shipped receiver
+/// accepts.
+///
+/// The path is a different story and stays undecoded — see `Request::segments`
+/// in `macast-upnp/src/http.rs` for why `%2E` must not become `.` there.
+///
+/// Order is preserved and duplicates are kept, because both callers read it
+/// positionally: the DLNA face asks "which field appeared", and
+/// `crate::setup`'s `params=` filter takes the **first** `params` item the way
+/// `parse_qs` yields a list per name and Python then reads `[0]`.
+pub fn parse_query(query_string: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for piece in query_string.split('&') {
+        if piece.is_empty() {
+            continue;
+        }
+        let (name, value) = split_once_ascii(piece, '=');
+        pairs.push((unquote_plus(name), unquote_plus(value)));
+    }
+    pairs
+}
+
+/// `parse_qs(query)[name]` read the way `_eureka_info` reads it: **the first
+/// non-blank value of a name**, `None` meaning "that name is not in this query".
+///
+/// This is deliberately *not* [`parse_query`] with a `.first()`, and the reason
+/// is that the reference itself has two readers which disagree about blanks —
+/// both asked on this machine, 2026-10-18:
+///
+/// | query | `urllib.parse.parse_qs` (setup face) | `cherrypy…parse_query_string` (DLNA face) |
+/// |---|---|---|
+/// | `params=&params=name` | `{'params': ['name']}` | `{'params': ['', 'name']}` |
+/// | `params` (no `=`) | `{}` — absent | `{'params': ''}` — present |
+/// | `params=0` | `{'params': ['0']}` | `{'params': '0'}` |
+/// | `params=+` | `{'params': [' ']}` | `{'params': ' '}` |
+///
+/// cherrypy's public entry passes `keep_blank_values=True`
+/// (`lib/httputil.py:369`), while `parse_qs` defaults that flag to `False` and
+/// drops both an empty value and a bare name (its `_parse_qs` guards on
+/// `if len(nv[1]) or keep_blank_values`). `_eureka_info` uses the second one
+/// (`protocol_cast.py:1264`), so for the setup face `?params=` is **not** a
+/// request for nothing — it is no filter at all, and the whole document comes
+/// back. `params=+` shows the other half of the line: a space is *not* blank to
+/// `parse_qs`, so it survives the grouping and is only emptied later by the
+/// caller's own `if p.strip()` — which is `setup.rs`'s business, not this
+/// reader's.
+///
+/// A literal `0` is therefore kept, and the first occurrence that has content
+/// wins: `?params=&params=name` asks for `name`, not for nothing.
+pub fn parse_qs_first<'a>(pairs: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    pairs
+        .iter()
+        .find(|(key, value)| key == name && !value.is_empty())
+        .map(|(_, value)| value.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1374,5 +1532,113 @@ mod tests {
         // different word, it keeps a host `parse_description` must replace.
         assert_eq!(Some(true), host_is_loopback("::ffff:127.0.0.1"));
         assert_eq!(Some(true), host_is_loopback("::1%lo"));
+    }
+
+    // -----------------------------------------------------------------
+    // The query reader, first-party tests (they lived in `macast-upnp`
+    // until this module became the owner of the rule)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn split_once_ascii_on_the_first_only() {
+        assert_eq!(split_once_ascii("a=b=c", '='), ("a", "b=c"));
+        assert_eq!(split_once_ascii("plain", '='), ("plain", ""));
+        // The shape a `?params=device_info,name` value relies on: the comma is
+        // not a boundary here, and no `=` means "a flag", not "no pair".
+        assert_eq!(
+            split_once_ascii("params=device_info,name", '='),
+            ("params", "device_info,name")
+        );
+    }
+
+    #[test]
+    fn unquote_plus_answers_the_three_shapes_that_look_simplifiable() {
+        // Measured against the oracle this module is built on (`.venv`,
+        // CPython 3.12.15, `urllib.parse.unquote_plus`) — these three are the
+        // cells whose "obvious" rewrite is wrong, so they are asked one more
+        // time here, at the owner, and not only through a `Request`.
+        assert_eq!(unquote_plus("a%2Bb+c"), "a+b c", "+ and %2B are two answers");
+        assert_eq!(unquote_plus("%zz"), "%zz", "a bad pair stays and is not re-scanned");
+        assert_eq!(
+            unquote_plus("%C3%A9x%E7"),
+            "éx\u{FFFD}",
+            "the decode is byte-level: one replacement for the whole run"
+        );
+        assert_eq!(unquote_plus("trailing%"), "trailing%");
+        assert_eq!(unquote_plus("plain"), "plain", "no percent, no buffer");
+    }
+
+    #[test]
+    fn parse_query_keeps_order_keeps_duplicates_and_skips_empty_pairs() {
+        assert_eq!(
+            parse_query("a=1&b&c=&"),
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), String::new()),
+                ("c".to_string(), String::new()),
+            ],
+            "the trailing & is an empty pair, not a third answer"
+        );
+        assert_eq!(parse_query("&&x=1"), vec![("x".to_string(), "1".to_string())]);
+        // Names decode too: `%70arams` **is** `params` as far as `parse_qs` cares.
+        assert_eq!(
+            parse_query("%70arams=1"),
+            vec![("params".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_qs_first_answers_like_the_setup_face_s_reader_does() {
+        // Every expectation below is the oracle's own answer for that query
+        // (`.venv`, CPython 3.12.15, `urllib.parse.parse_qs`), read the way
+        // `_eureka_info` reads it: `.get("params")` then `[0]`. The three rows
+        // that look like they could be collapsed are the ones that cannot:
+        // a blank is **not** a value, a bare name is **not** a key, and a
+        // decoded space **is** a value — the last one only stops being an
+        // answer after `setup.rs` strips it, which is not this reader's job.
+        // Read through a local that **owns** the pairs: `parse_qs_first` borrows
+        // from the vector the reader returns, so a closure answering `Option<&str>`
+        // here would be a borrow-check error — and the temptation to "fix" that by
+        // returning the reference is the same trap that makes a caller hold a
+        // decoded value past the buffer it was decoded into.
+        fn asked(q: &str) -> Option<String> {
+            let pairs = parse_query(q);
+            parse_qs_first(&pairs, "params").map(str::to_string)
+        }
+        assert_eq!(asked("params=name,version"), Some("name,version".to_string()));
+        assert_eq!(asked("params="), None, "parse_qs drops a blank: no filter at all");
+        assert_eq!(asked("params"), None, "a name with no `=` is not in the dict");
+        assert_eq!(
+            asked("params=&params=name"),
+            Some("name".to_string()),
+            "the blank is dropped, so the *second* occurrence becomes the first"
+        );
+        assert_eq!(
+            asked("params=name&params=version"),
+            Some("name".to_string()),
+            "two occurrences are one filter, and it is the first"
+        );
+        assert_eq!(asked("params=0"), Some("0".to_string()), "a literal zero is not blank");
+        assert_eq!(asked("params=+"), Some(" ".to_string()), "a space survives the grouping");
+        assert_eq!(
+            asked("x=1&params=%6eame"),
+            Some("name".to_string()),
+            "the value decodes before it is split on commas"
+        );
+        assert_eq!(asked("name=x"), None);
+        // And the DLNA face's reader keeps the rows this one drops, which is why
+        // there are two functions and not one with a flag: `parse_query` is
+        // cherrypy-shaped, and its output for the same queries differs.
+        assert_eq!(
+            parse_query("params=&params=name"),
+            vec![
+                ("params".to_string(), String::new()),
+                ("params".to_string(), "name".to_string()),
+            ]
+        );
+        assert_eq!(
+            parse_query("params"),
+            vec![("params".to_string(), String::new())]
+        );
     }
 }

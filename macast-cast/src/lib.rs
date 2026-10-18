@@ -54,8 +54,10 @@
 //!   *senders'* receivers on 5353 so the settings page has devices to name.
 //!   Reading a reply is not the same job as broadcasting our own receiver, and
 //!   the broadcast side is still ahead of this module.
-//! * *(next)* `setup` — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a
-//!   **bare** UUID in `ssdp_udn`, `params=` filtering, `/setup/icon.png`.
+//! * [`setup`] — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a **bare**
+//!   UUID in `ssdp_udn`, `params=` filtering that keeps the document's key order,
+//!   `/setup/icon.png`, and the two listeners whose ports a sender hardcodes.
+//!   The face is ungated by design, and the module header says what that means.
 //! * *(next)* the `_googlecast._tcp` **announcement** — our own receiver's PTR,
 //!   SRV and TXT records, broadcast unsolicited so senders can find it.
 //!
@@ -83,6 +85,7 @@ pub mod proto;
 pub mod push;
 pub mod resolve;
 pub mod relay;
+pub mod setup;
 pub mod targets;
 
 pub use cert::{
@@ -115,6 +118,11 @@ pub use targets::{
     AVTRANSPORT_SUFFIX, CAST_SEARCH_THREAD, DESCRIPTION_MAX_BYTES, DLNA_SEARCH_TARGETS,
     DLNA_SEARCH_THREAD, DLNA_SERVICE, LOGGER_NAME, SEARCH_TIMEOUT, SSDP_ADDR, SSDP_PORT,
     SSDP_READ_MAX, SSDP_RECV_TIMEOUT,
+};
+
+pub use setup::{
+    answer, eureka_info, Response, SetupServer, EUREKA_PATH, HTTPS_SETUP_PORT, ICON_PATH,
+    SETUP_CONN_THREAD, SETUP_PORT, SETUP_THREAD, SETUP_TLS_THREAD,
 };
 
 /// The config directory **this crate's tests** log into, pinned per process.

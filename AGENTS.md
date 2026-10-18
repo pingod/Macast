@@ -1778,6 +1778,65 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   数字侧：`src-tauri` 2,841 行 → **2,975 行**（host.rs 1,899 + main.rs 1,076）。
   **以及本分支从未推送 ⇒ 本轮这 603 条与那 4 趟真机读数没有任何 CI 见证过。**
 
+**Rust 侧把 setup 面接进壳时量到的事**（2026-10-18，`macast-cast/src/setup.rs`（655 行）
++ `setup_tests.rs`（755 行 / **30** 条）+ `src-tauri/src/main.rs` 起它 + `macast-core/src/url.rs`
+多了一个主人 + `scripts/verify_rust_receiver.sh` §20（**26 条**），整跑 **169 条 / EXIT=0**）：
+
+* **这张脸是发送端在投之前读的那份文档**：`GET /setup/eureka_info`（8008 与 TLS 的 8443 同一份
+  字节）与 `GET /setup/icon.png`。三条"只有读客户端才读得出来"的事实全部对着
+  `.venv` 里的 **pychromecast** 现场问过，不是引规格：`dial.py:25-26` 把 **8008 / 8443 两个数钉死**
+  （mDNS TXT 里只有 socket 口，所以绑到 8010 等于不存在）；`dial.py:133-134` 是
+  `check_hostname=False` + `verify_mode=CERT_NONE`（这就是自签证书能用 8443 的原因，
+  也是"我们不必假装证书可信"的依据）；`dial.py:157` 发的字面是
+  **`?params=device_info,name`** —— 而参考实现的过滤是 `{k: v for k, v in full.items() if k in wanted}`，
+  所以交回的是 `name` 在前，**文档的次序而不是调用方的次序**。这条判据在单元层与真机层各问一遍，
+  因为"按请求者给的顺序重建答案"照样能解析、照样是错的。
+* **`capabilities.multizone_supported` 必须是显式的 `false`**：pychromecast 在有 `device_info` 时读
+  `capabilities.get("multizone_supported", True)` ⇒ **漏写这一格等于宣称支持多房间**，于是每次发现都多一发
+  `?params=multizone`。而那一发的正确答复是一个 **200 的空对象**（`dial.py:317` 读 `"multizone" in status`），
+  不是 404 —— 404 会说"没有这台设备"，空对象说"没有这个字段"。
+* **8008 不回落，这是决定不是偷懒**（两条理由合成一条）：发送端钉死 8008，所以走
+  `PORT_FALLBACK_RANGE` 那 20 个口只买到一个没人敲的口；而回落的**第一步就是 8009**，那是 Cast
+  socket 的口 —— 参考实现能承受这个重叠是因为它 `start()` 里**先**绑 Cast（`protocol_cast.py:411-413`），
+  一个还没接上 Cast 通道的壳只会把它抢走。夹具在这里骗了我一次：第一版用 `127.0.0.1:P` 去占口，
+  而产品绑的是 `0.0.0.0:P`，**绑定照样成功**，于是那条"拒绝"从未发生 —— 判据改成用同样的
+  wildcard 去占，才真的问到那一格（§4.2「假命令行工具的输出必须是真工具在这台机器上的逐字输出」
+  的同一族：**夹具必须长成生产会遇到的形状**）。
+* **`serve_tls` 少发 `close_notify` 是一次真握手抓出来的产品 bug**：写完响应就 drop 流 ⇒
+  rustls 客户端在 `read_to_end` 上报 `UnexpectedEof`（"peer closed connection without sending
+  TLS close_notify"），**字节全都到了也算错**。参考实现不显式关闭也无所谓，因为
+  `socketserver.shutdown_request` 对包好的 TLS socket 调 `shutdown(SHUT_WR)` 天然发了
+  close_notify —— 所以这不是"客户端太严格"，是我们交出去的协议少了一半。打桩测与明文 socket 测
+  都看不见这一格，只有 TLS 客户端能看见。
+* **查询串读取器搬了家，因为出现了第二个读者，而参考实现自己就有两个读者**：
+  `parse_query` / `unquote_plus` / `split_once_ascii` 从 `macast-upnp/src/http.rs` 搬进
+  `macast-core/src/url.rs`（`macast-cast` 依赖 `macast-upnp`、从不反向 ⇒ 一张两个面都要读的
+  规则不能是哪个面的私有物）。搬的时候在本机把两边的答案各问一遍，因为**它们对空值相反**：
+  cherrypy 的 `parse_query_string` 默认 `keep_blank_values=True`（`lib/httputil.py:369`），
+  `urllib.parse.parse_qs` 默认 `False` —— 于是 `?params=` 在管理面是**一个空串参数**，
+  在 setup 面是**整份文档**。处理方式是交回**两个函数**（`parse_query` 与 `parse_qs_first`），
+  不是"一个带 flag 的函数"：合成一个就把"哪一个读者"这个决定推给调用点去记。
+* **沉默这一族的第四例，这次方向是"该有却没有"**：那条 8008 被占的断言要求日志里出现每个候选口的
+  DEBUG 行，而它永远不在 —— 默认阈值 INFO 把它滤掉了。修法是**把窗口打开再问**
+  （`crate::DebugWindow::armed()` 包住那一次调用），不是放宽断言。上一轮收的是"读 DEBUG 的用例互相撞"，
+  这一轮收的是"某一行 DEBUG 本该在场"：**两边都不能让别人的调度决定这一格有没有被问过**。
+* **一处本轮发现的既有缺口，setup 继承了它并写在代码注释里**：这个壳**不看 `Macast_Protocols`** ——
+  那份协议启用表今天只用来生成 `query=status` 的 `protocol` 字段，DLNA 的 HTTP/SSDP 与这张脸都无条件起。
+  所以"在页面里关掉 Chromecast"的用户仍然会在 8008 上被问到设备身份。缓解只有一条事实那么宽，
+  而且是用**局域网地址**（不是回环）问过的：这张脸不吐令牌、不吐路径、不吐控制动词
+  （`$SDIR` 与 `Api_Token` 都不在正文里，非 `GET` 一律 501）。等启用表变成门的时候，
+  `main.rs` 里那两处 "Started unconditionally" 注释就是同一批要改的地方。
+* **诚实边界（这条比读数重要）**：`grep -rn "CastChannel" src-tauri/src/` 回 **0 行** —— Cast 的
+  8009 通道还没接进壳，`_googlecast._tcp` 的广播也还是 `*(next)*`，所以**今天没有任何发送端会走到这张脸**。
+  §20 那 26 条证明的是线与文档的形状（含一次真 TLS 握手 + "8008/8443 交回同一串字节"），
+  不证明"手机找得到这台 Mac"。登记在 `docs/Rust-Port-Design.md` §15（新增一行）与 §16 第 10 条。
+* **计数与一次自我更正**：`macast-cast` 现在 **633** 条，两台仪器都说这个数
+  （`--list` 与逐文件字面扫描；`setup_tests` 30）；`macast-core` 86、`macast-upnp` 316；
+  `src-tauri` 2,975 → **3,077 行**。本轮把 `TESTS_IN_THIS_CRATE` 的**散文**先改成了 633、
+  常量还留在 632 —— 是附录 B 那条按名字的引用体检抓回来的（下限是 `>=`，低 1 不会红 ⇒
+  **没有任何用例会替你发现它**，这正是 §4.13 那句"一个没被机器问过的数字"的形状）。
+  **以及本分支从未推送 ⇒ 上面这些用例与那 169 条真机读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

@@ -316,7 +316,11 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `mdns.rs`（TXT） | 不强制 RFC 6763 §6 的完整性 | 参考实现（zeroconf）也不强制；强制会让真设备解不出 |
 | `mdns.rs`（地址族） | 只走 IPv4，`IPVersion.All` 不做 | 与 Python 侧当前行为对齐 |
 | `mdns.rs`（`drop_ours`） | `ours` 为空集时**不过滤** | 退化方向选"什么都看得见"而不是"什么都看不见"；`IP_MULTICAST_LOOP` 故意不设，所以自我回环是后果不是 bug（§9.3 那条）|
-| `http`（`unquote_plus`） | cherrypy 对 query 用 `errors='strict'`，一个 `?url=%FF` 在它那里是 **404**；本端口**有损解码并继续路由** | 这一格不是"发送端打错了"的判决点，而 404 不带正文、不带解释；用户读到的是"不认识的字段"那句可行动的话 |
+| `macast_core::url`（`unquote_plus`） | cherrypy 对 query 用 `errors='strict'`，一个 `?url=%FF` 在它那里是 **404**；本端口**有损解码并继续路由** | 这一格不是"发送端打错了"的判决点，而 404 不带正文、不带解释；用户读到的是"不认识的字段"那句可行动的话。**主人 2026-10-18 搬过一次**：`parse_query` / `split_once_ascii` / `unquote_plus` 从 `macast-upnp/src/http.rs` 搬进 `macast-core/src/url.rs`，因为 setup 面的 `?params=a,b` 是第二个读者（`macast-cast` 依赖 `macast-upnp`、从不反向），"%2B 是加号还是空格"这一条规则在一个进程里不能有两位答案 |
+| `macast_core::url`（`parse_qs_first`） | 参考实现**自己**就有两个读者，而它们对空值的答案相反 —— cherrypy 的 `parse_query_string` 默认 `keep_blank_values=True`（`lib/httputil.py:369`），`urllib.parse.parse_qs` 默认 `False`；本移植交回**两个函数**，不交回"一个带 flag 的函数" | 两边都在本机问过（`?params=` / `?params=&params=name` / `?params` 三行各自的答案，记在 `url.rs` 的 `parse_qs_first` doc 表里）。合成一个带布尔的函数等于把"哪一个读者"这个决定推迟到调用点，而 `?params=` 在 setup 面是**整份文档**、在管理面是**一个空串参数** —— 两种命运都不该由一个 flag 的默认值决定 |
+| `setup`（`Server:` 头） | 交回 `Macast/<版本>`，不抄 `BaseHTTP/0.6 Python/3.12.15` | 参考实现那个值是"它恰好继承了哪个类"的产物；把 CPython 的名字写到线上是关于"谁在答"的一句谎。`dial.py` 不读这个头，所以这不是兼容性代价，只是诚实 |
+| `setup`（非 `GET`） | `501` + **无正文**；Python 也回 501，但带 `BaseHTTPRequestHandler` 生成的 `text/html` 错误页 | 抄那页 HTML 就是把 CPython 的模板串放进我们的字节里，而唯一的读者（`dial.py:173-184`）把 `HTTPError` 折成一句 warning，从不渲染正文 |
+| `setup`（8008 的端口回落） | **不回落**：绑不上 8008 就交回 `Err`，而不是参考实现那样沿 `PORT_FALLBACK_RANGE` 走 20 个口 | 两条理由合成一条：`dial.py:25` 把 8008 钉死，所以 8010 上的这张脸是"绑上了但没人敲"；而回落的第一步就是 **8009**，那是 Cast socket 的口。参考实现能承受这个重叠，是因为它 `start()` 里**先**绑 Cast 再绑 setup（`protocol_cast.py:411-413`），8009 已在自己手里；一个还没接上 Cast 通道的壳只会把它抢走。判据：`setup_tests` 的 `d_a_taken_port_…` 用一份**同样绑在 0.0.0.0** 的夹具占住口（第一版用 `127.0.0.1` 占，结果 wildcard 绑定照样成功，那条"拒绝"从未发生 —— 夹具没生产会遇到的形状，用例就是在测夹具） |
 | `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
 
 **读代码时要找的下一类偏离**：任何一处"Rust 里做不到 / 做起来别扭"的 Python 行为，
@@ -702,8 +706,9 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 
 | 事项 | 状态 | 出处 |
 |---|---|---|
-| setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **尚未** | `macast-cast/src/lib.rs:57`（`*(next)*`） |
-| `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT，unsolicited） | **尚未** | `lib.rs:59`；`mdns.rs` 只做了**浏览器**那半 |
+| setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
+| Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、播放看门狗） | **尚未** —— 本轮才发现并登记 | 判据：`grep -rn "CastChannel" src-tauri/src/` 在这台机器上回 **0 行**。也就是说今天这个壳对外只有 DLNA + 这张 setup 脸；setup 面答得再对，也没有发送端会走到它 —— 下一行那条广播是同一件事的另一半 |
+| `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT，unsolicited） | **尚未** | `lib.rs` 的 `*(next)*`；`mdns.rs` 只做了**浏览器**那半 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
@@ -787,11 +792,30 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
    决定生死（`macast_core::logging::THRESHOLD` 是一个 `static AtomicU8`，
    `lib.rs` 的 `DebugWindow` 故意一次只让一个用例抬高它）。改成按**级别**断言（`loud()`：
    只看 INFO 及以上）之前的读数是 **`--lib targets` 14 跑红 12**，而**整 crate 6 跑红 0**；
-   之后是模块级 4 跑 0 红、整 crate 3 跑 0 红（603 passed 每次，约 7 秒）。
+   之后是模块级 4 跑 0 红、整 crate 3 跑 0 红（603 passed 每次，约 7 秒 —— 那两个读数都是
+   **setup 落进之前**的 603；本轮结束时同两台仪器都说 **633**）。
    上一轮那次"并发整 crate 5 红 / 24 次、串行 12 次 0 红"的读数让人以为
    `DebugWindow` 已经收干了这一族 —— **它只收了读 DEBUG 的那一半，没收断言沉默的那一半**，
    而后者只在模块级过滤器下才现形。所以 §13 那三层里第一层的正确做法是
    **两个粒度都要跑**，且一句"整 crate 绿"不许被复述成"这一族没问题"。
+   **同一族的第四例在本轮又出现一次，方向是"该有却没有"**：`setup_tests` 里那条"8008 被占时
+   什么都不绑"的断言，先要求日志里出现那行 **DEBUG**（每个候选口的失败），而它永远不在 ——
+   默认阈值 INFO 把它滤掉了。修法不是放宽断言，是**把窗口打开再问**（`crate::DebugWindow::armed()`
+   包住那一次 `start_on`，断言之后再放手）：**沉默的证据要按级别问，响亮的证据也一样**，
+   两边都不能让别人的调度决定这一格有没有被问过。
+10. **setup 面今天没有任何发送端会走到**（本轮登记的新边界）：这张脸答得再对，
+    发现它的那两条路都还没接进壳 —— `_googlecast._tcp` 的广播仍是 `*(next)*`（§15），
+    而 Cast 的 8009 通道 `grep -rn "CastChannel" src-tauri/src/` 回 **0 行**。
+    所以 §20 那 26 条证明的是**线与文档的形状**（含一次真 TLS 握手），
+    不证明"手机找得到这台 Mac"。把这两格里任何一格接上之前，
+    谁把 setup 面交付读成"Chromecast 接收端可用"都是读错了。
+11. **壳对所有脸都不看 `Macast_Protocols`**（本轮发现的一处既有缺口，setup 也继承它）：
+    那份协议启用表今天只用来生成 `query=status` 的 `protocol` 字段，DLNA 的 HTTP/SSDP
+    与本节的 8008/8443 都无条件起。后果是可行动的：一个在页面里"关掉 Chromecast"的用户
+    仍会在 8008 上被问到设备身份。这一格**记在代码注释里**（`main.rs` 的那段
+    "Started unconditionally"）并在这里登记；等启用表变成门的时候，那两处是同一批要改的地方。
+    缓解只有一条事实那么宽：这张脸不吐令牌、不吐路径、不吐任何控制动词 ——
+    §20 拿**局域网地址**（不是回环）问过一遍，正文里既没有 `Api_Token` 也没有 `$SDIR`。
 
 ---
 
@@ -835,11 +859,16 @@ cd /Users/pavia/githome/Macast
 # 本文提到的文件确实存在
 grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md \
   | sort -u | while read f; do [ -f "$f" ] || echo "MISSING $f"; done
-# 本文引用的**语句**仍在（每条都有唯一的字串可搜）
-grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs
-grep -n "impl Host for TauriHost" src-tauri/src/host.rs
-grep -n "has not been written yet" macast-mpv/src/lib.rs   # 期望：**0 行**（本轮已改）
-grep -rn "targets::" src-tauri/src/                        # 期望：≥2 行（§15 那一行）
+# 本文引用的**语句**仍在（每条都有唯一的字串可搜；右边的期望值是 2026-10-18 量出来的，
+# 不是"看起来应该"）
+grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs          # 期望 **633**
+grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
+grep -c "has not been written yet" macast-mpv/src/lib.rs        # 期望 **0**（本轮改的注释）
+grep -rn "targets::" src-tauri/src/                             # 期望 ≥2 行（§15）
+grep -rn "CastChannel" src-tauri/src/                           # 期望 **0**（§16 第 10 条）
+grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
+grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **23**（§20 是最后一节）
 grep -n "DEVICE_PUSH_UNAVAILABLE\|这台设备还投不了" src-tauri/src/host.rs \
      scripts/verify_rust_receiver.sh
 #   期望恰好两处，而且**都不是产品代码**：host.rs 里那句"这替换了什么"的历史说明，
