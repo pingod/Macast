@@ -406,28 +406,40 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 686 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 686, and the scanner below counts 671 `#[test]`
-    /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
-    /// **replica of the scanner**, not a `grep -c '#\[test\]'`, which on this
-    /// crate reads **678**: seven of those hits are the word inside doc prose and
-    /// needles (this doc comment among them). Same lesson as `push_tests` carrying
-    /// 610 against 603 — an instrument that counts strings is not a census.
-    /// check that neither is reading a stale file (it is deliberately
-    /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
-    /// the scan because they sit in `src/` itself). The largest contributors are
-    /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
+    /// 688 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 688, and the scanner below counts **the same
+    /// 688** `#[test]` attributes over `src/*.rs`. The per-file rows are the
+    /// **scanner's own line counts**, and they sum to that number: `job_tests`
+    /// 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
     /// `airplay_tests` 60, `push_tests` 46, `channel_tests` 40, `resolve` 39,
-    /// `setup_tests` 30, this file 19, `announce_tests` 19, `engine_tests` 17,
-    /// `respond_tests` 22 and `cert` 12. The previous values, 603, 633, 637, 655
-    /// and 656, were carried by the
+    /// `setup_tests` 30, `announce_tests` 29, `respond_tests` 22, this file 19,
+    /// `engine_tests` 17, `cert` 12, `scrape_tests` 6, `charmap_tests` 2.
+    ///
+    /// Neither instrument is `grep -c '#\[test\]'`, which on this crate reads
+    /// **695**: seven of those lines *mention* the attribute — the scanner's own
+    /// needle and this doc comment among them — instead of carrying one. Same
+    /// lesson as `push_tests` carrying 610 against 603: an instrument that counts
+    /// strings is not a census. The sentence this one replaces was itself the
+    /// stale half of that lesson (it claimed the scanner said 671 while `--list`
+    /// said 686 and called the two "in agreement"), which is why the per-file
+    /// rows are re-measured rather than remembered.
+    ///
+    /// The scan is deliberately non-recursive, so the `#[path]`-included
+    /// `*_tests.rs` files still land in it because they sit in `src/` itself.
+    /// The previous floors, 603, 633, 637, 655, 656, 671, 672, 677, 678, 686 and
+    /// 687, were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
     /// `channel_tests`: the starvation witness plus the frame cap, the split
     /// frame and the peer that closes), then until `announce.rs` landed with the
-    /// two frozen corpora, and then until §22 of the acceptance script caught that
-    /// module reading the wrong interface list (+1: the owner audit);
+    /// two frozen corpora, then until §22 of the acceptance script caught that
+    /// module reading the wrong interface list (+1: the owner audit), and then
+    /// until the responder was wired to a socket that both joins and reads
+    /// (+10 in `announce_tests`: the eight `e1`-`e8` answer-shape witnesses,
+    /// `e9` — the one that asks whether anything ever *arrived* — and `e10`,
+    /// which feeds in the 40-byte query a foreign python stack sent across the
+    /// LAN and asserts our own writer produces the same 40 bytes);
     /// `601 passed; 1 failed` in an older run is a *602-test* run with one
     /// failure, not a third floor — the sum of passed and failed is what has to
     /// reach this number.
@@ -446,7 +458,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 686;
+    const TESTS_IN_THIS_CRATE: usize = 688;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

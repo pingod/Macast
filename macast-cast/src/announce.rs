@@ -861,7 +861,7 @@ impl Announcer {
             );
             return Err("no advertisable address to publish".to_string());
         }
-        let sock = match bind_engine(&self.service.addresses, &self.log) {
+        let engine = match bind_engine(&self.service.addresses, &self.log) {
             Ok(sock) => sock,
             Err(e) => {
                 self.log.error(&format!(
@@ -878,6 +878,7 @@ impl Announcer {
         let started = thread::Builder::new()
             .name("MDNS_KEEPALIVE".to_string())
             .spawn(move || {
+                let sock = engine.sock;
                 let group = SocketAddr::from((MDNS_GROUP, MDNS_PORT));
                 let mut send = |bytes: &[u8]| sock.send_to(bytes, group).map(|_| ());
                 let mut unicast =
@@ -965,7 +966,7 @@ impl Announcer {
 /// is allowed to name (`advertised_addresses`, not the browser's superset, which is
 /// §22's product bug). A querier that can reach us is on one of these; joining
 /// elsewhere would only hear traffic we cannot answer on.
-fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<UdpSocket> {
+fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     crate::mdns::set_reuse_for_mdns(&sock, log);
     sock.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).into())?;
@@ -973,9 +974,13 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<UdpSocket> {
     sock.set_multicast_ttl_v4(MULTICAST_TTL as u32)?;
     sock.set_multicast_loop_v4(true)?;
     let mut joined = 0usize;
+    let mut took: Vec<String> = Vec::new();
     for address in interfaces {
         match sock.join_multicast_v4(&MDNS_GROUP, address) {
-            Ok(()) => joined += 1,
+            Ok(()) => {
+                joined += 1;
+                took.push(address.to_string());
+            }
             Err(e) => log.warning(&format!(
                 "mDNS cannot join {} on {}: {}",
                 MDNS_GROUP, address, e
@@ -998,7 +1003,43 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<UdpSocket> {
     let sock: UdpSocket = sock.into();
     // The poll, not an infinite block: see [`run`]'s `recv`.
     sock.set_read_timeout(Some(READ_POLL))?;
-    Ok(sock)
+    // And say out loud what this socket can now do, with the join count in the
+    // sentence. Before this line existed, "the receiver never answered a query" had
+    // three indistinguishable readings in the log — nothing bound, bound but not
+    // joined, joined but deaf — and telling them apart took two machines and an hour
+    // of probes. §4.2's 「别把端口在听当证据」 cuts both ways: the answer is the
+    // membership, not the bind, so the membership is what gets reported.
+    log.info(&format!(
+        "mDNS engine on {} joined {} of {} interface(s) [{}]; it will answer queries if \
+         that number is not zero",
+        MDNS_PORT,
+        joined,
+        interfaces.len(),
+        took.join(", ")
+    ));
+    Ok(Engine {
+        sock,
+        joined,
+        offered: interfaces.len(),
+    })
+}
+
+/// The socket plus what it managed to join.
+///
+/// `joined == 0` is the state where announcements still leave and queries never
+/// arrive — the shape a user reads as "搜到但投不上" and a log without this number
+/// cannot name.
+pub(crate) struct Engine {
+    sock: UdpSocket,
+    /// Read only by `announce_tests::e8`, which asserts the join count on the
+    /// struct instead of parsing the log sentence that prints it — so the dead-code
+    /// warning here is the product build, not a field nobody asked for. Deleting
+    /// these two would move the witness onto wording, which is the coupling the
+    /// module's other log-name assertions exist to avoid.
+    #[allow(dead_code)]
+    pub joined: usize,
+    #[allow(dead_code)]
+    pub offered: usize,
 }
 
 /// How long a read may hold the announcer's thread before it is asked again.
@@ -1007,6 +1048,16 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<UdpSocket> {
 /// polling is not a busy loop, short enough that neither the [`REANNOUNCE`]
 /// schedule nor [`Announcer::stop`] can sit behind it.
 const READ_POLL: Duration = Duration::from_millis(200);
+
+/// How many received queries this process names out loud, then goes quiet.
+///
+/// Three: one sentence is not enough to tell a reader that is alive from one that
+/// died after its first packet, and an unbounded sentence is §4.10's measured
+/// 49%-of-one-file shape — a scanner walking the group would write a line per
+/// probe. The cap is a fact about diagnosis rather than about traffic, because
+/// `verify_rust_receiver.sh` §25 reads this pair to separate "nothing arrived"
+/// from "it arrived and we declined".
+const HEARD_SENTENCES: usize = 3;
 
 /// What one received datagram turned into.
 ///
@@ -1170,6 +1221,7 @@ fn run(
     );
     let mut next = Instant::now() + REANNOUNCE;
     let mut served = Served::default();
+    let mut heard = 0usize;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -1177,6 +1229,43 @@ fn run(
         match recv() {
             Ok(Some((data, peer))) => {
                 let one = serve(&data, peer, service, send, unicast, log);
+                if one.queries > 0 && heard < HEARD_SENTENCES {
+                    // The **receiving** question, asked separately from the answering
+                    // one. "It never answered" has two causes and only this process can
+                    // tell them apart: nothing was ever handed to this socket, or it was
+                    // handed over and we declined. Both are live on this Mac — measured
+                    // 2026-10-18, a python socket bound and joined to the same group on
+                    // the same port received a remote host's `PTR _googlecast._tcp`
+                    // (40 bytes, source port 5353) while `macast-tauri`'s engine answered
+                    // none of them, and the same product functions in another process
+                    // received that query and answered it across the wire.
+                    //
+                    // Fire on a **query**, never on the first datagram: the announcer's
+                    // own bursts loop back into this very socket (multicast loop is at
+                    // the kernel default, which is why `drop_ours` exists), so "first
+                    // datagram" would be true one poll after start on a machine that
+                    // hears nobody. Cap at [`HEARD_SENTENCES`] for the flood reason.
+                    heard += 1;
+                    log.info(&format!(
+                        "mDNS engine heard query {} of {} on {} ({} bytes, {} question(s)) from {}",
+                        heard,
+                        HEARD_SENTENCES,
+                        MDNS_PORT,
+                        data.len(),
+                        one.queries,
+                        peer
+                    ));
+                }
+                if served.group + served.direct == 0 && one.group + one.direct > 0 {
+                    // Once, at INFO: the first query this process ever answered is
+                    // the moment "listening" stops being an assumption. Its absence
+                    // next to a join count above zero is the other half of the same
+                    // sentence, and that pair is what §25 reads.
+                    log.info(&format!(
+                        "mDNS answered its first query ({} to the group, {} direct) from {}",
+                        one.group, one.direct, peer
+                    ));
+                }
                 served.queries += one.queries;
                 served.group += one.group;
                 served.direct += one.direct;

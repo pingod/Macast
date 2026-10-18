@@ -2966,8 +2966,12 @@ while time.time() - start < seconds:
         continue
     flags = struct.unpack(">H", data[2:4])[0]
     qd = struct.unpack(">H", data[4:6])[0]
-    name = data[12:].split(b"\x00googlecast")[0][-1:]
-    if "_googlecast._tcp" not in data.decode("latin-1"):
+    # The needle is a **wire label**, not a dotted string: mDNS names on the wire
+    # are length-prefixed, so `_googlecast._tcp` (with dots) never appears in any
+    # packet, and the dotted filter made this listener report `queries=0` on a
+    # group full of them — which §25 then read as "the instrument heard nothing".
+    # Same bug, found the same way (a mutant, not a reading): 2026-10-18.
+    if b"\x0b_googlecast" not in data:
         continue
     if flags & 0x8000:
         answers += 1
@@ -3039,10 +3043,23 @@ QUERYEOF
                     # listener either, so this machine told us nothing about either side.
                     skip "no mDNS query appeared on the wire this window — the instrument, not the responder ($WIRE)"
                 else
-                    # Outcome 2, named for what it is. The responder is proven on
-                    # loopback (e8) and in a standalone test binary that receives this
-                    # same traffic; this app binary is the one that hears nothing.
-                    skip "this binary received no inbound LAN multicast while $WIRE — the responder cannot be witnessed from this process (macOS local-network permission); proven instead by announce_tests e8 and by the loopback path"
+                    # Outcome 2 splits in two, and the split is read from the
+                    # engine's own sentences rather than guessed from the machine.
+                    # "mDNS engine heard query N of 3" says the kernel handed this
+                    # socket a query; "answered its first query" says we chose to
+                    # speak. Measured 2026-10-18: a python socket bound and joined
+                    # to the same group on the same port received the same 40-byte
+                    # remote `PTR _googlecast._tcp` inside this window while this
+                    # process
+                    # printed neither line — so the receiving question has to be
+                    # asked out loud, and a silent engine is a *delivery* answer,
+                    # never a pass.
+                    HEARD=$(log_grep 'mDNS engine heard query' | tail -1)
+                    if [ -n "$HEARD" ]; then
+                        fail "the engine read a query ($HEARD) and answered none while $WIRE — that is the responder's own question, not this machine's"
+                    else
+                        skip "this binary was handed nothing on 5353 while $WIRE, and a joined python socket on the same port receives the same traffic; the receiving sentence never fired — proven instead by announce_tests e8 and e9 and by the loopback path"
+                    fi
                 fi
                 ;;
             *)
@@ -3071,6 +3088,20 @@ QUERYEOF
                     *"negative=saw"*) fail "the negative control found a device, so the timing above is not our responder's doing" ;;
                     *) pass "nothing answered the type this product does not run" ;;
                 esac
+                # Both of the engine's own sentences, when the answer happened. The
+                # hearing line fires from the same datagram as the answering one, so
+                # an answer without it means the pair was broken in the product and
+                # the three-way reading above would start lying.
+                if [ -n "$(log_grep 'mDNS engine heard query')" ]; then
+                    pass "the engine named the receipt before the reply: $(log_grep 'mDNS engine heard query' | tail -1)"
+                else
+                    fail "it answered a query it never said it received: the receiving sentence is missing from the log"
+                fi
+                if [ -n "$(log_grep 'mDNS answered its first query')" ]; then
+                    pass "and it named the reply: $(log_grep 'mDNS answered its first query' | tail -1)"
+                else
+                    fail "it answered on the wire but said nothing in the log"
+                fi
                 ;;
         esac
         rm -f "$QUERY_OUT" "$SNIFF_OUT" "$QUERY_PY" "$SNIFF_PY"

@@ -1137,12 +1137,24 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
     let logger = Logger::named(LOGGER_NAME);
     let service = fixture_service();
     let engine = match bind_engine(&[V4::LOCALHOST], &logger) {
-        Ok(sock) => sock,
+        Ok(engine) => engine,
         // Not a skip. Binding 5353 with the reuse options *is* the product's path,
         // and "we could not try it" must never read as "it works" (§4.2's
         // 「不提问的检查」 with the exit code as the mask).
         Err(e) => panic!("cannot bind the engine socket the product binds: {}", e),
     };
+    // The two numbers behind the app's 「joined N of M interface(s)」 sentence, asked
+    // of the struct rather than of its own log text: §25's reading starts from that
+    // pair, and a sentence nothing reads is a decoration.
+    assert_eq!(
+        engine.joined, 1,
+        "the engine says it joined, but the kernel did not take a join on lo"
+    );
+    assert_eq!(
+        engine.offered, 1,
+        "one interface was handed in and the engine should report exactly that offer"
+    );
+    let sock = engine.sock;
     let group = SocketAddr::new(IpAddr::V4(V4::new(224, 0, 0, 251)), MDNS_PORT);
     let asker = UdpSocket::bind("127.0.0.1:0").expect("an ephemeral asker binds");
     // Pin its egress to loopback with TTL 1 so no byte of this test reaches the LAN.
@@ -1159,12 +1171,12 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
     let mut answered = 0usize;
     let mut ask_again = std::time::Instant::now();
     while std::time::Instant::now() < deadline && answered == 0 {
-        match engine.recv_from(&mut buf) {
+        match sock.recv_from(&mut buf) {
             Ok((length, from)) => {
                 let data = buf[..length].to_vec();
-                let mut send = |bytes: &[u8]| engine.send_to(bytes, group).map(|_| ());
+                let mut send = |bytes: &[u8]| sock.send_to(bytes, group).map(|_| ());
                 let mut unicast = |bytes: &[u8], peer: SocketAddr| {
-                    engine.send_to(bytes, peer).map(|_| ())
+                    sock.send_to(bytes, peer).map(|_| ())
                 };
                 let served = serve(
                     &data,
@@ -1215,4 +1227,208 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
         "an mDNS answer must come from 5353 — a querier that filters on the source \
          port would drop a reply written from an ephemeral one"
     );
+}
+
+/// Drives [`run`] over a scripted queue of received datagrams, then stops it.
+///
+/// The queue is the only clock: when it runs dry the loop's flag goes down, so a
+/// test never waits on `REANNOUNCE` to reach its assertions.
+fn drive(service: &Service, logger: &Logger, packets: Vec<(Vec<u8>, SocketAddr)>) {
+    let running = AtomicBool::new(true);
+    let mut queue: std::collections::VecDeque<(Vec<u8>, SocketAddr)> = packets.into();
+    let mut send = |_bytes: &[u8]| Ok(());
+    let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
+    let mut recv = || match queue.pop_front() {
+        Some((bytes, peer)) => Ok(Some((bytes, peer))),
+        None => {
+            running.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
+    };
+    run(
+        service,
+        &mut send,
+        &mut unicast,
+        &mut recv,
+        &running,
+        logger,
+    );
+}
+
+#[test]
+fn e9_the_receiving_sentence_fires_for_a_query_and_never_for_our_own_echo() {
+    crate::pin_test_dir();
+    // "The responder never answered" has two causes, and this process is the only
+    // one that can tell them apart: nothing was ever handed to this socket, or it
+    // was handed over and declined. `verify_rust_receiver.sh` section 25 reads that
+    // pair, so the receiving question needs its own line — and the line has to mean
+    // *network*, not *thread*. Multicast loop is left at the kernel default (the
+    // module's own first divergence, and the reason `drop_ours` exists), so our
+    // announcement comes back to us on the same socket within one poll of start:
+    // a line fired by "first datagram" would be true on a machine that hears nobody.
+    //
+    // Two logger names, not one file: `run` logs into `logs/<name>.log` and the
+    // tests in this crate run in one process, so an absence assertion that shares a
+    // file with its own positive half is a collision waiting for the scheduler.
+    let service = fixture_service();
+    let echo = Logger::named("Discovery-Echo");
+    let echo_path = echo.claim();
+    drive(
+        &service,
+        &echo,
+        vec![
+            (service.announcement(), peer(MDNS_PORT)),
+            (service.goodbye(), peer(MDNS_PORT)),
+        ],
+    );
+    assert!(
+        // The needle is the sentence as `run` writes it **today**. It was first
+        // written against the older wording, and after the wording changed this
+        // assertion kept passing while asking nothing at all — the mutant that
+        // fires on every datagram came back **0 red** until the needle was
+        // re-matched. A stale needle is not a conservative test; it is no test.
+        !loud(&echo_path).contains("mDNS engine heard query"),
+        "the engine called its own looped-back announcement a query: {}",
+        lines(&echo_path)
+    );
+
+    let heard = Logger::named("Discovery-Heard");
+    let heard_path = heard.claim();
+    let query = ptr_query(SERVICE_TYPE);
+    drive(
+        &service,
+        &heard,
+        vec![
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+        ],
+    );
+    let said = |path: &std::path::Path| {
+        lines(path)
+            .lines()
+            .filter(|record| record.contains("mDNS engine heard query"))
+            .count()
+    };
+    assert_eq!(
+        said(&heard_path),
+        2,
+        "two queries should each be named, and the loop named {}: {}",
+        said(&heard_path),
+        lines(&heard_path)
+    );
+    assert!(
+        loud(&heard_path).contains("answered its first query"),
+        "the pair is what section 25 reads; a hearing with no answering is the \
+         product half of the diagnosis: {}",
+        lines(&heard_path)
+    );
+
+    // And the sentence is **capped**: three, and the number is a *literal* here on
+    // purpose. The first version asserted `said == crate::announce::HEARD_SENTENCES`
+    // — a same-source equality that is true for every value of the constant, and a
+    // mutant moving the cap 3 → 4 came back **0 red** because of it (§13.4's
+    // 「对任何上限值都成立」 again, this time in a test I wrote this hour). Six
+    // queries now, three lines expected: a chatty scanner cannot turn this into a
+    // line per probe, which is §4.10's measured flood.
+    let capped = Logger::named("Discovery-Capped");
+    let capped_path = capped.claim();
+    drive(
+        &service,
+        &capped,
+        vec![
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+            (query.clone(), peer(MDNS_PORT)),
+        ],
+    );
+    let heard = lines(&capped_path)
+        .lines()
+        .filter(|record| record.contains("mDNS engine heard query"))
+        .map(|record| record.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        heard.len(),
+        3,
+        "the hearing sentence is capped at three lines; the loop wrote {}: {}",
+        heard.len(),
+        lines(&capped_path)
+    );
+    // The number each line prints is the constant that decides when to stop. That
+    // is a real question — it goes red when the sentence and the cap drift apart —
+    // and it is asked *after* the count, so a wrong count cannot hide behind it.
+    for line in &heard {
+        assert!(
+            line.contains(&format!("of {} on", crate::announce::HEARD_SENTENCES)),
+            "the sentence prints a cap that is not the constant: {line}"
+        );
+    }
+}
+
+
+/// A query built by a **foreign stack**, in the exact shape one went across the LAN
+/// from 192.168.1.68 on 2026-10-18 (a python sender on that machine, its bytes
+/// printed before sending), and the answer that same host saw back: 296 bytes,
+/// an=1 ar=4, from 192.168.1.5:5353.
+///
+/// The transaction id is non-zero because the sender was not written to match us.
+/// Everything the responder layer had been checked against up to now was a query
+/// this crate's own [`crate::mdns::query`] wrote — self-consistency, and nothing
+/// else. A responder that reads only its own writer's shape (a zero id, one class
+/// spelling, its own label order) is exactly what a phone's Cast browser would meet
+/// as "searchable, never reachable".
+fn foreign_query(name: &str, id: u16, qu: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&id.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // flags: standard query
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // ANCOUNT / NSCOUNT / ARCOUNT
+    for label in name.trim_end_matches('.').split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out.extend_from_slice(&12u16.to_be_bytes()); // PTR
+    out.extend_from_slice(&if qu { [0x80, 0x01] } else { [0x00, 0x01] });
+    out
+}
+
+#[test]
+fn e10_a_query_written_by_a_foreign_stack_is_answered() {
+    crate::pin_test_dir();
+    let service = fixture_service();
+    for (label, bytes) in [
+        ("id 0, class IN", foreign_query(SERVICE_TYPE, 0, false)),
+        ("id 0x1234, class IN", foreign_query(SERVICE_TYPE, 0x1234, false)),
+        ("id 0, QU bit set", foreign_query(SERVICE_TYPE, 0, true)),
+    ] {
+        assert_eq!(bytes.len(), 40, "{label}: the frozen wire shape drifted");
+        let (served, _sent) = served_by(&service, &bytes, peer(5353));
+        assert_eq!(served.queries, 1, "{label}: not read as a question");
+        assert_eq!(
+            served.group, 1,
+            "{label}: a question we run the answer to was declined"
+        );
+    }
+    // Byte parity with our own writer on the plain shape: that is what makes the
+    // three cases above a statement about senders rather than about two encoders.
+    assert_eq!(
+        foreign_query(SERVICE_TYPE, 0, false),
+        ptr_query(SERVICE_TYPE),
+        "our query writer and the foreign sender disagree — the parity claim is gone"
+    );
+    // And the answering is not the *shape* doing the work: a foreign-built query
+    // for a type this product does not run still costs nothing but silence (e4).
+    let other = foreign_query("_airplay._tcp.local.", 0x1234, false);
+    let (served, sent) = served_by(&service, &other, peer(5353));
+    assert_eq!(served.queries, 1, "still a question");
+    assert_eq!(
+        served.group + served.direct,
+        0,
+        "a foreign type was answered: {}",
+        served.group + served.direct
+    );
+    assert!(sent.group.is_empty() && sent.direct.is_empty());
 }

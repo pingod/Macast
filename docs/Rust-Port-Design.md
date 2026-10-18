@@ -324,10 +324,11 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `setup`（`Server:` 头） | 交回 `Macast/<版本>`，不抄 `BaseHTTP/0.6 Python/3.12.15` | 参考实现那个值是"它恰好继承了哪个类"的产物；把 CPython 的名字写到线上是关于"谁在答"的一句谎。`dial.py` 不读这个头，所以这不是兼容性代价，只是诚实 |
 | `setup`（非 `GET`） | `501` + **无正文**；Python 也回 501，但带 `BaseHTTPRequestHandler` 生成的 `text/html` 错误页 | 抄那页 HTML 就是把 CPython 的模板串放进我们的字节里，而唯一的读者（`dial.py:173-184`）把 `HTTPError` 折成一句 warning，从不渲染正文 |
 | `setup`（8008 的端口回落） | **不回落**：绑不上 8008 就交回 `Err`，而不是参考实现那样沿 `PORT_FALLBACK_RANGE` 走 20 个口 | 两条理由合成一条：`dial.py:25` 把 8008 钉死，所以 8010 上的这张脸是"绑上了但没人敲"；而回落的第一步就是 **8009**，那是 Cast socket 的口。参考实现能承受这个重叠，是因为它 `start()` 里**先**绑 Cast 再绑 setup（`protocol_cast.py:411-413`），8009 已在自己手里；一个还没接上 Cast 通道的壳只会把它抢走。判据：`setup_tests` 的 `d_a_taken_port_…` 用一份**同样绑在 0.0.0.0** 的夹具占住口（第一版用 `127.0.0.1` 占，结果 wildcard 绑定照样成功，那条"拒绝"从未发生 —— 夹具没生产会遇到的形状，用例就是在测夹具） |
-| `announce`（一个发送 socket，不 join、也从不读） | 参考实现给**每一个** IPv4 接口各绑一个发送 socket 并逐口加入多播组（本机量到 6 个 socket、每轮广播 6 份相同字节）；本端口一个 `0.0.0.0:5353` socket，**不 join** | 这一行原来的理由**是一句从没问过内核的猜测**，现已量掉（`scripts/mdns_reuseport_probe.py`；2026-10-18 在这台 Mac 与那台 CachyOS 上各跑；egress 用 `IP_MULTICAST_IF=127.0.0.1` + TTL 1 钉在 lo0，一个字节都不上局域网；每例的报文**事务 id 各不相同**，所以"每个 socket 都拿到全部"是逐条可核而不是两个计数相等；并且只统计**自己发出去的那些 id** —— 第一次在 Linux 上读出 `14 of 12`，那是场上真实 mDNS 的噪声，不是发现）。两台机器的答案：① **多播是复制的** —— macOS 两个 joined `[12, 12, 0]`、三个 `[12, 12, 12]`；Linux 同样三行是 `[8, 8, 8]`，**包括那个没 join 的**（Linux 上绑到 5353 的 socket 不管加没加入组都收得到多播）。所以旧句子里"`SO_REUSEPORT` 把进来的数据报只交给一个读者，第二个 joined socket 会偷走设备列表的一半"**在两个内核上都不成立**。② **单播整条只交给一个 socket，而交给谁不是"后绑的那个"** —— Linux 同一进程三趟都是 `[8, 0, 0]`，换两个进程（源端口不同）则分别给出 `[0, 0, 12]` 与 `[0, 8, 0]`：选谁是**按流**算的，任何一趟都不能当成规则。macOS 上 wildcard 绑定的 socket 连**对照组**都是 `0`（场上系统的 mDNSResponder 很可能就是持有者，非特权 `lsof` 点不出它），而绑到**确切目的地址**的 socket 把整条流从 wildcard 那个手里全部拿走（`[12, 0]`，逐趟稳定）。③ **结论因此不是"不用合并"**：要合并，但理由换成**单播**，而且合并的位置是**长期在场的那个 socket**，不是每次三秒钟的临时 browse。今天这个 socket 是单播的一个**竞争者却从不读**，在 Linux 上还是每一份多播的**接收者而队列没人排空**。responder 落地（§15 剩下那一行）时它 join 且**读** —— 答查询、并把听到的喂进设备账本 —— 于是"一直在端口上的那个 socket"恰好是"有人在读的那个"。`mdns.rs::open` 那句" replies 会以单播回到我们这里"也已按测量改成**条件句**：单播只回到**某一个**绑在 5353 的 socket，只有读它的那个是我们的时候才算数 |
+| `announce`（一个 socket 承担广播 + 应答；2026-10-18 接线前它不 join、也从不读） | 参考实现给**每一个** IPv4 接口各绑一个发送 socket 并逐口加入多播组（本机量到 6 个 socket、每轮广播 6 份相同字节）；本端口一个 `0.0.0.0:5353` socket，**不 join** | 这一行原来的理由**是一句从没问过内核的猜测**，现已量掉（`scripts/mdns_reuseport_probe.py`；2026-10-18 在这台 Mac 与那台 CachyOS 上各跑；egress 用 `IP_MULTICAST_IF=127.0.0.1` + TTL 1 钉在 lo0，一个字节都不上局域网；每例的报文**事务 id 各不相同**，所以"每个 socket 都拿到全部"是逐条可核而不是两个计数相等；并且只统计**自己发出去的那些 id** —— 第一次在 Linux 上读出 `14 of 12`，那是场上真实 mDNS 的噪声，不是发现）。两台机器的答案：① **多播是复制的** —— macOS 两个 joined `[12, 12, 0]`、三个 `[12, 12, 12]`；Linux 同样三行是 `[8, 8, 8]`，**包括那个没 join 的**（Linux 上绑到 5353 的 socket 不管加没加入组都收得到多播）。所以旧句子里"`SO_REUSEPORT` 把进来的数据报只交给一个读者，第二个 joined socket 会偷走设备列表的一半"**在两个内核上都不成立**。② **单播整条只交给一个 socket，而交给谁不是"后绑的那个"** —— Linux 同一进程三趟都是 `[8, 0, 0]`，换两个进程（源端口不同）则分别给出 `[0, 0, 12]` 与 `[0, 8, 0]`：选谁是**按流**算的，任何一趟都不能当成规则。macOS 上 wildcard 绑定的 socket 连**对照组**都是 `0`（场上系统的 mDNSResponder 很可能就是持有者，非特权 `lsof` 点不出它），而绑到**确切目的地址**的 socket 把整条流从 wildcard 那个手里全部拿走（`[12, 0]`，逐趟稳定）。③ **结论因此不是"不用合并"**：要合并，但理由换成**单播**，而且合并的位置是**长期在场的那个 socket**，不是每次三秒钟的临时 browse。接线**之前**它是单播的一个**竞争者却从不读**，在 Linux 上还是每一份多播的**接收者而队列没人排空**。responder 落地之后（2026-10-18，§15 那一行）同一个 socket **join 且读**：答查询，并把听到的喂进设备账本 —— 于是"一直在端口上的那个 socket"恰好是"有人在读的那个"。**还没做的那半句**是设备账本那一侧：读到的**别人的**记录今天只统计不入库（`Served::absorbed` 那一个计数器），所以合并的是 socket，不是两张表。`mdns.rs::open` 那句" replies 会以单播回到我们这里"也已按测量改成**条件句**：单播只回到**某一个**绑在 5353 的 socket，只有读它的那个是我们的时候才算数 |
 | `announce`（不做唯一性探测） | 参考实现在广播之前先发 3 个 `QU` 的 PTR 查询并等回话（`generate_service_query`，`_core.py:263-283`），撞名就 `NonUniqueNameException` —— 而 `advertise()` 让它冒出去，所以 Python 那一侧撞名的后果是**这台机器根本不广播** | 我们照播。代价写在模块头：同一局域网里两个相同友好名的实例会发布**同一个** instance 与 SRV 目标，发送端可能把名字解到另一台的端口上。**而且我们连那个探测包都不构造**：没有"发完再听"的探测就只是一句问话，谁也不答它，写出来就是一段长得像覆盖的死代码（§4.13「不提问的检查」的形状）。语料里那行 `probe` 因此是**参考实现的**证据，`every_packet_we_write_is_a_response_and_never_a_query` 断言我们四个构造器没有一个交回它 |
 | `announce`（属性过长时） | 参考实现**整条起不来**：`ServiceInfo(...)` 打包 TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而这一句不在 `advertise()` 那两个 `try` 里（本机实测：200 字节过、300 字节抛），于是异常一路冲出 `ChromecastProtocol.start()` —— 用户改一个长设备名，买到的是 Chromecast 接收端没了 | 本端口砍属性、不砍接收端：按字符边界截到 255 字节，WARNING 里点名字段、原长度与上限，然后照常广播。方向与 §4.8「越界夹住而不是拒绝」、`vt_level` 的"少钉一个 level 只是不明确，钉错是每一帧都没了"是同一条。**Python 那一侧今天仍然如此**，这句话不是说它修好了 —— 记在这里是因为它是一条会被下一次"照抄参考实现"重新引进来的行为 |
 | `announce`（没有监听就不广播） | 参考实现里 `_advertise()` 在 `_start_tls_server()` 之后无条件跑，而 `cast_port` 绑定失败时保持默认值 —— 于是它广播一个**没人听的端口** | 本端口只在 8009 真的在听时广播（`main.rs` 里那一格是 `match cast_channel.as_ref()`）。一台出现在菜单里却投不上的设备，正是 `AGENTS.md` §4.1 第一行的症状，不是它的小版本 |
+| `announce`（**立即作答，没有聚合队列**） | 参考实现把非立即答案压进一个 `U(20,120)` ms 的聚合队列（`_RESTRICTED_QUERIES` / `outgoing` 那条路），只有 `{SRV,A,AAAA,NSEC}` 那一集合立刻发；本端口的 `serve` 收到查询**当场发**，`respond::timing()` 算出的四个 `Timing` 值**没有任何产品代码读它** | 这是本轮量出来的惰性格，不是风格选择：把 `mdns.rs` 里 `unicast_request: class & CLASS_UNIQUE != 0` 换成恒假，整 crate **688 passed / 0 failed**（2026-10-18），因为 QU 位唯一的消费者就是那个没人读的 `Timing::Direct`。**代价是真实的**：同一分钟内 N 个冷启动的浏览器会把 N 份答案打到组播上，而 §4.10 在本机日志里量到的膨胀（SSDP 那一路 49% 的行是同一件事重播）就是这条队列存在的理由。补法不是"再断言一次"，是把聚合落地（按记录键合并 + 随机延迟），落地时 `delays_ms` 那批读数**仍故意不作判据**（断言毫秒数就是断言这台机器的计时器）；判据见 §16 第 23 条 |
 | `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
 | `status`（四个键用 `peek` 读） | 参考实现的文档是 `Setting.get(key, default)` 拼出来的，而**那一次读会把默认值写进表里**，下一次 `save` 就落盘（`AGENTS.md` §4.2 的第一条陷阱）。本脸对 `Macast_Protocols` / `Macast_Protocol` / `Macast_Renderer` / `Play_History` 改用 `peek`，答案逐字相同、磁盘上不多一个键 | 边界要写清，因为它**不是**"本端口再也不写设置"：`ApplicationPort`、`Https_enabled`、`Https_Port` 与网卡钉 (`Network_Interface`) 仍然走共享读接口（前两者是壳自己启动时就在用的值，后者是 `macast_core::net::network_interfaces` 内部读的，改它要一起动 SSDP/广播/中转三张脸）。判据 `the_status_read_creates_no_key_that_was_not_there` 钉的就是这条边界，并且它**断言 `Network_Interface` 确实被创建** —— 一个把"什么都没写"当成整体主张的测试，会在下一次"顺手改成 peek"时红得说不清是谁的锅 |
 | `launch-param`（键的顺序） | 参考实现交回 `Setting.setting` —— 那个 dict 保的是**文件里的插入顺序**；本端口这张表是 `BTreeMap`，于是键按名字排序 | 页面的「高级设置」是一个 JSON 编辑器，本机没有任何读者按顺序读它（量过：这条路上唯一的读者还没写）。真要保序，改的是那张表而不是在这条路由上再排一次 —— 那会是第二个主人。**同一张路由携带 `Api_Token`**：这条不是偏离而是决定，写在路由的行注释里，并由 `the_face_never_answers_a_cors_question` 与 `launch_param_answers_the_whole_table…` 两条一起守（前者守"为什么可以带"，后者守"它确实带"） |
@@ -783,7 +784,9 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 
 分桶与延迟（记着，不作为判据）：`{SRV, A, AAAA, NSEC}` 是"立即"类型（`_RESPOND_IMMEDIATE_TYPES`），
 其余进聚合队列，延迟 `U(20, 120)` ms、窗口 500 ms（刚多播过的那一支换成 200 ms + 1 s 保护）。
-本机 16 行的实测范围 **0.3–110.4 ms**，与这个模型一致。
+语料 17 行里 15 个延迟读数的跨度是 **0.2–115.9 ms**，与这个模型一致（那两个数是本轮
+从 `mdns_responder.jsonl` 重算的，不是抄上一版的 —— 上一版写的是「16 行 0.3–110.4 ms」，
+那是补入 `ptr-known-srv` 之前的表）。
 
 **仪器自己犯过的两个错，都长得像产品规则**（§4.2 那一族，这次是 zeroconf 的 API 记忆）：
 ① `add_answer_at_time(record, now)` 的第二个参数是**"按哪个时钟算剩余 TTL"**，不是"asker 拿到它的
@@ -794,6 +797,36 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 答案里直接印出 `an PTR ttl=100`。现在 known 段一律走 `copy.deepcopy`，并且**每个用例建完 known
 之后都问一遍"注册着的那三条记录的 TTL 还是不是 4500/120/4500"**（`assert_service_untouched`）——
 这条断言就是这一格不会再次静默发生的地方。
+
+**同一天又犯了两个，这次抄的不是库 API 而是线格式本身**（§4.2「假命令行工具的输出必须是真工具
+在这台机器上的逐字输出」那一族的 Rust 侧第四、第五例）：③ 手搓的那条"远端发来的查询"把第一个
+标签的**长度字节**漏了（`_googlecast` 直接写字面文字，正确形状是 `\x0b_googlecast`），于是线上
+是 39 字节而不是 40 —— responder 对它的沉默是**正确行为**，而我第一版把它读成"这台 Mac 收不到
+局域网多播"，并据此写下了一条关于系统的结论。④ 判"有没有答复"的过滤器找的是
+`_googlecast._tcp.local.`（带点），而 mDNS 的名字在线上是**长度前缀标签**、点永远不出现 ——
+于是**任何**答复都会读成 0，连参照实现那一侧的对照组也是 0。**两个错叠在一起的样子是"环境挡住了
+我们"，而真相是仪器看不见任何字节。**修好之后才有的读数：那台 Linux 机器确实收到了我们的
+296 字节 `an=1 ar=4` 答复（见 §15 的 responder 行与 §16 第 22 条）。
+⑤ 由此固化了一条新用例 `announce_tests::e10`：把**外写的**查询字节（事务 id 0x1234）喂给
+`serve`，要求答，并断言它与我们自己的 `mdns::query` 交回**逐字节相同的 40 字节** —— 在此之前
+每一条查询形状的用例用的都是自己写的包，那是自洽，不是兼容。
+
+**两句让"问得出来"的日志**（本轮加，因为分辨一次沉默花了两个机器和一小时）：
+`bind_engine` 的 `mDNS engine on 5353 joined 1 of 1 interface(s) [192.168.1.5]; …` 把**加入的是
+哪些接口**写进句子（只数 N 的话，"join 在错的口上"与"没 join"读起来一样），`run` 的
+`mDNS engine heard query 1 of 3 on 5353 (40 bytes, 1 question(s)) from 192.168.1.68:5353`
+把**送达**与**判决**分开：它只在**查询**上响，绝不在第一个数据报上响 —— 多播回环是默认
+开着的（本模块第一条偏离就是因为它），我们的广播一毫秒后就会回到自己手里，用"第一个数据报"当
+判据会让一台什么都听不到的机器也报喜。**上限三条**（`HEARD_SENTENCES`）：一条不足以把"还在读的线程"
+与"收到第一条之后才死的线程"分开，不封顶就是 §4.10 量到的那种洪水（组里散步的扫描器每探一次写一行）。
+`e9` 钉三半：环回不响、两条各响一次、六条只响三条。
+**这一格里两支变异体第一次交出的是 0 红，而坏的都是用例本身**：① 那句否定断言的 needle 停在旧文案
+`heard its first query` 上 —— 产品把文案改成 `heard query 1 of 3` 之后它永远成立，**改文案等于把一条
+断言悄悄变成不提问**；② 计数断言写的是 `== crate::announce::HEARD_SENTENCES`，那是**同源等式**，常量
+改成 4 它照样绿（§13.4 那条「对任何上限值都成立」第三次现形，而这一次是我一小时前写的用例）。
+重新对上 needle、把期望改成字面 3 之后三支各红 **1** 条（永不响 / 任何数据报都响 / 上限挪到 4）；
+另加一问 —— 每行打印的 `of N` 必须等于那个常量，且这一问排在计数**之后**，这样"数错了"不会被它盖掉。
+判据：**先让变异体真的能红，再宣称这句话被测过**。
 
 
 ---
@@ -808,10 +841,12 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
 | Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT/NSEC/A，unsolicited） | **已交付**（2026-10-18，`macast-cast/src/announce.rs` + 壳在 `main.rs` 里随 8009 起停） | 判据不是"我们自己读得懂"：`verify_rust_receiver.sh` §22 让 `.venv` 里那套 **zeroconf**（参考实现自己用的栈）冷启动去解析，**42.8 秒**后交回完整设备（那一趟整套 **183 条 / 0 失败 / EXIT=0**）—— 而第一串广播那时早就发完了，所以这条同时是 **60 秒 keepalive 的真机见证**。字节层面另有两条冻结语料（`macast-cast/tests/golden/mdns_announce.hex`、`mdns_names.jsonl`，由 `scripts/mdns_announce_probe.py` 产出），其中 announce 有**两行**，因为参考实现那一对 `A/NSEC` 的先后随 `PYTHONHASHSEED` 变（§8 的偏离表与探针注释都写了这一条）。**剩下的不是这一行**：下一行 |
-| mDNS **responder**（回答别人的查询） | **已接线**（2026-10-18：判决层 + 装配层 + `announce::serve` 挂在 announcer 那个 join 且读的 socket 上）；**局域网那一格在本机无见证** | 回环上有端到端见证（`announce_tests` 的 e8：真 socket、真查询、真答复），独立测试进程也量到 `bind_engine` 在 LAN 口 12 秒收到 42 条多播；但 `verify_rust_receiver.sh` §25 在**这一个 app 进程**里问不到东西，于是它按三种空说话（见 §16 第 22 条）。今天用户能读到的话仍然要说清：后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
+| mDNS **responder**（回答别人的查询） | **已接线**（2026-10-18：判决层 + 装配层 + `announce::serve` 挂在 announcer 那个 join 且读的 socket 上）；**跨机答复已量到，app 进程那一格仍无见证** | 读代码的人要把这两句分开：① 一个**只跑产品那批函数**的长命进程（`bind_engine` + `serve`）收到 192.168.1.68 发来的真 `PTR _googlecast._tcp` 并答了，**那台机器看见了 296 字节 an=1 ar=4 的回包** —— 所以"我们的答复能不能跨过一台机器"这一问今天有答案了；② `macast-tauri` 那个 app 进程对同一条查询既不答也不说收到，而同窗口同形状的 python 监听器收到了、同一进程的 UDP/1900 也真的收到过 .68 的 M-SEARCH —— **原因未定，不在这里挑一个填**（§16 第 22 条记了两条仪器错与全部读数）。回环端到端另有 e8，外写的查询形状另有 e10（含"与我们自己的 writer 逐字节相同"那一问）；`verify_rust_receiver.sh` §25 现在按 `heard` / `answered` 两句判决分三种答案说话（有 hearing 无 answering ⇒ 红；两句都没有 ⇒ skip 计败）。今天用户能读到的话仍然要说清：后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
 `respond::datagram` 按 `Section` 分派，广播那五条记录的字节**一个都没变**（19 条 golden 对拍用例
-照旧绿就是这一句的见证）。剩下的是 (b)：让 `announce.rs` 那个长期在场的 socket join 且读，
-读到的查询交 `respond::respond`，读到的别的记录喂设备账本 —— 后者就是 §8/§16 那条"合并"结论落地的地方。
+照旧绿就是这一句的见证）。(b) **也已做完**（2026-10-18 接线）：`announce.rs` 那个长期在场的 socket 
+现在 join 且读，读到的查询交 `respond::respond` + `respond::datagram` 答出去。**仍然欠着的那半句**是
+"读到的**别人的**记录喂设备账本"：今天非查询的数据报只进 `Served::absorbed` 一个计数器，所以 
+§8/§16 那条"合并"结论只合并了 socket，没有合并两张表。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
@@ -990,7 +1025,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     任何一趟都不配当规则；macOS 上 wildcard 绑定连**对照组**都收 0（很可能是 mDNSResponder 持有，
     非特权 `lsof` 点不出它），而绑到确切目的地址的 socket 把整条流从 wildcard 那个手里**全部**拿走。
     ③ **合并这个结论仍然成立，但换了理由和位置**：要合并的是**长期在场的那个 socket**，
-    动机是**单播**（今天我们那个 socket 是单播的竞争者却从不读，在 Linux 上还替每份多播攒了一个
+    动机是**单播**（接线前那个 socket 是单播的竞争者却从不读，在 Linux 上还替每份多播攒了一个
     没人排空的队列），而不是"第二个 joined socket 会分到多播"。responder 落地时它 join 且读：
     答查询 + 把听到的喂进设备账本，于是"一直占着 5353 的 socket"就是"有人在读的 socket"。
     **留在文档里的形状**：一句没问过内核的机制陈述，只要写成了"所以下一步必须怎么做"，它就会
@@ -1104,16 +1139,43 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     那一个，`--selftest` 把出事那一行原样造进内存并要求报 **1**（量过：1；同时要求转义那行
     报 0）。**一条没有正控的扫描器，它的 0 只是"它没在工作的另一种写法"**（Part 50 那一族），
     而**一个不再复测的数字会伪装成一条判据**（§4.13）。
-22. **responder 接上线之后，局域网那一格在本机问不出来，而 §25 拒绝把它读成产品坏了**
-    （2026-10-18）。接线本身有见证：回环端到端（`announce_tests::e8`，真 socket 真查询真答复）、
-    产品路径的 `Announcer::start()` 在独立测试进程里对 LAN 组答出 296 字节、`bind_engine`
-    在 LAN 口 12 秒收到 42 条多播。但验收脚本跑起来时，`macast-tauri` 这个 app 进程既没答
-    （`ours=none`），同窗口那台**加入同一个组、绑在同一个口**的 python 监听器也报告
-    `wire queries=0 answers=0`。这一种空与"responder 坏了"不是一回事，与"仪器没听到"也不是同一句：
-    所以 §25 分三种答案说话，并把两个读数一起印出来，第三种走 `skip`（本脚本里 skip 计败，
-    不会静默）。要么在系统设置里给这个 dev 二进制允许「本地网络」（**那是用户的系统设置，我不代点**），
-    要么等局域网里真有 mDNS 流量在跑时重问一次。**在这之前，"手机上的 Cast 按钮现在能看到这台 Mac
-    并被秒答"这句话，本机说不出口。**
+22. **responder 的跨机答复已经量到了，而 app 进程那一格仍然没有见证 —— 两半都要分开说**
+    （2026-10-18，本轮把"问不出来"变成了"问得出来"，也把两条自己仪器的错翻了出来）。
+    *现在量到的*：同一台 Mac 上，一个**只跑产品那批函数**的长命进程（`bind_engine` +
+    `serve` + `respond` + `datagram`）收到 192.168.1.68 发来的真实 `PTR _googlecast._tcp`
+    （40 字节，事务 id 0x1234），并且**那台机器看见了我们的答复**：
+    `296 bytes from 192.168.1.5:5353 an=1 ar=4`。这就是 §25 outcome 1 想要的形状，
+    只是它出自测试二进制而不是 app。
+    *仍然没有的*：`macast-tauri` 这个 app 进程对同一条查询既不答也不说收到
+    （`heard query …` 只在启动后 0.8 秒为一条 36 字节本地查询响过一次，之后三条上限内再没有第二条）。
+    同窗口一台 python 监听器（同样 wildcard 绑 5353、同样加入组）收到那条 40 字节查询，
+    而**同一进程的 UDP/1900 确实收到来自 192.168.1.68 的 M-SEARCH** —— 所以"这个进程被
+    系统挡了入站"这句**不成立**，"内核没把这条多播交给这个 socket"也没有解释为什么
+    同码同形状的测试进程收得到。**原因未定，不许在这里挑一个填上**（§4.2「先拿证据再动手」）。
+    *两条仪器错，都是我的*（§4.2「测试自己的实现也是实现」那一族，这次抄的是**线格式本身**）：
+    ① 手搓的第一版查询把第一个标签的长度字节漏了（`_googlecast` 直接写字面文字），
+    于是线上是 39 字节而正确形状是 40 —— responder 沉默是**对的**，我却把它读成"这台机器收不到"；
+    ② 判"有没有答复"的过滤器找的是 `_googlecast._tcp.local.`（带点），而 mDNS 名字在线上是
+    **长度前缀标签**，点永远不出现 —— 于是**任何**答复都读成 0，连参照实现那一侧的对照组也是 0。
+    修好这两处之后才有了上面那条 296 字节读数。
+    *一条新学到的可见性*：`bind_engine` 现在把**加入的是哪些接口**写进那句 INFO
+    （`joined 1 of 1 interface(s) [192.168.1.5]`），`run` 把**收到查询**写成 INFO（上限三条）
+    （`heard query N of 3 … from <peer>`）。在此之前"从未答"有三种读法（没绑上 / 绑了没加入 /
+    加入了但聋），本轮为分清它们花了两台机器和一小时；现在一条 grep 就能把"送达"与"判决"分开。
+    §25 因此改成读这两句：`heard` 有而 `answered` 没有 = 产品的问题，红；两句都没有 =
+    本机送达问题，`skip`（计败，不静默）。**而 §25 自己的监听器也中了同一条针**：它按带点的
+    `_googlecast._tcp` 过滤线上字节，于是把满组的查询数成 `queries=0`，脚本一直走"仪器没听到"
+    那一支。改成线标签 `\x0b_googlecast` 之后现跑整套是 **250 PASS / 1 SKIP / 0 FAIL、退出码 1**，
+    读数是 `wire queries=3 answers=0` + app 一句没响 —— 这一格从此是**计败的 skip**，不是静默，
+    也不是"responder 坏了"。
+23. **`Timing` 在装配层还是惰的，所以一个把 QU 位读成恒假的变异体 0 红**（2026-10-18，实测）。
+    `mdns.rs` 读出的 `unicast_request` 只喂给 `respond::timing()`，而 `announce::serve`
+    **从不读 `reply.timing`** —— 它把每条答复立即发出去。把 `class & CLASS_UNIQUE != 0`
+    换成 `false` 之后整 crate **688 passed / 0 failed**。这不是"覆盖够"，是**这一格在结构上
+    无人可问**：参考实现把非立即答案压进 `U(20,120)` ms 的聚合队列（语料里的 `delays_ms`
+    就是它的读数，本轮仍故意不作判据），聚合队列没落地之前，`Timing` 的四个值只有单元测试
+    在算它，没有一行产品代码按它行动。登记在 §8 的偏离表里：**我们的 responder 立即作答**，
+    后果是同一分钟内多个查询会把多份答案打到组播上（正是 §4.10 那类日志/流量膨胀的形状）。
 ---
 
 ## 17. 提交与文档的规矩
@@ -1158,7 +1220,11 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
   | sort -u | while read f; do [ -f "$f" ] || echo "MISSING $f"; done
 # 本文引用的**语句**仍在（每条都有唯一的字串可搜；右边的期望值是 2026-10-18 量出来的，
 # 不是"看起来应该"）
-grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs          # 期望 **656**
+grep -n "TESTS_IN_THIS_CRATE: usize" macast-cast/src/proto.rs   # 期望它**等于两台仪器量出的数**：
+#   `cargo test -p macast-cast --lib -- --list` 的计数，与 proto.rs 里那条扫描用例扫到的条数。
+#   2026-10-18 那一趟两边都是 **688**。这里故意不写成一个可以照抄的常量：上一版写的 656
+#   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688），一个会随加用例腐烂的数
+#   不是引用体检，是§4.13 那句「一个没被机器问过的数字」的文档版本。
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
 grep -c "has not been written yet" macast-mpv/src/lib.rs        # 期望 **0**（本轮改的注释）
 grep -rn "targets::" src-tauri/src/                             # 期望 ≥2 行（§15）
@@ -1183,8 +1249,17 @@ grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行
 grep -c 'set_multicast_loop_v4(true)' macast-cast/src/announce.rs            # 期望 **1**（发送侧，参考实现的 responder socket 也开环回）
-grep -c 'join_multicast_v4' macast-cast/src/announce.rs                      # 期望 **0**：广播口故意不入组，见 §16 第 13 条
+grep -c 'join_multicast_v4' macast-cast/src/announce.rs                      # 期望 **1**（2026-10-18 起：
+#   responder 接线后那个长期在场的口 join 且读，见 §16 第 13 条与 §14.6；这一行以前钉的是「广播口
+#   故意不入组」，那个形状已经反向 —— 现在**不**加入组才是缺陷）
 grep -c 'pub fn cast_enabled' src-tauri/src/host.rs                          # 期望 **1**（门只有一个主人）
+# 应答这一格的三句话，各自只有一个主人（§14.6）：
+grep -c 'mDNS engine heard query' macast-cast/src/announce.rs       # 期望 **1**（写句子的地方只有一处）
+grep -c 'mDNS answered its first query' macast-cast/src/announce.rs # 期望 **1**（送达与判决是两句，不是一句）
+grep -c 'HEARD_SENTENCES' macast-cast/src/announce.rs                # 期望 **4**（定义 + 上界 + 打印两处）；
+#   用例里的期望写的是**字面 3**，不是常量 —— 同源等式对任何常量都成立，见 §16 第 22 末与 §13.4
+grep -c 'x0b_googlecast' scripts/verify_rust_receiver.sh             # 期望 **1**：§25 的监听器按**线标签**过滤；
+#   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::cast_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
 grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **2**（两个 seed 各一），且下面这条 **0**：
@@ -1219,7 +1294,7 @@ grep -c 'STATUS_MEDIA_NAMES' macast-upnp/src/http.rs            # 期望 **4**�
 ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl
 #   两份 mDNS 语料都在，且产生器在仓库里：
 #   scripts/mdns_announce_probe.py --fixture --dump-hex <前者> / --dump-names <后者>
-ls macast-cast/tests/golden/mdns_responder.jsonl   # 16 行，一行一道查询形状（§14.6）
+wc -l macast-cast/tests/golden/mdns_responder.jsonl # 17 行，一行一道查询形状（§14.6）
 grep -c '"case"' macast-cast/tests/golden/mdns_responder.jsonl
 #   期望 **17**。它与 `respond.rs` 的关系是"规则 → 判据"：`every_corpus_row_is_answered_exactly_as_
 #   the_reference_answered_it` 逐行对拍，`the_corpus_rows_and_the_mapping_agree_in_both_directions`
