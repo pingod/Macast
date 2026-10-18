@@ -36,6 +36,13 @@ fn logger() -> &'static std::sync::Arc<Logger> {
     SELF.get_or_init(|| Logger::named("AirPlay"))
 }
 
+/// How long the accept loop may sit out before it looks at the stop flag again.
+///
+/// The same budget `channel.rs` and `announce.rs` settled on: long enough that
+/// polling is not a busy loop, short enough that a service stop is measured in
+/// milliseconds rather than "whenever the next sender connects".
+pub const ACCEPT_POLL: Duration = Duration::from_millis(200);
+
 /// Default RTSP listen port. macOS ships its own AirPlay receiver that
 /// occupies 7000; we try a few consecutive ports before giving up.
 pub const AIRPLAY_PORT: u16 = 7000;
@@ -443,7 +450,7 @@ impl AirPlayState {
                 // only changes the address leaves the *previous* item's title on the
                 // window. AirPlay's ANNOUNCE carries a URL and no title, so the address
                 // is the honest answer.
-                let title = derive_title_from_url(&url);
+                let title = title_for_play(&url);
                 renderer.set_media_title(&title);
                 let session = self.session.lock().unwrap();
                 let session_val = (*session).max(1);
@@ -473,9 +480,35 @@ impl AirPlayState {
                     // The body is "volume: <float>" where float is 0.0-1.0 scale,
                     // but we multiply by 100 to get 0-100 for the renderer.
                     if let Some(vol_str) = req.body.split("volume:").nth(1) {
-                        if let Ok(vol) = vol_str.trim().parse::<f64>() {
-                            let volume = (vol * 100.0) as i32;
-                            renderer.set_media_volume(volume);
+                        match vol_str.trim().parse::<f64>() {
+                            Ok(vol) => {
+                                let volume = (vol * 100.0) as i32;
+                                // Said out loud, because this is the only place the
+                                // sender's number becomes the player's number, and
+                                // mpv does **not** emit a `property-change` event when
+                                // the value it already holds is set again (measured
+                                // 2026-10-18: a second SET_PARAMETER of the same 0.5
+                                // left the log with one 50.0 line while the property
+                                // read 50.0 both times). A check that watches mpv's
+                                // events therefore sees a real volume change go
+                                // unmentioned; this line is the durable half.
+                                logger().info(&format!(
+                                    "AirPlay SET_PARAMETER volume {} -> renderer volume {}",
+                                    vol_str.trim(),
+                                    volume
+                                ));
+                                renderer.set_media_volume(volume);
+                            }
+                            Err(_) => {
+                                // 200 is still the right reply (the reference gives one
+                                // too), but the reason nothing moved has to be readable:
+                                // "the sender asked for a volume we could not parse" is
+                                // a different fact from "we ignored the request".
+                                logger().warning(&format!(
+                                    "AirPlay SET_PARAMETER carried a volume this receiver could not read: {:?}",
+                                    vol_str.trim()
+                                ));
+                            }
                         }
                     }
                 }
@@ -508,17 +541,25 @@ impl AirPlayState {
 ///
 /// AirPlay's ANNOUNCE carries a URL and no title, so the address is the honest
 /// answer. This extracts the last path segment as a fallback title.
-fn derive_title_from_url(url: &str) -> String {
-    // Try to parse as URL and extract the last path segment.
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(segment) = parsed.path_segments().and_then(|s| s.last()) {
-            if !segment.is_empty() {
-                return segment.to_string();
-            }
-        }
-    }
-    // Fallback: just use the URL itself.
-    url.to_string()
+/// What to call the stream when the sender named nothing — **the same function the
+/// page and the Cast channel use** ([`crate::resolve::title_for_uri`], whose answer
+/// is frozen against CPython's `media_resolve.title_for_uri`).
+///
+/// This module used to carry its own three-line version: last path segment, kept
+/// with its container suffix. That difference is user-visible and was never asked
+/// of the reference — an iPhone casting `…/clip.mp4` got a window titled `clip.mp4`
+/// while the same file cast from the page got `clip`, which is AGENTS.md §4.2's
+/// 「两处答案不一致比没有数字更糟」 with two owners of one rule.
+///
+/// The `Err` half is a **deliberate divergence**: the reference calls
+/// `media_resolve.title_for_uri(url)` unguarded in `PLAY`, and a malformed address
+/// (`http://[::1`) raises `ValueError` inside the RTSP handler, so the sender gets
+/// **no answer at all** on that request. Handing back the address as the name keeps
+/// the reply honest about the media it did accept — and the `fallback` argument is
+/// the same string, so the only way this can come back as an error is the case where
+/// nothing better exists. Recorded in `docs/Rust-Port-Design.md` §8.
+fn title_for_play(url: &str) -> String {
+    crate::resolve::title_for_uri(url, url).unwrap_or_else(|_| url.to_string())
 }
 
 /// Handle one RTSP connection.
@@ -611,21 +652,52 @@ impl AirPlayReceiver {
         ))
     }
 
-    /// Serve connections until stopped.
+    /// Serve connections until [`stop`] is called.
+    ///
+    /// [`stop`]: AirPlayReceiver::stop
+    ///
+    /// The accept is **polled, not parked**. A blocking `accept` does not look at
+    /// the flag, so `stop()` would leave this thread asleep in the kernel holding
+    /// the listening socket until some sender happened to connect — which is exactly
+    /// the shape "the user switched AirPlay off and port 7000 is still ours" and the
+    /// reason `Announcer` polls at [`READ_POLL`] and `channel.rs` refuses to hold a
+    /// lock across a blocking read. The first version of this loop was blocking, and
+    /// the only test that touched `serve` worked around it by taking the listener out
+    /// of the receiver and accepting by hand — a test that cannot fail is worse than
+    /// no test, because it says the row is covered.
+    ///
+    /// Each accepted socket is put back into **blocking** mode on the way out: on
+    /// Linux an accepted socket inherits the listener's `O_NONBLOCK`, and
+    /// `handle_connection` reads it with a timeout (macOS does not inherit, so the
+    /// line is a no-op there and still needed — the same platform pair
+    /// `mdns_reuseport_probe.py` measured).
     pub fn serve(&self, renderer: Arc<dyn RendererCallback>) -> std::io::Result<()> {
         let listener = self.listener.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::NotConnected, "not started")
         })?;
+        listener.set_nonblocking(true)?;
 
         while self.state.running.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     logger().debug(&format!("AirPlay RTSP connection from {}", addr));
+                    if let Err(e) = stream.set_nonblocking(false) {
+                        logger().warning(&format!("AirPlay socket from {addr}: {e}"));
+                    }
                     let state = Arc::clone(&self.state);
                     let renderer = Arc::clone(&renderer);
                     std::thread::spawn(move || {
                         handle_connection(stream, state, renderer);
                     });
+                }
+                // Nothing waiting: ask again shortly, and look at the flag first.
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    std::thread::sleep(ACCEPT_POLL);
                 }
                 Err(e) => {
                     if !self.state.running.load(Ordering::SeqCst) {
@@ -634,7 +706,7 @@ impl AirPlayReceiver {
                     // A *single* failed accept (ECONNABORTED, EMFILE) must not take
                     // down the whole server — same trap as Chromecast TLS (§4.1).
                     logger().warning(&format!("AirPlay accept error: {}", e));
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(ACCEPT_POLL);
                 }
             }
         }

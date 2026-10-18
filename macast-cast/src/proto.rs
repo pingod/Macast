@@ -406,17 +406,24 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 690 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 690, and the scanner below counts **the same
-    /// 690** `#[test]` attributes over `src/*.rs`. The per-file rows are the
-    /// **scanner's own line counts**, and they sum to that number: `job_tests`
-    /// 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 64,
-    /// `airplay_tests` 61, `push_tests` 46, `channel_tests` 40, `resolve` 39,
+    /// 695 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 695, and the scan over `src/*.rs` sums to **the
+    /// same 695**. The per-file rows are the **scanner's own line counts**:
+    /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `airplay_tests` 66,
+    /// `relay_tests` 64, `push_tests` 46, `channel_tests` 40, `resolve` 39,
     /// `setup_tests` 30, `announce_tests` 29, `respond_tests` 22, this file 19,
     /// `engine_tests` 17, `cert` 12, `scrape_tests` 6, `charmap_tests` 2.
     ///
-    /// Neither instrument is `grep -c '#\[test\]'`, which on this crate reads
-    /// **697**: seven of those lines *mention* the attribute — the scanner's own
+    /// The two instruments agreeing is a **measured** fact, not a law: the same
+    /// scan run against `macast-mpv` reads **161** while its `--list` reads
+    /// **149** — twelve of that crate's attributes sit in `#[cfg(windows)]`
+    /// modules that this Mac does not compile, so a scan counts source that
+    /// cannot run. `macast-cast` has no such module today, which is *why* the
+    /// two numbers coincide here; a round that adds a platform-gated test file
+    /// should expect them to part, and `--list` is the one that counts tests.
+    ///
+    /// Neither instrument is a plain `grep` for the attribute, which on this
+    /// crate reads **702**: seven of those lines *mention* the attribute — the scanner's own
     /// needle and this doc comment among them — instead of carrying one. Same
     /// lesson as `push_tests` carrying 610 against 603: an instrument that counts
     /// strings is not a census. The sentence this one replaces was itself the
@@ -426,20 +433,26 @@ mod tests {
     ///
     /// The scan is deliberately non-recursive, so the `#[path]`-included
     /// `*_tests.rs` files still land in it because they sit in `src/` itself.
-    /// The previous floors, 603, 633, 637, 655, 656, 671, 672, 677, 678, 686, 687
-    /// and 688, were carried by the
+    /// The previous floors — 603, 633, 637, 655, 656, 671, 672, 677, 678, 686,
+    /// 687, 688, 690 — were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
     /// `channel_tests`: the starvation witness plus the frame cap, the split
     /// frame and the peer that closes), then until `announce.rs` landed with the
     /// two frozen corpora, then until §22 of the acceptance script caught that
-    /// module reading the wrong interface list (+1: the owner audit), and then
+    /// module reading the wrong interface list (+1: the owner audit), then
     /// until the responder was wired to a socket that both joins and reads
     /// (+10 in `announce_tests`: the eight `e1`-`e8` answer-shape witnesses,
     /// `e9` — the one that asks whether anything ever *arrived* — and `e10`,
     /// which feeds in the 40-byte query a foreign python stack sent across the
-    /// LAN and asserts our own writer produces the same 40 bytes). Two more rows in
+    /// LAN and asserts our own writer produces the same 40 bytes), and then 690
+    /// → 695 on 2026-10-18 when the AirPlay RTSP face was wired into the shell:
+    /// five rows in `airplay_tests` (the accept loop the shell actually runs and
+    /// the port it lets go of, a connection that arrives after the first poll,
+    /// the name the page would show, and the two `SET_PARAMETER` sentences — the
+    /// handover said with both numbers, and the refusal said when the number
+    /// cannot be read). Two more rows in
     /// this crate are not about the responder at all: `airplay_tests`'s
     /// refusal-lines row and `relay_tests`'s sweep-names-its-files row, both of
     /// which exist because those two modules wrote through the `log` facade while
@@ -463,7 +476,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 690;
+    const TESTS_IN_THIS_CRATE: usize = 695;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

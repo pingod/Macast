@@ -335,6 +335,8 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `subscribers`（文档比参考实现多两个键） | 参考实现的 `query=subscribers` 交回 `{aggregated, children[{title, type, running, event_thread_alive, subscribed, pending_append, pending_state}]}`；本端口那份**多** `pending_remove` 与 `children[].rows` | `pending_remove`：一个卡住的回收线程与一个卡住的追加线程是**同一种故障形状**，而少了这个数字，"订阅者永远不走"就没有见证者。`rows`：想知道"哪个 SID 落在哪个回调口"的调用方不该被迫去读 `query=status` 的 `clients` 再自己 diff 一份名单。**两个读者共用一个建造者**（`subscribers_document` —— HTTP 路由与窗口命令各调一次），所以"多出来的键"只可能长在一处而不是两份文档各长各的；审计与它的 0 红教训见 §16 第 16 条 |
 | `status`（`history` 住在内存，不住在设置文件） | 参考实现的播放历史是 `Setting[Play_History]`，**重启之后还在**；本壳的行住在 `StateTable` 的内存里，重启即空，而 `query=status` 打印的是内存那份 | 打印设置文件里那份会算什么？算"这台机器从没投过任何片子" —— 一个空列表在两个原因之间**不可分辨**（§4.14「空结果要说清是哪一种空」在文档层的新形状）。发现方式是本节的 §23 真机一节：投完之后 `history` 仍然是 `[]`，两条红。补成持久化是一次有"重启后还在"这条断言的决定，不是这一轮顺手做掉的一行 |
 | `channel`（读的方式） | Python 在**裸 socket** 上阻塞读、读期间不持任何锁；本端口**每条连接一把锁**，所以读改成 `READ_POLL`（200 ms）轮询，**锁在两批字节之间放开** | 这是"参考实现做不到"的那一类，不是风格：rustls 的一次 `read` 会动会话状态，必须串行化，而把锁跨在一次无限阻塞读上会让**同一根 socket 上的所有推送饿死** —— `_watch_playback` 与状态变化都排在那把锁后面，发送端 LOAD 之后只拿到那一次请求驱动的答复、此后一句话都没有，直到它自己断开（2026-10-18 接进壳之后由 §21 量出，见 §16 第 11 条）。Python 那边根本没有这一层，所以这一格**不可能**由"照抄它的写法"得到正确答案 |
+| `macast-mpv`（`set_observe` 之后才交出去的默认音量） | **不是偏离，是一格量到的同形缺陷**：链接一赋值就可写，而八条 `observe_property` 与那条**默认音量**是在这之后才写的 —— 落在同一个几毫秒窗口里的 `SET_PARAMETER` 会被 100 盖掉 | 2026-10-18 实测：全新实例的第一个会话，四条同形状跑（`PLAY` 之后 0 毫秒就发音量）**三次丢、一次没丢**（这正是"窗口"而不是"规则"的样子），同一实例后来的会话 4/4 落地。参考实现同形：`macast_renderer/mpv.py:404-414` 先 `self.ipc_sock = …` 再 `self.set_observe()`，`send_command` 每次单独拿 `command_lock` —— 所以这里**不单边修**（修它就是把自己的行为挪出参考实现，那需要自己的判据）。`verify_rust_receiver.sh` §26 因此隔 0.4 秒再发动作（真手机音量滑块不会在按播放的同一毫秒动），并把判据换成两条持久的：我们那句"两个数字都说"的 INFO + 从 mpv **读回来**的那个值。要动这一格的人先读 `set_observe` 的 docstring，读数就写在那里 |
+| `airplay`（谁写播放状态） | AirPlay 的投屏**不写 DLNA 状态表、不写播放列表、不写历史** | `protocol_airplay.py:251-280` 调的是 `self.renderer.…`，那里 renderer 是**渲染器实例本身**而不是 `PlaybackGuard`。移植照抄这个形状：壳给的是 `ShellRenderer` 上的 `airplay::RendererCallback`，五个方法都是直通。后果要说明白：用手机投完一段之后，设置页那张卡继续显示**上一次 DLNA/Cast 交接**的内容 —— **这不是 AirPlay 坏了**，是把主人留在发送端该在的那一层；谁要在 Rust 侧"改进"成也写状态，要先改的是 §15 与 `AGENTS.md` §4.2 那句"只有一个主人"的归属，而不是悄悄加一次 `set_state` |
 | `channel`（`MAX_FRAME_BYTES`） | 帧头声称的长度 > 8 MiB 时**先拒再分配**（`InvalidData`，不 `vec![0u8; length]`）；参考实现没有这个上限，它 `_recv_exact(sock, length)` 一路累积 | 那 4 字节是**对端给的**，`>I` 能声称 4 GiB。Python 的累积读至少不会一次性申请，而我们的实现一旦先申请就给了"一个谎长度打爆接收端"的形状。代价要写清：一台**真的**发 >8 MiB 帧的发送端在这里会被断开而不是收下。**8 MiB 是我们选的数，不是从设备上量出来的上限**（本局域网没有真 Chromecast，§16 第 1 条），它的依据只有两条：正文是 JSON 与 protobuf 控制消息，而 `>I` 那个字段可以对端随口写。**这一句只到"会话结束"，不到"用户看得见"**：`client_loop` 的错误统一走那句 `Cast client disconnected: {e}`，而它是 **DEBUG** 级（与对端正常断开同一句，`channel.rs` 的 `handle_connection` 尾部），所以默认阈值下这条拒绝**不进日志**。这是今天的形状，不是已验证的决定 —— 要把安全侧的那一格抬到 INFO，改的是这一句分级，不是上限 |
 
 **读代码时要找的下一类偏离**：任何一处"Rust 里做不到 / 做起来别扭"的 Python 行为，
@@ -854,17 +856,19 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 **两句让"问得出来"的日志**（本轮加，因为分辨一次沉默花了两个机器和一小时）：
 `bind_engine` 的 `mDNS engine on 5353 joined 1 of 1 interface(s) [192.168.1.5]; …` 把**加入的是
 哪些接口**写进句子（只数 N 的话，"join 在错的口上"与"没 join"读起来一样），`run` 的
-`mDNS engine heard query 1 of 3 on 5353 (40 bytes, 1 question(s)) from 192.168.1.68:5353`
+`mDNS engine heard query 1 of 8 on 5353 (40 bytes, asking Ptr _googlecast._tcp.local.) from 192.168.1.68:5353`
 把**送达**与**判决**分开：它只在**查询**上响，绝不在第一个数据报上响 —— 多播回环是默认
 开着的（本模块第一条偏离就是因为它），我们的广播一毫秒后就会回到自己手里，用"第一个数据报"当
-判据会让一台什么都听不到的机器也报喜。**上限三条**（`HEARD_SENTENCES`）：一条不足以把"还在读的线程"
-与"收到第一条之后才死的线程"分开，不封顶就是 §4.10 量到的那种洪水（组里散步的扫描器每探一次写一行）。
-`e9` 钉三半：环回不响、两条各响一次、六条只响三条。
+判据会让一台什么都听不到的机器也报喜。**这一格的形状在下一轮被重写过**（第 26 条）：
+INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG 与一条自己的上限，两句都把
+**问的是什么**写进文本；上限从三条抬到八条，因为一趟脚本里 §22、§24、§25 有三个浏览器在问。
+`e9` 钉五半：环回不响、两条各响一次、两句都带主语、别人的查询不占 INFO 预算但记进 DEBUG、
+十条只响八条。
 **这一格里两支变异体第一次交出的是 0 红，而坏的都是用例本身**：① 那句否定断言的 needle 停在旧文案
 `heard its first query` 上 —— 产品把文案改成 `heard query 1 of 3` 之后它永远成立，**改文案等于把一条
 断言悄悄变成不提问**；② 计数断言写的是 `== crate::announce::HEARD_SENTENCES`，那是**同源等式**，常量
 改成 4 它照样绿（§13.4 那条「对任何上限值都成立」第三次现形，而这一次是我一小时前写的用例）。
-重新对上 needle、把期望改成字面 3 之后三支各红 **1** 条（永不响 / 任何数据报都响 / 上限挪到 4）；
+重新对上 needle、把期望改成字面 3 之后三支各红 **1** 条（永不响 / 任何数据报都响 / 上限挪到 4）；同一族在读过第 26 条之后又量了七支，各红 1 条。
 另加一问 —— 每行打印的 `of N` 必须等于那个常量，且这一问排在计数**之后**，这样"数错了"不会被它盖掉。
 判据：**先让变异体真的能红，再宣称这句话被测过**。
 
@@ -881,7 +885,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
 | Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT/NSEC/A，unsolicited） | **已交付**（2026-10-18，`macast-cast/src/announce.rs` + 壳在 `main.rs` 里随 8009 起停） | 判据不是"我们自己读得懂"：`verify_rust_receiver.sh` §22 让 `.venv` 里那套 **zeroconf**（参考实现自己用的栈）冷启动去解析，**42.8 秒**后交回完整设备（那一趟整套 **183 条 / 0 失败 / EXIT=0**）—— 而第一串广播那时早就发完了，所以这条同时是 **60 秒 keepalive 的真机见证**。字节层面另有两条冻结语料（`macast-cast/tests/golden/mdns_announce.hex`、`mdns_names.jsonl`，由 `scripts/mdns_announce_probe.py` 产出），其中 announce 有**两行**，因为参考实现那一对 `A/NSEC` 的先后随 `PYTHONHASHSEED` 变（§8 的偏离表与探针注释都写了这一条）。**剩下的不是这一行**：下一行 |
-| mDNS **responder**（回答别人的查询） | **已接线**（2026-10-18：判决层 + 装配层 + `announce::serve` 挂在 announcer 那个 join 且读的 socket 上）；**跨机答复已量到，app 进程那一格仍无见证** | 读代码的人要把这两句分开：① 一个**只跑产品那批函数**的长命进程（`bind_engine` + `serve`）收到 192.168.1.68 发来的真 `PTR _googlecast._tcp` 并答了，**那台机器看见了 296 字节 an=1 ar=4 的回包** —— 所以"我们的答复能不能跨过一台机器"这一问今天有答案了；② `macast-tauri` 那个 app 进程对同一条查询既不答也不说收到，而同窗口同形状的 python 监听器收到了、同一进程的 UDP/1900 也真的收到过 .68 的 M-SEARCH —— **原因未定，不在这里挑一个填**（§16 第 22 条记了两条仪器错与全部读数）。回环端到端另有 e8，外写的查询形状另有 e10（含"与我们自己的 writer 逐字节相同"那一问）；`verify_rust_receiver.sh` §25 现在按 `heard` / `answered` 两句判决分三种答案说话（有 hearing 无 answering ⇒ 红；两句都没有 ⇒ skip 计败）。今天用户能读到的话仍然要说清：后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
+| mDNS **responder**（回答别人的查询） | **已接线**（2026-10-18：判决层 + 装配层 + `announce::serve` 挂在 announcer 那个 join 且读的 socket 上）；**跨机答复已量到，app 进程那一格仍无见证** | 读代码的人要把这两句分开：① 一个**只跑产品那批函数**的长命进程（`bind_engine` + `serve`）收到 192.168.1.68 发来的真 `PTR _googlecast._tcp` 并答了，**那台机器看见了 296 字节 an=1 ar=4 的回包** —— 所以"我们的答复能不能跨过一台机器"这一问今天有答案了；② `macast-tauri` 那个 app 进程**今天仍然没有收到**冷浏览器那三条 40 字节 `PTR _googlecast._tcp` —— 而这一句今天是重新量出来的，因为它上一版是错的：那条 hearing 句子当时按**任何**查询计数，而本机自己的栈每 0.8 秒就问一次 `Ptr _irohv1._udp.local.`，上限三条在四秒内烧光，于是 §25 到达时日志是空的，我们把它写成了"这个二进制收不到 LAN 多播"。今天改成**INFO 只报问我们的、DEBUG 另报问别人的**（各自一条上限），再重测：同一台机器、一个 python 浏览器 + 一个加入同组的 python 监听器看得见那三条查询，app 进程两句都没有；把监听器整个去掉、场上只剩 app 与浏览器，app 仍然一句没有。**同一天早些时候它确实收到过**`_irohv1` 那一族查询（source 同样是 192.168.1.5:5353）。所以"这个进程的入站多播被系统挡了"这句也不成立 —— 成立的是"这个 socket 收不到这一条"，而**原因未定，不在这里挑一个填**（§16 第 22 条记仪器错、上限被淹死那一格与全部读数）。回环端到端另有 e8，外写的查询形状另有 e10（含"与我们自己的 writer 逐字节相同"那一问）；`verify_rust_receiver.sh` §25 现在按 `heard` / `answered` 两句判决分三种答案说话（有 hearing 无 answering ⇒ 红；两句都没有 ⇒ skip 计败）。今天用户能读到的话仍然要说清：后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
 `respond::datagram` 按 `Section` 分派，广播那五条记录的字节**一个都没变**（19 条 golden 对拍用例
 照旧绿就是这一句的见证）。(b) **也已做完**（2026-10-18 接线）：`announce.rs` 那个长期在场的 socket 
 现在 join 且读，读到的查询交 `respond::respond` + `respond::datagram` 答出去。**仍然欠着的那半句**是
@@ -892,6 +896,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 在内存不在设置文件）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
+| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**20 条**）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**这一行仍然欠的那半句**：`_airplay._tcp` 的广播没接 —— 所以"iPhone 的屏幕镜像/音频列表里看得到这台 Mac"今天说不出口，只有**知道端口**的发送端（手动填地址、将来的测试）走得进来。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
 ---
@@ -1014,7 +1019,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     分片帧在轮询之间补齐、对端关掉时结束会话而不是空转）。
 12. **`Macast_Protocols` 现在是 Chromecast 三张脸的门；DLNA 那一半仍然不是**
     （2026-10-18 关掉一半，剩下一半是有意的）：
-    `host::cast_enabled` 一次读取，门住 8009 接收端、8008/8443 setup 脸与 `_googlecast._tcp`
+    `host::faces_enabled` 一次读取（AirPlay 接进来之后它交回 `Faces { cast, airplay }`，门从三张脸变四张），门住 8009 接收端、8008/8443 setup 脸与 `_googlecast._tcp`
     广播 —— 三者是一个协议，分开门会得到"身份答得出来、连接握不上"的那台设备。
     证书生成也在门后（它往设置目录里写两个文件；一个用户关掉的协议不该留下密钥材料）。
     判据两层：`host::tests` 问**读法**（存的字符串要当成一条记录、legacy 键是追加不是优先、
@@ -1187,7 +1192,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     `296 bytes from 192.168.1.5:5353 an=1 ar=4`。这就是 §25 outcome 1 想要的形状，
     只是它出自测试二进制而不是 app。
     *仍然没有的*：`macast-tauri` 这个 app 进程对同一条查询既不答也不说收到
-    （`heard query …` 只在启动后 0.8 秒为一条 36 字节本地查询响过一次，之后三条上限内再没有第二条）。
+    （`heard query …` 只在启动后 0.8 秒为一条 36 字节本地查询响过一次，之后三条上限内再没有第二条）。**这一句的读法下一轮被推翻过一次**：那「三条上限用光」不是送达的证据，而是本机自己的查询把预算淹死了 —— 见第 26 条，那里有重写过的仪器与重测的读数。
     同窗口一台 python 监听器（同样 wildcard 绑 5353、同样加入组）收到那条 40 字节查询，
     而**同一进程的 UDP/1900 确实收到来自 192.168.1.68 的 M-SEARCH** —— 所以"这个进程被
     系统挡了入站"这句**不成立**，"内核没把这条多播交给这个 socket"也没有解释为什么
@@ -1199,8 +1204,8 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     **长度前缀标签**，点永远不出现 —— 于是**任何**答复都读成 0，连参照实现那一侧的对照组也是 0。
     修好这两处之后才有了上面那条 296 字节读数。
     *一条新学到的可见性*：`bind_engine` 现在把**加入的是哪些接口**写进那句 INFO
-    （`joined 1 of 1 interface(s) [192.168.1.5]`），`run` 把**收到查询**写成 INFO（上限三条）
-    （`heard query N of 3 … from <peer>`）。在此之前"从未答"有三种读法（没绑上 / 绑了没加入 /
+    （`joined 1 of 1 interface(s) [192.168.1.5]`），`run` 把**收到查询**写成 INFO（问到我们头上的才算，上限八条）
+    （`heard query N of 8 … asking Ptr _googlecast._tcp.local. … from <peer>`），别人的查询另有一条 DEBUG 与一条自己的上限。在此之前"从未答"有三种读法（没绑上 / 绑了没加入 /
     加入了但聋），本轮为分清它们花了两台机器和一小时；现在一条 grep 就能把"送达"与"判决"分开。
     §25 因此改成读这两句：`heard` 有而 `answered` 没有 = 产品的问题，红；两句都没有 =
     本机送达问题，`skip`（计败，不静默）。**而 §25 自己的监听器也中了同一条针**：它按带点的
@@ -1231,6 +1236,49 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     把某条拒绝降到 DEBUG（默认阈值下不可见）→ 红 1、清扫消息去掉名字 → 红 1、
     一行改回 `log::warn!` → 全仓扫描那条红 1。**方向值得记一句**：这一格不是"用户报了 bug"
     那一类，是"日志指错嫌疑人比不指更贵"（§4.2/§4.3）那一类的**前一档**——日志一个字都不写。
+25. **AirPlay 的 RTSP 面接进壳，而这一节的三条判据全在被测之前先错过了目标**（2026-10-18，
+    `macast-cast/src/airplay.rs` + `src-tauri/src/{host,main}.rs` + 真机 §26 的 **20 条**）。
+    *线是通的*：第二台实例只开 `DLNA + AirPlay`，真 RTSP 字节打进 7001（macOS 自己的接收端占着 7000，
+    回落这件事本轮第一次被断言），`OPTIONS/ANNOUNCE/SETUP/RECORD/PLAY/SET_PARAMETER/TEARDOWN`
+    全部 200，且 mpv 那边有 `file-loaded`、窗口名字 `macast_verify_clip`、读回来的音量 50。
+    整跑读数是 **271 条 PASS / 1 条 SKIP / 0 条 FAIL，退出码 1** —— 那一条 SKIP 就是第 22 条那格（本机送达），
+    计败而不是静默；§26 自己那 20 条今天全绿。
+    *三条仪器错，都在我自己那一侧*：① `ap_grep "\'event\': \'file-loaded\'"` —— 双引号里的
+    `\'` 是**字面反斜杠加引号**，于是这条判据从写下那天起就没问过任何东西，而它失败时印的是
+    `tail -3`，读起来完全像"加载到一半被 stop 打断了"；产品没错，日志里 `file-loaded` 一直在那儿。
+    ② 一次 splice 留下**两条 PLAY**，第二条把第一条的加载打断（mpv 那边 `end-file reason=stop` 加
+    第二条 `start-file`），音量那一格反而**因为这次错误而通过**。③ 音量判据读的是 mpv 的
+    `property-change` 事件，而 mpv **在值没变时不发事件**（同一条 0.5 发第二遍，日志一条不动、
+    属性读回仍是 50）—— 判据因此换成两条持久的：接收端自己那句"两个数字都说"的 INFO，
+    加从 mpv **读回来**的值。这条错属于 §4.2「等那个账本」的最后一档：**账本在不在，先问它会不会写**。
+    *一格产品事实，量出来而不是猜的*：全新实例的第一个会话若在 `set_observe` 写完默认音量之前发
+    `SET_PARAMETER`，音量被 100 盖掉（四条同形状跑：三次丢、一次没丢；后来的会话 4/4 落地）。
+    参考实现同形（`mpv.py:404-414`），所以**不单边修**，§8 记一行，`player.rs` 的 `set_observe`
+    docstring 里放着读数；§26 的客户端按真发送端的节奏隔 0.4 秒再发。
+    *仍然欠的*：`_airplay._tcp` 的广播没接 —— **iPhone 的镜像/音频列表里看不到这台 Mac**，
+    只有知道端口的发送端走得进来（§15 的 AirPlay 行写了这一句）。
+26. **hearing 句子被本机自己的查询淹死，而一条被淹死的判据会写出一条假的历史**（2026-10-18，
+    `announce.rs` 的两级句子 + `respond::concerns` + §25 重写 + §26 那节末尾的引号审计）。
+    *上一轮写下的那句"这个二进制收不到 LAN 多播"是**仪器造成的误判**，不是读数*：
+    `mDNS engine heard query` 当时对**任何**查询计数，上限三条，而本机自己的栈每约 0.8 秒问一次
+    `Ptr _irohv1._udp.local.` —— 四条日志在启动后四秒内把预算吃光，§25 的冷浏览器于是问进一份
+    空日志，读出来就是"送达失败"。修法不是把上限调大（本机换成更吵的网络照样淹得死）：
+    INFO 只报**问我们**的（`respond::concerns` 复用出答案的那同一个匹配器，不在外面再抄一份名字规则），
+    报别人的降到 DEBUG、各自一条上限，两条句子都**把问的东西写进行里**
+    （`asking Ptr _googlecast._tcp.local.`）。上限 3→8 的理由是量出来的：一趟脚本里有 §22、§24、
+    §25 三个浏览器在问。
+    *重测之后的读数*（去掉被证伪的那句）：app 进程对浏览器的三条 40 字节查询**两句都不响**，
+    同形状加入同组的 python 监听器三条全看见；把监听器整个撤掉、场上只剩 app 与浏览器，app 仍然一句没有。
+    同一小时它确实收到过 `_irohv1` 那一族（source 同为 192.168.1.5:5353）。所以"入站多播被系统挡了"
+    这句也**不成立**；成立的是"这一条没交到这只 socket 手里"，原因未定，§15 与 §16 第 22 条都不挑一个填。
+    *七支定点变异，各红 1 条*（都是 e9，红在各自那句话上）：去掉 for_us 门 / 删掉 DEBUG 那一支 /
+    上限 8→7 / INFO 句子丢掉主语 / `concerns` 恒真 / `concerns` 恒假 / 答复句子丢掉主语。
+    **其中一支第一次是空操作**：我的 perl 模式匹配的是多行形状，而产品那行参数在同一行上 ——
+    于是"0 红"读的其实是"没改动"，与 §13.4 那条编译错误冒充 0 红同一族。加了一条"变异必须真的改到文件"
+    的做法：每次先 `grep` 证明那一处已经变了，再跑测试。
+    *引号审计*（§26 那节顶部，每次跑脚本都执行）：本脚本的**代码行**里不许出现
+    反斜杠紧跟单引号那一对字符（注释豁免，因为教训总要写在某处，而会冤枉文档的扫描器活不过下一次），
+    并配一条**栽赃正控**：现造一个含一个 bug 的临时文件，扫描必须报 1。干净树报 0（本轮量过）。
 ---
 
 ## 17. 提交与文档的规矩
@@ -1277,7 +1325,7 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
 # 不是"看起来应该"）
 grep -n "TESTS_IN_THIS_CRATE: usize" macast-cast/src/proto.rs   # 期望它**等于两台仪器量出的数**：
 #   `cargo test -p macast-cast --lib -- --list` 的计数，与 proto.rs 里那条扫描用例扫到的条数。
-#   2026-10-18 最后一趟两边都是 **690**。这里故意不写成一个可以照抄的常量：上一版写的 656
+#   2026-10-18 最后一趟两边都是 **695**（AirPlay 那一轮 +5）。这里故意不写成一个可以照抄的常量：上一版写的 656
 #   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688 → 690），一个会随加用例腐烂的数
 #   不是引用体检，是§4.13 那句「一个没被机器问过的数字」的文档版本。
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
@@ -1296,10 +1344,15 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **28**（§25 是最后一节，
-#   responder 的局域网问答；§24 是门。§23 是 2026-10-18 的 status 一节，门那一节当时从 §23
-#   挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **29**（§26 是最后一节，
+#   iPhone 的 RTSP 问答；§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
+#   门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
 #   编号变了而判据没变）
+grep -c 'a query that is not ours' macast-cast/src/announce.rs        # 期望 **1**（DEBUG 那半句也只有一处；
+#   两级句子是 §16 第 26 条那一格：INFO 只报问我们的，预算才不会被本机自己的查询淹死）
+grep -c 'fn concerns' macast-cast/src/respond.rs                       # 期望 **1**（复用出答案的那个匹配器，不是第二份名字规则）
+grep -c 'AirPlay SET_PARAMETER' macast-cast/src/airplay.rs             # 期望 **2**（"两个数字都说" 与 "读不懂也要说"）
+grep -c 'AirPlayReceiver::new' src-tauri/src/main.rs                   # 期望 **1**（AirPlay 那张脸的构造点恰好一个）
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行
@@ -1307,12 +1360,13 @@ grep -c 'set_multicast_loop_v4(true)' macast-cast/src/announce.rs            # �
 grep -c 'join_multicast_v4' macast-cast/src/announce.rs                      # 期望 **1**（2026-10-18 起：
 #   responder 接线后那个长期在场的口 join 且读，见 §16 第 13 条与 §14.6；这一行以前钉的是「广播口
 #   故意不入组」，那个形状已经反向 —— 现在**不**加入组才是缺陷）
-grep -c 'pub fn cast_enabled' src-tauri/src/host.rs                          # 期望 **1**（门只有一个主人）
+grep -c 'pub fn faces_enabled' src-tauri/src/host.rs                          # 期望 **1**（门只有一个主人）
 # 应答这一格的三句话，各自只有一个主人（§14.6）：
 grep -c 'mDNS engine heard query' macast-cast/src/announce.rs       # 期望 **1**（写句子的地方只有一处）
 grep -c 'mDNS answered its first query' macast-cast/src/announce.rs # 期望 **1**（送达与判决是两句，不是一句）
-grep -c 'HEARD_SENTENCES' macast-cast/src/announce.rs                # 期望 **4**（定义 + 上界 + 打印两处）；
-#   用例里的期望写的是**字面 3**，不是常量 —— 同源等式对任何常量都成立，见 §16 第 22 末与 §13.4
+grep -c 'HEARD_SENTENCES' macast-cast/src/announce.rs                # 期望 **7**（定义 + 两道上限判断 + 两处打印
+#   + 文档里两处引用）；用例里的期望写的是**字面 8**，不是常量 —— 同源等式对任何常量都成立，
+#   见 §16 第 22 末、第 26 条与 §13.4
 grep -c 'x0b_googlecast' scripts/verify_rust_receiver.sh             # 期望 **1**：§25 的监听器按**线标签**过滤；
 # `log` 门面这一格的两道闸（§12.3）：依赖不在图里是**编译错误**，源码扫描是它后面那一层
 grep -c '^log = ' macast-core/Cargo.toml macast-mpv/Cargo.toml macast-upnp/Cargo.toml \
@@ -1320,9 +1374,9 @@ grep -c '^log = ' macast-core/Cargo.toml macast-mpv/Cargo.toml macast-upnp/Cargo
 grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast/src src-tauri/src | grep -v ':0' ; echo "同上，源码里也不许出现"
 #   注意后一条在 (前一条成立) 时永远为空 —— 它是给"哪天有人把依赖加回来并解释为什么"那一天读的
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
-grep -c 'host::cast_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
+grep -c 'host::faces_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
-grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **2**（两个 seed 各一），且下面这条 **0**：
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **3**（launch 那台 + §24 门那台 + §26 AirPlay 那台），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
 #   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②

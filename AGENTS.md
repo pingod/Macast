@@ -2281,12 +2281,14 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   ② 判"有没有答复"的过滤器找的是带点的 `_googlecast._tcp.local.`，而 mDNS 名字在线上是
   **长度前缀标签**、点永远不出现，于是**任何**答复都读成 0 —— 连参照实现那一侧的对照组也是 0，
   所以那一趟"Python 也不答"同样是我的过滤器说的谎。**先修仪器再改结论**：这两处修完才有了上面那条 296 字节。
-* **沉默的三种读法现在一条 grep 就能分开**：`bind_engine` 写
-  `joined 1 of 1 interface(s) [192.168.1.5]`（只报 N 的话，"join 在错的口"与"没 join"同形），
-  `run` 写 `heard query 1 of 3 on 5353 (40 bytes, 1 question(s)) from <peer>`。
-  **它在"查询"上响（上限 `HEARD_SENTENCES` = 3 条），绝不在第一个数据报上响** —— 多播环回是默认开着的（本模块第一条偏离就为它而存在），
+* **沉默的三种读法现在一条 grep 就能分开**（这一格在下一轮被重做过，理由见下面那条"能被淹死的判据"）：
+  `bind_engine` 写 `joined 1 of 1 interface(s) [192.168.1.5]`（只报 N 的话，"join 在错的口"与"没 join"同形），
+  `run` 写 `heard query N of 8 on 5353 (40 bytes, asking Ptr _googlecast._tcp.local.) from <peer>`。
+  **它对"问到我们头上的查询"上响（INFO 上限 `HEARD_SENTENCES` = 8），问别人的降到 DEBUG、另算一条上限，
+  绝不在第一个数据报上响** —— 多播环回是默认开着的（本模块第一条偏离就为它而存在），
   我们的广播一毫秒后回到自己手里，用"第一个数据报"当判据会让一台什么都听不到的机器报喜。
-  e9 钉这三半（环回不响 / 两条各响一次 / 六条只响三条）。§25 因此改成：有 hearing 无 answering ⇒ **红**（产品自己的问题）；
+  e9 钉这五半（环回不响 / 两条各响一次 / 两句都带主语 / 别人的查询不占 INFO 预算但记进 DEBUG /
+  十条只响八条）。§25 因此改成：有 hearing 无 answering ⇒ **红**（产品自己的问题）；
   两句都没有 ⇒ `skip` 计败（本机送达问题）；成功那一路还额外要求两句都在场。
   **§25 自己的监听器也中了同一条针**：它按带点的 `_googlecast._tcp` 过滤线上字节，把满组的查询
   数成 `queries=0`，于是脚本一直走"仪器没听到"那一支。换成线标签 `\x0b_googlecast` 之后现跑整套
@@ -2345,6 +2347,55 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   我们自己的 `logger().warning(`）与**必须报**的那六条成对存在。
 * **修的是通路，不是那两行**：Python 侧 `logging.getLogger("AirPlay")` / `"MediaRelay"` 都**不认领**
   模块文件，所以 Rust 侧照旧落 `macast.log`，设置页日志面板的模块列表一个名字都没多。
+
+**Rust 侧把 AirPlay 的 RTSP 面接进壳时量到的事**（2026-10-18，`macast-cast/src/airplay.rs` +
+`src-tauri/src/{host,main}.rs` + `announce.rs` 的两级句子 + 真机 §26 的 **20 条**）：
+
+* **接线本身有见证**：第二台实例只开 `DLNA + AirPlay`，真 RTSP 字节打进 **7001**
+  （macOS 自己的接收端占着 7000 —— 回落这件事第一次被断言，而 §15 那行写的"iPhone 找不到这台 Mac"
+  说的就是它），`OPTIONS/ANNOUNCE/SETUP/RECORD/PLAY/SET_PARAMETER/TEARDOWN` 全 200，
+  mpv 那边 `file-loaded` 在、窗口名是 `macast_verify_clip`、音量读回 50。
+  整套真机读数是 **271 条 PASS / 1 条 SKIP / 0 条 FAIL、退出码 1** —— 那一条 SKIP 就是下面那格送达。
+* **三条仪器错全在我这一侧，而且每一条都长得像产品坏了**：① `ap_grep "\'event\': \'file-loaded\'"` ——
+  双引号里 `\'` 是**字面反斜杠加引号**，这条判据从写下那天起就没问过任何东西；它红的时候印 `tail -3`，
+  读起来完全像"加载到一半被 stop 打断"，而日志里 `file-loaded` 一直在那儿。② 一次 splice 留下**两条 PLAY**，
+  第二条打断第一条的加载（mpv 那边 `end-file reason=stop` 接第二条 `start-file`），音量那一格
+  **因为这次错误而通过** —— 一个多余的请求可以替产品把判据蒙过去。③ 音量读的是 mpv 的 `property-change`
+  事件，而 **mpv 在值没变时不发事件**（同一个 0.5 发第二遍，日志一行不动、属性读回仍是 50）。
+  判据因此换成两条持久的：接收端自己那句"两个数字都说"的 INFO，加从 mpv **读回来**的值。
+  脚本顶部现在每次跑都自查这一族：**代码行里不许出现反斜杠紧跟单引号**（注释豁免，否则扫描器会冤枉
+  写教训的那几行、然后被人删掉），并配一条**栽赃正控** —— 现造一个含一个 bug 的临时文件，扫描必须报 1；
+  干净树报 0（本轮量过）。
+* **一格产品事实是量出来的，不是猜的**：全新实例的第一个会话若在 `set_observe` 写完默认音量之前发
+  `SET_PARAMETER`，音量被 100 盖掉 —— 四条同形状跑（`PLAY` 之后 0 毫秒）三次丢、一次没丢，
+  同一实例后来的会话 4/4 落地（这就是"窗口"而不是"规则"）。参考实现同形
+  （`macast_renderer/mpv.py:404-414` 先 `self.ipc_sock = …` 再 `self.set_observe()`，
+  `send_command` 每次单独拿 `command_lock`），所以**不单边修**：§8 记一行，`player.rs` 的
+  `set_observe` docstring 里放着读数，§26 按真发送端的节奏隔 0.4 秒再动音量
+  （手机不会在按播放的同一毫秒拖滑块）。
+* **上一轮写下的"这个二进制收不到 LAN 多播"是仪器造成的误判，本轮把它改回来了**：
+  `heard query` 那句当时对**任何**查询计数、上限三条，而本机自己的栈每约 0.8 秒问一次
+  `Ptr _irohv1._udp.local.` —— 四条日志在四秒内把预算吃光，§25 的冷浏览器于是问进一份空日志。
+  修法不是把上限调大（换个更吵的网络照样淹得死）：**INFO 只报问到我们头上的，报别人的降到 DEBUG
+  并另算一条上限，两句都把问的东西写进行里**（`asking Ptr _googlecast._tcp.local.`），
+  判据复用 `respond::concerns` —— 它调的就是出答案那同一个匹配器，不在外面抄第二份名字规则。
+  重测（去掉被证伪的那句）：app 进程对浏览器那三条 40 字节查询**两句都不响**，
+  同形状加入同组的 python 监听器三条全看见；**把监听器整个撤掉、场上只剩 app 与浏览器，app 仍然一句没有**；
+  而同一小时它确实收到过 `_irohv1` 那一族（source 同为 192.168.1.5:5353）。所以"入站多播被系统挡了"
+  这句也**不成立** —— 成立的是"这一条没交到这只 socket 手里"，**原因未定，不挑一个填**。
+  七支定点变异各红 1 条（去 for_us 门 / 删 DEBUG 支 / 上限 8→7 / INFO 丢主语 / `concerns` 恒真 /
+  恒假 / 答复句丢主语）。**其中一支第一次是空操作**：perl 模式匹配的是多行形状而产品那行参数在同一行上，
+  于是"0 红"读的其实是"没改动" —— 与"编译错误冒充 0 红"同一族；从此变异先 `grep` 证明那一处真的变了再跑。
+* **仍然欠着的两件事，方向别读错**：① `_airplay._tcp` 的广播没接 —— **iPhone 的镜像/音频列表里
+  看不到这台 Mac**，只有知道端口的发送端走得进来；② AirPlay 的投屏**不写 DLNA 状态表、列表与历史**
+  （参考实现调的是 renderer 实例而不是 `PlaybackGuard`），所以投完之后设置页那张卡显示的是上一次
+  DLNA/Cast 交接的内容 —— **这不是 AirPlay 坏了**，要"改进"它得先改归属（§8 有行）。
+* **计数（两台仪器一致）**：`macast-cast` **695**（`--list` 695、逐文件扫描求和 695，
+  `airplay_tests` 66 / `announce_tests` 29），`macast-core` 90、`macast-mpv` 149、
+  `macast-upnp` 347、`macast-tauri` 11。**顺手量到一条仪器本身的边界**：同一套逐文件扫描打在
+  `macast-mpv` 上是 **161** 而 `--list` 是 **149** —— 那 12 条坐在 `#[cfg(windows)]` 模块里，
+  这台 Mac 根本不编译。所以"两台仪器一致"是**测出来的巧合**，不是定律；数得出可运行的用例的只有 `--list`。
+  **以及本分支从未推送 ⇒ 本轮这些用例与那 271 条真机读数没有任何 CI 见证过。**
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、

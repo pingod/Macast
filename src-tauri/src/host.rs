@@ -517,6 +517,48 @@ impl macast_upnp::store::Renderer for ShellRenderer {
         title_for_uri(uri)
     }
 }
+/// The same player, wearing the AirPlay face.
+///
+/// Five methods, each a straight pass to [`Player`], and that plainness is the
+/// point: `protocol_airplay.py:251-280` calls `self.renderer.…`, where the
+/// reference's `renderer` is **the renderer instance**, not the `PlaybackGuard`.
+/// So an AirPlay cast writes no DLNA state, no playlist and no play history —
+/// the 设置页 keeps showing whatever the last DLNA or Cast handover said. That is
+/// the reference's behaviour and this port copies it rather than improving it; the
+/// consequence is written into `docs/Rust-Port-Design.md` §8 so nobody reads the
+/// stale card as an AirPlay bug.
+///
+/// What is **not** a straight pass: nothing. The naming rule lives in one place
+/// (`airplay.rs` asks `resolve::title_for_uri`, the same owner the DLNA state table
+/// and the Cast channel ask), so the four ways a stream can arrive here cannot give
+/// one address four window titles.
+impl macast_cast::airplay::RendererCallback for ShellRenderer {
+    /// AirPlay's RTSP carries no start position, so `None` — the bare
+    /// `loadfile <url> replace` shape, not a seek to zero.
+    fn set_media_url(&self, url: &str) {
+        self.player.set_media_url(url, None);
+    }
+
+    fn set_media_title(&self, title: &str) {
+        self.player.set_media_title(title);
+    }
+
+    fn set_media_pause(&self) {
+        self.player.set_media_pause();
+    }
+
+    fn set_media_stop(&self) {
+        self.player.set_media_stop();
+    }
+
+    /// The RTSP layer has already turned the sender's `volume:` body into the
+    /// 0–100 integer the reference hands its renderer (`protocol_airplay.py:274`
+    /// multiplies by 100 before calling); this is where that number meets the
+    /// JSON value the player's own setter takes.
+    fn set_media_volume(&self, volume: i32) {
+        self.player.set_media_volume(&json!(volume));
+    }
+}
 
 /// `load_xml(XMLPath.PROTOCOL_INFO.value).strip()`.
 ///
@@ -2153,15 +2195,32 @@ pub fn resolve_title(title: &str, available: &[&str]) -> Option<String> {
         .map(|held| (*held).to_string())
 }
 
-/// Is the Chromecast protocol switched on? One call site per face, all reading
-/// this, because the three Cast faces are one protocol: a run that gated 8009
-/// but not 8008 would answer `eureka_info` about a device that cannot be cast
-/// to, and a run that gated both but not the announcement would put the device
-/// in every phone's list while refusing the connection.
-pub fn cast_enabled(setting: &Setting, log: &Logger) -> bool {
-    enabled_protocols(setting, log)
-        .iter()
-        .any(|title| title == CAST_TITLE)
+/// Which protocol faces this run opens, from **one** read of `Macast_Protocols`.
+///
+/// One read rather than one per face, for two reasons that are the same reason:
+/// [`enabled_protocols`] is where the 「Skipping unknown protocol」 sentence lives,
+/// so calling it per face says that sentence once per door on every run that carries
+/// a stale entry (AGENTS.md §4.10's "the same thing said twice is the log's whole
+/// growth"); and a settings tab can rewrite the file between two reads, which would
+/// let 8009 and 7000 be opened by **different answers to the same question**.
+pub struct Faces {
+    /// 8009, the 8008/8443 setup face and the `_googlecast._tcp` announcement: one
+    /// protocol, so a run that gated 8009 but not 8008 would answer `eureka_info`
+    /// about a device that cannot be cast to, and one that gated both but not the
+    /// announcement would put the device in every phone's list while refusing the
+    /// connection.
+    pub cast: bool,
+    /// The AirPlay RTSP receiver on 7000. Separate key in the user's list, so a
+    /// "Chromecast off" run must not keep answering iPhones on the old port.
+    pub airplay: bool,
+}
+
+pub fn faces_enabled(setting: &Setting, log: &Logger) -> Faces {
+    let titles = enabled_protocols(setting, log);
+    Faces {
+        cast: titles.iter().any(|title| title == CAST_TITLE),
+        airplay: titles.iter().any(|title| title == AIRPLAY_TITLE),
+    }
 }
 
 #[cfg(test)]
@@ -2193,6 +2252,11 @@ mod tests {
         });
     }
 
+    /// The one-read answer, for the rows that only care about a single door.
+    fn faces_of(setting: &Setting) -> Faces {
+        faces_enabled(setting, &logger())
+    }
+
     fn setting(tag: &str) -> Arc<Setting> {
         Arc::new(Setting::new(
             macast_core::paths::setting_dir().join(format!("gate-{tag}.json")),
@@ -2213,7 +2277,9 @@ mod tests {
         // nobody made.
         let enabled = enabled_protocols(&setting("fresh"), &logger());
         assert_eq!(enabled, vec![DLNA_TITLE, CAST_TITLE, AIRPLAY_TITLE]);
-        assert!(cast_enabled(&setting("fresh"), &logger()));
+        let faces = faces_enabled(&setting("fresh"), &logger());
+        assert!(faces.cast, "a fresh install opens the Cast faces");
+        assert!(faces.airplay, "and the AirPlay one");
     }
 
     #[test]
@@ -2222,7 +2288,31 @@ mod tests {
         let dir = setting("dlna-only");
         dir.set(Key::MacastProtocols, json!(["DLNA Protocol"]));
         assert_eq!(enabled_protocols(&dir, &logger()), vec![DLNA_TITLE]);
-        assert!(!cast_enabled(&dir, &logger()));
+        let faces = faces_of(&dir);
+        assert!(!faces.cast, "8009, 8008/8443 and the announcement stay shut");
+        assert!(
+            !faces.airplay,
+            "and so does 7000 — an iPhone must not be pointed at a port this run              refused to listen on"
+        );
+    }
+
+    #[test]
+    fn airplay_alone_opens_its_own_door_and_no_other() {
+        pin_test_dir();
+        // The two protocols are separate entries in the user's list, so the two
+        // doors have to be separable: a run that keeps AirPlay and drops Chromecast
+        // must still answer RTSP on 7000, and one that keeps Chromecast and drops
+        // AirPlay must not be an iPhone target. A single `cast_enabled` shape could
+        // not express that at all, which is why the gate answers with a struct.
+        let dir = setting("airplay-only");
+        dir.set(Key::MacastProtocols, json!(["DLNA Protocol", "AirPlay Protocol"]));
+        let faces = faces_of(&dir);
+        assert!(faces.airplay, "RTSP is asked for by name");
+        assert!(!faces.cast, "and nothing else is opened with it");
+        assert_eq!(
+            enabled_protocols(&dir, &logger()),
+            vec![DLNA_TITLE, AIRPLAY_TITLE]
+        );
     }
 
     #[test]
@@ -2241,7 +2331,7 @@ mod tests {
             "the shared reader's behaviour is the trap this test names"
         );
         assert_eq!(enabled_protocols(&dir, &logger()), vec![DLNA_TITLE]);
-        assert!(!cast_enabled(&dir, &logger()));
+        assert!(!faces_of(&dir).cast);
     }
 
     #[test]
@@ -2359,7 +2449,7 @@ mod tests {
         let all_unknown = setting("all-unknown");
         all_unknown.set(Key::MacastProtocols, json!(["Nirvana Protocol"]));
         assert_eq!(enabled_protocols(&all_unknown, &log), vec![DLNA_TITLE]);
-        assert!(!cast_enabled(&all_unknown, &log));
+        assert!(!faces_enabled(&all_unknown, &log).cast);
     }
 
     #[test]
@@ -2415,11 +2505,14 @@ mod tests {
     fn every_cast_face_is_behind_the_gate() {
         pin_test_dir();
         let main = include_str!("main.rs");
-        let gate = main.find("host::cast_enabled(").expect("main.rs reads the gate");
+        let gate = main
+            .find("host::faces_enabled(")
+            .expect("main.rs reads the gate");
         for (needle, what) in [
             ("CastChannel::new", "the 8009 receiver"),
             ("setup::SetupServer::start", "the setup face"),
             ("announce::Announcer::new", "the announcement"),
+            ("airplay::AirPlayReceiver::new", "the AirPlay receiver"),
         ] {
             let at = main.find(needle).unwrap_or_else(|| panic!("no {} in main.rs", what));
             assert!(
@@ -2439,11 +2532,13 @@ mod tests {
                  would be behind the gate only by accident"
             );
         }
-        // Exactly one read, so a second face cannot consult a *different* rule.
+        // Exactly one read, so no two faces can consult a *different* answer to the
+        // same question — and so that a stale entry says 「Skipping unknown protocol」
+        // once per run rather than once per door (§4.10's growth-by-repetition).
         assert_eq!(
-            main.matches("host::cast_enabled(").count(),
+            main.matches("host::faces_enabled(").count(),
             1,
-            "the gate is read more than once, so the three faces can disagree"
+            "the gate is read more than once, so the faces can disagree"
         );
     }
 

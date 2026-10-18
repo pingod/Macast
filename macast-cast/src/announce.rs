@@ -1049,15 +1049,20 @@ pub(crate) struct Engine {
 /// schedule nor [`Announcer::stop`] can sit behind it.
 const READ_POLL: Duration = Duration::from_millis(200);
 
-/// How many received queries this process names out loud, then goes quiet.
+/// How many received queries this process names out loud (and, one level down, how
+/// many queries that are not about it it still admits to having received).
 ///
-/// Three: one sentence is not enough to tell a reader that is alive from one that
-/// died after its first packet, and an unbounded sentence is §4.10's measured
-/// 49%-of-one-file shape — a scanner walking the group would write a line per
-/// probe. The cap is a fact about diagnosis rather than about traffic, because
-/// `verify_rust_receiver.sh` §25 reads this pair to separate "nothing arrived"
-/// from "it arrived and we declined".
-const HEARD_SENTENCES: usize = 3;
+/// Eight for each, and the number is a measurement rather than a taste: one run of
+/// `verify_rust_receiver.sh` has §22's browser, §24's browse and §25's browser all
+/// asking, and the cap that used to be 3 was spent before §25 got there. The INFO
+/// half is gated on the query being about this service, because this machine's own
+/// stack asks `Ptr _irohv1._udp.local.` about every 0.8 seconds — no cap that has to
+/// outlast that chatter is a witness. One sentence each is not enough to tell a
+/// reader that is alive from one that died after its first packet, and an unbounded
+/// sentence is §4.10's measured 49%-of-one-file shape. The cap is a fact about
+/// diagnosis rather than about traffic, because `verify_rust_receiver.sh` §25 reads
+/// this pair to separate "nothing arrived" from "it arrived and we declined".
+const HEARD_SENTENCES: usize = 8;
 
 /// What one received datagram turned into.
 ///
@@ -1069,7 +1074,7 @@ const HEARD_SENTENCES: usize = 3;
 /// one. When that happens and the packet is not a query, there is nothing here to do
 /// with it: it was an answer meant for whoever else binds 5353, quite possibly our
 /// own browser. `absorbed` is where that loss stops being invisible.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Served {
     /// Queries this datagram carried (of any type, answered or not).
     pub queries: usize,
@@ -1080,6 +1085,14 @@ pub struct Served {
     /// Non-query packets dropped here. See the doc above: this is the unicast hole,
     /// counted rather than smoothed over.
     pub absorbed: usize,
+    /// Whether one of those queries asked about records this service holds — the
+    /// decision layer's own answer, not a name comparison made here.
+    pub for_us: bool,
+    /// What was asked, in the words the parser read off the wire (`PTR
+    /// _googlecast._tcp.local.`), first three at most. A byte count cannot tell a
+    /// query for us from a query for someone else's printer, and the announcer's
+    /// log line is the only place a reader learns which one arrived.
+    pub asking: String,
 }
 
 /// The DNS type number → the kind the decision layer speaks.
@@ -1099,6 +1112,31 @@ fn kind_from_rtype(rtype: u16) -> Option<crate::respond::Kind> {
         255 => Some(Kind::Any),
         _ => None,
     }
+}
+
+/// The questions a datagram asked, in the words a reader of a log wants:
+/// `Ptr _googlecast._tcp.local. + A pavia-macbookpro.local.`, three at most.
+///
+/// The type is spelled the way [`crate::respond::Kind`] prints it rather than by a
+/// second table of names, and an rtype this port does not model keeps its number
+/// (`type48 …`) instead of vanishing: a line that quietly dropped the question it
+/// could not name would read as "nothing was asked", which is the exact
+/// ambiguity §25 exists to remove.
+fn describe_questions(questions: &[crate::mdns::Question]) -> String {
+    const NAMED: usize = 3;
+    let mut words: Vec<String> = questions
+        .iter()
+        .take(NAMED)
+        .map(|question| {
+            let kind = kind_from_rtype(question.rtype)
+                .map_or_else(|| format!("type{}", question.rtype), |kind| format!("{kind:?}"));
+            format!("{kind} {}", question.name)
+        })
+        .collect();
+    if questions.len() > NAMED {
+        words.push(format!("+{} more", questions.len() - NAMED));
+    }
+    words.join(" + ")
 }
 
 /// Answer one received datagram, sending through the two closures.
@@ -1136,7 +1174,11 @@ pub fn serve(
         return out;
     }
     out.queries = message.questions.len();
+    out.asking = describe_questions(&message.questions);
     let shape = Shape::new(&service.instance, &service.server, !service.addresses.is_empty());
+    // The judgment the log line needs, taken from the decision layer rather than
+    // from a name comparison here: if this says "not about us" the responder is
+    // silent, so the two cannot disagree about whether a query was ours.
     let questions: Vec<Question> = message
         .questions
         .iter()
@@ -1148,6 +1190,7 @@ pub fn serve(
             })
         })
         .collect();
+    out.for_us = respond::concerns(&questions, &shape);
     let known: Vec<Known> = message
         .records
         .iter()
@@ -1222,6 +1265,7 @@ fn run(
     let mut next = Instant::now() + REANNOUNCE;
     let mut served = Served::default();
     let mut heard = 0usize;
+    let mut other_heard = 0usize;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -1229,16 +1273,26 @@ fn run(
         match recv() {
             Ok(Some((data, peer))) => {
                 let one = serve(&data, peer, service, send, unicast, log);
-                if one.queries > 0 && heard < HEARD_SENTENCES {
+                if one.queries > 0 && one.for_us && heard < HEARD_SENTENCES {
                     // The **receiving** question, asked separately from the answering
                     // one. "It never answered" has two causes and only this process can
                     // tell them apart: nothing was ever handed to this socket, or it was
-                    // handed over and we declined. Both are live on this Mac — measured
-                    // 2026-10-18, a python socket bound and joined to the same group on
-                    // the same port received a remote host's `PTR _googlecast._tcp`
-                    // (40 bytes, source port 5353) while `macast-tauri`'s engine answered
-                    // none of them, and the same product functions in another process
-                    // received that query and answered it across the wire.
+                    // handed over and we declined.
+                    //
+                    // Counted only for queries about **us**, and the subject travels in
+                    // the text. Both halves were measured on 2026-10-18, in two failed
+                    // shapes each. Without the subject, `36 bytes` could be a Chromecast
+                    // or this machine's own stack, which asks `Ptr
+                    // _irohv1._udp.local.` about every 0.8 seconds — a cap of 3 spent
+                    // itself inside four seconds and §25's cold browser then asked into a
+                    // silent log, which got written down as "this binary receives no
+                    // inbound LAN multicast". Without the subject gate the cap has to be
+                    // larger than the chatter, and on a machine producing more than eight
+                    // queries in the time it takes a script to reach §25 there is no such
+                    // number: an instrument that can be drowned is an instrument. So the
+                    // INFO line is reserved for the traffic a reader of this log cares
+                    // about, and everything else is said at DEBUG — same sentence, same
+                    // cap, one level down, so nothing that arrived goes unrecordable.
                     //
                     // Fire on a **query**, never on the first datagram: the announcer's
                     // own bursts loop back into this very socket (multicast loop is at
@@ -1247,23 +1301,30 @@ fn run(
                     // hears nobody. Cap at [`HEARD_SENTENCES`] for the flood reason.
                     heard += 1;
                     log.info(&format!(
-                        "mDNS engine heard query {} of {} on {} ({} bytes, {} question(s)) from {}",
-                        heard,
-                        HEARD_SENTENCES,
-                        MDNS_PORT,
-                        data.len(),
-                        one.queries,
-                        peer
+                        "mDNS engine heard query {} of {} on {} ({} bytes, asking {}) from {}",
+                        heard, HEARD_SENTENCES, MDNS_PORT, data.len(), one.asking, peer
+                    ));
+                } else if one.queries > 0 && other_heard < HEARD_SENTENCES {
+                    other_heard += 1;
+                    // The other half of the pair above: this process received a query
+                    // that no answer of ours can be for. DEBUG because the machine's own
+                    // name-service chatter is continuous and this line is only ever for
+                    // a human with the threshold raised, asking "what is out there".
+                    log.debug(&format!(
+                        "mDNS engine heard a query that is not ours {} of {} on {} ({} bytes, asking {}) from {}",
+                        other_heard, HEARD_SENTENCES, MDNS_PORT, data.len(), one.asking, peer
                     ));
                 }
                 if served.group + served.direct == 0 && one.group + one.direct > 0 {
                     // Once, at INFO: the first query this process ever answered is
                     // the moment "listening" stops being an assumption. Its absence
                     // next to a join count above zero is the other half of the same
-                    // sentence, and that pair is what §25 reads.
+                    // sentence, and that pair is what §25 reads. Not gated by
+                    // HEARD_SENTENCES: a machine whose log is full of other people's
+                    // probes must still say the one thing that is news.
                     log.info(&format!(
-                        "mDNS answered its first query ({} to the group, {} direct) from {}",
-                        one.group, one.direct, peer
+                        "mDNS answered its first query ({} to the group, {} direct), of {} from {}",
+                        one.group, one.direct, one.asking, peer
                     ));
                 }
                 served.queries += one.queries;

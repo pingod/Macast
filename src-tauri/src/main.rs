@@ -50,6 +50,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
+use macast_cast::airplay;
 use macast_cast::announce;
 use macast_cast::relay;
 use macast_cast::setup;
@@ -127,6 +128,20 @@ struct Runtime {
     /// listening receiver, which is the case whose reason went to
     /// `logs/Discovery.log`.
     announce: Option<Arc<announce::Announcer>>,
+    /// The AirPlay RTSP receiver, with the thread that serves it. `Mutex` +
+    /// `Option` for the same reason the setup face uses them: stopping means
+    /// **taking** the handle, and a `stop_services` that ran twice (a bind failure
+    /// on another thread followed by the window closing) must not join a thread
+    /// that another caller already joined.
+    ///
+    /// **Only the start and stop paths are wired.** Whether an iPhone can actually
+    /// find this receiver is a separate row in `docs/Rust-Port-Design.md` §15: the
+    /// reference also advertises `_airplay._tcp` over mDNS with `deviceid`/`features`
+    /// `pk` TXT records (`protocol_airplay.py:_advertise`), and the announcer here
+    /// publishes one service type — `_googlecast._tcp`. So today an AirPlay sender
+    /// on the LAN will not list this Mac; the RTSP face answers anything that
+    /// already knows the address, which is what §26 of the acceptance script drives.
+    airplay: Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>,
 }
 
 impl Runtime {
@@ -206,10 +221,34 @@ impl Runtime {
                 .log
                 .info(&format!("setup face on {port} closed; 8443 goes with it"));
         }
+        // AirPlay goes with the rest of the listeners, and the order is the
+        // reference's (`stop()` closes the RTSP server after the advertiser): the
+        // flag is lowered first, then the serving thread is joined, because
+        // "switched off" has to mean **the port is free** — the accept loop polls,
+        // so this is milliseconds rather than "whenever the next iPhone connects".
+        if let Some((receiver, handle)) = self
+            .airplay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let port = receiver.port();
+            receiver.stop();
+            match handle.join() {
+                Ok(()) => self
+                    .host
+                    .log
+                    .info(&format!("AirPlay RTSP on {port} stopped and the port is free")),
+                Err(_) => self.host.log.warning(&format!(
+                    "AirPlay RTSP on {port}: its serving thread panicked; the port may \
+                     still be bound until this process exits"
+                )),
+            }
+        }
         self.eventing.stop();
         self.host.log.info(
-            "receiver stopped (relay emptied, SSDP byebye, HTTP face closed, GENA thread \
-             released); the player is untouched",
+            "receiver stopped (relay emptied, SSDP byebye, HTTP face closed, AirPlay RTSP \
+             released, GENA thread released); the player is untouched",
         );
     }
 }
@@ -890,9 +929,13 @@ pub fn run() {
             // DLNA door and the Cast door would start disagreeing about what the
             // player was handed, which is exactly the class of bug §4.8 keeps
             // naming. Hoisted above `Soap::new` for that reason, not for tidiness.
-            let renderer = Arc::new(host::ShellRenderer {
+            let shell_renderer = Arc::new(host::ShellRenderer {
                 player: player.clone(),
-            }) as SharedRenderer;
+            });
+            // The concrete handle is kept because there are now **three** doors
+            // (SOAP, the Cast channel, AirPlay's RTSP) and the last one speaks a
+            // different trait; the object behind all three stays the one value.
+            let renderer = Arc::clone(&shell_renderer) as SharedRenderer;
             let scpd = Arc::new(Scpd::embedded()?);
             let soap = Soap::new(
                 scpd,
@@ -1012,7 +1055,14 @@ pub fn run() {
             // certificate is behind the same door because generating it writes two
             // files into the settings directory — a protocol the user switched off
             // should not leave key material behind.
-            let cast_on = host::cast_enabled(&setting, &log);
+            // One read of the enable list for **both** doors. The list is also what
+            // says which 「unknown protocol」 warnings get written, so reading it per
+            // face would repeat that sentence once per protocol and let 8009 and 7000
+            // be opened by two different snapshots of a file the settings tab can
+            // rewrite (`host::faces_enabled`'s doc, and the audit row in `host.rs`).
+            let faces = host::faces_enabled(&setting, &log);
+            let cast_on = faces.cast;
+            let airplay_on = faces.airplay;
             if !cast_on {
                 log.info(
                     "Chromecast is switched off (Macast_Protocols): not starting 8009, 8008/8443, \
@@ -1172,6 +1222,77 @@ pub fn run() {
                 }
             };
 
+            // The **AirPlay receiver**: a second, independent protocol on its own
+            // port, with its own door in the same one read of the enable list. The
+            // reference binds RTSP *before* it advertises, because macOS ships an
+            // AirPlay Receiver that already owns 7000 — so the number a sender must
+            // reach is only known after the bind, and `start()` answers with the
+            // port it got rather than the one it was asked for (`protocol_airplay.py`
+            // says the same thing in its own comment).
+            let airplay = if !airplay_on {
+                log.info(
+                    "AirPlay is switched off (Macast_Protocols): not listening on 7000, \
+                     and an iPhone will not be pointed at a port nobody serves",
+                );
+                None
+            } else {
+                let mut receiver = airplay::AirPlayReceiver::new(setting.friendly_name());
+                match receiver.start() {
+                    Ok(port) => {
+                        let receiver = Arc::new(receiver);
+                        let served = {
+                            let receiver = Arc::clone(&receiver);
+                            let serve_log = Arc::clone(&log);
+                            let sink =
+                                Arc::clone(&shell_renderer) as Arc<dyn airplay::RendererCallback>;
+                            // The reference's own thread name, typo included
+                            // (`name="AIRPLAY_RSTP"`): a reader who has seen a
+                            // Python log and a reader who has seen this one should
+                            // recognise the same line.
+                            thread::Builder::new()
+                                .name("AIRPLAY_RSTP".to_string())
+                                .spawn(move || {
+                                    if let Err(e) = receiver.serve(sink) {
+                                        serve_log.warning(&format!(
+                                            "AirPlay RTSP serve loop ended: {e} — 7000 answers no more"
+                                        ));
+                                    }
+                                })
+                        };
+                        match served {
+                            Ok(handle) => {
+                                log.info(&format!(
+                                    "AirPlay RTSP: listening on {port} as \"{}\" — the \
+                                     number this run actually bound, which is not \
+                                     necessarily 7000",
+                                    setting.friendly_name()
+                                ));
+                                Some((receiver, handle))
+                            }
+                            Err(e) => {
+                                log.warning(&format!(
+                                    "AirPlay RTSP could not start its serving thread: {e} — \
+                                     {port} is bound but nobody reads it"
+                                ));
+                                None
+                            }
+                        }
+                    }
+                    // `start` has already said which ports it tried; the sentence
+                    // here is for the reader of the startup summary, who asks
+                    // "is this Mac an AirPlay target or not".
+                    Err(e) => {
+                        log.warning(&format!(
+                            "AirPlay RTSP: not listening — no free port in the range \
+                             after 7000 ({e}); macOS's own AirPlay Receiver is the usual \
+                             reason, and turning it off in 系统设置 is the way to give \
+                             this to Macast instead"
+                        ));
+                        None
+                    }
+                }
+            };
+
             // Managed before anything is started, and this ordering is load-bearing
             // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
             // `Hooks::stop_service`, which resolves the services through
@@ -1197,6 +1318,7 @@ pub fn run() {
                 cast: cast_channel,
                 setup,
                 announce: announcer,
+                airplay: Mutex::new(airplay),
             });
 
             player.start();

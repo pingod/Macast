@@ -998,6 +998,21 @@ fn apply_line(shared: &Arc<Shared>, line: &str) -> Result<(), String> {
 /// again here, so the string `Volume: ` has one owner. Both places announce the
 /// volume — this one on connect, the other when the user moves it — and a port that
 /// spells the sentence twice is a port where one of them will drift.
+///
+/// **One window this leaves open, measured and kept.** The link slot becomes writable
+/// before these writes finish, so a handover that arrives in the same few
+/// milliseconds as the connect — AirPlay's `SET_PARAMETER` right after `PLAY` is the
+/// shape — has its volume overwritten by the default here. Measured on 2026-10-18,
+/// four runs of that exact shape against a fresh instance: **3 lost the write** (mpv
+/// read back `100.0` after the receiver had written `50`) and **1 kept it**, which is
+/// what a window rather than a rule looks like; every later session in the same
+/// instance kept it, 4/4. This is the reference's behaviour, not this port's
+/// invention — `macast_renderer/mpv.py:404-414` assigns `self.ipc_sock` and *then*
+/// calls `set_observe()`, with the same per-call `command_lock` — so closing the
+/// window would be a divergence and is not done here. It is recorded in
+/// `docs/Rust-Port-Design.md` §8, and `verify_rust_receiver.sh` §26 sends the volume
+/// 0.4 s after `PLAY` because no phone moves a slider in the same millisecond it
+/// presses play.
 fn set_observe(shared: &Arc<Shared>) {
     for observed in command::observe_all() {
         send_command(shared, &observed);

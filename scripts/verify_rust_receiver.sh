@@ -69,6 +69,48 @@ skip() { printf '  [SKIP] %s\n' "$1"; FAILED=$((FAILED + 1)); }
 
 listener_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1; }
 
+# ---- harness self-audit ------------------------------------------------------
+# This script's verdicts are only as good as the strings it greps for, and a
+# needle can be wrong in a way that never shows up as an error: in bash, a
+# backslash before a single quote **inside double quotes** stays a backslash, so
+# a needle written that way searches for text no log file has ever contained.
+# That is how §26 reported "mpv never reported file-loaded" about a run whose
+# MPV.log had printed it — the same family as the backtick-in-double-quotes bug
+# that made this script print PASS with an empty message (AGENTS.md §4.13).
+#
+# The audit says: no *code* line of this file may contain that two-character
+# sequence. Comment lines are exempt because the lesson has to be written down
+# somewhere, and a scanner that flags its own documentation gets deleted rather
+# than fixed. The pattern is assembled from pieces so this line is not itself a
+# hit — and the backslash arrives as an octal escape rather than as a quoted
+# backslash, because a backslash sitting next to a quote is the thing being
+# scanned for.
+BSL=$(printf '\134')
+SQ="'"
+QUOTE_PATTERN="$BSL$SQ"
+quote_audit() {
+    grep -Fna "$QUOTE_PATTERN" "$1" | grep -vc '^[0-9]*:[[:space:]]*#'
+}
+QUOTE_HITS=$(quote_audit "$0")
+if [ "$QUOTE_HITS" != "0" ]; then
+    echo "  [FAIL] $QUOTE_HITS code line(s) of this script hold the ${QUOTE_PATTERN} quoting bug: $(grep -Fan "$QUOTE_PATTERN" "$0" | grep -v '^[0-9]*:[[:space:]]*#' | head -3 | tr '\n' ' ')"
+    FAILED=$((FAILED + 1))
+fi
+# Positive control: the audit must find the bug when the bug is present, or the
+# zero above is the same kind of zero as a scanner over an empty directory.
+QUOTE_CONTROL=$(mktemp /tmp/macast-quote-control.XXXXXX.sh)
+printf 'needle=$(grep "%s")\n' "${QUOTE_PATTERN}event${QUOTE_PATTERN}" > "$QUOTE_CONTROL"
+if [ "$(quote_audit "$QUOTE_CONTROL")" = "1" ]; then
+    if [ "$QUOTE_HITS" = "0" ]; then
+        echo "  [PASS] harness audits itself: the ${QUOTE_PATTERN} quoting scan finds a planted bug and reports this file clean"
+    fi
+else
+    echo "  [FAIL] the quoting audit did not find the bug in a file written to contain exactly one"
+    FAILED=$((FAILED + 1))
+fi
+rm -f "$QUOTE_CONTROL"
+# -----------------------------------------------------------------------------
+
 # The two refusal sentences, by the shortest prefix that identifies which gate
 # answered. Sections 9 and 11 assert a caller heard the **token** sentence;
 # section 8 asserts **neither** appears where a route answered before any gate
@@ -3045,20 +3087,32 @@ QUERYEOF
                 else
                     # Outcome 2 splits in two, and the split is read from the
                     # engine's own sentences rather than guessed from the machine.
-                    # "mDNS engine heard query N of 3" says the kernel handed this
-                    # socket a query; "answered its first query" says we chose to
-                    # speak. Measured 2026-10-18: a python socket bound and joined
-                    # to the same group on the same port received the same 40-byte
-                    # remote `PTR _googlecast._tcp` inside this window while this
-                    # process
-                    # printed neither line — so the receiving question has to be
-                    # asked out loud, and a silent engine is a *delivery* answer,
-                    # never a pass.
+                    # "mDNS engine heard query N of 8 … asking Ptr _googlecast._tcp.local."
+                    # says the kernel handed this socket *this* query; "answered its
+                    # first query" says we chose to speak. Absent the first, this
+                    # process was never given the second.
+                    #
+                    # The subject inside the sentence is what makes that reading sound,
+                    # and it was bought with two wrong readings today. This LAN is not
+                    # quiet: the machine's own stack asks `Ptr _irohv1._udp.local.`
+                    # about every 0.8 s, and when the line counted **any** query the
+                    # whole budget was gone in four seconds — so §25 arrived at a silent
+                    # log and said "nothing was delivered". Gating the INFO line on the
+                    # subject instead of raising the cap was the other mistake: a query
+                    # that is not ours then reads exactly like a query that never
+                    # arrived. The shipped shape is both halves — INFO for ours (capped,
+                    # named), DEBUG for anyone else's (capped separately), so a reader
+                    # can always tell the three empties apart. Measured with that in
+                    # place, with no competing socket on the group at all: this process
+                    # logs nothing while a python socket joined to 224.0.0.251 on en7
+                    # sees the same three 40-byte queries — a delivery answer about this
+                    # binary, not about the responder, and not something I get to fix by
+                    # clicking his System Settings.
                     HEARD=$(log_grep 'mDNS engine heard query' | tail -1)
                     if [ -n "$HEARD" ]; then
                         fail "the engine read a query ($HEARD) and answered none while $WIRE — that is the responder's own question, not this machine's"
                     else
-                        skip "this binary was handed nothing on 5353 while $WIRE, and a joined python socket on the same port receives the same traffic; the receiving sentence never fired — proven instead by announce_tests e8 and e9 and by the loopback path"
+                        skip "this binary was handed nothing on 5353 while $WIRE, and a joined python socket on the same port receives the same traffic; the subject-named receiving sentence never fired, and the DEBUG half of it is silent too — proven instead by announce_tests e8, e9 and e10 and by the loopback path"
                     fi
                 fi
                 ;;
@@ -3106,6 +3160,333 @@ QUERYEOF
         esac
         rm -f "$QUERY_OUT" "$SNIFF_OUT" "$QUERY_PY" "$SNIFF_PY"
     fi
+fi
+
+echo "== 26: an iPhone's RTSP session reaches the mpv behind this shell =="
+# The RTSP door, wired into this shell on 2026-10-18. Nothing is stubbed: a real
+# socket speaks real RTSP to the bound port, and the witness is what **mpv** says
+# while the session is still up — the address it was handed, the name on the
+# window, and the number a `SET_PARAMETER` of 0.5 turned into.
+#
+# This run is a third instance on purpose, with `Chromecast` off and `AirPlay` on.
+# Both doors come out of **one** read of the enable list, and "they are separable"
+# is only checkable on a run whose list is not the default "everything": a sender
+# that reaches 7000 must meet a receiver, and 8009 must still refuse.
+AP_SDIR=$(mktemp -d /tmp/macast-rust-airplay.XXXXXX)
+AP_PORT=$((PORT + 6))
+AP_SOCK="$AP_SDIR/mpvsocket"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust AirPlay", "Macast_Protocols": ["DLNA Protocol", "AirPlay Protocol"]}' "$AP_PORT" \
+    > "$AP_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$AP_SDIR" MACAST_MPV_SOCKET="$AP_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$AP_SDIR/stdout.log" 2>&1 &
+AP_PID=$!
+disown "$AP_PID" 2>/dev/null || true
+
+ap_grep() { grep -ahF "$1" "$AP_SDIR/macast.log" "$AP_SDIR"/logs/*.log 2>/dev/null; }
+
+# The bound number, read from the log rather than assumed. macOS ships its own
+# AirPlay Receiver on 7000 — `ControlCenter` holds it on this machine, measured —
+# so the port that answers is the one `start()` fell back to.
+RTSP_PORT=""
+for _ in $(seq 1 40); do
+    line=$(ap_grep 'AirPlay RTSP server started on port ' | tail -1)
+    if [ -n "$line" ]; then RTSP_PORT=${line##*port }; break; fi
+    sleep 0.25
+done
+if [ -z "$RTSP_PORT" ]; then
+    skip "no AirPlay RTSP listener line in $AP_SDIR/macast.log — the face never came up"
+else
+    pass "the receiver says which port it bound: $RTSP_PORT (7000 is macOS's own)"
+    case "$RTSP_PORT" in
+        700[0-9]|701[0-9]) pass "and that number is inside the 7000..7019 range the reference tries";;
+        *) fail "$RTSP_PORT is outside the 7000..7019 range the reference tries";;
+    esac
+    if curl -s -m 2 -o /dev/null "http://127.0.0.1:8009/setup/eureka_info"; then
+        fail "Chromecast is off in the settings list and 8009 still answered"
+    else
+        pass "with Chromecast off, 8009 refuses while AirPlay answers"
+    fi
+fi
+
+if [ -n "$RTSP_PORT" ]; then
+    # Derived from `$CLIP`, which the user can point at another file with
+    # `MACAST_VERIFY_CLIP` — a needle hardcoded to the default name would then read
+    # "the player was handed nothing" about a run that handed it everything.
+    CLIP_STEM=$(basename "$CLIP" .mp4)
+    RTSP_PY=/tmp/verify_rust_receiver_airplay.py
+    RTSP_OUT=/tmp/verify_rust_receiver_airplay.txt
+    cat > "$RTSP_PY" <<'PY'
+import json, socket, sys, time
+
+port, media, sockpath = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+rtsp = socket.create_connection(("127.0.0.1", port), timeout=5)
+rtsp.settimeout(3.0)
+cseq = 0
+
+
+def ask(method, headers=(), body=""):
+    """One RTSP request. Returns its status line and its header block."""
+    global cseq
+    cseq += 1
+    lines = ["%s rtsp://127.0.0.1/ RTSP/1.0" % method, "CSeq: %d" % cseq]
+    lines += ["%s: %s" % (k, v) for k, v in headers]
+    payload = body.encode()
+    if payload:
+        lines.append("Content-Length: %d" % len(payload))
+    rtsp.sendall(("\r\n".join(lines) + "\r\n\r\n").encode() + payload)
+    got = b""
+    while True:
+        try:
+            chunk = rtsp.recv(4096)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        got += chunk
+        head, _, rest = got.partition(b"\r\n\r\n")
+        want = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length"):
+                want = int(line.split(b":")[1])
+        if not rest and not want:
+            break
+        if len(rest) >= want:
+            break
+    head = got.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+    return (head.split("\r\n")[0] if head else "(nothing back)"), head
+
+
+def code(line):
+    """The **number** in the status line. The first version of this row printed
+    `line.split()[-1]`, which is `OK` for a 200 and `Not Found` for a 454, and
+    then compared it to `200` — an instrument that could only ever answer wrong."""
+    parts = line.split()
+    return parts[1] if len(parts) > 1 and parts[1].isdigit() else "none"
+
+
+first, head = ask("OPTIONS")
+print("OPTIONS=%s" % code(first))
+print("PUBLIC=%d" % (1 if all(m in head for m in (
+    "OPTIONS", "ANNOUNCE", "SETUP", "RECORD", "PLAY", "PAUSE", "FLUSH", "STOP",
+    "TEARDOWN", "SET_PARAMETER", "GET_PARAMETER")) else 0))
+print("ECHO=%d" % (1 if "CSeq: 1" in head else 0))
+
+first, _ = ask("ANNOUNCE")
+print("NOLOCATION=%s" % code(first))
+
+first, head = ask("SETUP", [("Transport", "RTP/AVP/TCP;unicast;interleaved=0-1")])
+print("SETUP=%s" % code(first))
+session = ""
+for line in head.split("\r\n"):
+    if line.lower().startswith("session"):
+        session = line.split(":", 1)[1].split(";")[0].strip()
+print("SESSION=%s" % (session or "none"))
+
+print("ANNOUNCE=%s" % code(ask("ANNOUNCE", [("Content-Location", media)])[0]))
+print("RECORD=%s" % code(ask("RECORD", [("Session", session)])[0]))
+print("PLAY=%s" % code(ask("PLAY", [("Session", session), ("Range", "npt=0-")])[0]))
+
+# The player's side is asserted in bash against **two durable things** — the lines
+# this receiver wrote about the handover, and the properties mpv still reports after
+# the clip has ended. The first version of this section polled `path` from inside the
+# client, and the 12 s clip had already reached `end-file reason=eof` by the time it
+# looked: mpv answers `path` with nothing once it is idle, so a working handover read
+# as "the player was never handed anything". AGENTS.md §4.2's 「等那个账本」 applies to
+# the file, not to a property that goes back to empty.
+#
+# Two waits, and both are the sender's own cadence rather than a courtesy:
+# 0.4 s before the volume, because `set_observe` writes the default volume onto a
+# freshly connected player and a SET_PARAMETER in the same millisecond as PLAY lands
+# **inside** that window can be overwritten with 100. Measured 2026-10-18 against a
+# fresh instance, four runs of that shape: three lost the write, one kept it — a
+# window, not a rule — and every later session kept it. `macast_renderer/mpv.py:404-414`
+# has the same ordering, so this is the reference's behaviour copied rather than a bug
+# introduced here; §8 of the design doc carries the row. No phone sends volume in the
+# same millisecond as PLAY: the slider is a separate gesture.
+# 1.5 s before TEARDOWN, because a `stop` landing mid-load emits no `file-loaded` at
+# all, and the first two versions of this row were asserting that race.
+time.sleep(0.4)
+first, _ = ask("SET_PARAMETER", [("Session", session), ("Content-Type", "text/parameters")],
+               "volume: 0.5\n")
+print("SETPARAM=%s" % code(first))
+# A sender does not tear down 3 ms after its PLAY, and this section must not: the
+# first two versions of this row raced the player's own pipeline (a `stop` landing
+# mid-load emits no `file-loaded` at all, so the check was asserting the race
+# rather than the handover). One and a half seconds is what mpv on this machine
+# takes to report the file, and the events it writes are the durable witnesses the
+# bash rows below read.
+time.sleep(1.5)
+print("TEARDOWN=%s" % code(ask("TEARDOWN", [("Session", session)])[0]))
+rtsp.close()
+PY
+    # Wait for the player to be **there** before the session starts. Every face of
+    # this shell is constructed before `player.start()`, so the RTSP door opens while
+    # there is no mpv to hand anything to; a real iPhone is seconds behind that, and
+    # so is this check. The wait prints what it waited for, because "the player was
+    # up" is a premise of the three rows below rather than part of them — the
+    # sub-second ordering is its own finding (§16's AirPlay row).
+    PLAYER_WAIT=0
+    until python3 - "$AP_SOCK" <<'PING' >/dev/null 2>&1
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(1)
+s.connect(sys.argv[1])
+s.sendall(json.dumps({"command": ["get_property", "idle-active"], "request_id": 3}).encode() + b"\n")
+buf = b""
+while b'"data"' not in buf:
+    buf += s.recv(4096)
+PING
+    do
+        PLAYER_WAIT=$((PLAYER_WAIT + 1))
+        [ "$PLAYER_WAIT" -ge 40 ] && break
+        sleep 0.25
+    done
+    echo "  (the player's own IPC answered after $((PLAYER_WAIT * 250)) ms)"
+    env -u PYTHONPATH python3 "$RTSP_PY" "$RTSP_PORT" "file://$CLIP" "$AP_SOCK" > "$RTSP_OUT" 2>&1
+    field() { grep -a "^$1=" "$RTSP_OUT" | head -1 | cut -d= -f2-; }
+    # One property, over the player's own IPC socket, against **this** instance's
+    # socket — the shared `mpv_ask` reads the first instance's, which would answer
+    # "what is AirPlay playing" with another session's player (§24 learned that
+    # about `log_grep` the hard way: a reader pointed at the wrong directory
+    # answers a different question entirely).
+    ap_mpv_ask() {
+        python3 - "$AP_SOCK" "$1" <<'PINGMPV'
+import json, socket, sys
+path, name = sys.argv[1], sys.argv[2]
+# An explicit AF_UNIX socket: `create_connection` wants a (host, port) pair and
+# unpacks a path string one character at a time, so every read died with
+# `ValueError: too many values to unpack` while the player was answering fine.
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(4)
+try:
+    s.connect(path)
+except OSError:
+    print("")
+    raise SystemExit(0)
+s.sendall(json.dumps({"command": ["get_property", name], "request_id": 7}).encode() + b"\n")
+got = ""
+try:
+    buf = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        rows = []
+        for line in buf.split(b"\n"):
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+        hit = [r for r in rows if r.get("request_id") == 7]
+        if hit:
+            data = hit[0].get("data")
+            got = "" if data is None else str(data)
+            break
+except Exception:
+    pass
+print(got)
+PINGMPV
+    }
+    if [ ! -s "$CLIP" ]; then
+        skip "no clip, so the RTSP session has no media to hand the player"
+    else
+        echo "  (witness) $(tr '\n' ' ' < "$RTSP_OUT")"
+        [ "$(field OPTIONS)" = "200" ] && pass "OPTIONS is answered" \
+            || fail "OPTIONS answered $(field OPTIONS): $(head -1 "$RTSP_OUT")"
+        [ "$(field PUBLIC)" = "1" ] && pass "and its Public header lists the eleven methods the reference implements" \
+            || fail "the Public header is missing methods"
+        [ "$(field ECHO)" = "1" ] && pass "the sender's CSeq comes back on the first reply" \
+            || fail "CSeq was not echoed, so the sender's numbering drifts from the first exchange"
+        [ "$(field NOLOCATION)" = "400" ] && pass "an ANNOUNCE with no address is refused, not accepted" \
+            || fail "an address-less ANNOUNCE answered $(field NOLOCATION) — a 200 there promises a play that cannot happen"
+        if [ -n "$(ap_grep 'AirPlay ANNOUNCE carried no Content-Location')" ]; then
+            pass "and the refusal says why, in the log a user can read"
+        else
+            fail "the 400 came back and nothing was written down about it"
+        fi
+        [ "$(field ANNOUNCE)" = "200" ] && pass "the real address is accepted" || fail "ANNOUNCE: $(field ANNOUNCE)"
+        [ "$(field SETUP)" = "200" ] && [ -n "$(field SESSION)" ] && pass "SETUP hands back a session id" \
+            || fail "SETUP: $(field SETUP) with session='$(field SESSION)'"
+        [ "$(field RECORD)" = "200" ] && pass "RECORD is answered" || fail "RECORD: $(field RECORD)"
+        [ "$(field PLAY)" = "200" ] && pass "PLAY is answered" || fail "PLAY: $(field PLAY)"
+        [ "$(field SETPARAM)" = "200" ] && pass "SET_PARAMETER is answered" || fail "SET_PARAMETER: $(field SETPARAM)"
+        [ "$(field TEARDOWN)" = "200" ] && pass "TEARDOWN is answered" || fail "TEARDOWN: $(field TEARDOWN)"
+
+        # What the sender was promised, read off the player rather than off the
+        # reply that promised it.
+        # Durable witness one: mpv's own log says a file started and loaded, and
+        # the line above it says which address the RTSP layer was handed.
+        if [ -n "$(ap_grep 'AirPlay ANNOUNCE url=file://')" ]; then
+            pass "the announced address was taken: $(ap_grep 'AirPlay ANNOUNCE url=' | tail -1)"
+        else
+            fail "no ANNOUNCE line in the log — PLAY answered 200 and nothing recorded what it carried"
+        fi
+        LOADED=""
+        for _ in $(seq 1 40); do
+            # The needle is inside **double** quotes, so it is written without any
+            # backslashes: in bash, `\'` inside double quotes is a literal backslash
+            # plus a quote, not an escaped quote. The first version of this row read
+            # `"\'event\': \'file-loaded\'"`, grepped for that literal, found nothing
+            # on every run, and the failure text (`tail -3` of a log that had long
+            # since printed `file-loaded`) read exactly like "the load died mid-way".
+            # The product was fine; §4.2's 「假命令行工具的输出」 family, this time
+            # with the shell's own quoting rules as the fictional format.
+            if [ -n "$(ap_grep "{'event': 'file-loaded'}")" ]; then LOADED=1; break; fi
+            sleep 0.25
+        done
+        if [ -n "$LOADED" ]; then
+            pass "and mpv loaded it (file-loaded in logs/MPV.log)"
+        else
+            fail "mpv never reported file-loaded: $(tail -3 "$AP_SDIR/logs/MPV.log" 2>/dev/null | tr '\n' ' ')"
+        fi
+        # Durable witness two: the name outlives the clip, and this is the row that
+        # separates this shell from the one that carried a second copy of the naming
+        # rule (`clip.mp4` on the window instead of `clip`).
+        WANT_TITLE="$CLIP_STEM"
+        GOT_TITLE=$(ap_mpv_ask force-media-title)
+        if [ "$GOT_TITLE" = "$WANT_TITLE" ]; then
+            pass "and it is named the way the page and Cast name it: $GOT_TITLE"
+        else
+            fail "the window says '$GOT_TITLE'; the shared owner answers '$WANT_TITLE'"
+        fi
+        # Durable witness three: the number the sender asked for, in both scales, in
+        # **our** line — and then the value mpv still holds.
+        #
+        # This row used to poll MPV.log for
+        # `{'event': 'property-change', ..., 'data': 50.0}`, and two things are wrong
+        # with that: mpv emits no property-change when the value it already has is set
+        # again (so a legitimate second gesture is invisible), and the line is an
+        # *event* the player chose to broadcast, not the fact under test. What is
+        # under test is "the receiver handed over 0–100 correctly, and the player
+        # holds it".
+        if [ -n "$(ap_grep 'AirPlay SET_PARAMETER volume 0.5 -> renderer volume 50')" ]; then
+            pass "the sender's 0.5 became the 0-100 number the player takes, and the receiver said so"
+        else
+            fail "SET_PARAMETER answered 200 and nothing was written about which number was handed over: $(ap_grep 'SET_PARAMETER' | tail -2)"
+        fi
+        GOT_VOLUME=$(ap_mpv_ask volume)
+        if [ "$GOT_VOLUME" = "50" ] || [ "$GOT_VOLUME" = "50.0" ]; then
+            pass "and mpv still holds that volume after the session: $GOT_VOLUME"
+        else
+            fail "mpv reports volume='$GOT_VOLUME' after a SET_PARAMETER of 0.5 — the handover was lost (see the 0.4 s note above: a first-session write landing inside set_observe's window is overwritten by the default volume, in the reference as here)"
+        fi
+        if [ -n "$(ap_grep 'RTSP idle timeout')" ]; then
+            fail "the control connection timed out mid-session: $(ap_grep 'RTSP idle timeout' | tail -1)"
+        else
+            pass "and the session never sat idle long enough for the receiver to reclaim it"
+        fi
+    fi
+    kill -9 "$AP_PID" 2>/dev/null
+    pkill -9 -f "$AP_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $AP_SDIR (macast.log, logs/MPV.log, stdout.log)"
+    else
+        rm -rf "$AP_SDIR"
+    fi
+    rm -f "$RTSP_PY" "$RTSP_OUT"
 fi
 
 echo

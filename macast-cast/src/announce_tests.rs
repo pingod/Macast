@@ -1322,27 +1322,99 @@ fn e9_the_receiving_sentence_fires_for_a_query_and_never_for_our_own_echo() {
          product half of the diagnosis: {}",
         lines(&heard_path)
     );
+    // **What was asked** is in the line, not just a byte count. Measured on this
+    // Mac 2026-10-18: a fresh instance's log filled with three `Ptr
+    // _http._tcp.local.` probes from the machine's own stack — the same shape the
+    // old anonymous line printed as "36 bytes", indistinguishable from a
+    // Chromecast's query — and §25's cold browser arrived to a spent budget. A
+    // reader of the log has to be able to tell which query this process is talking
+    // about, or the sentence cannot separate the empties it exists to separate.
+    let subject = format!("{:?} {}", crate::respond::Kind::Ptr, SERVICE_TYPE);
+    let asked = format!("asking {subject}");
+    assert!(
+        loud(&heard_path).contains(&asked),
+        "the hearing line names no subject ({asked}): {}",
+        lines(&heard_path)
+    );
+    // The same subject has to be in the **answering** sentence too: §25 pairs the
+    // two lines and reads them as one story, and an answer whose question is not
+    // named cannot be matched to the query the harness sent.
+    let answered = loud(&heard_path)
+        .lines()
+        .find(|record| record.contains("answered its first query"))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        answered.contains(&subject),
+        "the answering sentence does not say what it answered ({subject} would have \
+         to be inferred from the line above it, which is a different datagram): {answered}"
+    );
 
-    // And the sentence is **capped**: three, and the number is a *literal* here on
+    // And a query about **somebody else** is still admitted to — at DEBUG, and under
+    // its own cap. The INFO line is reserved for traffic a reader of this log cares
+    // about (a cap that the machine's own chatter can outrun is not a witness), but
+    // "not ours" and "never arrived" must stay two different answers, so the
+    // receiving fact is written down either way.
+    let other = Logger::named("Discovery-OtherType");
+    let other_path = other.claim();
+    {
+        let _debug = crate::DebugWindow::armed();
+        drive(
+            &service,
+            &other,
+            vec![
+                (foreign_query("_http._tcp.local.", 0, false), peer(MDNS_PORT)),
+                (foreign_query("_printer._tcp.local.", 7, false), peer(MDNS_PORT)),
+            ],
+        );
+    }
+    assert_eq!(
+        said(&other_path),
+        0,
+        "the INFO budget was spent on a query this service cannot answer, which is \
+         how §25's own query ends up unsaid: {}",
+        lines(&other_path)
+    );
+    assert_eq!(
+        lines(&other_path)
+            .lines()
+            .filter(|record| record.contains("a query that is not ours"))
+            .count(),
+        2,
+        "two foreign queries arrived and neither was recorded at all, so the log \
+         cannot tell \"not for us\" from \"nothing came\": {}",
+        lines(&other_path)
+    );
+    assert!(
+        lines(&other_path)
+            .lines()
+            .filter(|record| record.contains("a query that is not ours"))
+            .all(|record| record.contains("[DEBUG]")),
+        "the foreign line is meant to be DEBUG — at INFO it is the chatter that \
+         outran the old cap: {}",
+        lines(&other_path)
+    );
+    assert!(
+        loud(&heard_path).contains(&asked),
+        "the hearing line names no subject ({asked}): {}",
+        lines(&heard_path)
+    );
+
+    // And the sentence is **capped**: eight, and the number is a *literal* here on
     // purpose. The first version asserted `said == crate::announce::HEARD_SENTENCES`
     // — a same-source equality that is true for every value of the constant, and a
     // mutant moving the cap 3 → 4 came back **0 red** because of it (§13.4's
-    // 「对任何上限值都成立」 again, this time in a test I wrote this hour). Six
-    // queries now, three lines expected: a chatty scanner cannot turn this into a
-    // line per probe, which is §4.10's measured flood.
+    // 「对任何上限值都成立」 again, this time in a test I wrote this hour). Ten
+    // queries now, eight lines expected: a chatty scanner cannot turn this into a
+    // line per probe, which is §4.10's measured flood. Eight replaced three on
+    // 2026-10-18 because one script run has three separate browsers asking, and a
+    // cap they all fit inside before §25 arrives is not a witness.
     let capped = Logger::named("Discovery-Capped");
     let capped_path = capped.claim();
     drive(
         &service,
         &capped,
-        vec![
-            (query.clone(), peer(MDNS_PORT)),
-            (query.clone(), peer(MDNS_PORT)),
-            (query.clone(), peer(MDNS_PORT)),
-            (query.clone(), peer(MDNS_PORT)),
-            (query.clone(), peer(MDNS_PORT)),
-            (query.clone(), peer(MDNS_PORT)),
-        ],
+        (0..10).map(|_| (query.clone(), peer(MDNS_PORT))).collect(),
     );
     let heard = lines(&capped_path)
         .lines()
@@ -1351,8 +1423,8 @@ fn e9_the_receiving_sentence_fires_for_a_query_and_never_for_our_own_echo() {
         .collect::<Vec<_>>();
     assert_eq!(
         heard.len(),
-        3,
-        "the hearing sentence is capped at three lines; the loop wrote {}: {}",
+        8,
+        "the hearing sentence is capped at eight lines; the loop wrote {}: {}",
         heard.len(),
         lines(&capped_path)
     );

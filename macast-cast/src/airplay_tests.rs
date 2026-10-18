@@ -444,7 +444,42 @@ fn play_sets_title_from_url() {
     state.handle_request(&play, renderer.as_ref());
     let titles = renderer.titles.lock().unwrap();
     assert_eq!(titles.len(), 1);
-    assert_eq!(titles[0], "my_video.mp4");
+    // The container suffix is **not** part of the name. This row used to say
+    // `my_video.mp4`, because the test and the module were written against the
+    // same three-line derivation rather than against the reference; the answer the
+    // page gives for the same address is `my_video`
+    // (`media_resolve.title_for_uri`, frozen in `resolve`'s differential test).
+    assert_eq!(titles[0], "my_video");
+}
+
+#[test]
+fn play_names_the_stream_the_way_the_page_does() {
+    crate::pin_test_dir();
+    // The seam, not the arithmetic: whatever the shared owner answers for this
+    // address is what the RTSP path must hand the player. Two owners of one rule is
+    // how the same file ends up with two window titles depending on which button
+    // was pressed (AGENTS.md §4.2, 「两处答案不一致比没有数字更糟」).
+    for url in [
+        "http://media.url/path/my_video.mp4",
+        "http://h/a.mp4?x=1&t=2",
+        "http://h/relay/f1CrNPfebdllNdlsh4NhrQ/media",
+        "http://h/%E4%B8%AD%E6%96%87.mp4",
+        "not-a-real-url",
+        "http://[::1",
+    ] {
+        let state = AirPlayState::new("Test".into());
+        let renderer = Arc::new(VolumeCapture::new());
+        let ann = make_request("ANNOUNCE", "rtsp://x", &[("Content-Location", url)], "");
+        state.handle_request(&ann, renderer.as_ref());
+        let play = make_request("PLAY", "rtsp://x", &[("CSeq", "2")], "");
+        let (code, _, _) = state.handle_request(&play, renderer.as_ref());
+        assert_eq!(code, 200, "{url}: PLAY must answer");
+        let expected = crate::resolve::title_for_uri(url, url).unwrap_or_else(|_| url.to_string());
+        assert_eq!(
+            renderer.titles.lock().unwrap()[0], expected,
+            "{url}: the RTSP path and the page disagree about the name"
+        );
+    }
 }
 
 // ── handle_request: PAUSE ───────────────────────────────────────────
@@ -691,7 +726,7 @@ fn title_from_url_with_path() {
     state.handle_request(&ann, renderer.as_ref());
     let play = make_request("PLAY", "rtsp://x", &[("CSeq", "1")], "");
     state.handle_request(&play, renderer.as_ref());
-    assert_eq!(renderer.titles.lock().unwrap()[0], "clip.mp4");
+    assert_eq!(renderer.titles.lock().unwrap()[0], "clip");
 }
 
 #[test]
@@ -877,4 +912,155 @@ fn the_two_refusals_are_written_down_not_just_returned() {
         text.contains("AirPlay PLAY without a prior ANNOUNCE url"),
         "the 455 was returned and nothing was written down: {text}"
     );
+}
+
+#[test]
+fn a_volume_request_says_both_numbers_before_it_moves_the_player() {
+    crate::pin_test_dir();
+    // Why the sentence exists, measured 2026-10-18: mpv does not emit a
+    // `property-change` event when the number it already holds is set again. §26's
+    // first reading of "did the volume land" watched MPV.log for a `50.0` line, so
+    // the second identical SET_PARAMETER in a session was invisible — and a
+    // mid-load one really was lost, which the event row could not distinguish from
+    // "nothing happened". The receiver's own line carries both numbers, the sender's
+    // 0–1 scale and the player's 0–100 scale, so the two are never confused again.
+    let state = AirPlayState::new("Test".into());
+    let renderer = Arc::new(VolumeCapture::new());
+    let req = make_request(
+        "SET_PARAMETER",
+        "rtsp://x",
+        &[("CSeq", "1"), ("Content-Type", "text/parameters")],
+        "volume: 0.5\n",
+    );
+    let (code, _, _) = state.handle_request(&req, renderer.as_ref());
+    assert_eq!(code, 200);
+    assert_eq!(renderer.volumes.lock().unwrap().as_slice(), &[50]);
+    let text = root_log();
+    assert!(
+        text.contains("AirPlay SET_PARAMETER volume 0.5 -> renderer volume 50"),
+        "the handover happened and the log does not say which number became which: {text}"
+    );
+}
+
+#[test]
+fn an_unreadable_volume_is_answered_and_said_out_loud() {
+    crate::pin_test_dir();
+    // 200 is what the reference gives back when it cannot read the body, and that
+    // is fine as long as the reason is written down somewhere — otherwise a user
+    // who drags the phone's slider hears "no reply means it worked" from the
+    // protocol and finds nothing in the log that contradicts it.
+    let state = AirPlayState::new("Test".into());
+    let renderer = Arc::new(VolumeCapture::new());
+    let req = make_request(
+        "SET_PARAMETER",
+        "rtsp://x",
+        &[("CSeq", "1"), ("Content-Type", "text/parameters")],
+        "volume: loud\n",
+    );
+    let (code, _, _) = state.handle_request(&req, renderer.as_ref());
+    assert_eq!(code, 200);
+    assert!(
+        renderer.volumes.lock().unwrap().is_empty(),
+        "a number this receiver cannot read must not move the player"
+    );
+    let text = root_log();
+    assert!(
+        text.contains("AirPlay SET_PARAMETER carried a volume this receiver could not read"),
+        "the sender asked for a volume and nothing was written about why it did not change: {text}"
+    );
+    // No negative assertion about the *other* sentence living in this file: these
+    // tests share one process and one `macast.log`, so "the handover line is not
+    // here" would be a claim about the test scheduler (§4.2's parallel-fixture
+    // family). `renderer.volumes` being empty above is the product-side answer.
+}
+
+// ── serve(): the loop the shell actually runs ───────────────────────
+
+#[test]
+fn stop_ends_the_serve_loop_and_lets_go_of_the_port() {
+    crate::pin_test_dir();
+    // `receiver_serve_accepts_connection` above never calls `serve` — it takes the
+    // listener out of the receiver and accepts by hand, so the loop that the shell
+    // runs was never entered by a test, and its blocking `accept` looked covered.
+    // A parked accept does not see the stop flag: the thread keeps the listening
+    // socket until some sender connects, which is "the user switched AirPlay off and
+    // 7000 is still ours". Ask the two things that matter: the call comes back, and
+    // the number is free.
+    let mut recv = AirPlayReceiver::new("TestBox".into());
+    let port = recv.start().expect("bind");
+    let recv = Arc::new(recv);
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let running = Arc::clone(&recv);
+        std::thread::spawn(move || {
+            let out = running.serve(Arc::new(VolumeCapture::new()));
+            // Put our share of the socket down **before** reporting: the listener
+            // belongs to the receiver, and a receiver still alive in this thread
+            // keeps the port bound. The first version of this row failed for that
+            // reason alone — the loop had stopped, and the number was still ours.
+            drop(running);
+            let _ = tx.send(out);
+        });
+    }
+    // Long enough to be inside `accept`, which is the state a blocking loop cannot
+    // leave.
+    std::thread::sleep(Duration::from_millis(400));
+    recv.stop();
+    let ended = rx.recv_timeout(Duration::from_secs(3));
+    assert!(
+        matches!(ended, Ok(Ok(()))),
+        "serve did not return after stop (a parked accept never looks at the flag): {ended:?}"
+    );
+    drop(recv);
+    let again = TcpListener::bind(("0.0.0.0", port));
+    assert!(again.is_ok(), "port {port} is still held after the loop ended");
+}
+
+#[test]
+fn a_connection_that_arrives_after_the_first_poll_is_still_answered() {
+    crate::pin_test_dir();
+    // The other half: polling must not turn the accepted socket into a nonblocking
+    // one. On Linux an accepted socket inherits the listener's `O_NONBLOCK`, and then
+    // `handle_connection`'s timed read would return `WouldBlock` on an empty socket
+    // instead of waiting for the second packet — so a sender that writes the request
+    // in pieces (which is what a real client does when it has not been told the
+    // address yet) gets nothing back, on one platform only.
+    let mut recv = AirPlayReceiver::new("TestBox".into());
+    let port = recv.start().expect("bind");
+    let recv = Arc::new(recv);
+    let renderer = Arc::new(VolumeCapture::new());
+    {
+        let running = Arc::clone(&recv);
+        let sink = Arc::clone(&renderer);
+        std::thread::spawn(move || {
+            let _ = running.serve(sink);
+        });
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .expect("a read timeout on the client");
+    // Piece one now, piece two after the loop has had several polls to itself.
+    client
+        .write_all(b"OPTIONS * RTSP/1.0\r\nCSe")
+        .expect("the first piece leaves");
+    client.flush().expect("flush");
+    std::thread::sleep(Duration::from_millis(300));
+    client
+        .write_all(b"q: 7\r\n\r\n")
+        .expect("the second piece leaves");
+    let mut got = [0u8; 512];
+    use std::io::Read as _;
+    let length = client.read(&mut got).expect("an answer comes back");
+    let text = String::from_utf8_lossy(&got[..length]).to_string();
+    assert!(
+        text.starts_with("RTSP/1.0 200 OK"),
+        "a split request was not answered: {text}"
+    );
+    assert!(
+        text.contains("CSeq: 7"),
+        "the sequence number of the second piece was not echoed: {text}"
+    );
+    recv.stop();
 }

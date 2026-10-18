@@ -306,6 +306,26 @@ fn answers(question: &Question, shape: &Shape) -> Vec<Group> {
     }
 }
 
+/// Whether any of these questions asks about records **this** shape holds.
+///
+/// The announcer's log line needs exactly this question, and it is answered here —
+/// by calling the same matcher that produces the answers — rather than by a second
+/// copy of the name rules. A copy would be a divergence waiting to happen: the log
+/// would claim a query was "about us" on a datagram the decision layer then ignores.
+///
+/// A question that is ours but fully suppressed by the asker's known answers counts
+/// **here**, which is the point: "we were asked and declined" and "we were never
+/// asked" are two different facts, and `verify_rust_receiver.sh` §25 has to tell
+/// them apart from one line. Measured on this Mac 2026-10-18: a cold python browser
+/// and this process were both joined to the group, the LAN also carries queries for
+/// `_http._tcp.local.` (36 bytes, not ours, answered by nobody), and a cap that
+/// counts *any* query gets spent on that chatter before the browser has asked
+/// anything — which is how "the receiving sentence never fired" came to be written
+/// down as "this binary receives no inbound multicast". It does.
+pub fn concerns(questions: &[Question], shape: &Shape) -> bool {
+    questions.iter().any(|question| !answers(question, shape).is_empty())
+}
+
 /// ANY over one instance name: TXT and SRV in the answer section, the host pair as
 /// additionals on the SRV, and **no PTR** — the corpus's `any` row is four records
 /// and a PTR is not among them.

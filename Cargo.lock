@@ -1742,7 +1742,6 @@ name = "macast-cast"
 version = "0.1.0"
 dependencies = [
  "libc",
- "log",
  "macast-core",
  "macast-upnp",
  "rand",
