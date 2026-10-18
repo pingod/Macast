@@ -1144,7 +1144,7 @@ else
         || fail "candidate mode: '$(json_ask status.candidates.0.mode)'"
 fi
 
-echo "== 16: casting a candidate goes through our relay; the device arm refuses =="
+echo "== 16: casting a candidate goes through our relay; the device arm names a row it does not have =="
 if [ -z "$CLIP_BYTES" ] || [ -z "$JOB" ]; then
     skip "no job, so nothing to cast"
 else
@@ -1200,17 +1200,34 @@ else
         && pass "and the window name follows the page, overwriting the earlier cast" \
         || fail "mpv force-media-title reads '$(mpv_ask force-media-title)', not $PAGE_TITLE"
 
-    # The device arm. `target_push` does not exist in this crate yet (task #26),
-    # so the honest answer is a refusal that says which face is missing — and
-    # the player must still be on the **local** cast's address afterwards.
-    # Run second on purpose: "unchanged" only means something once there is a
-    # change to be unaffected by (the red line is that neither arm may touch our
-    # own playstate from the other one).
+    # The device arm. The send face (`macast-cast/src/push.rs`) and this wiring both
+    # exist now, so this is no longer "the shell has no sender"; what *is* reachable
+    # here without touching somebody else's player is the arm's stale-row answer,
+    # and that is what this asserts. `tv` is a shape
+    # `targets::Table` can never produce (rows are `cast:{host}:{port}` or
+    # `dlna:{control-url}`), so the row stays deterministic even when a real
+    # renderer answers the search — and pushing to a device that happens to be
+    # alive on this LAN is deliberately **not** tested: the only renderers out here
+    # are the user's own Macast instances, and starting playback on his other
+    # machine is not this script's call to make.
     api_post "$BASE/api" "cast-resolved=1" "job=$JOB" "candidate=0" "target=tv"
     [ "$API_CODE" = "1" ] \
-        && case "$API_MSG" in *"这台设备还投不了"*) true ;; *) false ;; esac \
-        && pass "the device arm refuses and names the missing face" \
+        && case "$API_MSG" in *"设备列表里没有这一台"*) true ;; *) false ;; esac \
+        && pass "the device arm refuses a row the caches do not hold, by name" \
         || fail "device arm answered code '$API_CODE': $API_MSG"
+    case "$API_MSG" in
+        *"这台设备还投不了"*) fail "it still says the shell has no sender face: $API_MSG" ;;
+        *) pass "and it no longer blames a missing face that exists" ;;
+    esac
+    # The wrapper is Python's: `_cast_relayed` builds `{'code','message','target'}`
+    # **before** it knows the outcome (`protocol.py:2982-2983`), so even a refusal
+    # echoes the id it was handed.
+    [ "$(json_keys .)" = "code,message,target" ] \
+        && pass "and the refusal carries the target it was asked for" \
+        || fail "device-arm keys: $(json_keys .)"
+    [ "$(json_ask target)" = "tv" ] \
+        && pass "echoed verbatim, not re-derived from the row that is not there" \
+        || fail "target echo: '$(json_ask target)'"
     [ "$(track_uri)" = "$RELAY_URL" ] \
         && pass "and the refused device push left our own player alone" \
         || fail "a refused device push moved our player to '$(track_uri)'"
@@ -1491,41 +1508,136 @@ else
         || fail "state.browser after off: '$(json_ask state.browser)'"
 fi
 
-echo "== 19: the device dropdown answers with a refusal that is a full document =="
-# This shell has no `target_push` seam yet (task #22), so the honest answer to
-# "which device?" is a refusal — but the card must still be able to **stop
-# spinning**. The reference's refusal shape ships `searching` and `known` as
-# `false` rather than leaving them out, because the page reads them as booleans
-# and a missing key is a spinner that never ends.
+echo "== 19: the device dropdown is served, with 本机 first =="
+# The device dropdown is **served** now (the shell reads `targets::Table`), so this
+# is the success document rather than the refusal it used to be. What gets asserted
+# is the core's own half — the local row, the key order, the two booleans — because
+# the device rows are a fact about this LAN, and this
+# LAN has no Chromecast: requiring a count would make the script red for somebody
+# else's television being switched off. `targets::Table` is what answers, and the
+# core prepends 「本机」 (`protocol.py:1793`), exactly as the reference splits it.
 api_probe "$BASE/api?query=cast-targets"
-[ "$API_STATUS" = "200" ] && [ "$API_CODE" = "1" ] \
-    && pass "the device list answers, as a refusal, and loopback is admitted" \
-    || fail "cast-targets answered HTTP $API_STATUS code '$API_CODE'"
-case "$API_MSG" in
-    *"这台设备还投不了"*) pass "and it names the missing face rather than a network problem" ;;
-    *) fail "refusal wording: $API_MSG" ;;
-esac
+[ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] && [ "$API_MSG" = "success" ] \
+    && pass "the list is served, and loopback is admitted" \
+    || fail "cast-targets answered HTTP $API_STATUS code '$API_CODE': $API_MSG"
+[ "$(json_keys .)" = "code,message,targets" ] \
+    && pass "the wrapper is the reference's three keys" \
+    || fail "cast-targets keys: $(json_keys .)"
+[ "$(json_keys targets)" = "items,searching,known" ] \
+    && pass "the document is items,searching,known, in that order" \
+    || fail "targets keys: $(json_keys targets)"
+[ "$(json_ask targets.items.0.id)" = "local" ] \
+    && pass "the first row is always this machine" \
+    || fail "first row id: '$(json_ask targets.items.0.id)'"
+[ "$(json_ask targets.items.0.kind)" = "local" ] && [ "$(json_ask targets.items.0.address)" = "" ] \
+    && pass "and it names no socket — the local row is a route through our player, not an address" \
+    || fail "local row: kind='$(json_ask targets.items.0.kind)' address='$(json_ask targets.items.0.address)'"
 case "$API_MSG" in
     *"$MANAGEMENT_MARK"*) fail "loopback heard the management sentence: $API_MSG" ;;
     *) pass "and no gate sentence, since nothing here runs code" ;;
 esac
-[ "$(json_keys .)" = "code,message,targets" ] \
-    && pass "the refusal is wrapped the same way the success document would be" \
-    || fail "cast-targets keys: $(json_keys .)"
-[ "$(json_keys targets)" = "items,searching,known" ] \
-    && pass "and the target row ships all three keys, in the reference's order" \
-    || fail "targets keys: $(json_keys targets)"
-[ "$(json_len targets.items)" = "0" ] \
-    && pass "with no rows in it — the local row belongs to the success document" \
-    || fail "items has $(json_len targets.items) row(s) in a refusal"
-[ "$(json_ask targets.searching)" = "false" ] && [ "$(json_ask targets.known)" = "false" ] \
-    && pass "and both booleans are present and false, so the card stops polling" \
-    || fail "searching='$(json_ask targets.searching)' known='$(json_ask targets.known)'"
-REFUSED="$API_MSG"
+SEARCHING=$(json_ask targets.searching)
+KNOWNS=$(json_ask targets.known)
+LOCAL_NAME=$(json_ask targets.items.0.name)
+case "$SEARCHING" in true|false) _s=1 ;; *) _s="" ;; esac
+case "$KNOWNS" in true|false) _k=1 ;; *) _k="" ;; esac
+[ -n "$_s" ] && [ -n "$_k" ] \
+    && pass "both booleans are booleans, so the card can render them" \
+    || fail "booleans: searching='$SEARCHING' known='$KNOWNS'"
+# The LAN's own half, **printed rather than asserted**: how many devices this
+# machine can actually find right now is a fact about the neighbours, and a check
+# on it would go red when somebody switches a television off. It is recorded here
+# because the alternative is that §16's "the discovery client has no real-machine
+# witness" stays written in a design document that nobody re-measures.
+ROWS=$(json_len targets.items)
+pass "this LAN offered $ROWS row(s) so far (known=$KNOWNS, searching=$SEARCHING) — a reading, not a judgement"
+# The row's **name** is the selected renderer's title (§4.14: 「本机」 is not one
+# thing), so it is compared against the same key `query=status` reports rather
+# than against a literal. `'' or 'MPV'` is Python's own fallback
+# (`protocol.py:1806`): a dropdown whose first row has a blank label is not a
+# label — and the two faces legitimately differ on a fresh run, because status
+# ships the stored value (`:2007`) while the row answers 「what 投屏 will reach」.
+# Read **before** the status probe above is overwritten: `$API_BODY` is one file,
+# so anything asking `targets.*` after this must re-probe.
+STATUS_RENDERER=$(api_probe "$BASE/api?query=status" >/dev/null; json_ask server.renderer)
+if [ -z "$STATUS_RENDERER" ]; then
+    [ "$LOCAL_NAME" = "MPV" ] \
+        && pass "with no renderer stored the row says MPV while status says ''" \
+        || fail "nothing stored, so the row should read MPV: '$LOCAL_NAME'"
+else
+    [ "$LOCAL_NAME" = "$STATUS_RENDERER" ] \
+        && pass "the row repeats the renderer the status page reports, verbatim" \
+        || fail "local row name '$LOCAL_NAME' vs status renderer '$STATUS_RENDERER'"
+fi
+# A refresh adds `started` **last** (`state['started'] = started` after the
+# document is built, `cast_local_file.py:2913`), and it is a boolean either way:
+# `false` means a sweep is already in flight from the cold-start poll, which is a
+# real answer and not a failure.
 api_probe "$BASE/api?query=cast-targets&refresh=1"
-[ "$API_MSG" = "$REFUSED" ] && [ "$(json_ask targets.searching)" = "false" ] \
-    && pass "asked to re-search it says the same thing, and starts no probe" \
-    || fail "refresh=1 changed the answer: '$API_MSG' searching='$(json_ask targets.searching)'"
+[ "$(json_keys targets)" = "items,searching,known,started" ] \
+    && pass "a refresh answers the same document plus started, in last place" \
+    || fail "refresh keys: $(json_keys targets)"
+[ "$(json_ask targets.items.0.id)" = "local" ] \
+    && pass "and 本机 is still the first row after a search starts" \
+    || fail "refresh moved the local row: '$(json_ask targets.items.0.id)'"
+case "$(json_ask targets.started)" in
+    true|false) pass "started is a boolean ('$(json_ask targets.started)')" ;;
+    *) fail "started is not a boolean: '$(json_ask targets.started)'" ;;
+esac
+# `refresh` arrives as query-string text, so truth is a name rather than Python's
+# idea of it: `?refresh=0` means *do not search* and must not grow a `started`.
+api_probe "$BASE/api?query=cast-targets&refresh=0"
+[ "$(json_keys targets)" = "items,searching,known" ] \
+    && pass "refresh=0 is read as 'do not search' and adds no key" \
+    || fail "refresh=0 answered with: $(json_keys targets)"
+# Why there is **no** "the spinner stops" check here, written down because the
+# first version of this section asserted exactly that and was permanently red:
+# `target_state()` cold-kicks a sweep whenever **both** caches are empty
+# (`cast_local_file.py:2897-2907`, ported at `targets.rs`'s `target_state`), and a
+# machine with nothing discoverable therefore never has full caches — so every
+# poll re-arms a search and reports `searching: true`. That is the reference's
+# behaviour byte for byte, and it is *honest*: the LAN really is being searched
+# again, once per poll-after-completion, for as long as the card is open. The
+# claim "searching eventually reads false" is only reachable on a network that
+# has a device to find, which this LAN does not have (see docs/Rust-Port-Design.md
+# §16). Asking it here would be a check that can only be green by accident.
+#
+# What **is** reachable, and is the property the settle check was standing in for:
+# polling does not pile up threads. Two refreshes back to back — the second must
+# find the first sweep still in flight and answer `started: false`, because
+# `Table::start` takes a latch before spawning rather than starting a multicast
+# per click. A missing latch would show up as two `true`s and an ever-growing
+# thread count.
+api_probe "$BASE/api?query=cast-targets&refresh=1"
+FIRST_STARTED=$(json_ask targets.started)
+api_probe "$BASE/api?query=cast-targets&refresh=1"
+SECOND_STARTED=$(json_ask targets.started)
+if [ "$FIRST_STARTED" = "false" ] || [ "$SECOND_STARTED" = "false" ]; then
+    pass "consecutive searches share the latch: one of them was refused (started=$FIRST_STARTED/$SECOND_STARTED)"
+else
+    fail "two back-to-back refreshes both started a sweep (started=$FIRST_STARTED/$SECOND_STARTED) — no latch?"
+fi
+# **Read this check's teeth honestly.** On a machine whose caches stay empty the
+# cold-start kick has already put a sweep in flight long before §19 gets here, so
+# the pair reads `false/false` and the discriminating shape (`true` then `false`)
+# needs a network where a sweep *finishes* between two curls ~10 ms apart. What
+# this proves is "not one thread per poll"; it does **not** prove "a started sweep
+# eventually ends" — and nothing else here proves that either, because the very
+# first check of this section is the one that had to be deleted for asking exactly
+# that. The settle property is witnessed only by `targets_tests.rs`'s latch cases
+# against a fake `Sweeps`, never on this LAN.
+# The caches survive a poll: a sweep that finds **nothing** must not empty the
+# dropdown while the television is still in the living room (AGENTS.md §4.8's
+# 「设备睡着了也还是那一台」, `targets.rs`'s `if found:` guard). Asserted as a
+# non-shrink rather than an equality because the honest range of "how many
+# devices" on this LAN is anything from one row to several.
+api_probe "$BASE/api?query=cast-targets"
+BEFORE_ITEMS=$(json_len targets.items)
+api_probe "$BASE/api?query=cast-targets&refresh=1"
+AFTER_ITEMS=$(json_len targets.items)
+[ -n "$BEFORE_ITEMS" ] && [ -n "$AFTER_ITEMS" ] && [ "$AFTER_ITEMS" -ge "$BEFORE_ITEMS" ] \
+    && pass "a second sweep never shortens the list below what the card showed" \
+    || fail "items $BEFORE_ITEMS -> $AFTER_ITEMS after a re-search (or a document with no list)"
 if [ -n "$LAN" ]; then
     for q in cast-targets resolve-cookies; do
         api_probe "http://$LAN:$PORT/api?query=$q"

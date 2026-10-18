@@ -96,12 +96,54 @@ fn lines(path: &std::path::Path) -> String {
     read_tail(path, 200).text
 }
 
+/// The same read, with every DEBUG record taken out: **the loud half**.
+///
+/// Silence assertions in this file are phrased against this rather than
+/// `lines(..).is_empty()`, and the reason is the same process-wide `AtomicU8`
+/// that forced `crate::DebugWindow` to exist: the level is not per-test, so a
+/// file's emptiness is decided by whichever neighbour happened to be holding the
+/// DEBUG window while this test wrote. Measured, not theorised —
+/// `i_a_body_truncated_at_the_cap_loses_the_service_and_says_so_by_silence` went
+/// red **12 times out of 14** `--lib targets` runs on 2026-10-18, each time
+/// printing the DEBUG sentence the module genuinely writes:
+/// `cannot parse http://10.0.0.7/d: document ends with 4 element(s) still open`.
+/// **And the whole crate ran it green 6 times out of 6 that same day**, which is
+/// the part worth keeping in the sentence: the per-module run is not a weaker
+/// instrument than the crate run here, it is a *different* one, and the flake only
+/// shows when the file's own eight DEBUG windows are scheduled against its own
+/// silence assertions. A round that only ever runs the crate would have concluded
+/// the hazard was fixed by `DebugWindow`; it was not — it was only ever reachable
+/// from the module filter.
+///
+/// That is AGENTS.md §13's "0 红 = 没人问过" from the other side: 0 red in six runs
+/// of the *right-looking* instrument.
+///
+/// What these paths promise is that they write nothing **a user would call
+/// speaking**: no INFO that reads like a claim, no WARNING, no ERROR. A DEBUG
+/// diagnostic is allowed by design and is what an engineer opens the log for, so
+/// it is not what the assertion is about — and `assert!(… , "{}", lines(&path))`
+/// still prints the whole file when red, so the DEBUG line is never hidden from
+/// the reader.
+fn loud(path: &std::path::Path) -> String {
+    lines(path)
+        .lines()
+        .filter(|record| !record.contains("[DEBUG]"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // The DEBUG window is the crate-level `crate::DebugWindow` (lib.rs), not a
 // local guard here: the threshold is a process-wide `AtomicU8` in
 // `macast_core::logging`, so a guard that only restores the level still lets
 // two tests share the one global at once. That collision is what this file
 // used to cause in `mdns_tests` — 5 red out of 24 parallel full-crate runs,
 // 0 out of 12 serial — and the reading is recorded on `DebugWindow`.
+//
+// **And the same global bites the other way**: a test that asserts a witness
+// file is *empty* is decided by whichever neighbour holds a DEBUG window. Those
+// assertions are phrased against [`loud`] instead, which is the same protection
+// seen from the reader's side; `DebugWindow` cannot help them, because they must
+// not wait for a window to close — they must not care whether one is open.
 
 /// Poll an atomic until it reaches `want`, or give up after ~2 s and let the
 /// caller's assertion fail honestly. There is no shared `wait_until` in this
@@ -791,7 +833,7 @@ fn c_a_zero_timeout_still_asks_and_never_reads() {
     // time left is still a search that was asked.
     assert_eq!(wire.sent, vec![ssdp_request("st-one")]);
     assert_eq!(wire.reads, 0, "no deadline means no datagram wait");
-    assert!(lines(&_path).is_empty(), "silence is the right answer here");
+    assert!(loud(&_path).is_empty(), "{}", lines(&_path));
 }
 
 #[test]
@@ -933,7 +975,7 @@ fn c_a_refused_send_propagates_and_says_nothing() {
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert!(wire.sent.is_empty(), "a refused send is not a sent request");
     assert_eq!(wire.reads, 0, "a socket that could not ask never starts listening");
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
 }
 
 #[test]
@@ -1067,7 +1109,7 @@ fn g_the_friendly_name_wins_and_both_spellings_agree() {
     assert_eq!(a, b, "the namespace must not change the answer");
     assert_eq!(a.0, "客厅电视");
     assert_eq!(a.1, "http://192.168.1.9:8080/cm.xml");
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
 }
 
 #[test]
@@ -1132,7 +1174,7 @@ fn g_the_device_url_decides_the_host_and_the_peer_is_only_a_fallback() {
     )
     .unwrap();
     assert_eq!(named.1, "http://livingroom-tv.local:49152/cm.xml");
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
 }
 
 #[test]
@@ -1375,7 +1417,7 @@ fn h_a_description_with_no_avtransport_service_is_not_a_renderer() {
     assert!(parse_description(xml.as_bytes(), "http://10.0.0.7/d", "10.0.0.7", &log).is_none());
     let other = description(false, "Radio", "urn:schemas-upnp-org:service:RenderingControl:1", "/cm");
     assert!(parse_description(other.as_bytes(), "http://10.0.0.7/d", "10.0.0.7", &log).is_none());
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
 }
 
 #[test]
@@ -1539,13 +1581,17 @@ fn i_a_body_truncated_at_the_cap_loses_the_service_and_says_so_by_silence() {
     crate::pin_test_dir();
     let (log, path) = witness("targets-i-truncated");
     // Cut the document where the `<controlURL>` no longer exists. The answer is
-    // `None` with **no** log line — a truncated body is not a parse failure, and
-    // an ERROR per truncation would be a new way to fill the log with a lie.
+    // `None` and **nothing loud**: a truncated body is not a failure worth an
+    // ERROR, and an ERROR per truncation would be a new way to fill the log with a
+    // lie. It is *not* silent in the absolute sense — the parser does write one
+    // DEBUG sentence (`document ends with N element(s) still open`), which is the
+    // truth about a cut document and the line an engineer wants when the card says
+    // "no devices" — so this asserts the loud half, per [`loud`].
     let full = av_description(false, "TV", "/cm");
     let cut = &full[..full.find("<controlURL>").unwrap()];
     let fetcher = FakeFetcher::serving(cut);
     assert!(describe_renderer(&fetcher, "http://10.0.0.7/d", "10.0.0.7", &log).is_none());
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
 }
 
 #[test]
@@ -1595,7 +1641,7 @@ fn i_the_real_fetcher_reads_a_real_listener_through_the_proxy_none_agent() {
     // described one, and the path is absolute-relative.
     assert_eq!(got.0, "Real TV");
     assert_eq!(got.1, format!("http://192.168.99.9:{port}/upnp/control/av"), "{got:?}");
-    assert!(lines(&path).is_empty(), "{}", lines(&path));
+    assert!(loud(&path).is_empty(), "{}", lines(&path));
     thread.join().expect("the fake server finished");
 }
 

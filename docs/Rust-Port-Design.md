@@ -471,6 +471,12 @@ glob 本 crate `src/` 下每个 `.rs`，对每一行 `#[test]` 找到函数体�
 这一层问的是"我们的读法与算法对不对"，测的是**我们自己那一侧**。
 它的天花板写死在 `AGENTS.md` §4.9：网络全打桩的套件**抓不到"真实发送端栈不认账"**这一类。
 
+**而且这一层有两个粒度，谁也不是谁的超集**：`cargo test -p macast-cast --lib` 与
+`cargo test -p macast-cast --lib <module>` 是两台仪器。2026-10-18 那轮的读数是决定性的：
+一个用例被**进程级日志阈值**的邻居决定生死，**模块级 14 跑红 12，整 crate 6 跑红 0**
+（见 §16 第 9 条）。所以一轮改完至少两个粒度各跑一次，且一句"整 crate 绿"不许被复述成
+"这一族没问题" —— 上一轮的 `DebugWindow` 就是这么被当成收干了那族 flake 的。
+
 ### 13.2 第二层 —— 与 CPython 对拍的差分语料
 
 关键判断：一条语义**不该由 Rust 侧的推测来决定**。做法是在这台机器上从
@@ -698,8 +704,8 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 |---|---|---|
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **尚未** | `macast-cast/src/lib.rs:57`（`*(next)*`） |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT，unsolicited） | **尚未** | `lib.rs:59`；`mdns.rs` 只做了**浏览器**那半 |
-| SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**尚未接进壳** | `macast-cast/src/targets.rs` + `lib.rs:85`（`pub mod targets;`）。判据是量出来的：`grep -rn "targets::" src-tauri/src/` 在这台机器上回 **0 行**，壳里只有 `cast_targets` 那一张脸（`host.rs:979/1536/1554/1556`），它答的是拒绝文档，从没调用过这张表 |
-| 渲染器插件的 `target_push` 面（#28 territory：设备下拉真正投到远端） | **尚未** | 目前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`），不是空。发现侧的两张表现在有了（#27），**缺的只有把壳从拒绝答复接到 `Table::cast_target_state`** 那一步 |
+| SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
+| 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
@@ -714,15 +720,26 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
    目前只有我们自己的假设备与单元层。
 2. **本分支从不推送**（项目 memory：`refactor/rust-tauri-2 … never push it`）。
    因此**没有任何 CI 见证**过这里的任何一条用例；每一句"通过"都必须来自本机的读数。
-3. **两处陈述已经落后于代码**（记在这里，不是遗漏）：
-   - `macast-mpv/src/lib.rs:41` 说 `src-tauri` *"has not been written yet"*，而它已在；
-   - `macast-cast/src/proto.rs:410` 的 `TESTS_IN_THIS_CRATE = 65`（注释解释为
-     "35 channel + 18 proto + 12 cert"）与该 crate **现在**的用例数不符 ——
-     它作为**下限**（`>=`，见 `:847`）仍在起作用，所以**不会**因新增用例而红，
-     但它那句解释性散文已经不再是这台机器的读数。按 §4.13 的规矩，
-     要么让它对上，要么把注释改成不承诺具体构成。
-4. **`Cargo.toml:130` 指向不存在的 `macast-airplay`**（§2）。今天无害，
-   但它是"注释描述了一个从未被写出来的 crate"的那种债。
+3. **两处"陈述落后于代码"的债，本轮（2026-10-18）关掉，写法改成不钉行号**：
+   - `macast-mpv/src/lib.rs` 那句 *"the event bus and the settings live in
+     `src-tauri`, which has not been written yet"* 已按 §8「偏离不许沉默」**改注释**
+     （不是改本文迁就它）：现在那句话点名 `src-tauri/src/host.rs` 的
+     `impl Host for TauriHost` 是该特质的**唯一非测试实现**，并按名字数过 ——
+     全仓 `impl Host for` 共四处，其余三处都在 `macast-mpv/src/player.rs` 的测试模块里；
+   - `macast-cast/src/proto.rs` 的 `TESTS_IN_THIS_CRATE` 上一轮已经跟着读数走到 **603**，
+     并且注释里那份**逐文件构成**（`job_tests` 162 / `targets_tests` 75 / …）就是量出来的，
+     所以本文原先记的那句"`= 65`，散文过期"本身才是过期那句 —— 按 §4.13 的规矩，
+     一条没有机器在问的陈述要改的是陈述，不是被引用的代码。
+   ⚠ 这两条原来都写成 `lib.rs:41` / `proto.rs:410` 这种**行号锚点**，而本轮的编辑把它们
+   挪走了。这正是本文 §14.5 末那条"锚点会腐烂"的教训**打在自己文档上**：附录 B 的
+   引用体检现在改成按名字问（`grep -n "TESTS_IN_THIS_CRATE" / grep -n "impl Host for"`），
+   不再 `sed -n '<行号>p'`。
+4. **`Cargo.toml` 曾声明一个不存在的 `macast-airplay`**（§2）—— 本轮删掉那一行，并把
+   头部 crate 清单里的那一格改成"AirPlay 是 `macast-cast` 里的模块"。
+   **删之前量过它今天并不致命**：`[workspace.dependencies]` 是惰性的，
+   `cargo metadata --format-version 1 --no-deps` 在删之前**退出 0**（没有任何成员引用它），
+   所以"清单里有一个不存在的 crate"这句话要连着说"直到有人写 `workspace = true` 才变成
+   全盘加载错误" —— 那正是这份清单自己的注释写下的形状。
 5. **Python 侧 §4.9 那一族边界照旧适用**：真机验证欠的那两件
    —— 一台**真电视**在转封装还没写完时就去打开它，以及**需要登录的站点被真的解开**
    —— 在 Rust 侧同样欠着，且不会因为移植完成而自动补上。
@@ -742,13 +759,39 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
      而唯一能安排出那个的夹具会同时弄坏本进程里每一条用例。所以那一支**一条断言都没有**
      （手写在字符串层上的"假断言"比没有断言更糟，它会让下一次重写以为这里验过了）。
    这四格**不算已覆盖**，也不许用"分支存在"来代替"分支被走过"。
-7. **`targets.rs` 从未对着真电视跑过，也从未被真机脚本经过**：本局域网里没有 Chromecast，
-   DLNA 侧只有假 `Searcher` 与假 `Describer`（见第 1 条）。`verify_rust_receiver.sh` 里
-   与 SSDP 有关的那一段（`:490-520`）验的是**服务端那一半** —— 我们自己的接收端应答别人
-   发出去的 M-SEARCH；而**客户端那一半**（我们发 M-SEARCH、拉邻居的描述、建设备表）
-   在真机上没有见证者。第 19 节问的 `cast-targets`（`:1500-1530`）拿到的是**壳的拒绝文档**，
-   它根本不调用这张表（§15 那一行量过：`src-tauri/src/` 里 `targets::` 出现 **0 次**）。
-   所以"发现层通过"这句话在这里只能指单元层的 75 条，不能指任何一次真机读数。
+7. **发现层的客户端那一半，真机上只走到"没有设备可发现"这一格**（2026-10-18 接线后重写）：
+   以前这条写的是"`targets.rs` 从未被真机脚本经过，§19 拿到的是壳的拒绝文档，
+   `src-tauri/src/` 里 `targets::` 出现 **0 次**" —— 那是 §15 那两行的同一句，本轮已翻面。
+   今天的读数是：`verify_rust_receiver.sh` §19 真的把这张表问了一遍（列表是 success 文档、
+   第一行是本机、键序 `items,searching,known`、refresh 多一个末位 `started`），
+   脚本里与 SSDP 有关的老那一段（服务端那一半，我们自己应答 M-SEARCH）不变。
+   **仍然欠的是同一条**：本局域网里没有 Chromecast，DLNA 侧的真设备只有**别人家的
+   Macast 实例**，而把媒体推到用户另一台机器不是这个脚本可以擅自做的事（§10 第一条），
+   所以"拉到一个陌生邻居的描述、建出一行、投给它"这一路在真机上没有见证者，
+   只有 `push_tests` 的 46 条打在自家假设备与假 SOAP 服务器上。
+   一句诚实的边界：`known` 为假时上面那些断言**都还能全绿** —— 它们问的是壳与表之间的
+   文档形状，不是"网络上有没有东西"。
+8. **`searching` 在一台发现不到任何东西的机器上永远是 `true`，而且这是设计**（本轮量出来的，
+   第一版 §19 把它写成了一条永远红不起来的判据）：`target_state()` 的冷启动踢法是
+   "两份缓存都空 ⇒ 再起一次搜索"（`cast_local_file.py:2897-2907`），所以缓存永远填不满的
+   机器上，**每一次轮询都恰好看见有人在搜**。Python 一字不差是同一个行为，
+   因此这不是移植缺陷，而是一条关于"卡片能停下来的到底是什么"的事实：停下来的不是
+   `searching`，是**用户关掉那张卡**。§19 现在断言的是**闩**（连续两次 refresh 里至多一次
+   真的起搜），并且在那条检查旁边写清楚它**没有**证明什么：`false/false` 在这种网络上是常态，
+   而"起飞的搜索会落地"这一问只有 `targets_tests` 那两条 `k_…`（拿着 `HoldGate` 放行之后
+   要求 `searching` 转假）答得出，真机答不出。
+   ⚠ 这一格留在文档里的形状比结论重要：**"等它变假"这条断言在这台机器上不可能为真**，
+   写出来就是第二个 Part 34 —— 一组永远红的用例教人忽略红（AGENTS.md §4.12 那条）。
+9. **模块级运行与整 crate 运行是两台不同的仪器，谁也不是谁的超集**（与第 8 条同一轮，
+   由那条 flake 量出）：`targets_tests` 里"断言见证文件为空"的用例被**进程级日志阈值**
+   决定生死（`macast_core::logging::THRESHOLD` 是一个 `static AtomicU8`，
+   `lib.rs` 的 `DebugWindow` 故意一次只让一个用例抬高它）。改成按**级别**断言（`loud()`：
+   只看 INFO 及以上）之前的读数是 **`--lib targets` 14 跑红 12**，而**整 crate 6 跑红 0**；
+   之后是模块级 4 跑 0 红、整 crate 3 跑 0 红（603 passed 每次，约 7 秒）。
+   上一轮那次"并发整 crate 5 红 / 24 次、串行 12 次 0 红"的读数让人以为
+   `DebugWindow` 已经收干了这一族 —— **它只收了读 DEBUG 的那一半，没收断言沉默的那一半**，
+   而后者只在模块级过滤器下才现形。所以 §13 那三层里第一层的正确做法是
+   **两个粒度都要跑**，且一句"整 crate 绿"不许被复述成"这一族没问题"。
 
 ---
 
@@ -782,12 +825,26 @@ cargo test -p macast-core -p macast-mpv -p macast-upnp -p macast-cast   # 逐 cr
 
 ## 附录 B：引用体检（改完文档跑）
 
+**按名字问，不按行号问**（§14.5 末那条教训落在本文自己身上：本文曾经写
+`sed -n '41p' macast-mpv/src/lib.rs` 与 `sed -n '410p' macast-cast/src/proto.rs`，
+而 2026-10-18 那一轮改注释就把那两个锚挪走了 —— 一个会因为邻行加了三句话而腐烂的引用，
+不是判据，是待修的债）。
+
 ```shell
+cd /Users/pavia/githome/Macast
 # 本文提到的文件确实存在
 grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md \
   | sort -u | while read f; do [ -f "$f" ] || echo "MISSING $f"; done
-# 本文提到的行号仍然落在预期语句上（抽样核对，不靠记忆）
-sed -n '410p' macast-cast/src/proto.rs
-sed -n '1621,1623p' macast-cast/src/mdns.rs
-sed -n '41p' macast-mpv/src/lib.rs
+# 本文引用的**语句**仍在（每条都有唯一的字串可搜）
+grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs
+grep -n "impl Host for TauriHost" src-tauri/src/host.rs
+grep -n "has not been written yet" macast-mpv/src/lib.rs   # 期望：**0 行**（本轮已改）
+grep -rn "targets::" src-tauri/src/                        # 期望：≥2 行（§15 那一行）
+grep -n "DEVICE_PUSH_UNAVAILABLE\|这台设备还投不了" src-tauri/src/host.rs \
+     scripts/verify_rust_receiver.sh
+#   期望恰好两处，而且**都不是产品代码**：host.rs 里那句"这替换了什么"的历史说明，
+#   和脚本 §16 里那条**反向**断言（设备臂再说出这句旧话就算红）。
+#   除这两处之外任何命中都表示那句话回来了 —— 它是"这台机器还没有发送面"的谎。
+# 本文提到的脚本节号确实存在
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh
 ```

@@ -38,8 +38,11 @@
 //!   Windows cases that need no child written beside it. This is the only module
 //!   here that talks to anything outside the process, and it does so through a
 //!   [`player::Host`] trait — the event bus and the settings live in `src-tauri`,
-//!   which has not been written yet, so the crate defines the seam and its tests
-//!   are the only implementations of it for now.
+//!   whose `impl Host for TauriHost` (`src-tauri/src/host.rs`) is the trait's only
+//!   non-test implementation. The crate still *defines* the seam instead of
+//!   depending on the shell: that is what keeps every test in this crate hermetic,
+//!   and the three `impl Host` blocks inside `player.rs`'s test modules are what
+//!   a player looks like when there is no window to notify.
 //!
 //! Why the split is worth a crate of its own: AGENTS.md records a family of
 //! defects that all have the same shape — *a contract that only a real player or

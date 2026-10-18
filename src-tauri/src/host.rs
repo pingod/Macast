@@ -42,8 +42,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
+use macast_cast::push;
 use macast_cast::relay;
 use macast_cast::resolve;
+use macast_cast::targets;
 use macast_core::logging::{Level, Logger};
 use macast_core::net;
 use macast_core::paths;
@@ -976,16 +978,50 @@ fn cookie_settings(setting: &Setting) -> resolve::JobCookies {
     resolve::JobCookies::from(&resolve::Cookies { file, browser: &browser })
 }
 
-/// One sentence, two readers: [`ShellManagement::cast_targets`]'s refusal document
-/// and the device arm of [`ShellManagement::cast_resolved`]. Sharing it is the
-/// point — a dropdown that says "this shell cannot reach a device" next to a cast
-/// answer that pretends otherwise is the failure AGENTS.md §4.8 names (两处答案不一致
-/// 比没有数字更糟), and it is exactly what two hand-copied sentences drift into.
+/// The answer to "which device?" when the id the card sent is no longer a device.
 ///
-/// The 「这台设备还投不了」 prefix is load-bearing for a different reason:
-/// `scripts/verify_rust_receiver.sh` §16 asserts it, so a rewrite that drops it
-/// turns a green run into a red one for no product change.
-const DEVICE_PUSH_UNAVAILABLE: &str = "这台设备还投不了：本机的 Rust 壳还没有设备发送面（`grep -r target_push macast-cast/src` 是空的，那是 #22 的渲染器插件面），请改用「本机」。";
+/// Byte-for-byte the reference's sentence (`cast_local_file.py:2926-2927`), and it
+/// is worth saying why a *stale id* is a different answer from a *failed push*:
+/// the dropdown is a cache of a multicast that happened seconds ago, so the row
+/// the user pointed at may have gone to sleep or left the network. Silently
+/// falling back to this machine would play the clip somewhere the user did not
+/// ask for; `push_url_to`'s own failure sentence («投给「…」失败：…») is for a
+/// device we still believe in that said no.
+///
+/// This replaced `DEVICE_PUSH_UNAVAILABLE`, a refusal this shell used while the
+/// send face (`crate::push`) existed but nothing called it. The honesty rule is
+/// unchanged — a card that cannot reach a device must say so — but the fact it
+/// reports is now the user's stale row rather than our missing wiring, so
+/// `scripts/verify_rust_receiver.sh` §16 asserts the new shape instead of the old
+/// sentence.
+const DEVICE_ROW_GONE: &str = "设备列表里没有这一台（它可能刚关机，或者搜索结果已过期），请点「重新搜索」再投";
+
+/// `_local_target` (`macast/protocol.py:1796-1807`): the card's first option.
+///
+/// The name is the **selected renderer's title**, not the word 「本机」, because
+/// "this machine" is not one thing: with MPV it is a window on this Mac, with a
+/// caster selected it is that caster's own chosen screen. A row that said 本机
+/// would let the card promise one target and reach another.
+///
+/// The read is the same key `query=status` reports (`macast/protocol.py:2007`,
+/// ported at `main.rs`'s status face) — with one difference that is Python's, not
+/// ours: the status face ships the raw value (`''` when nothing was ever written),
+/// while this row substitutes `'MPV'`, because a dropdown whose first row has a
+/// blank label is not a label. So the two can legitimately differ on a fresh
+/// install, and neither is a bug: one answers "what is stored", the other answers
+/// "what pressing 投屏 will reach".
+///
+/// `address` is empty because there is no address to give: `local` is a route
+/// through our own player, not a socket, and `push_url_to` never sees this row.
+fn local_target(setting: &Setting) -> Value {
+    let renderer = setting.get_str(Key::MacastRenderer, "");
+    json!({
+        "id": "local",
+        "kind": "local",
+        "name": if renderer.is_empty() { "MPV" } else { &renderer },
+        "address": "",
+    })
+}
 
 /// The name Python prints in front of an OS error: `type(exc).__name__`
 /// (`macast/protocol.py:3005`, `:3041`). Both sentences a user can read quote it
@@ -1199,6 +1235,20 @@ pub struct ShellManagement {
     /// from **this** number.
     pub port: u16,
     pub jobs: ResolveJobs,
+    /// The device caches behind the dropdown and the device arm of a cast.
+    ///
+    /// One table for the whole shell, read by both faces that answer about
+    /// "what is out there": [`ShellManagement::cast_targets`] polls it (and is the
+    /// only thing that kicks a cold search), and [`ShellManagement::cast_resolved`]
+    /// looks the card's id up in it before pushing. A second `Table` would give
+    /// those two questions different answers — AGENTS.md §4.8's oldest lesson, one
+    /// owner per fact.
+    ///
+    /// `Arc` rather than a bare `Table`: the type is already a `Clone` handle onto
+    /// one shared `Inner`, but the shell hands it to a trait object that is itself
+    /// shared, and `Clone`-ing a handle at each use site would let a future reader
+    /// believe they copied a ledger.
+    pub targets: Arc<targets::Table>,
 }
 
 impl macast_upnp::http::Management for ShellManagement {
@@ -1470,10 +1520,62 @@ impl macast_upnp::http::Management for ShellManagement {
                 Err(why) => Answer::fail(why),
             }
         } else {
-            // The same sentence the device dropdown gives ([`DEVICE_PUSH_UNAVAILABLE`]),
-            // from the same constant. Refusing is the honest answer; the relay we just
-            // opened is not one, and the `code != 0` branch below drops it.
-            Answer::fail(DEVICE_PUSH_UNAVAILABLE)
+            // `_cast_relayed`'s device arm (`macast/protocol.py:2970-2983`), through
+            // `target_push`'s two steps: look the id up **in the live caches**, then
+            // push. The lookup is first and it is not a formality — the row the card
+            // showed may name a television that has since slept or left the network,
+            // and pushing to an address we no longer believe in would be a cast that
+            // "succeeded" onto nothing.
+            //
+            // The device gets the **relay** address, never the page's URL; that is
+            // the entire reason the relay exists, and it is why this arm is written
+            // with `url` (built above from `relay` + the advertised host) and not
+            // with `pick.url`.
+            //
+            // `live` is `not relay.seekable`: a stream whose byte range nobody has
+            // promised cannot be scrubbed, so the sender must not promise a
+            // seekable timeline. §4.1's three-state reading is *not* what lives here:
+            // `push_url_to` gets a plain bool because this is our own page card
+            // naming its own media, and by the time a clip reached the relay the
+            // "we do not know" answer was already collapsed by `open_relay` into
+            // whatever the probe could say about ranges and length.
+            //
+            // Both reference arms that could raise are unreachable in Rust and are
+            // recorded rather than kept as dead code: `setting is None` (this shell
+            // owns the table), and `except Exception` around `target_push` — whose
+            // Rust counterpart returns `(bool, String)` and has already written the
+            // ERROR line the reference's `logger.exception` would have produced.
+            match self.targets.target_by_id(target) {
+                None => Answer::fail(DEVICE_ROW_GONE).with("target", json!(target)),
+                Some(row) => {
+                    let content_type = relay.content_type();
+                    let media = push::PushMedia {
+                        title: &title,
+                        content_type: &content_type,
+                        duration: pick.duration(),
+                        live: !relay.seekable(),
+                    };
+                    let (ok, message) = push::push_url_to(
+                        &row,
+                        &url,
+                        &media,
+                        &self.host.setting,
+                        &self.host.log,
+                    );
+                    // `code` follows the plugin's `ok`, and the message is the
+                    // plugin's sentence — the same words the caster's own menu
+                    // prints, which is why they are not re-derived here. A failed
+                    // hand-off still carries `target`, because Python builds the
+                    // wrapper before it knows the outcome (`:2982-2983`), and the
+                    // caller below drops the relay for `code != 0` either way.
+                    let answer = if ok {
+                        Answer::ok(message)
+                    } else {
+                        Answer::fail(message)
+                    };
+                    answer.with("target", json!(target))
+                }
+            }
         };
 
         if answer.code != 0 {
@@ -1533,29 +1635,51 @@ impl macast_upnp::http::Management for ShellManagement {
         )
     }
 
-    /// `_cast_targets` (`macast/protocol.py:1765-1794`) — a refusal, in words.
+    /// `_cast_targets` (`macast/protocol.py:1765-1794`): the card's device list,
+    /// **never a live probe on this thread**.
     ///
-    /// The Rust shell has no plugin manager and no `target_push` seam yet (task
-    /// #22), so there is no cache to answer from and no background search to
-    /// start. `_refresh` is therefore unread here: the honest answer to "should I
-    /// search?" is "there is nothing to search with", and a `false` on the way to
-    /// a probe would be a fact this shell does not have.
+    /// Both reference arms that used to be reachable here are now unreachable, and
+    /// the honest way to say that is to say it rather than keep the code:
     ///
-    /// Both halves of the document come from the reference's own refusal path:
-    /// `_url_target_unavailable` (`:1754-1763`) supplies the words, and `:1781`
-    /// appends `{'items': [], 'searching': False, 'known': False}` to them —
-    /// `items` empty, `searching` and
-    /// `known` **false** rather than absent — the page reads those two as booleans,
-    /// and a missing key renders as a spinner that never stops. The `local` row is
-    /// deliberately not shipped here either: it belongs to the success document,
-    /// whose name comes from a renderer title this shell does not own yet.
-    /// `scripts/verify_rust_receiver.sh:1512-1523` is what asks for that shape;
-    /// nothing in this file checks it.
-    fn cast_targets(&self, _refresh: bool) -> Answer {
-        Answer::fail(DEVICE_PUSH_UNAVAILABLE).with(
-            "targets",
-            json!({ "items": [], "searching": false, "known": false }),
-        )
+    /// - `setting is None` (the plugin that owns the caches is not loaded). This
+    ///   shell *is* the owner — [`ShellManagement::targets`] is built at startup —
+    ///   so there is no "no plugin" state to report. `scripts/verify_rust_receiver.sh`
+    ///   §19 used to assert the refusal document that stood in for it; it now
+    ///   asserts this one.
+    /// - `except Exception` → 「读取设备列表失败：…」. The table's only failure mode
+    ///   is a refused `thread::spawn` on the search path, and `Table::start` already
+    ///   answers that itself (it logs, clears its own latch and returns `false`, so
+    ///   the card gets `started: false` and can press 重新搜索). A lock here cannot
+    ///   poison: [`lock_recovering`](macast_cast::targets) takes a panicked guard
+    ///   back rather than propagating, because one dead search thread must not make
+    ///   every later poll of the settings page panic.
+    ///
+    /// The local row is prepended **here**, not inside `Table`: Python's plugin
+    /// answers the device rows and the core adds 「本机」, and the same split is what
+    /// keeps `query=cast-targets` from claiming a device it does not own. The key
+    /// order of the wrapper (`code,message,targets`) and of the inner document
+    /// (`items,searching,known`, plus `started` last on a refresh) is asserted by
+    /// that script — `serde_json`'s `preserve_order` is what makes re-assigning
+    /// `items` an overwrite in place rather than a move to the end, which is
+    /// exactly what Python's dict does and what a plain `BTreeMap` would get wrong.
+    fn cast_targets(&self, refresh: bool) -> Answer {
+        let mut state = if refresh {
+            self.targets.target_refresh()
+        } else {
+            self.targets.target_state()
+        };
+        // `state.get('items') or []` (`:1793`): a document with no rows is still a
+        // document, and `Table` always writes the key. The fallback is for the day
+        // it does not, and it must not turn into 「本机 is the only device」 being
+        // reported as a fact about the network.
+        let mut rows = state
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        rows.insert(0, local_target(&self.host.setting));
+        state["items"] = Value::Array(rows);
+        Answer::ok("success").with("targets", state)
     }
 
     /// `_post_resolve_cookies` (`macast/protocol.py:2986-3030`): validate the

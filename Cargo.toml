@@ -8,8 +8,11 @@
 #                   rotating per-module logs, tokens, trash, time formatting
 #   macast-mpv      mpv argv builder + JSON IPC renderer (the player half)
 #   macast-upnp     SSDP + DLNA MediaRenderer (description/SOAP/GENA/DIDL)
-#   macast-cast     Chromecast Cast v2 receiver (protobuf over TLS + setup HTTP)
-#   macast-airplay  AirPlay video-URL receiver (RTSP)
+#   macast-cast     Chromecast Cast v2 receiver (protobuf over TLS), AirPlay RTSP,
+#                   the web-address resolve/relay layers and the device send +
+#                   discovery tables. **AirPlay is a module here, not a crate** —
+#                   the port decided that, and the setup HTTP/8443 face is still
+#                   ahead of it (see `macast-cast/src/lib.rs`'s `*(next)*` list).
 #   src-tauri       tray + settings window; the only crate that knows about UI
 #
 # `src-tauri` stays a member so `cargo check` at the root proves the shell
@@ -127,7 +130,6 @@ macast-core = { path = "macast-core" }
 macast-mpv = { path = "macast-mpv" }
 macast-upnp = { path = "macast-upnp" }
 macast-cast = { path = "macast-cast" }
-macast-airplay = { path = "macast-airplay" }
 
 [profile.release]
 opt-level = "s"

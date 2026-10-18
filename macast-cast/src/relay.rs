@@ -389,6 +389,27 @@ fn now_secs() -> f64 {
 }
 
 impl Relay {
+    /// Whether the stream can be promised a byte range: Python's `relay.seekable`
+    /// property, which is `self.ranges and bool(self.length)` (`RelayInner::seekable`).
+    ///
+    /// An accessor rather than a field read because the answer lives behind a lock,
+    /// and because two callers ask from different sides of a wire: the byte-serving
+    /// path writes it into `Accept-Ranges`, and the page card's device push turns
+    /// "not seekable" into `live = true` for the device's `streamType`. Reading it
+    /// back out of `status_json()` would put a document format in the middle of a
+    /// decision.
+    pub fn seekable(&self) -> bool {
+        self.inner.lock().unwrap().seekable()
+    }
+
+    /// The media type this relay is currently serving, which is **not** fixed at
+    /// registration: a proxy relay learns the real one from the origin's answer
+    /// (`probe_proxy` writes `content_type` under its own lock, `:1222`), so the
+    /// reader takes the lock instead of copying the field at open time.
+    pub fn content_type(&self) -> String {
+        self.content_type.lock().unwrap().clone()
+    }
+
     pub fn touch(&self) {
         *self.last_seen.lock().unwrap() = now_secs();
     }
@@ -1048,9 +1069,10 @@ fn handle_connection(stream: TcpStream, store: &RelayStore, _temp_dir: &Path, gr
     }
 
     // Build response headers
-    let seekable = relay.inner.lock().unwrap().seekable();
+    let seekable = relay.seekable();
+    let content_type = relay.content_type();
     let _ = write!(stream, "HTTP/1.0 {} {}\r\n", sp.status, reason_phrase(sp.status));
-    let _ = write!(stream, "Content-Type: {}\r\n", relay.content_type.lock().unwrap());
+    let _ = write!(stream, "Content-Type: {}\r\n", content_type);
     let _ = write!(stream, "Cache-Control: no-store\r\n");
     let _ = write!(stream, "X-Content-Type-Options: nosniff\r\n");
     let _ = write!(stream, "Accept-Ranges: {}\r\n", if seekable { "bytes" } else { "none" });

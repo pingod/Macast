@@ -51,6 +51,7 @@ use serde_json::{json, Value};
 use tauri::{Manager, State};
 
 use macast_cast::relay;
+use macast_cast::targets;
 use macast_core::env;
 use macast_core::logging::{self, Logger};
 use macast_core::net;
@@ -941,6 +942,15 @@ pub fn run() {
             // startup — the reference has no persistence either, which is why a
             // poll after a restart answers 「没有这个解析任务（超时或已重启）」.
             let resolve_jobs: host::ResolveJobs = Arc::new(Mutex::new(Vec::new()));
+            // The device caches behind the settings page's dropdown, and the table a
+            // device-named cast looks its id up in. Built once here because "what is
+            // out there" is one fact with two readers (AGENTS.md §4.8's rule): a
+            // second `Table` would let the card list a television that the push path
+            // does not know about, which reads to the user as 「投了但什么都没播」.
+            // `Table::new` searches for real; nothing is probed at construction —
+            // the cold-start kick happens on the first `target_state()` poll, so a
+            // shell that never opens the page never sends a multicast.
+            let device_table = Arc::new(targets::Table::new(setting.clone()));
             let face = Face::new(
                 Arc::new(soap) as Arc<dyn Control>,
                 eventing.clone() as Arc<dyn Subscription>,
@@ -958,6 +968,7 @@ pub fn run() {
                     temp_dir: relay_temp,
                     port: relay_port,
                     jobs: Arc::clone(&resolve_jobs),
+                    targets: device_table,
                 }) as Arc<dyn macast_upnp::http::Management>,
                 setting.clone(),
             )?;

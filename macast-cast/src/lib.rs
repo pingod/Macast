@@ -190,6 +190,15 @@ pub(crate) fn pin_test_dir() {
 /// `proto::tests::only_lib_rs_touches_the_log_threshold` audits that, because a
 /// raw pair added anywhere else re-creates the flake and no test in this crate
 /// can be trusted to catch it — by construction, it is intermittent.
+/// The same guard seen from the other side: a test that asserts its witness file
+/// is **empty** is decided by whichever neighbour holds a window. `targets_tests`
+/// measured it on 2026-10-18 — **12 red out of 14** `--lib targets` runs before its
+/// silence assertions were rephrased by level (`targets_tests::loud`, which ignores
+/// DEBUG records and fails on anything INFO or above), and **0 red out of 6** whole
+/// crate runs the same day. This type cannot help those tests, because they must not
+/// wait for a window to close — they must not care whether one is open — and the 0
+/// red is not "fixed": it is the crate run not scheduling the collision, which is
+/// why a round that only ever runs the whole crate would have closed this as done.
 #[cfg(test)]
 pub(crate) struct DebugWindow {
     // Dropped *after* the `Drop` body, which is the ordering the doc above

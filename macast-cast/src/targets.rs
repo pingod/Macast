@@ -90,8 +90,9 @@
 //!   `finally` (`:1080-1082`) always clears it because the thread body ran. If
 //!   `thread::Builder::spawn` itself fails there is no body and no `finally`, so
 //!   `Table::start` resets the latch by hand — a stuck `searching` flag is the
-//!   spinner that never stops (`src-tauri/src/host.rs:1545` says the same thing
-//!   about a missing key).
+//!   spinner that never stops (the shell's `cast_targets` makes the same argument
+//!   about a *missing* key, and `scripts/verify_rust_receiver.sh` §19 asks for
+//!   both: the keys present, and consecutive refreshes sharing the latch).
 //! * **XML bytes are read lossily.** `Dom::parse` takes `&str`, `ET.fromstring`
 //!   takes bytes and trusts the `<?xml encoding?>` declaration. A description
 //!   whose declared encoding lies about its bytes therefore parses here and is
@@ -110,8 +111,10 @@
 //!   reference, not an oversight of the port.
 //! * **`target_by_id` hands back the whole row.** Python returns
 //!   `(kind, name, address)` (`:1664`); the Rust [`TargetItem`] carries `id`
-//!   too, because the caller that needs it is #28 and it should not have to
-//!   rebuild the id from a `kind` and an `address`.
+//!   too, because its caller — `src-tauri/src/host.rs`'s device arm of
+//!   `cast_resolved` — echoes the id back into the answer it sends the page, and
+//!   rebuilding it from a `kind` and an `address` there would be a second owner
+//!   of the id format.
 //!
 //! ## Two guards the reference has that this module has no branch for
 //!
@@ -865,8 +868,9 @@ fn lock_recovering<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The two caches and the two latches: the object the settings page's
-/// `target_state()` / `target_refresh()` read, and the object #28's `target_push`
-/// will look an id up in.
+/// `target_state()` / `target_refresh()` read, and the object the shell's device
+/// arm looks an id up in before it pushes (`src-tauri/src/host.rs`'s
+/// `cast_resolved` → [`crate::push::push_url_to`]).
 ///
 /// `Clone` is a *handle*, not a copy of the ledger: every clone shares one
 /// `Inner`, so the page and the push path cannot hold different answers about
@@ -1035,12 +1039,20 @@ impl Table {
     /// `preserve_order` feature is on for this crate, so `json!({...})` keeps the
     /// order written below — `items`, `searching`, `known` — which is Python's
     /// dict literal order at `:1641-1647`. **The witness for that order is the
-    /// acceptance script**, `scripts/verify_rust_receiver.sh:1515`, which asks for
-    /// exactly `items,searching,known` and is the only thing in this repo that
-    /// would notice a reordering; the shell's own refusal document
-    /// (`src-tauri/src/host.rs:1550-1555`) carries the three but checks nothing.
-    /// Two booleans must be **present** and false rather than absent: a missing
-    /// `searching` renders as a spinner that never stops.
+    /// acceptance script**: `scripts/verify_rust_receiver.sh` §19 compares
+    /// `json_keys targets` against exactly `items,searching,known`, and asks again
+    /// for `items,searching,known,started` after `?refresh=1` — so a reordering,
+    /// or a `started` that lands in the middle instead of last
+    /// (`cast_local_file.py:2913` assigns it after the document is built), is a
+    /// red line and not a style opinion. Nothing in this crate checks it, and the
+    /// shell does not either: `cast_targets` prepends 「本机」 to whatever this
+    /// returns, so the order has to be right **here** for it to be right there.
+    /// The two booleans must be **present** whatever they say — the card renders
+    /// them as booleans, and a missing `searching` is a spinner that never ends.
+    /// (On a LAN with nothing discoverable `searching` reads `true` on every poll,
+    /// because the cold-start kick re-arms a sweep each time the caches are found
+    /// empty; that is the reference's behaviour, and §19 asserts the latch rather
+    /// than a settle. See `docs/Rust-Port-Design.md` §16.)
     pub fn cast_target_state(&self) -> Value {
         let inner = lock_recovering(&self.inner);
         let items: Vec<Value> = items_from(&inner.cast, &inner.dlna);
