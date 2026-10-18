@@ -2624,6 +2624,29 @@ PY
         skip "this machine contributed no IPv4 interface to the picker"
     fi
 
+    # ---- the raw settings table ---------------------------------------------------
+    # 高级设置 reads `query=launch-param`, and this is the one GET on the face whose
+    # answer is the whole file — including `Api_Token`. Asserting what it contains is
+    # the point, not an oversight: the route is only defensible because the two facts
+    # below hold, and if either ever changes the right answer is to shut the route,
+    # not to relax the check.
+    # Read out of the file with the same parser the page would use; `get` rather
+    # than indexing because a run that never revealed its token has no key at all.
+    TOKEN_STORED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("Api_Token",""))' \
+        "$SDIR/macast_setting.json" 2>/dev/null)
+    api_probe "$BASE/api?query=cast-info"
+    api_probe "$BASE/api?query=launch-param"
+    [ "$(json_ask DLNA_FriendlyName)" = "Macast Rust Verify" ] \
+        && pass "launch-param hands the tab the settings file's own keys" \
+        || fail "launch-param said DLNA_FriendlyName='$(json_ask DLNA_FriendlyName)'"
+    if [ -n "$EXTRACTED" ] && [ -n "$TOKEN_STORED" ] && [ "$EXTRACTED" = "$TOKEN_STORED" ]; then
+        [ "$(json_ask Api_Token)" = "$TOKEN_STORED" ] \
+            && pass "and it carries the resident token, byte for byte — the reason this route is loopback/token-gated and the reason no response here ever carries a CORS header" \
+            || fail "launch-param's Api_Token is not the stored one"
+    else
+        skip "no stored token to compare against ($EXTRACTED / $TOKEN_STORED)"
+    fi
+
     # ---- the gate -----------------------------------------------------------------
     api_probe "$BASE/api?query=status"
     [ "$API_STATUS" = "200" ] && [ -z "$API_CODE" ] \
@@ -2650,7 +2673,7 @@ PY
         [ "$API_STATUS" = "403" ] \
             && pass "and so is the diagnostic read — it names who is watching, which is not LAN weather" \
             || fail "a LAN caller got HTTP $API_STATUS from subscribers"
-        for query in log log-modules log-download; do
+        for query in log log-modules log-download launch-param; do
             api_probe "http://$LAN:$PORT/api?query=$query&module=MPV"
             [ "$API_STATUS" = "403" ] \
                 && pass "a LAN caller is refused $query" \

@@ -330,6 +330,7 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `announce`（没有监听就不广播） | 参考实现里 `_advertise()` 在 `_start_tls_server()` 之后无条件跑，而 `cast_port` 绑定失败时保持默认值 —— 于是它广播一个**没人听的端口** | 本端口只在 8009 真的在听时广播（`main.rs` 里那一格是 `match cast_channel.as_ref()`）。一台出现在菜单里却投不上的设备，正是 `AGENTS.md` §4.1 第一行的症状，不是它的小版本 |
 | `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
 | `status`（四个键用 `peek` 读） | 参考实现的文档是 `Setting.get(key, default)` 拼出来的，而**那一次读会把默认值写进表里**，下一次 `save` 就落盘（`AGENTS.md` §4.2 的第一条陷阱）。本脸对 `Macast_Protocols` / `Macast_Protocol` / `Macast_Renderer` / `Play_History` 改用 `peek`，答案逐字相同、磁盘上不多一个键 | 边界要写清，因为它**不是**"本端口再也不写设置"：`ApplicationPort`、`Https_enabled`、`Https_Port` 与网卡钉 (`Network_Interface`) 仍然走共享读接口（前两者是壳自己启动时就在用的值，后者是 `macast_core::net::network_interfaces` 内部读的，改它要一起动 SSDP/广播/中转三张脸）。判据 `the_status_read_creates_no_key_that_was_not_there` 钉的就是这条边界，并且它**断言 `Network_Interface` 确实被创建** —— 一个把"什么都没写"当成整体主张的测试，会在下一次"顺手改成 peek"时红得说不清是谁的锅 |
+| `launch-param`（键的顺序） | 参考实现交回 `Setting.setting` —— 那个 dict 保的是**文件里的插入顺序**；本端口这张表是 `BTreeMap`，于是键按名字排序 | 页面的「高级设置」是一个 JSON 编辑器，本机没有任何读者按顺序读它（量过：这条路上唯一的读者还没写）。真要保序，改的是那张表而不是在这条路由上再排一次 —— 那会是第二个主人。**同一张路由携带 `Api_Token`**：这条不是偏离而是决定，写在路由的行注释里，并由 `the_face_never_answers_a_cors_question` 与 `launch_param_answers_the_whole_table…` 两条一起守（前者守"为什么可以带"，后者守"它确实带"） |
 | `subscribers`（文档比参考实现多两个键） | 参考实现的 `query=subscribers` 交回 `{aggregated, children[{title, type, running, event_thread_alive, subscribed, pending_append, pending_state}]}`；本端口那份**多** `pending_remove` 与 `children[].rows` | `pending_remove`：一个卡住的回收线程与一个卡住的追加线程是**同一种故障形状**，而少了这个数字，"订阅者永远不走"就没有见证者。`rows`：想知道"哪个 SID 落在哪个回调口"的调用方不该被迫去读 `query=status` 的 `clients` 再自己 diff 一份名单。**两个读者共用一个建造者**（`subscribers_document` —— HTTP 路由与窗口命令各调一次），所以"多出来的键"只可能长在一处而不是两份文档各长各的；审计与它的 0 红教训见 §16 第 16 条 |
 | `status`（`history` 住在内存，不住在设置文件） | 参考实现的播放历史是 `Setting[Play_History]`，**重启之后还在**；本壳的行住在 `StateTable` 的内存里，重启即空，而 `query=status` 打印的是内存那份 | 打印设置文件里那份会算什么？算"这台机器从没投过任何片子" —— 一个空列表在两个原因之间**不可分辨**（§4.14「空结果要说清是哪一种空」在文档层的新形状）。发现方式是本节的 §23 真机一节：投完之后 `history` 仍然是 `[]`，两条红。补成持久化是一次有"重启后还在"这条断言的决定，不是这一轮顺手做掉的一行 |
 | `channel`（读的方式） | Python 在**裸 socket** 上阻塞读、读期间不持任何锁；本端口**每条连接一把锁**，所以读改成 `READ_POLL`（200 ms）轮询，**锁在两批字节之间放开** | 这是"参考实现做不到"的那一类，不是风格：rustls 的一次 `read` 会动会话状态，必须串行化，而把锁跨在一次无限阻塞读上会让**同一根 socket 上的所有推送饿死** —— `_watch_playback` 与状态变化都排在那把锁后面，发送端 LOAD 之后只拿到那一次请求驱动的答复、此后一句话都没有，直到它自己断开（2026-10-18 接进壳之后由 §21 量出，见 §16 第 11 条）。Python 那边根本没有这一层，所以这一格**不可能**由"照抄它的写法"得到正确答案 |
@@ -944,6 +945,23 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     还有一条方法学的：M2 的第一版交回的是**编译错误**（`json!` 不在非测试作用域里），
     当天第二次踩同一个形状（`main.rs` 那支 M10 的第一版因为移走 `setup_config` 也是编译错误）——
     只看退出码时"编译不过"和"这一格没人问"完全同形，**同型替换要连能编译一起满足**。
+16. **一条审计被自己的变异体证伪过一次**（2026-10-18，`query=subscribers` 那一轮）：
+    新加的文本审计 `the_window_command_builds_its_subscriber_document_from_the_same_function`
+    第一版找的是 `"pending_append":` 这种**带冒号的整键**，而变异体写的是
+    `doc["pending_append_total"] = json!(…)` —— 往文档上**赋值**而不是重打一份 `json!`，
+    针眼没咬住，**0 红**。红不了不是因为规则没被破坏，而是审计的形状与破坏的形状不是同一个。
+    加强后的 needle 是**开引号 + 键名**（不带冒号），并列禁止 `"aggregated`/`"subscribed`/
+    `"pending_append`/`"pending_state`/`"pending_remove`/`"event_thread_alive`/`"children`/
+    `"rows`/`"timed_out`；重测同一支变异体：**1 红**。两个附带决定写在同一条里：
+    ① `"title"` **不在**针眼里 —— 窗口命令合法地写自己的 `title`（`player_snapshot` 与历史行
+    各一处），把它列进去会让审计在**干净树上红**，而"干净树会红的审计"的下场是被删掉而不是被修好；
+    ② 同一轮的门名变异体（`subscribers` 那行 gate 改成 token）红 **4** 条。
+17. **§23 里那条"先重新问一次再断言"**（同日，脚本自己的顺序 bug）：subscribers 那一串检查接在
+    clients 之后跑，而 `$API_BODY` 是**一个共享文件** —— 后面 `history` 的两条断言读到的是
+    subscribers 那份文档，`json_len history` 回"没有这个键"，两条红。产品一个字节没错，
+    **红的是我们对夹具状态的假设**。修法是在 history 之前重新 `api_probe` 一次，并把这件事写在
+    检查上方。这一格与 `AGENTS.md` §4.2「计数器在 flush 之后才加」「夹具脚本里的那对括号是承重的」
+    同族，只是这次共享的不是计数器也不是字符串拼接，而是**一个被三个读者先后覆盖的临时文件**。
 18. **日志面板那三份文档是"一个建造者、两扇门"的第三次应用**（2026-10-18，紧接第 16 条）：
     `query=log` / `log-modules` / `log-download` 与 `POST clear-log` 的答案全部来自
     `macast_core::logging` 的三个 `*_document`，而窗口那三条命令调的是**同一批函数**。
@@ -964,23 +982,18 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     `clear-log` 的 `removed` 数的是"文件 + 它带走的那几代"——面板若只列一代，那个数字
     就在用户面前没有解释。
 
-16. **一条审计被自己的变异体证伪过一次**（2026-10-18，`query=subscribers` 那一轮）：
-    新加的文本审计 `the_window_command_builds_its_subscriber_document_from_the_same_function`
-    第一版找的是 `"pending_append":` 这种**带冒号的整键**，而变异体写的是
-    `doc["pending_append_total"] = json!(…)` —— 往文档上**赋值**而不是重打一份 `json!`，
-    针眼没咬住，**0 红**。红不了不是因为规则没被破坏，而是审计的形状与破坏的形状不是同一个。
-    加强后的 needle 是**开引号 + 键名**（不带冒号），并列禁止 `"aggregated`/`"subscribed`/
-    `"pending_append`/`"pending_state`/`"pending_remove`/`"event_thread_alive`/`"children`/
-    `"rows`/`"timed_out`；重测同一支变异体：**1 红**。两个附带决定写在同一条里：
-    ① `"title"` **不在**针眼里 —— 窗口命令合法地写自己的 `title`（`player_snapshot` 与历史行
-    各一处），把它列进去会让审计在**干净树上红**，而"干净树会红的审计"的下场是被删掉而不是被修好；
-    ② 同一轮的门名变异体（`subscribers` 那行 gate 改成 token）红 **4** 条。
-17. **§23 里那条"先重新问一次再断言"**（同日，脚本自己的顺序 bug）：subscribers 那一串检查接在
-    clients 之后跑，而 `$API_BODY` 是**一个共享文件** —— 后面 `history` 的两条断言读到的是
-    subscribers 那份文档，`json_len history` 回"没有这个键"，两条红。产品一个字节没错，
-    **红的是我们对夹具状态的假设**。修法是在 history 之前重新 `api_probe` 一次，并把这件事写在
-    检查上方。这一格与 `AGENTS.md` §4.2「计数器在 flush 之后才加」「夹具脚本里的那对括号是承重的」
-    同族，只是这次共享的不是计数器也不是字符串拼接，而是**一个被三个读者先后覆盖的临时文件**。
+19. **CORS 那条不变式现在也被这台端口自己扫**（2026-10-18，随 `launch-param` 一起补）：
+    参考实现的 §4.7b 有一遍全仓扫描，断言"我们从不发 `Access-Control-Allow-*`"，而这份移植
+    **此前没有任何等价的守卫** —— 这很讽刺，因为正是这条缺失让"回环可读、局域网不可读"这套
+    门在浏览器面前还成立（`cast-info` 交回令牌、`launch-param` 交回整份设置表，靠的都是
+    跨源脚本读不到响应体）。补上的是一个纯函数 `header_emissions(sources, needle)`：
+    真实测试喂三个 crate 的每个 `.rs`（先断言扫到 ≥20 个文件，免得空扫描当成通过），
+    合成控制喂四种形状 —— 会发的、只在注释里提的、**小写拼的**（HTTP 头名大小写不敏感，
+    扫描器也就必须不敏感）、与无关的。两支变异体各红 1/2：把 `launch-param` 的门名改成
+    `token` 红在"回环也被拒"那一条上（局域网那句听不出区别，因为检查是累积且有序的 ——
+    这正是 §4.7c 的设计在测试层现形）；删掉"注释行不算"红 **2** 条，其中一条是真实扫描本身 ——
+    我们仓库里关于这条不变式的散文正是那句话的活样本，一个会对文档变红的扫描器的寿命是
+    一次"这测试干嘛挡我写注释"。
 ---
 
 ## 17. 提交与文档的规矩
@@ -1057,10 +1070,13 @@ grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
 #   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
-grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **11**（GET 表：cast/cast-info/
+grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **12**（GET 表：cast/cast-info/
 #   resolve-status/resolve-cookies/cast-targets/status/interfaces/subscribers/log/log-modules/
-#   log-download —— 参考实现十五个里的十一个，剩下四个是 plugin-info / module-settings /
-#   launch-param / mirror-* 那批还没移植的）
+#   log-download / launch-param —— 参考实现十五个里的十二个，剩下三个是 plugin-info /
+#   module-settings / mirror-* 那批还没移植的）
+grep -rc 'fn header_emissions' macast-upnp/src/http.rs          # 期望 **1**（CORS 不变式的扫描器在这里，
+#   它扫的是三个 crate 的所有 `.rs`；`the_cors_scanner_answers_when_a_cors_header_exists` 是它的合成正控，
+#   删掉"注释行不算"那一支就会红 2 条 —— 见 §16 第 19 条）
 grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **7**（POST 表，含 `clear-log`）
 grep -c 'fn log_view_document\|fn log_modules_document\|fn clear_log_document' macast-core/src/logging.rs
 #   期望 **3**：日志面板那三份文档的唯一建造者（HTTP 脸与窗口命令都调它）。

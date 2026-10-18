@@ -446,6 +446,9 @@ enum Action {
     LogModules,
     /// `query=log-download`: the whole file as an attachment.
     LogDownload,
+    /// `query=launch-param`: the raw settings table, which is what the page's
+    /// 高级设置 tab edits.
+    LaunchParam,
 }
 
 /// The eleven answers this port implements out of the shipped management API's
@@ -475,7 +478,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 11] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 12] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -585,6 +588,30 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 11] = [
         // report)".
         gate: "management",
         action: Action::LogDownload,
+    },
+    GetRoute {
+        query: "launch-param",
+        // Management, exactly as the reference gates it (`protocol.py:2080-2088`)
+        // — and said out loud about what it hands back, because this is the one
+        // read on this face whose answer is **the whole settings file**: every key
+        // the user has ever stored, including `Api_Token`, which is the credential
+        // that opens `query=cast` and every `GATE_CODE` POST route.
+        //
+        // Why that is survivable, in the reference's own terms: the browser-side
+        // defence is not this gate, it is that **no response on this port ever
+        // carries a CORS header** (AGENTS.md §4.7b's invariant, and
+        // `the_face_never_answers_a_cors_question` below is what holds it here),
+        // so a DNS-rebound page cannot read the body even though its request
+        // arrives from loopback. A local process that *can* read it already can
+        // read `macast_setting.json`. And a LAN caller without a token is refused.
+        //
+        // What is **ours** and not the reference's: the keys come out sorted,
+        // because this port's table is a `BTreeMap` while Python's dict keeps the
+        // file's insertion order. No reader here depends on order — the 高级设置
+        // view is a JSON editor — and if one ever does, the fix is an
+        // order-preserving table, not a sort in this route.
+        gate: "management",
+        action: Action::LaunchParam,
     },
 ];
 
@@ -1586,6 +1613,7 @@ impl Face {
             Action::Log => self.log_entry(req),
             Action::LogModules => self.log_modules_entry(),
             Action::LogDownload => self.log_download_entry(req),
+            Action::LaunchParam => self.launch_param_entry(),
         }
     }
 
@@ -1864,6 +1892,14 @@ impl Face {
             },
             &self.subscription.rows(),
         )
+    }
+
+    /// `query=launch-param` — the settings table as it stands, for the page's
+    /// 高级设置 tab. Read-only: nothing on this route writes, so a page that polls
+    /// it cannot create a key (`Setting::get` would, and §4.2's oldest trap says a
+    /// polling read must not).
+    fn launch_param_entry(&self) -> Response {
+        json_value_response(&Value::Object(self.setting.snapshot()))
     }
 
     /// `query=log` — the panel's tail of one log file.
@@ -5690,7 +5726,7 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 11);
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 12);
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -5716,6 +5752,7 @@ mod tests {
             Action::Log,
             Action::LogModules,
             Action::LogDownload,
+            Action::LaunchParam,
         ] {
             assert_eq!(
                 GET_MANAGEMENT_ROUTES
@@ -7550,6 +7587,222 @@ mod tests {
                 .unwrap_or(false),
             "the refused call still emptied the file"
         );
+    }
+
+    /// The lines of a source file that *emit* an HTTP header name: a non-comment
+    /// line containing `needle`.
+    ///
+    /// Comments are excluded on purpose, and not for tidiness — the prose about
+    /// this invariant has to be able to name the header it forbids, and a scanner
+    /// that reds on documentation gets deleted the first time someone writes a
+    /// sentence about it (AGENTS.md §4.13's 「文档比代码活得久」 in its tooling form).
+    fn header_emissions(sources: &[(&str, &str)], needle: &str) -> Vec<String> {
+        let mut hits = Vec::new();
+        for (path, text) in sources {
+            for (index, line) in text.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") || trimmed.starts_with('*') {
+                    continue;
+                }
+                if line.to_ascii_lowercase().contains(&needle.to_ascii_lowercase()) {
+                    hits.push(format!("{path}:{}: {trimmed}", index + 1));
+                }
+            }
+        }
+        hits
+    }
+
+    /// The needle, assembled rather than written. The scan's own source must not
+    /// become a hit, or the test would have to exclude itself — and a rule with an
+    /// exemption for its own enforcement is a rule nobody can re-read.
+    fn cors_needle() -> String {
+        format!("{}-{}", "Access", "Control")
+    }
+
+    #[test]
+    fn launch_param_answers_the_whole_table_because_that_is_what_the_tab_edits() {
+        crate::pin_test_dir();
+        let setting = fresh_setting("launch-param-table");
+        setting.set(Key::DlnaFriendlyName, Value::String("客厅的电视".into()));
+        setting.set(Key::NetworkInterface, Value::String("en0".into()));
+        store_token(&setting, Some(SECRET));
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting.clone(),
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        let response = face.answer(&get_api("/api?query=launch-param", LOCAL));
+        assert_eq!(response.status, 200);
+        let doc = serde_json::from_slice::<serde_json::Value>(&response.body).expect("an object");
+        assert_eq!(doc["DLNA_FriendlyName"], json!("客厅的电视"));
+        assert_eq!(doc["Network_Interface"], json!("en0"));
+        // **The secret is in this answer**, and the assertion says so rather than
+        // letting the route look like a harmless settings dump: `Api_Token` is what
+        // opens `query=cast` and every `GATE_CODE` POST. What keeps that out of a
+        // browser's hands is not this gate but the missing CORS header
+        // (`the_face_never_answers_a_cors_question`), and what keeps it out of a
+        // LAN peer's hands is the gate below.
+        assert_eq!(doc["Api_Token"], json!(SECRET));
+        // **The route itself creates nothing.** 高级设置 is polled, and a poll that
+        // grows the file it is showing is §4.2's trap arriving through a snapshot
+        // route. The comparison is before-and-after around the *call*, not around
+        // the face's construction — building the face already writes
+        // `DLNA_FriendlyName` into a fresh table, because the device description
+        // asks for the friendly name through the shared reader, and that is the
+        // reference's behaviour too (`build_description` runs `get_friendly_name()`
+        // at startup). Blaming the route for the face's own read would be a test
+        // that cannot be satisfied, which is how such assertions end up deleted.
+        let fresh = fresh_setting("launch-param-no-write");
+        let face2: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            fresh.clone(),
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        // Building the face is what writes `DLNA_FriendlyName` into a fresh table
+        // (the device description asks for the friendly name through the shared
+        // reader, exactly as the reference's does at startup), so the snapshot is
+        // taken **after** construction: this assertion is about the route, and a
+        // check that blames the route for the face would never be satisfiable —
+        // which is how such assertions end up deleted rather than fixed.
+        let before: Vec<String> = fresh
+            .snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            face2.answer(&get_api("/api?query=launch-param", LOCAL)).status,
+            200
+        );
+        let after: Vec<String> = fresh
+            .snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(before, after, "the dump grew the table it was showing");
+    }
+
+    #[test]
+    fn launch_param_is_refused_to_a_lan_caller_that_brings_no_token() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("launch-param-gate");
+        let refused = face.answer(&get_api("/api?query=launch-param", LAN));
+        assert_eq!(refused.status, 403);
+        let body: serde_json::Value =
+            serde_json::from_slice(&refused.body).expect("a refusal is JSON");
+        assert_eq!(body["message"].as_str(), Some(MANAGEMENT_REFUSAL));
+        assert!(
+            !text(&refused.body).contains("DLNA_FriendlyName"),
+            "the refusal still dumped the table"
+        );
+        store_token(&face.setting, Some(SECRET));
+        let served = face.answer(&get_api(
+            &format!("/api?query=launch-param&token={SECRET}"),
+            LAN,
+        ));
+        assert_eq!(served.status, 200);
+    }
+
+    #[test]
+    fn the_face_never_answers_a_cors_question() {
+        crate::pin_test_dir();
+        // AGENTS.md §4.7b's invariant, ported: every refusal on this face is
+        // written for a *browser*, and what actually stops a cross-site page from
+        // reading the answer is that no response carries
+        // `Access-Control-Allow-*`. Same-site POST checks and tokens are about who
+        // may *act*; the missing CORS header is the only thing keeping the reads
+        // (`cast-info`'s token, `launch-param`'s whole settings table, `log`'s
+        // sender-supplied titles) from being harvestable by any page the user
+        // visits while Macast runs.
+        //
+        // So the check is a scan over every file that can build a response, not a
+        // test of one route: a second writer added in `macast-cast`'s relay or in
+        // the shell would otherwise sit outside every per-route assertion this
+        // crate has.
+        let mut sources: Vec<(&str, &str)> = Vec::new();
+        for dir in [
+            (std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), "macast-upnp"),
+            (
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .map(|root| root.join("macast-cast").join("src"))
+                    .expect("workspace layout"),
+                "macast-cast",
+            ),
+            (
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .map(|root| root.join("src-tauri").join("src"))
+                    .expect("workspace layout"),
+                "src-tauri",
+            ),
+        ] {
+            let entries = std::fs::read_dir(&dir.0)
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.0.display()));
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let name = format!("{}/{}", dir.1, path.file_name().unwrap().to_string_lossy());
+                sources.push((Box::leak(name.into_boxed_str()), Box::leak(text.into_boxed_str())));
+            }
+        }
+        // A scan that scanned nothing is the failure mode the reference's Part 50
+        // names for its own scanner, so the population is asserted first.
+        assert!(
+            sources.len() >= 20,
+            "the CORS scan saw {} files; it is not covering the port",
+            sources.len()
+        );
+        let hits = header_emissions(&sources, &cors_needle());
+        assert!(hits.is_empty(), "a response emits a CORS header: {hits:?}");
+    }
+
+    #[test]
+    fn the_cors_scanner_answers_when_a_cors_header_exists() {
+        crate::pin_test_dir();
+        // The positive control, because a scanner that has never returned a hit is
+        // indistinguishable from a scanner that cannot find one. Three synthetic
+        // sources, the same shape the reference's Part 48 uses.
+        let needle = cors_needle();
+        // The fixtures are **assembled**, because this file is one of the files the
+        // scan reads: a literal `"Access-Control-Allow-Origin"` sitting in a test
+        // string is a hit, and the honest fix is not to exempt this file from the
+        // rule it exists to enforce. Same reasoning as [`cors_needle`].
+        let ac = cors_needle();
+        let emitting = format!(
+            "impl Response {{\n    fn wire(&self) -> Vec<u8> {{\n        \
+            push_header(&mut out, b\"{ac}-Allow-Origin\", b\"*\");\n    }}\n}}"
+        );
+        let commented = format!("// We never send {ac}-Allow-Origin; that is the invariant.\n");
+        let lowercase = format!("push_header(h, b\"{ac}-allow-origin\", b\"*\");");
+        let unrelated = "const HOST: &str = \"example.com\";\n";
+        let hits = header_emissions(
+            &[
+                ("emitting.rs", &emitting),
+                ("commented.rs", &commented),
+                ("lowercase.rs", &lowercase),
+                ("unrelated.rs", unrelated),
+            ],
+            &needle,
+        );
+        // Two hits, and they are the two *emissions*: the comment is prose, and a
+        // scanner that reds on documentation gets deleted the first time someone
+        // writes a sentence about it.
+        assert_eq!(hits.len(), 2, "expected the two emitting lines: {hits:?}");
+        assert!(hits[0].starts_with("emitting.rs:"), "{hits:?}");
+        // Header names on the wire are case-insensitive, so the scan is too — a
+        // ported `access-control-allow-origin` is the same hole spelled differently.
+        assert!(hits[1].starts_with("lowercase.rs:"), "{hits:?}");
     }
 
     #[test]
