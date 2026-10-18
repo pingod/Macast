@@ -20,8 +20,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, info, warn};
+use macast_core::logging::Logger;
 use rand::Rng;
+
+/// The logger this module writes through, under the name the reference gives it
+/// (`protocol_airplay.py:29` — `logging.getLogger("AirPlay")`).
+///
+/// It is **not** claimed, so the records land in `macast.log` exactly where
+/// Python's go. Until 2026-10-18 this module used the `log` facade's free
+/// macros, and nothing in the workspace installed a sink for them — every line
+/// below, including the port-fallback warning a user needs when macOS's own
+/// AirPlay Receiver has taken 7000, was written to nowhere.
+fn logger() -> &'static std::sync::Arc<Logger> {
+    static SELF: std::sync::OnceLock<std::sync::Arc<Logger>> = std::sync::OnceLock::new();
+    SELF.get_or_init(|| Logger::named("AirPlay"))
+}
 
 /// Default RTSP listen port. macOS ships its own AirPlay receiver that
 /// occupies 7000; we try a few consecutive ports before giving up.
@@ -324,10 +337,10 @@ impl AirPlayState {
             return None;
         }
         if session_id != session.to_string() {
-            info!(
+            logger().info(&format!(
                 "AirPlay stale session {:?} (ours is {})",
                 session_id, *session
-            );
+            ));
             return Some(454);
         }
         None
@@ -367,7 +380,7 @@ impl AirPlayState {
                 // answers with a signed Apple-Response. We have no signing key,
                 // so we deliberately do not promise one.
                 if get_header(&req.headers, "Apple-Challenge").is_some() {
-                    info!("Client sent Apple-Challenge; signature auth is not implemented, continuing without Apple-Response");
+                    logger().info("Client sent Apple-Challenge; signature auth is not implemented, continuing without Apple-Response");
                 }
                 (200, headers, String::new())
             }
@@ -385,11 +398,11 @@ impl AirPlayState {
                     // Answering 200 here promised a play that could never happen,
                     // and the PLAY that followed reported Range/RTP-Info for a
                     // stream that did not exist.
-                    warn!("AirPlay ANNOUNCE carried no Content-Location; refusing rather than pretending to load");
+                    logger().warning("AirPlay ANNOUNCE carried no Content-Location; refusing rather than pretending to load");
                     return (400, headers, String::new());
                 }
                 let url = url.unwrap();
-                info!("AirPlay ANNOUNCE url={}", url);
+                logger().info(&format!("AirPlay ANNOUNCE url={}", url));
                 *self.current_url.lock().unwrap() = Some(url);
                 (200, headers, String::new())
             }
@@ -421,7 +434,7 @@ impl AirPlayState {
                 if url.is_none() {
                     // Nothing was announced: 455 rather than a 200 that claims
                     // playback started.
-                    warn!("AirPlay PLAY without a prior ANNOUNCE url");
+                    logger().warning("AirPlay PLAY without a prior ANNOUNCE url");
                     return (455, headers, String::new());
                 }
                 let url = url.unwrap();
@@ -483,7 +496,7 @@ impl AirPlayState {
             _ => {
                 // Anything else: say so instead of answering 200 to a request we never
                 // performed. `Allow` tells the client what it may ask for.
-                info!("AirPlay unsupported RTSP method {:?} from a client", req.method);
+                logger().info(&format!("AirPlay unsupported RTSP method {:?} from a client", req.method));
                 headers.insert("Allow".to_string(), SUPPORTED_METHODS.join(", "));
                 (501, headers, String::new())
             }
@@ -525,16 +538,16 @@ pub fn handle_connection(
         let req = match read_request(&mut reader) {
             Ok(Some(req)) => req,
             Ok(None) => {
-                debug!("RTSP connection closed by client {:?}", addr);
+                logger().debug(&format!("RTSP connection closed by client {:?}", addr));
                 break;
             }
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut
                 {
-                    info!("RTSP idle timeout from {:?}, closing connection", addr);
+                    logger().info(&format!("RTSP idle timeout from {:?}, closing connection", addr));
                 } else {
-                    debug!("RTSP read error from {:?}: {}", addr, e);
+                    logger().debug(&format!("RTSP read error from {:?}: {}", addr, e));
                 }
                 break;
             }
@@ -543,7 +556,7 @@ pub fn handle_connection(
         let (code, resp_headers, body) = state.handle_request(&req, renderer.as_ref());
         let response = format_response(code, &resp_headers, &body);
         if let Err(e) = writer.write_all(response.as_bytes()) {
-            debug!("RTSP write error to {:?}: {}", addr, e);
+            logger().debug(&format!("RTSP write error to {:?}: {}", addr, e));
             break;
         }
 
@@ -578,16 +591,16 @@ impl AirPlayReceiver {
                     self.state.running.store(true, Ordering::SeqCst);
                     self.listener = Some(listener);
                     if port != AIRPLAY_PORT {
-                        warn!(
+                        logger().warning(&format!(
                             "AirPlay port {} already in use (macOS AirPlay Receiver?), using {} instead",
                             AIRPLAY_PORT, port
-                        );
+                        ));
                     }
-                    info!("AirPlay RTSP server started on port {}", port);
+                    logger().info(&format!("AirPlay RTSP server started on port {}", port));
                     return Ok(port);
                 }
                 Err(e) => {
-                    debug!("AirPlay bind port {} failed: {}", port, e);
+                    logger().debug(&format!("AirPlay bind port {} failed: {}", port, e));
                     continue;
                 }
             }
@@ -607,7 +620,7 @@ impl AirPlayReceiver {
         while self.state.running.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
-                    debug!("AirPlay RTSP connection from {}", addr);
+                    logger().debug(&format!("AirPlay RTSP connection from {}", addr));
                     let state = Arc::clone(&self.state);
                     let renderer = Arc::clone(&renderer);
                     std::thread::spawn(move || {
@@ -620,7 +633,7 @@ impl AirPlayReceiver {
                     }
                     // A *single* failed accept (ECONNABORTED, EMFILE) must not take
                     // down the whole server — same trap as Chromecast TLS (§4.1).
-                    warn!("AirPlay accept error: {}", e);
+                    logger().warning(&format!("AirPlay accept error: {}", e));
                     std::thread::sleep(Duration::from_millis(200));
                 }
             }
@@ -631,7 +644,7 @@ impl AirPlayReceiver {
     /// Stop the receiver.
     pub fn stop(&self) {
         self.state.running.store(false, Ordering::SeqCst);
-        info!("AirPlay RTSP server stopped");
+        logger().info("AirPlay RTSP server stopped");
     }
 
     /// Get the actual bound port.

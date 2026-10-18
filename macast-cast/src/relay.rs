@@ -41,7 +41,7 @@
 //! * `wait_for_bytes_within` blocks **before** the response line is written.
 ///   Once that line is out the only honest answer is a truncated one.
 
-use log::warn;
+use macast_core::logging::Logger;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{TcpListener, TcpStream};
@@ -65,6 +65,18 @@ use crate::resolve::console_flags;
 
 /// Bytes read from upstream per turn.
 const COPY_CHUNK: usize = 128 * 1024;
+
+/// The logger this module writes through, under the name the reference gives it
+/// (`media_relay.py:72` — `logging.getLogger("MediaRelay")`), unclaimed so the
+/// records join `macast.log` like Python's do.
+///
+/// Same story as `airplay.rs`: these two `warn!` calls went through the `log`
+/// facade, which no code in this workspace ever gave a sink, so "a relay temp
+/// file survived the sweep" was a sentence that could never be read.
+fn relay_logger() -> &'static std::sync::Arc<Logger> {
+    static SELF: std::sync::OnceLock<std::sync::Arc<Logger>> = std::sync::OnceLock::new();
+    SELF.get_or_init(|| Logger::named("MediaRelay"))
+}
 
 /// Maximum seconds to wait for the remux to produce its first byte.
 pub const GROW_WAIT_SECONDS: f64 = 20.0;
@@ -488,7 +500,7 @@ impl Relay {
         if !path.is_empty() {
             if let Err(e) = std::fs::remove_file(&path) {
                 if e.kind() != io::ErrorKind::NotFound {
-                    warn!("relay {}: temp file left behind at {path}: {e}", self.relay_id);
+                    relay_logger().warning(&format!("relay {}: temp file left behind at {path}: {e}", self.relay_id));
                 }
             }
         }
@@ -652,7 +664,26 @@ impl RelayStore {
             removed.push(path);
         }
         if !removed.is_empty() {
-            warn!("relay: swept {} abandoned temp file(s)", removed.len());
+            // The names, not just the count. "swept 3 abandoned temp file(s)" says
+            // something happened; a reader deciding whether that is a bug needs to
+            // know **which** files, because an abandoned `…/<id>.mp4` whose id is
+            // still on the page is a different story from an old one left by a
+            // killed ffmpeg (AGENTS.md §4.2: 每一条失败要给得出下一步).
+            const NAMED: usize = 5;
+            let mut names = removed
+                .iter()
+                .take(NAMED)
+                .filter_map(|path| path.file_name().and_then(|n| n.to_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if removed.len() > NAMED {
+                names.push_str(&format!(" … (+{} more)", removed.len() - NAMED));
+            }
+            relay_logger().warning(&format!(
+                "relay: swept {} abandoned temp file(s): {}",
+                removed.len(),
+                names
+            ));
         }
         removed
     }

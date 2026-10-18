@@ -742,6 +742,38 @@ pub fn clear_log_file(path: &Path) -> std::io::Result<usize> {
     Ok(removed)
 }
 
+/// Which of these sources speak through the `log` facade rather than a [`Logger`].
+///
+/// A pure function of `(name, text)` pairs, so the audit that runs it against the
+/// workspace can also run it against four synthetic strings and prove the scanner
+/// itself has teeth — the shape `macast-upnp`'s CORS scan uses, and the reason it
+/// exists here is the same: **an invariant nothing re-asks comes back.**
+///
+/// What counts: an import of the facade (`use log::…`) or a call of one of its
+/// five macros. What does not: a comment that talks about them — this file's own
+/// doc comments would otherwise make the audit red on a clean tree, which is how
+/// such a scanner ends up deleted rather than fixed.
+pub fn log_facade_uses(sources: &[(String, String)]) -> Vec<String> {
+    let macros = ["info!", "warn!", "debug!", "error!", "trace!"];
+    let import = ["use ", "log::"].concat();
+    let mut offenders = Vec::new();
+    for (name, text) in sources {
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with(&import) || macros.iter().any(|m| trimmed.contains(&format!("{m}("))) {
+                offenders.push(name.clone());
+                break;
+            }
+        }
+    }
+    offenders.sort();
+    offenders.dedup();
+    offenders
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1090,3 +1122,117 @@ mod tests {
         );
     }
 }
+
+    #[test]
+    fn the_facade_scanner_reports_a_source_that_borrows_it() {
+        // Synthetic controls first: a scanner that has never reported anything has
+        // not been asked. Each of the five macros, the import, and the two shapes
+        // that must **not** be flagged — a doc comment mentioning `warn!`, and our
+        // own `Logger` call spelled `logger().warning(`.
+        // The controls are **built**, not written: a source line that literally
+        // contains `warn!(` would make the workspace scan below flag this very file
+        // (same reason `macast-cast`'s proto.rs splices its needles with `format!`).
+        let bang = "!";
+        let call = |name: &str| format!("        {name}{bang}(\"x\");\n");
+        let hits = log_facade_uses(&[
+            ("a".to_string(), format!("use {}::warn;\n", "log")),
+            ("b".to_string(), call("info")),
+            ("c".to_string(), call("warn")),
+            ("d".to_string(), call("debug")),
+            ("e".to_string(), call("error")),
+            ("f".to_string(), call("trace")),
+        ]);
+        assert_eq!(hits, vec!["a", "b", "c", "d", "e", "f"], "the needles went quiet: {hits:?}");
+        let misses = log_facade_uses(&[
+            ("doc".to_string(), format!("/// these two `warn{}` calls went nowhere\n", bang)),
+            (
+                "ours".to_string(),
+                "        logger().warning(\"AirPlay refused\");\n".to_string(),
+            ),
+        ]);
+        assert!(misses.is_empty(), "the scanner flags prose or our own calls: {misses:?}");
+    }
+
+    #[test]
+    fn no_crate_even_declares_the_facade() {
+        // The structural half, and the one that carries the weight now: with **no
+        // crate declaring `log`**, a `use log::` line is a compile error rather than
+        // something a test has to catch. `macast-cast` carried the dependency until
+        // 2026-10-18 while its two modules' lines went to nowhere; taking it out is
+        // what makes the source scan below un-failable-by-accident.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace layout")
+            .to_path_buf();
+        let mut declared = Vec::new();
+        let mut manifests = 0usize;
+        let name = ["use ", "log::"].concat();
+        for crate_name in ["macast-core", "macast-mpv", "macast-upnp", "macast-cast", "src-tauri"] {
+            let path = root.join(crate_name).join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            manifests += 1;
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                if trimmed.starts_with("log ") || trimmed.starts_with("log=") {
+                    declared.push(format!("{crate_name}: {trimmed}"));
+                }
+            }
+        }
+        assert_eq!(
+            manifests, 5,
+            "only {manifests} of the five manifests were readable — a scan of nothing is not a pass"
+        );
+        assert!(
+            declared.is_empty(),
+            "these manifests put the `log` facade back into the graph; nothing installs a sink \
+             for it, and the import must stay a compile error (the needle this test refuses to \
+             write out is `{name}…`): {declared:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_in_the_workspace_borrows_the_log_facade() {
+        // `airplay.rs` and `relay.rs` did, until 2026-10-18: the workspace had **no
+        // `impl log::Log`, no `set_logger`, no `set_max_level` anywhere**, so the
+        // `log` crate's default level filter (off) meant every one of their
+        // eighteen sentences — both AirPlay refusals, the port-fallback warning a
+        // user needs when macOS owns 7000, and "a relay temp file survived the
+        // sweep" — was written to nowhere. That is not a cosmetic gap: the log panel
+        // and `macast.log` are how this product explains a black screen.
+        //
+        // The rule is checked workspace-wide rather than per crate, because the next
+        // offender is whoever adds the next `use log::` in whichever crate.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace layout")
+            .to_path_buf();
+        let mut sources: Vec<(String, String)> = Vec::new();
+        let mut scanned_files = 0usize;
+        for crate_name in ["macast-core", "macast-mpv", "macast-upnp", "macast-cast", "src-tauri"] {
+            let dir = root.join(crate_name).join("src");
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let name = format!("{}/{}", crate_name, path.file_name().unwrap().to_string_lossy());
+                scanned_files += 1;
+                sources.push((name, text));
+            }
+        }
+        assert!(
+            scanned_files >= 20,
+            "the scan read {scanned_files} files; a scan that read almost nothing is not a pass"
+        );
+        let offenders = log_facade_uses(&sources);
+        assert!(
+            offenders.is_empty(),
+            "these sources write through the `log` facade, which has no sink in this \
+             workspace — their lines reach no file: {offenders:?}"
+        );
+    }

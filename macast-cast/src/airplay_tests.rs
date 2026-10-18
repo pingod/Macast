@@ -842,3 +842,39 @@ fn every_test_pins_the_log_directory_first() {
     assert!(test_count > 10, "expected at least 10 tests, found {test_count}");
     assert_eq!(pinned_count, test_count, "every test must call pin_test_dir()");
 }
+
+// ── the module's own sentences reach a file ─────────────────────────
+
+/// Root-log text, the file an unclaimed logger writes to.
+fn root_log() -> String {
+    macast_core::logging::read_tail(&macast_core::paths::log_file(), 400).text
+}
+
+#[test]
+fn the_two_refusals_are_written_down_not_just_returned() {
+    crate::pin_test_dir();
+    // Until 2026-10-18 this module talked through the `log` facade's free macros
+    // while **nothing in the workspace had installed a sink** — no `impl log::Log`,
+    // no `set_logger`, no `set_max_level`. So both of the sentences that explain a
+    // black screen ("your ANNOUNCE carried no URL", "your PLAY had nothing behind
+    // it") were written to nowhere, and the 400/455 they accompany were the only
+    // thing a sender ever saw. The status codes were never at risk; the sentence a
+    // user greps for was. Ask the file.
+    let state = AirPlayState::new("Test".into());
+    let renderer = Arc::new(VolumeCapture::new());
+    let bare = make_request("ANNOUNCE", "rtsp://x", &[("CSeq", "1")], "");
+    let (code, _, _) = state.handle_request(&bare, renderer.as_ref());
+    assert_eq!(code, 400, "the refusal itself still works");
+    let play = make_request("PLAY", "rtsp://x", &[("CSeq", "2")], "");
+    let (code, _, _) = state.handle_request(&play, renderer.as_ref());
+    assert_eq!(code, 455, "and so is the second one");
+    let text = root_log();
+    assert!(
+        text.contains("AirPlay ANNOUNCE carried no Content-Location"),
+        "the 400 was returned and nothing was written down: {text}"
+    );
+    assert!(
+        text.contains("AirPlay PLAY without a prior ANNOUNCE url"),
+        "the 455 was returned and nothing was written down: {text}"
+    );
+}

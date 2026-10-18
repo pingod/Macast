@@ -1437,3 +1437,29 @@ fn the_sweep_of_a_directory_we_cannot_list_claims_nothing() {
         "a directory we cannot open is not a directory we cleaned"
     );
 }
+
+#[test]
+fn the_sweep_names_the_files_it_took_in_a_file_someone_reads() {
+    crate::pin_test_dir();
+    // Two facts, one row. Until 2026-10-18 this module's warnings went through the
+    // `log` facade, and the workspace installs no sink for it, so the sweep was
+    // silent by construction. And a count alone cannot be acted on: the question a
+    // reader has is "**which** file", because an id that is still on the page is a
+    // different bug from a temp file an orphaned ffmpeg left behind.
+    let dir = temp_dir_for("sweep-naming");
+    let orphan = dir.join("relay-named-4f7a.mp4");
+    std::fs::write(&orphan, b"y").unwrap();
+    age_file(&orphan, 4000);
+    let store = RelayStore::new(RELAY_MAX, RELAY_IDLE_TTL);
+    let removed = store.sweep_orphans(&dir, RELAY_IDLE_TTL, now_secs());
+    assert_eq!(removed.len(), 1, "the fixture is one orphan");
+    let text = macast_core::logging::read_tail(&macast_core::paths::log_file(), 400).text;
+    assert!(
+        text.contains("relay-named-4f7a.mp4"),
+        "the sweep said a number but not a name, or said nothing at all: {text}"
+    );
+    assert!(
+        text.contains("swept 1 abandoned temp file(s)"),
+        "the count went missing while the names arrived: {text}"
+    );
+}

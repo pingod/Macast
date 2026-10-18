@@ -2318,6 +2318,34 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   （旧值 656 写下时已落后两级），`join_multicast_v4` 的期望从 **0** 翻成 **1**（接线前"广播口故意不入组"
   是设计，今天"不入组"才是缺陷）。
 
+**Rust 侧发现两条日志从来没落过盘时量到的事**（2026-10-18，`macast-cast/src/airplay.rs` +
+`relay.rs` 改走本端口自己的 `Logger`、`macast-cast/Cargo.toml` 删掉 `log`、
+`macast-core/src/logging.rs` 新增 `log_facade_uses` 与两条守卫用例；`macast-core` **90** 条、
+`macast-cast` **690** 条）：
+
+* **成因是一句 grep，不是一条用户投诉**：`airplay.rs` 与 `relay.rs` 用 `log::` 自由宏，
+  而全仓 `impl log::Log` / `log::set_logger` / `log::set_max_level` **三个都是 0 行**，
+  `log` 的默认级别过滤又是 `Off` ⇒ 18 条句子写进空气。最贵的三条恰好都是"用户会来问的那类问题"
+  的唯一答案：macOS 自带接收端占了 7000 之后我们换到哪个口、`ANNOUNCE` 没带地址所以我们拒了、
+  中转扫走了哪些遗留临时文件。§4.2/§4.3 那条老话是"日志指错嫌疑人比不指更贵"，
+  **这一格是它的前一档：日志一个字都不写。**
+* **承重的是删依赖那一刀，不是新增的用例**：`log` 从 `macast-cast/Cargo.toml` 移除之后
+  `use log::` 是**编译错误** —— 结构比测试早一步拦住。源码扫描那条（62 个文件、地板 20）
+  在这道闸成立时**永远不会响**，这句话写在用例旁边：它等的是"哪天有人把依赖加回来并给出理由"那一天。
+  同理五份 manifest 那条先断言**真的读到了 5 份**（"少读几份也算过"正是它要防的形状）。
+* **两条新用例问的是文件，不是返回值**：状态码从来不是风险（400/455 早就被测过），
+  风险是那两句解释去哪了。AirPlay 那条打两条拒绝、要求 `macast.log` 里两句都在；
+  中转那条顺手把消息补成**能行动**的形状 —— 只说"扫走 3 个"回答不了"这 3 个里有没有我页面上
+  还在用的那个"，所以现在带上前 5 个文件名（多的写成 `… (+N more)`）。
+* **四支定点变异各红 1 条**：把模块 logger 改成 `claim()`（句子换文件）/ 把一句拒绝降到 DEBUG
+  （默认阈值下不可见）/ 清扫消息去掉文件名 / 一行改回 `log::warn!`。
+* **扫描器自己被自己的合成对照冤枉过一次**：控制字符串里写死的 `warn!(` 让干净树报红
+  —— 与 `mdns_announce_probe` 那族"needle 要拼接"的教训同源，这次是我一小时前写的测试。
+  现在两条控制都用 `format!` 拼出来，并且**必须不报**的那两条（注释里的宏名散文、
+  我们自己的 `logger().warning(`）与**必须报**的那六条成对存在。
+* **修的是通路，不是那两行**：Python 侧 `logging.getLogger("AirPlay")` / `"MediaRelay"` 都**不认领**
+  模块文件，所以 Rust 侧照旧落 `macast.log`，设置页日志面板的模块列表一个名字都没多。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

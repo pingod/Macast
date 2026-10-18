@@ -45,7 +45,11 @@ rustls-pemfile = { workspace = true }
 # the log line that explained the failure named the wrong suspect (AGENTS.md
 # §4.2, "写文件的代码要自己把目录建出来").
 rcgen = { workspace = true }
-log = { workspace = true }
+# No `log` here on purpose: the two modules that used to declare it (`airplay.rs`,
+# `relay.rs`) wrote 18 sentences into a facade nothing in the workspace had given a
+# sink, so those lines reached no file at all. They now use `macast_core::logging::Logger`,
+# like every other module here — and leaving the dependency out is the **stronger** guard:
+# a `use log::` line in this crate is now a compile error, not a test failure.
 rand = { workspace = true }
 url = { workspace = true }
 # `resolve.rs` mirrors the three places `media_resolve.py` asks a regex rather than

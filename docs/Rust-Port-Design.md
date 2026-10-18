@@ -479,6 +479,46 @@ glob 本 crate `src/` 下每个 `.rs`，对每一行 `#[test]` 找到函数体�
 需要 DEBUG 行的见证要先 `set_threshold(Level::Debug)`，**并在同一个作用域结束时还原** ——
 阈值是进程全局的，不还原就等于让后面的用例跑在一个不同的产品配置上。
 
+### 12.3 `log` 门面：一条曾经写到空气里的路
+
+`airplay.rs` 与 `relay.rs` 用的是 `log` crate 的自由宏（`info!` / `warn!` / `debug!`），
+而不是本端口自己的 `Logger`。这本身不是错 —— 错在**全仓没有任何一处安装过它**：
+`impl log::Log`、`log::set_logger`、`log::set_max_level` 三个 grep 在 2026-10-18 之前
+**全都是 0 行**，而 `log` 的默认级别过滤是 `Off`。于是那 18 条句子从来没进过任何文件，
+包括三句用户真的会需要的：
+
+| 句子 | 它本来要回答的问题 |
+|---|---|
+| `AirPlay port 7000 already in use (macOS AirPlay Receiver?), using N instead` | "为什么 iPhone 找不到这台 Mac" —— macOS 自带接收端占了 7000 是**本机最常见的一种占法** |
+| `AirPlay ANNOUNCE carried no Content-Location; refusing rather than pretending to load` | "投了却没画面"：发送端没给地址，我们拒了，而拒了这件事只存在于那个 400 里 |
+| `relay: swept N abandoned temp file(s)` | "配置目录为什么越来越大" |
+
+修法选的是**改成 `Logger::named`**，不是装一个全局 sink。理由不是省事：装 sink 会把
+**第三方** crate 的 `log` 输出也接进我们的文件，而这条通路的音量从来不由我们决定
+（`AGENTS.md` §4.10 那 49% 就是这么来的）；`Logger` 的名字由参考实现自己点名 ——
+`protocol_airplay.py:29` 是 `logging.getLogger("AirPlay")`、`media_relay.py:72` 是
+`"MediaRelay"`，两边都对得上，且**都不认领**（claim）自己的模块文件，所以记录照旧落
+`macast.log`，与 Python 同一处。
+
+守这条的是两层用例，而**承重的是后面那一层**：
+
+1. `no_crate_even_declares_the_facade` 扫五份 `Cargo.toml`（断言真的读到了 **5** 份，
+   "少读几份也算过"正是它要防的形状），要求没有任何一份声明 `log`。`macast-cast`
+   那一行本轮**删掉了** —— 于是 `use log::` 从此是**编译错误**而不是测试失败：
+   **结构比用例早一步拦住，这一格才是承重的那一格。**
+2. `nothing_in_the_workspace_borrows_the_log_facade` 再用纯函数 `log_facade_uses` 扫五个
+   crate 的每个 `.rs`（本轮量到 **62 个文件**：core 10、mpv 9、upnp 10、cast 31、
+   src-tauri 2；地板写 20），四条合成对照（五种宏各一 + 那条 import），两条必须**不**报的
+   （注释里提到宏名的散文、以及我们自己的 `logger().warning(`）。
+   **(1) 成立时这一条永远不会响，这句话写在用例旁边而不是藏起来**：它在等的那一天是
+   "有人重新声明那个依赖并给出理由"，那时它是唯一还在读源码的一层。
+
+牙都量过：把 `relay.rs` 的一行改回 `log::warn!(…)` ⇒ (2) 红 **1** 条并点名
+`["macast-cast/relay.rs"]`；把 `macast-cast/Cargo.toml` 那一行加回去 ⇒ (1) 红 **1** 条。
+**扫描器自己的 needle 一律拼接而成** —— 本轮真的栽过一次：合成对照里写死的 `warn!(`
+把装着它的那个文件自己报成了违规，于是干净树红。同 §13 那条 CORS 扫描的教训。
+
+
 ---
 
 ## 13. 验证模型：三层，各自答不同的问题
@@ -1176,6 +1216,21 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     就是它的读数，本轮仍故意不作判据），聚合队列没落地之前，`Timing` 的四个值只有单元测试
     在算它，没有一行产品代码按它行动。登记在 §8 的偏离表里：**我们的 responder 立即作答**，
     后果是同一分钟内多个查询会把多份答案打到组播上（正是 §4.10 那类日志/流量膨胀的形状）。
+24. **两条模块的日志从来没有落过盘，而这件事是读代码读出来的、不是用户报出来的**（2026-10-18）。
+    `airplay.rs` 与 `relay.rs` 用 `log::` 自由宏，而全仓没有 `impl log::Log` / `set_logger` /
+    `set_max_level` 中的任何一个（三条 grep 当时都是 0 行），`log` 的默认级别过滤又是 `Off` ⇒
+    **18 条句子写进了空气**。里面最贵的三条恰好都是"用户会来问的那种问题"的唯一答案：
+    macOS 自带接收端占了 7000 之后我们换了哪个口、`ANNOUNCE` 没带地址所以我们拒了、
+    以及中转扫走了哪些遗留临时文件。修法是改走本端口自己的 `Logger`（名字照抄参考实现的
+    `"AirPlay"` / `"MediaRelay"`、都不 claim，所以照旧落 `macast.log`），
+    **并把 `log` 从 `macast-cast` 的依赖里删掉** —— 这一句才是承重的：从此 `use log::` 是编译错误。
+    为什么没更早发现：这条通路**没有任何一条用例问过文件**（§12.3）。现在问了，两条各一
+    （AirPlay 的两句拒绝、中转那句点名文件的清扫报告），而且中转那条顺手把消息补成了
+    能行动的形状 —— 只报"扫走 3 个"回答不了"那三个里有没有我页面上还在用的那个"，
+    所以现在带上前 5 个文件名。四支定点变异：把 logger 改成 claim（句子换文件）→ 红 1、
+    把某条拒绝降到 DEBUG（默认阈值下不可见）→ 红 1、清扫消息去掉名字 → 红 1、
+    一行改回 `log::warn!` → 全仓扫描那条红 1。**方向值得记一句**：这一格不是"用户报了 bug"
+    那一类，是"日志指错嫌疑人比不指更贵"（§4.2/§4.3）那一类的**前一档**——日志一个字都不写。
 ---
 
 ## 17. 提交与文档的规矩
@@ -1222,8 +1277,8 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
 # 不是"看起来应该"）
 grep -n "TESTS_IN_THIS_CRATE: usize" macast-cast/src/proto.rs   # 期望它**等于两台仪器量出的数**：
 #   `cargo test -p macast-cast --lib -- --list` 的计数，与 proto.rs 里那条扫描用例扫到的条数。
-#   2026-10-18 那一趟两边都是 **688**。这里故意不写成一个可以照抄的常量：上一版写的 656
-#   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688），一个会随加用例腐烂的数
+#   2026-10-18 最后一趟两边都是 **690**。这里故意不写成一个可以照抄的常量：上一版写的 656
+#   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688 → 690），一个会随加用例腐烂的数
 #   不是引用体检，是§4.13 那句「一个没被机器问过的数字」的文档版本。
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
 grep -c "has not been written yet" macast-mpv/src/lib.rs        # 期望 **0**（本轮改的注释）
@@ -1259,6 +1314,11 @@ grep -c 'mDNS answered its first query' macast-cast/src/announce.rs # 期望 **1
 grep -c 'HEARD_SENTENCES' macast-cast/src/announce.rs                # 期望 **4**（定义 + 上界 + 打印两处）；
 #   用例里的期望写的是**字面 3**，不是常量 —— 同源等式对任何常量都成立，见 §16 第 22 末与 §13.4
 grep -c 'x0b_googlecast' scripts/verify_rust_receiver.sh             # 期望 **1**：§25 的监听器按**线标签**过滤；
+# `log` 门面这一格的两道闸（§12.3）：依赖不在图里是**编译错误**，源码扫描是它后面那一层
+grep -c '^log = ' macast-core/Cargo.toml macast-mpv/Cargo.toml macast-upnp/Cargo.toml \
+  macast-cast/Cargo.toml src-tauri/Cargo.toml | grep -v ':0' ; echo "五份 manifest 的 log 声明数应为空"
+grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast/src src-tauri/src | grep -v ':0' ; echo "同上，源码里也不许出现"
+#   注意后一条在 (前一条成立) 时永远为空 —— 它是给"哪天有人把依赖加回来并解释为什么"那一天读的
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::cast_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
