@@ -339,6 +339,10 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `airplay`（谁写播放状态） | AirPlay 的投屏**不写 DLNA 状态表、不写播放列表、不写历史** | `protocol_airplay.py:251-280` 调的是 `self.renderer.…`，那里 renderer 是**渲染器实例本身**而不是 `PlaybackGuard`。移植照抄这个形状：壳给的是 `ShellRenderer` 上的 `airplay::RendererCallback`，五个方法都是直通。后果要说明白：用手机投完一段之后，设置页那张卡继续显示**上一次 DLNA/Cast 交接**的内容 —— **这不是 AirPlay 坏了**，是把主人留在发送端该在的那一层；谁要在 Rust 侧"改进"成也写状态，要先改的是 §15 与 `AGENTS.md` §4.2 那句"只有一个主人"的归属，而不是悄悄加一次 `set_state` |
 | `channel`（`MAX_FRAME_BYTES`） | 帧头声称的长度 > 8 MiB 时**先拒再分配**（`InvalidData`，不 `vec![0u8; length]`）；参考实现没有这个上限，它 `_recv_exact(sock, length)` 一路累积 | 那 4 字节是**对端给的**，`>I` 能声称 4 GiB。Python 的累积读至少不会一次性申请，而我们的实现一旦先申请就给了"一个谎长度打爆接收端"的形状。代价要写清：一台**真的**发 >8 MiB 帧的发送端在这里会被断开而不是收下。**8 MiB 是我们选的数，不是从设备上量出来的上限**（本局域网没有真 Chromecast，§16 第 1 条），它的依据只有两条：正文是 JSON 与 protobuf 控制消息，而 `>I` 那个字段可以对端随口写。**这一句只到"会话结束"，不到"用户看得见"**：`client_loop` 的错误统一走那句 `Cast client disconnected: {e}`，而它是 **DEBUG** 级（与对端正常断开同一句，`channel.rs` 的 `handle_connection` 尾部），所以默认阈值下这条拒绝**不进日志**。这是今天的形状，不是已验证的决定 —— 要把安全侧的那一格抬到 INFO，改的是这一句分级，不是上限 |
 
+| `announce`（一个服务一个 socket，而参考实现是一个引擎两个服务） | 参考实现把 Cast 与 AirPlay 都注册进**同一个** `Zeroconf` 引擎（`discovery.py` 的 `discover()` 是单例），所以 5353 上它只有那一个读着的多播 socket；本壳今天有**三个**：`mdns.rs` 的浏览器、Cast 的 announcer、AirPlay 的 announcer（后两个各 bind 各的 5353，`SO_REUSEPORT`） | 两台机器（macOS 与 CachyOS，2026-10-18，`scripts/mdns_reuseport_probe.py`）量过的分发规则是：**多播复制给每一个 socket，单播整条只交给一个，而交给谁随流变**。合并那两个 announcer 之前，这条规则的直接后果是"会答问的那一个 socket 可能收不到某个发送端发给 5353 的单播查询" —— 而今天 §22/§25/§26 的真机读数**没有观察到损失**，这件事不能读成"没问题"：那一族的查询是**多播**送达的，多播本来就每个 socket 都收到。**所以记账的方式是"已知代价 + 未见的损失"**：这一格不是待办的装饰，它是 §16 第 13 条那条"长期在场的那个 socket 要合并"的第二条、更强的理由（第一条是它从不读；现在是它读，但读到的是别人该答的问题）。合并的形状已经想清楚：一次 bind、一轮读、按 service type 分派广播与答问，判据连 §25 一起重测 |
+
+| 日志布局（核心模块也各自一个文件） | 参考实现只给**插件** claim 独立文件（`logsplit.claim` 的全部调用点是 `macast.py:336` 与 `:905` 两条插件加载路径）；`Protocol` / `Discovery` / `Chromecast` / `AirPlay` / `server` / `SSDPServer` 都 `propagate` 到根 handler ⇒ 全在 **`macast.log`**。本壳把 `MPV` / `Protocol` / `Discovery` / `Chromecast` 四个名字 claim 成了 `logs/<Name>.log` | 这是**移植决定**，不是照抄，所以它自己记账（§12.1b 那一格的理由曾在这一点上说错，已在原地改成量到的形状）。决定站得住的一侧：设置页「模块日志」那个下拉读的就是 `logs/`，高频行不把核心行埋掉是 §4.10 那一族的动机，而这四个名字在页面上都点得到。代价要说清并写在这里：**`AGENTS.md` §5 那条排障配方（`grep -aE "Cast LOAD|mDNS|ERROR" …/macast.log`）对本壳不成立**，按那一行去 grep 的人会在一个没有这些句子的文件里找它们。今天把四条 mDNS 总结句搬进了 `logs/Discovery.log`（它们的同伴句本来就在那），而壳自己的其余总结句仍骑在 `MPV` logger 上 —— 逐句归位的账记在 §16 与本节末尾那条待办 |
+
 **读代码时要找的下一类偏离**：任何一处"Rust 里做不到 / 做起来别扭"的 Python 行为，
 就是必须新增一行账的地方。不允许的处理方式是把它简化掉并在提交信息里不提。
 
@@ -453,10 +457,19 @@ utf-8 仍走 `std::str::from_utf8`；单字节标签是手抄表，理由是
 由**谁先拿到那个名字**决定 —— 这不是一句风格提醒，是被两个真 bug 换来的：
 
 * **产品侧**：`main.rs` 当年把播放器的 `MPV` logger 交给了 DLNA 状态表，所以
-  `setState: …` 与整段播放历史的故事写进 `logs/MPV.log`，而 `protocol.py:30` 用的是
-  `getLogger("Protocol")`、`logsplit` 给它 `logs/Protocol.log`。修法是表的构造点自己
+  `setState: …` 与整段播放历史的故事写进 `logs/MPV.log`。修法是表的构造点自己
   claim 一个名字（`host::PROTOCOL_LOG`），而**判据按文件名 grep**（§27 读
   `logs/Protocol.log`）：一个"在所有日志里找那句话"的检查会对着错误的目的地照样绿。
+  **这一条当年写的理由里有一句是假的，就地改掉**：那句写的是「`protocol.py:30` 用的是
+  `getLogger("Protocol")`、`logsplit` 给它 `logs/Protocol.log`」。量过的事实是：
+  参考实现里 `claim()` 只有一个入口链 —— `macast.py:336`（`load_from_file`）与
+  `:905`（`_load_bundled_plugins`）各调一次 `claim_from_module`，**只给插件**；
+  `Protocol` / `Discovery` / `Chromecast` / `AirPlay` / `server` / `SSDPServer` 这些
+  核心 logger 一律没被 claim，`propagate` 开着，所以它们全部落 **`macast.log`**。
+  本壳把其中四个名字 claim 成了独立文件，那是**移植的决定不是参考实现的行为**，
+  §8 有它一行；这一格真正成立的部分是**内部一致性**：既然这份壳里 `Protocol` 有自己
+  的文件，状态表的话就该在那个文件里，而不是挨着播放器事件。理由换成了这个，
+  修法与判据一个字没动 —— 一个错了的理由配一条对的判据，要改的是理由。
 * **测试侧**：`Logger::named("Macast")` 被任何一个用例 `claim()` 之后，全进程读到的
   都是那个文件 —— 于是"这条句子没写在 macast.log"这类**否定断言**的成败取决于
   **哪个测试先跑**。工具是分名的：`macast-cast` 的 e9 用 `Discovery-Echo` /
@@ -918,7 +931,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
-| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**20 条**）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**这一行仍然欠的那半句**：`_airplay._tcp` 的广播没接 —— 所以"iPhone 的屏幕镜像/音频列表里看得到这台 Mac"今天说不出口，只有**知道端口**的发送端（手动填地址、将来的测试）走得进来。**取证已完成**（同日，`macast-cast/tests/golden/mdns_airplay.hex`）：形状与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
+| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting` + `main.rs` 在**已经绑好口的 receiver** 之后起第二个 announcer）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**仍然欠的那半句换了位置，但没有消失**：**会广播 ≠ 会答问** —— responder 的判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门，`run()` 的 `answers` 参数把它带到 socket 上），所以对 `_airplay._tcp` 的**查询**这一侧我们不答，iPhone 靠的是那三包突发与 60 秒 keepalive。这一格要说成"没有见证"而不是"验证过不行"：§26 的 browse 从突发里就能成功，它既证不了答问也证不了不答问；announcer 自己的那一行日志**明说了这件事**（`it announces only — queries about this type are not answered`），§26 有一条就是问这句话在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
 ---
@@ -1041,14 +1054,21 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     分片帧在轮询之间补齐、对端关掉时结束会话而不是空转）。
 12. **`Macast_Protocols` 现在是 Chromecast 三张脸的门；DLNA 那一半仍然不是**
     （2026-10-18 关掉一半，剩下一半是有意的）：
-    `host::faces_enabled` 一次读取（AirPlay 接进来之后它交回 `Faces { cast, airplay }`，门从三张脸变四张），门住 8009 接收端、8008/8443 setup 脸与 `_googlecast._tcp`
-    广播 —— 三者是一个协议，分开门会得到"身份答得出来、连接握不上"的那台设备。
+    `host::faces_enabled` 一次读取（AirPlay 接进来之后它交回 `Faces { cast, airplay }`，门从三张脸变四张），门住 8009 接收端、8008/8443 setup 脸、`_googlecast._tcp`
+    广播，以及同日下一轮接上的 `_airplay._tcp` 广播（后者在 `airplay` 那一半门后：`main.rs` 只在 receiver 真的绑到口之后才建 announcer）—— 前三者是一个协议，分开门会得到"身份答得出来、连接握不上"的那台设备。
     证书生成也在门后（它往设置目录里写两个文件；一个用户关掉的协议不该留下密钥材料）。
     判据两层：`host::tests` 问**读法**（存的字符串要当成一条记录、legacy 键是追加不是优先、
     不认识的标题跳过并说一句、空表 = 全开、`ChromecastProtocol` 这种紧凑拼写在**两边都**解不出——
     参考实现的 `canonical_title` 只去 `" protocol"` 带空格那一截），
     §24 问**关上的门**（第二个实例只开 DLNA：8009/8008 必须拒连、日志必须说出是谁关的、
-    浏览器必须看不见它、证书文件必须不存在）。
+    浏览器必须看不见它、证书文件必须不存在）。**"看不见它"今天问的是两种服务类型**：
+    §24 那个浏览同时 watch `_googlecast._tcp` 与 `_airplay._tcp`（名字带类型标签落盘），
+    所以"关掉 Chromecast"这一问不再只对 Cast 的广播说话 —— 而这一格意外多了一个**正向对照**：
+    同一趟浏览在线上读到了 **别人**的一条 `_airplay._tcp`（`Pavia的MacBook Pro._airplay._tcp.local.`，
+    与本机 ControlCenter 占着 7000 那一条读数同形）。要说清这条对照证明到哪一步：它证明
+    "线不是空的、这套浏览读得到这个类型的实例"，它**不**证明是谁发的 —— §24 的浏览只记名字，
+    不解析 A 记录，所以"那是本机 macOS 自己的接收端"是从端口占用那一条读数**推**出来的，
+    不是这一格量出来的（§4.14「空结果要说清是哪一种空」+ §10「先拿证据再动手」）。
     **剩下那一半不是遗漏**：DLNA 的 HTTP 脸在这份壳里同时承载设置页与管理 API，
     把它一起门住 = 用户关掉 DLNA 就没有页面可改回来。参考实现里 DLNA 关闭时页面还在不在，
     本机**没有量过**（`build_protocol_group` 只在分组为空时兜底加回 DLNA，正好说明它考虑过
@@ -1264,7 +1284,8 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     回落这件事本轮第一次被断言），`OPTIONS/ANNOUNCE/SETUP/RECORD/PLAY/SET_PARAMETER/TEARDOWN`
     全部 200，且 mpv 那边有 `file-loaded`、窗口名字 `macast_verify_clip`、读回来的音量 50。
     整跑读数是 **271 条 PASS / 1 条 SKIP / 0 条 FAIL，退出码 1** —— 那一条 SKIP 就是第 22 条那格（本机送达），
-    计败而不是静默；§26 自己那 20 条今天全绿。
+    计败而不是静默；§26 自己那 20 条今天全绿（**这一节的 20 条是那一趟的读数**：同日下一轮 §29 给
+    §26 加了 7 条问广播的判据，那一节今天是 **27** 条，整跑 **288 PASS / 1 SKIP**）。
     *三条仪器错，都在我自己那一侧*：① `ap_grep "\'event\': \'file-loaded\'"` —— 双引号里的
     `\'` 是**字面反斜杠加引号**，于是这条判据从写下那天起就没问过任何东西，而它失败时印的是
     `tail -3`，读起来完全像"加载到一半被 stop 打断了"；产品没错，日志里 `file-loaded` 一直在那儿。
@@ -1369,6 +1390,67 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     一份九键 TXT 表**；responder 那侧仍只认 `_googlecast._tcp`，这一格要如实写进 §16 与 §15，
     别让"会广播"被读成"会答问"。
 
+29. **`_airplay._tcp` 真的广播了，而"会广播"与"会答问"是两格 —— 这一轮的四条读数各暴露了一处仪器或文档的谎**（2026-10-18 → 10-19，`macast-cast/src/announce.rs` 的 `service_type` / `for_airplay` / `airplay_from_setting` / `responder_answers` + `src-tauri/src/main.rs` 的第二个 announcer + 真机 §26 的 **+7 条**（这一节现在 **27** 条）与 §24 的双类型浏览）：
+    *形状*：`Service` 多的是**一个字段**而不是第二份实现（第 28 条那条接缝照兑现）；两个 builder
+    （`from_setting` / `airplay_from_setting`）共用同两个私人主人 `advertisable()`（窄地址集合，
+    §4.1 第一行）与 `report_clipped()`（超长友好名截属性不截接收端）。答不答问收在
+    `responder_answers()` 一行里：它问的是"这份判决表是为哪个类型量的"，答案只有 `_googlecast._tcp`。
+    *真机读到的*（`.venv` 那套 zeroconf，浏览在实例启动**之前**开 30 秒，横跨初始突发）：
+    `Macast-Rust-AirPlay._airplay._tcp.local.` 折成完整设备（PTR+SRV+TXT+A），
+    **端口读回来 = 实际绑的那个 7001**（macOS 自己占 7000），TXT 的 `deviceid` 非空、
+    `model=Macast`、`name=` 等于这趟种子给的友好名。§24 那一趟还**意外拿到一个正向对照**：
+    线上真有一条别人的 `_airplay._tcp`（`Pavia的MacBook Pro._airplay._tcp.local.`），
+    于是"没有我们的"不再是空线上的答复 —— 但它证明到哪一步要写清：那一格的浏览只记名字，
+    **不**证明是谁发的（"本机 ControlCenter"是从 7000 被占那条读数推的，不是这格量的）。
+    *四条各自独立的错，全在被发现之前长得像结论*：
+    ① **§22 的 `tail -1` 从此读的是"最后一个服务类型"**。两个 announcer 一存在，`log_grep 'mDNS: announcing ' | tail -1`
+    交回的就是 AirPlay 那条，于是 §22 拿 `_googlecast._tcp` 的浏览去解 `_airplay._tcp` 的名字，
+    读出 `unresolved`，并把 **7 条** TXT 顺序 / `ca` / SRV 目标 / A 记录的产品判据报成红 ——
+    而那一趟广播本身逐字节是对的（同一个浏览自己的 seen 列表里就躺着 Cast 那条）。判据修成
+    **按类型选行**，理由写在行上方：从"每个服务类型一行"的日志里挑最后一行，等于随手挑一个类型。
+    ② **共享模块的拒绝句会替另一个协议撒谎**：`start()` 的两条失败句写死「Chromecast will not be
+    discoverable」，AirPlay 的广播失败时用户读到的是 Chromecast —— 而参考实现那句 `%s` 格式化的是
+    **调用方给的 service type**（`discovery.py:268-269`），所以照抄的正确读法本来就是类型名。
+    变异体把 `self.service.service_type` 换回 `"Chromecast"` → **2 红**（两条拒绝句用例各一）。
+    ③ **一格 coverage 空洞是在写电池时发现的，不是在跑电池时**：`start()` 里
+    `let answers = self.service.responder_answers();` 这一次派生**没有任何见证者** —— 单元用例都是自己
+    手工把 flag 交给 `run()`，而真机那一问是 §25，本机 §25 的送达那一格是 **SKIP**。所以今天补的是
+    `the_answering_half_is_derived_not_written`（结构性审计：派生在、字面量不在），并把它为什么是审计
+    而不是行为用例写进测试自己的注释 —— **"§25 会抓"不是一条判据，尤其当 §25 在这台机器上跳过的时候**。
+    ④ **我的仪器 grep 错了文件，而那次错把一条真缺陷挖了出来**：M8 那一支把日志句子改坏之后，
+    探针在 `macast.log` 里找不到那行，读数一度读成"0 命中 = 判据有牙"。真相是那行**从来没写在
+    `macast.log`**：壳自己的启动总结句一直骑在 `Logger::named("MPV")` 上，落的是 `logs/MPV.log` ——
+    一个跟着 `AGENTS.md` §5 配方 grep `macast.log` 的人，永远读不到"这台 Mac 到底有没有在广播"。
+    四条 mDNS 总结句搬进 `logs/Discovery.log`（它们的同伴句「mDNS advertised …」本来就在那），
+    §22/§26 的读取改成**按文件名**（§27 立的规矩：在所有日志里找那句话的检查，对着错误的目的地照样绿）。
+    搬的过程中又量出一句**假理由**：上一轮本文与 `AGENTS.md` 都写着「`protocol.py:30` 是
+    `getLogger("Protocol")`，logsplit 给它 `logs/Protocol.log`」——量 `logsplit.claim` 的全部调用点是
+    `macast.py:336` 与 `:905` 两条**插件加载**路径，核心的 `Protocol` / `Discovery` / `Chromecast` /
+    `AirPlay` / `server` / `SSDPServer` **都没被 claim**，全部 `propagate` 到根 handler，
+    在参考实现里都落 `macast.log`。本壳把核心名字也分文件是**移植决定**（§8 新加一行，含它的代价：
+    §5 那条排障配方对本壳不成立），而 §12.1b 那格的原理由已就地换成量到的形状 —— 修法与判据一个字没动。
+    *八支定点变异（一支一条命令，`/tmp` 备份 + trap 还原 + md5 回到当轮基线；每支都先验证文件确实变了）*：
+    `responder_answers` 恒真 → **1** 红（`the_airplay_service_is_announced_and_never_answered`）；
+    恒假 → **1** 红（同一条的另一问：Cast 必须是那个会答问的）；
+    TXT `features` 的 `0x{:X}` 改小写 → **1** 红（逐字节对拍那行语料）；
+    `advertisable()` 换回宽集合 → **1** 红，**而红的是行为那一问**（`the Chromecast announcement carries 192.168.139.3, which is not in the set a sender can reach`），
+    审计那一问在同一条用例里排在它后面 —— 这台机器两个集合确实不同，所以"审计只是兜底"这句话在这里是真的；
+    `run()` 里 `if answers` 换成 `if true` → **1** 红（同一格证明 flag 是**被 obeyed 的**而不只是被算出来的）；
+    `start()` 的字面量 `true` → **1** 红（③那条新审计）；拒绝句写回 Chromecast → **2** 红；
+    M8（日志句子改坏）见 ④ —— 它的第一次读数**无效**，无效的原因是仪器而不是产品。
+    **没有一支 0 红；但 ③ 那一支在被补之前是真正的 0 红**，那一格从"没人问过"变成"有人问，只是问的是结构"。
+    *计数（两台仪器一致）*：`macast-cast` **699**（695 → 697 → 699：语料对拍、"广播但绝不答问"、
+    AirPlay 的拒绝句点名 AirPlay、答问那半是派生的不是写死的），`macast-core` 90、`macast-mpv` 149、
+    `macast-upnp` 347、`macast-tauri` 18。真机 **288 PASS / 0 FAIL / 1 SKIP，退出码 1**
+    （那一条 SKIP 仍是 §25 的送达那一格）。
+    *诚实边界（三条，方向别读错）*：① **会广播 ≠ 会答问**，而本机上"不答问"这件事也没有见证者 ——
+    §26 那条 browse 从突发就能成功，它既证不了答问也证不了不答问；要答 `_airplay._tcp` 的查询，
+    先得对参考实现做 §16 第 27 条那一族的取证，不是在这层猜。② **本壳现在在 5353 上有三个 socket**
+    （浏览器 + 两个 announcer），两台机器量过的规则是单播整条只交给其中一个 —— 今天的读数没有观察到损失
+    （那些查询是多播送达的，而多播本来就复制），**但"没观察到"不是"没有代价"**，合并那一条已经排进 §8 与本节待办。
+    ③ **没有任何一台 iPhone 连过这台接收端**：§26 的发送端是本脚本自己写的 RTSP 字节，
+    真机的"手机列表里看得见并投进来"仍然欠着。**以及本分支从未推送 ⇒ 这一轮的 699 条与那 288 条读数没有任何 CI 见证过。**
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1415,7 +1497,8 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
 # 不是"看起来应该"）
 grep -n "TESTS_IN_THIS_CRATE: usize" macast-cast/src/proto.rs   # 期望它**等于两台仪器量出的数**：
 #   `cargo test -p macast-cast --lib -- --list` 的计数，与 proto.rs 里那条扫描用例扫到的条数。
-#   2026-10-18 最后一趟两边都是 **695**（AirPlay 那一轮 +5）。这里故意不写成一个可以照抄的常量：上一版写的 656
+#   2026-10-19 最后一趟两边都是 **699**（AirPlay 的 RTSP 那一轮 +5，`_airplay._tcp` 的广播这一轮 +4：语料对拍 /
+#   "广播但绝不答问" / AirPlay 的拒绝句点名 AirPlay / 答问那半是派生的不是写死的）。这里故意不写成一个可以照抄的常量：上一版写的 656
 #   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688 → 690），一个会随加用例腐烂的数
 #   不是引用体检，是§4.13 那句「一个没被机器问过的数字」的文档版本。
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
@@ -1450,6 +1533,27 @@ grep -c 'AirPlayReceiver::new' src-tauri/src/main.rs                   # 期望 
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行
+grep -c 'advertisable(setting, log)' macast-cast/src/announce.rs            # 期望 **2**：两个 builder 走同一个主人
+#   （`from_setting` 与 `airplay_from_setting`），而 `report_clipped(&service, log)` 也**恰好 2** ——
+#   「一个服务类型一个字段，不是一个服务类型一份实现」这句话的外部对应物：哪一天第三个类型进来，
+#   这两对数字一起涨才是对的，只涨一处就是有人抄了第二份实现
+grep -c 'responder_answers' macast-cast/src/announce.rs                     # 期望 **3**（定义 + `start()` 里那次派生 +
+#   模块内那条文档引用）。这一行钉的是"答不答问只有一个判定点"；而 `run()` 里那个 `if answers` 是
+#   **被 obeyed 的**（M5：换成 `if true` → 1 红），两件事各有各的用例
+grep -cE 'discovery_log\.(info|warning)\(' src-tauri/src/main.rs            # 期望 **5** = 下面这两条之和
+grep -c 'mDNS: announcing' src-tauri/src/main.rs                            # 期望 **2**（Cast 与 AirPlay 各一条总结）
+grep -c 'mDNS: not announcing' src-tauri/src/main.rs                        # 期望 **3**（两条拒绝 + 一条"8009 没在听"）
+#   这三行合起来是一条**目的地**判据：壳自己的 mDNS 句子一条都不许再骑在播放器的 logger 上
+#   （§16 第 29 条 ④ —— 它们以前全在 `logs/MPV.log` 里，而 §5 那条排障配方 grep 的是 `macast.log`）。
+#   真机那侧的对应物是按文件名读：
+grep -cF "grep -ahF 'mDNS: announcing ' " scripts/verify_rust_receiver.sh   # 期望 **2**（§22 与 §26 各一次，
+#   都只读 `logs/Discovery.log`；`log_grep` 那种"在所有日志里找"的宽度对**否定**断言是对的、
+#   对**目的地**是错的 —— §27 立的同一条规矩）
+grep -cF "grep -ahF 'mDNS: not announcing' " scripts/verify_rust_receiver.sh # 期望 **3**
+grep -c 'it announces only' src-tauri/src/main.rs                           # 期望 **1**（"会广播 ≠ 会答问"这句话
+#   必须活在日志里；§26 有一条就是问它在不在，M8 那一支改坏它的第一次读数**无效**，原因见 §16 ④）
+grep -cF '_airplay._tcp.local.' scripts/verify_rust_receiver.sh             # 期望 **4**（§24 的浏览 + 它的缺席分支 +
+#   §26 的 TYPE + 它的类型断言）—— §24 现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播
 grep -c 'set_multicast_loop_v4(true)' macast-cast/src/announce.rs            # 期望 **1**（发送侧，参考实现的 responder socket 也开环回）
 grep -c 'join_multicast_v4' macast-cast/src/announce.rs                      # 期望 **1**（2026-10-18 起：
 #   responder 接线后那个长期在场的口 join 且读，见 §16 第 13 条与 §14.6；这一行以前钉的是「广播口

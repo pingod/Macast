@@ -243,6 +243,19 @@ pub struct Service {
     /// map: the wire order is the answer a sender's cache keeps (§9.2).
     pub txt: Vec<(String, Vec<u8>)>,
     pub addresses: Vec<Ipv4Addr>,
+    /// Which service this record set announces: `_googlecast._tcp.local.` for a
+    /// Chromecast receiver, `_airplay._tcp.local.` for the AirPlay one.
+    ///
+    /// A **field**, not a second module: measured on 2026-10-18 against
+    /// `tests/golden/mdns_airplay.hex`, the two announcements are record-for-record
+    /// identical — same five records in the same sections, same TTLs
+    /// (4500/120/4500/120/120), same cache-flush rule (everything but the PTR),
+    /// same `flags=0x8400`, same goodbye (the same five records with TTL 0, not an
+    /// empty packet) — and the only difference is this name plus the TXT table.
+    /// A second builder would have been a second place to be wrong about all of
+    /// that, and §16's A/NSEC lesson says the corpus, not the reading, is what
+    /// decides a shape.
+    pub service_type: String,
     /// Set when [`clip_txt`] shortened something, so the caller can say so once
     /// instead of every burst.
     pub clipped: Vec<(String, usize)>,
@@ -286,6 +299,67 @@ impl Service {
             port,
             txt,
             addresses,
+            service_type: SERVICE_TYPE.to_string(),
+            clipped,
+        }
+    }
+
+    /// The AirPlay receiver's service, from the same two settings plus the RTSP port
+    /// this run **actually bound**.
+    ///
+    /// Two facts the reference owns and this copies rather than improves:
+    ///
+    /// * the nine TXT keys, in this order, with `features` rendered as
+    ///   `"0x%X"` — asked of `AirPlayProtocol._advertise` with the advertiser
+    ///   replaced by a recorder, so the table is what the product hands zeroconf
+    ///   rather than what a text scan of `protocol_airplay.py` suggests
+    ///   (`scripts/mdns_announce_probe.py --protocol airplay`; frozen in
+    ///   `tests/golden/mdns_airplay.hex`).
+    /// * `deviceid` is **drawn per process** (`protocol_airplay.py:99-103`, never
+    ///   persisted), so a phone that sees this Mac before and after a restart is
+    ///   told it is two different receivers. That is the reference's behaviour.
+    ///   Persisting it would look like a fix and read like a divergence to every
+    ///   sender that cached the old one, so it is not done here — §8 carries the
+    ///   row if anyone wants to change both sides at once.
+    ///
+    /// `port` is the caller's, deliberately: `AirPlayProtocol.start()` binds the
+    /// RTSP listener **before** advertising, because macOS ships its own receiver
+    /// on 7000 and the fallback number is the one a sender must be told. A
+    /// hardcoded 7000 here would announce a port that may not be ours.
+    pub fn for_airplay(
+        setting: &Setting,
+        port: u16,
+        addresses: Vec<Ipv4Addr>,
+        device_id: &str,
+    ) -> Service {
+        let friendly = setting.friendly_name();
+        let instance = sanitize_instance_name(&friendly, crate::airplay::AIRPLAY_SERVICE, FALLBACK_NAME);
+        let server = normalize_server(instance.split('.').next().unwrap_or(FALLBACK_NAME));
+        let txt: Vec<(String, Vec<u8>)> = vec![
+            ("deviceid".to_string(), device_id.as_bytes().to_vec()),
+            (
+                "features".to_string(),
+                format!("0x{:X}", crate::airplay::FEATURES).into_bytes(),
+            ),
+            ("model".to_string(), b"Macast".to_vec()),
+            ("name".to_string(), friendly.clone().into_bytes()),
+            ("srcvers".to_string(), b"320.20".to_vec()),
+            ("vv".to_string(), b"2".to_vec()),
+            ("pi".to_string(), b"2e3883fe".to_vec()),
+            ("flags".to_string(), b"0x4".to_vec()),
+            (
+                "pk".to_string(),
+                b64_macast_public_key().as_bytes().to_vec(),
+            ),
+        ];
+        let (txt, clipped) = clip_txt(txt);
+        Service {
+            instance,
+            server,
+            port,
+            txt,
+            addresses,
+            service_type: crate::airplay::AIRPLAY_SERVICE.to_string(),
             clipped,
         }
     }
@@ -310,25 +384,27 @@ impl Service {
     /// losing the whole announcement — one dead interface among several is not a
     /// reason for a sender to learn nothing.
     pub fn from_setting(setting: &Setting, port: u16, log: &Logger) -> Service {
-        let mut addresses = Vec::new();
-        for text in macast_core::net::advertised_addresses(setting) {
-            match text.parse::<Ipv4Addr>() {
-                Ok(addr) => addresses.push(addr),
-                Err(_) => log.warning(&format!(
-                    "mDNS announce skipping non-IPv4 interface {}",
-                    text
-                )),
-            }
-        }
-        let service = Service::for_cast(setting, port, addresses);
-        for (key, bytes) in &service.clipped {
-            // The reference's equivalent here is `start()` raising; ours names
-            // the field, what was lost, and that the receiver still came up.
-            log.warning(&format!(
-                "mDNS TXT property {} is {} bytes, past the {}; shortened for the wire",
-                key, bytes, MAX_TXT_PROPERTY
-            ));
-        }
+        let service = Service::for_cast(setting, port, advertisable(setting, log));
+        report_clipped(&service, log);
+        service
+    }
+
+    /// The AirPlay announcement's own entry point — same addresses, same clipping
+    /// report, different table and port.
+    ///
+    /// `port` is a parameter and not `airplay::AIRPLAY_PORT`: the reference binds
+    /// first and advertises the number it got (`protocol_airplay.py:126-131`),
+    /// because macOS's own receiver sits on 7000 on this machine. Announcing the
+    /// requested port instead of the bound one would publish an address that
+    /// belongs to somebody else's AirPlay.
+    pub fn airplay_from_setting(
+        setting: &Setting,
+        port: u16,
+        device_id: &str,
+        log: &Logger,
+    ) -> Service {
+        let service = Service::for_airplay(setting, port, advertisable(setting, log), device_id);
+        report_clipped(&service, log);
         service
     }
 
@@ -357,6 +433,24 @@ impl Service {
         self.datagram(Some(0), TailOrder::AFirst)
     }
 
+    /// May the responder answer queries on this service's socket?
+    ///
+    /// Yes for `_googlecast._tcp`, no for anything else — and the reason is a
+    /// measurement gap, not a policy preference. The 17 rows of
+    /// `tests/golden/mdns_responder.jsonl` are answers the reference gave to
+    /// queries about **our Chromecast service**: suppression edges, the PTR's
+    /// alias equality, the NSEC it sends instead of silence for `AAAA`. Nothing has
+    /// ever been asked of it about `_airplay._tcp`, and a responder that guesses a
+    /// second service's rules is a responder that will answer with bytes nobody
+    /// verified. So the AirPlay announcement sends and stays quiet.
+    ///
+    /// A method rather than a field, because the answer is a fact about the type —
+    /// and the one place that reads it (`Announcer::start`) cannot then be told a
+    /// different story by a caller that constructed the struct by hand.
+    pub fn responder_answers(&self) -> bool {
+        self.service_type == SERVICE_TYPE
+    }
+
     /// `ttl = None` means "each record's own TTL", the way
     /// `_add_broadcast_answer` passes it; `Some(n)` overrides every one of them,
     /// which is how `unregister` gets zeros everywhere.
@@ -367,7 +461,7 @@ impl Service {
         // borrow checker argues with the wire format and not with the design.
         let instance = self.instance.as_str();
         let server = self.server.as_str();
-        let service_type = SERVICE_TYPE;
+        let service_type = self.service_type.as_str();
         let txt = self.txt.as_slice();
         let addresses = self.addresses.as_slice();
         let port = self.port;
@@ -424,6 +518,16 @@ impl Service {
 /// there is no value. This is the reference's rule
 /// (`_services/info.py`'s `_set_properties`), and it matters for `fn` — an empty
 /// friendly name would otherwise write `fn=` where the reference writes `fn`.
+/// The reference's `pk` value: `base64.b64encode(b"macast-airplay-public-key")`.
+///
+/// It is a **fixed string**, not a key — the reference generates no pair material
+/// and its AirPlay implementation does not use it for anything the receiver reads
+/// back. Reproduced as bytes rather than by pulling in a base64 crate for one
+/// constant; the corpus line is the witness that this string is what goes out.
+fn b64_macast_public_key() -> &'static str {
+    "bWFjYXN0LWFpcnBsYXktcHVibGljLWtleQ=="
+}
+
 pub(crate) fn property_bytes(key: &str, value: &[u8]) -> Vec<u8> {
     if value.is_empty() {
         return key.as_bytes().to_vec();
@@ -850,23 +954,34 @@ impl Announcer {
     /// machine whose mDNS is blocked must still run the rest of the receiver —
     /// the reference swallows the equivalent into `advertise() -> False` with
     /// 「mDNS unavailable, %s will not be discoverable: %s」.
+    ///
+    /// The `%s` there is **the service type the caller passed** (`discovery.py:268-269`
+    /// formats `service_type`), and this port names it the same way. It used to say
+    /// "Chromecast" in both sentences, which was a divergence from the reference
+    /// *and* became a lie the day the same module started announcing `_airplay._tcp`:
+    /// an iPhone user whose AirPlay advertisement failed would be told his Chromecast
+    /// is undiscoverable, and would go looking in the Cast settings. AGENTS.md §4.2's
+    /// 「日志指错嫌疑人比不指更贵」, one layer down: the sentence has to name the thing
+    /// that actually failed.
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
         if self.service.addresses.is_empty() {
-            // Not a comment about the network: this is the case where the
-            // receiver is up and reachable on 8009 and **no sender can learn it**,
-            // so the sentence says which half failed.
-            self.log.warning(
-                "mDNS unavailable, Chromecast will not be discoverable: \
+            // Not a comment about the network: this is the case where the receiver is
+            // up on its own port and **no sender can learn it**, so the sentence says
+            // which half failed.
+            self.log.warning(&format!(
+                "mDNS unavailable, {} will not be discoverable: \
                  no advertisable address to publish",
-            );
+                self.service.service_type,
+            ));
             return Err("no advertisable address to publish".to_string());
         }
-        let engine = match bind_engine(&self.service.addresses, &self.log) {
+        let answers = self.service.responder_answers();
+        let engine = match bind_engine(&self.service.addresses, &self.log, answers) {
             Ok(sock) => sock,
             Err(e) => {
                 self.log.error(&format!(
-                    "mDNS unavailable, Chromecast will not be discoverable: {}",
-                    e
+                    "mDNS unavailable, {} will not be discoverable: {}",
+                    self.service.service_type, e
                 ));
                 return Err(e.to_string());
             }
@@ -903,6 +1018,7 @@ impl Announcer {
                 };
                 run(
                     &service,
+                    answers,
                     &mut send,
                     &mut unicast,
                     &mut recv,
@@ -966,7 +1082,7 @@ impl Announcer {
 /// is allowed to name (`advertised_addresses`, not the browser's superset, which is
 /// §22's product bug). A querier that can reach us is on one of these; joining
 /// elsewhere would only hear traffic we cannot answer on.
-fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
+fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger, answers: bool) -> io::Result<Engine> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     crate::mdns::set_reuse_for_mdns(&sock, log);
     sock.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).into())?;
@@ -1010,12 +1126,16 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
     // of probes. §4.2's 「别把端口在听当证据」 cuts both ways: the answer is the
     // membership, not the bind, so the membership is what gets reported.
     log.info(&format!(
-        "mDNS engine on {} joined {} of {} interface(s) [{}]; it will answer queries if \
-         that number is not zero",
+        "mDNS engine on {} joined {} of {} interface(s) [{}]; {}",
         MDNS_PORT,
         joined,
         interfaces.len(),
-        took.join(", ")
+        took.join(", "),
+        if answers {
+            "it will answer queries if that number is not zero"
+        } else {
+            "it announces only, because the responder knows one service type"
+        }
     ));
     Ok(Engine {
         sock,
@@ -1040,6 +1160,40 @@ pub(crate) struct Engine {
     pub joined: usize,
     #[allow(dead_code)]
     pub offered: usize,
+}
+
+/// The interfaces an announcement may name — the **narrowed** set, in one place.
+///
+/// Two service types publishing two different lists is AGENTS.md §4.1's first row
+/// ("搜到、投不上") with an extra step: the sender picks one address for the
+/// service it likes, so a Chromecast on the LAN address and an AirPlay on a VM
+/// bridge is one unreachable record set and one lucky one. It is also what
+/// §22 of the acceptance script compares against what a second stack reads off
+/// the wire, so a count is not enough and a list is.
+fn advertisable(setting: &Setting, log: &Logger) -> Vec<Ipv4Addr> {
+    let mut addresses = Vec::new();
+    for text in macast_core::net::advertised_addresses(setting) {
+        match text.parse::<Ipv4Addr>() {
+            Ok(addr) => addresses.push(addr),
+            Err(_) => log.warning(&format!(
+                "mDNS announce skipping non-IPv4 interface {}",
+                text
+            )),
+        }
+    }
+    addresses
+}
+
+/// The clipping warnings, said once per construction rather than per burst.
+fn report_clipped(service: &Service, log: &Logger) {
+    for (key, bytes) in &service.clipped {
+        // The reference's equivalent here is `start()` raising; ours names
+        // the field, what was lost, and that the receiver still came up.
+        log.warning(&format!(
+            "mDNS TXT property {} is {} bytes, past the {}; shortened for the wire",
+            key, bytes, MAX_TXT_PROPERTY
+        ));
+    }
 }
 
 /// How long a read may hold the announcer's thread before it is asked again.
@@ -1250,6 +1404,7 @@ pub fn serve(
 /// thing one layer down, where the lock was the casualty rather than the schedule).
 fn run(
     service: &Service,
+    answers: bool,
     send: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
     recv: &mut dyn FnMut() -> io::Result<Option<(Vec<u8>, SocketAddr)>>,
@@ -1266,13 +1421,33 @@ fn run(
     let mut served = Served::default();
     let mut heard = 0usize;
     let mut other_heard = 0usize;
+    let mut silent_notice = !answers;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
         }
         match recv() {
             Ok(Some((data, peer))) => {
-                let one = serve(&data, peer, service, send, unicast, log);
+                // The one place this loop can put a packet on the wire **in reply to
+                // somebody else**. With `answers` false the datagram is still read —
+                // a joined socket that is never read is the shape
+                // `scripts/mdns_reuseport_probe.py` measured as a queue nobody
+                // drains — it is simply not answered, because the rules below it
+                // were measured for one service type only. See
+                // [`Service::responder_answers`].
+                let one = if answers {
+                    serve(&data, peer, service, send, unicast, log)
+                } else {
+                    if silent_notice {
+                        silent_notice = false;
+                        log.debug(
+                            "mDNS engine received a datagram and did not answer it: \
+                             this socket announces only, and the responder's table is \
+                             for one service type",
+                        );
+                    }
+                    Served::default()
+                };
                 if one.queries > 0 && one.for_us && heard < HEARD_SENTENCES {
                     // The **receiving** question, asked separately from the answering
                     // one. "It never answered" has two causes and only this process can

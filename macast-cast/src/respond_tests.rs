@@ -446,6 +446,7 @@ fn fixture_service() -> crate::announce::Service {
             ("ca".to_string(), b"5".to_vec()),
         ],
         addresses: vec!["192.0.2.7".parse().unwrap()],
+        service_type: crate::announce::SERVICE_TYPE.to_string(),
         clipped: Vec::new(),
     }
 }

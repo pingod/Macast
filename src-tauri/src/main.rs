@@ -134,14 +134,27 @@ struct Runtime {
     /// on another thread followed by the window closing) must not join a thread
     /// that another caller already joined.
     ///
-    /// **Only the start and stop paths are wired.** Whether an iPhone can actually
-    /// find this receiver is a separate row in `docs/Rust-Port-Design.md` §15: the
-    /// reference also advertises `_airplay._tcp` over mDNS with `deviceid`/`features`
-    /// `pk` TXT records (`protocol_airplay.py:_advertise`), and the announcer here
-    /// publishes one service type — `_googlecast._tcp`. So today an AirPlay sender
-    /// on the LAN will not list this Mac; the RTSP face answers anything that
-    /// already knows the address, which is what §26 of the acceptance script drives.
+    /// What is wired: the RTSP face, and since 2026-10-18 the `_airplay._tcp`
+    /// announcement next to it (the field below). What is **not**: answering a
+    /// query about that type, and any real iPhone in this LAN — so "手机里看得到这台
+    /// Mac" is still a sentence this machine cannot say, and the row in
+    /// `docs/Rust-Port-Design.md` §15 is where that is recorded. The RTSP face is
+    /// what §26 of the acceptance script drives.
     airplay: Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>,
+    /// The `_airplay._tcp` announcement, started only once the RTSP listener has a
+    /// port. `None` covers three cases and the log tells them apart: the protocol is
+    /// switched off, the bind failed, or `Announcer::start` refused (no advertisable
+    /// address) — each of which has its own sentence in `macast.log` or
+    /// `logs/Discovery.log`.
+    ///
+    /// This announcer **announces and does not answer**. The responder's 17-row
+    /// corpus is measurements of the reference answering queries about
+    /// `_googlecast._tcp`; nothing has been asked of it about an AirPlay question,
+    /// so guessing that table would be this port inventing a protocol rule.
+    /// `Service::responder_answers` is the one line that decides it, and
+    /// `announce_tests::the_airplay_service_is_announced_and_never_answered` is the
+    /// witness that both halves — the decision and the obeying — are real.
+    airplay_announce: Option<Arc<announce::Announcer>>,
 }
 
 impl Runtime {
@@ -226,6 +239,9 @@ impl Runtime {
         // flag is lowered first, then the serving thread is joined, because
         // "switched off" has to mean **the port is free** — the accept loop polls,
         // so this is milliseconds rather than "whenever the next iPhone connects".
+        if let Some(announcer) = self.airplay_announce.as_ref() {
+            announcer.stop();
+        }
         if let Some((receiver, handle)) = self
             .airplay
             .lock()
@@ -1215,13 +1231,13 @@ pub fn run() {
                     // startup log, and a refusal keeps `None` so `stop_services`
                     // never joins a thread that did not exist.
                     if announcer.start().is_err() {
-                        log.warning(&format!(
+                        discovery_log.warning(&format!(
                             "mDNS: not announcing {instance} — see {}",
                             discovery_log_path.display()
                         ));
                         None
                     } else {
-                        log.info(&format!(
+                        discovery_log.info(&format!(
                             "mDNS: announcing {instance} on port {port} over [{published}]; \
                              re-announcing every {} s",
                             announce::REANNOUNCE.as_secs()
@@ -1230,7 +1246,7 @@ pub fn run() {
                     }
                 }
                 None => {
-                    log.info(
+                    discovery_log.info(
                         "mDNS: not announcing — 8009 is not listening, and a device that \
                          cannot be cast to is worse than no device",
                     );
@@ -1245,7 +1261,7 @@ pub fn run() {
             // reach is only known after the bind, and `start()` answers with the
             // port it got rather than the one it was asked for (`protocol_airplay.py`
             // says the same thing in its own comment).
-            let airplay = if !airplay_on {
+            let airplay_started = if !airplay_on {
                 log.info(
                     "AirPlay is switched off (Macast_Protocols): not listening on 7000, \
                      and an iPhone will not be pointed at a port nobody serves",
@@ -1309,6 +1325,53 @@ pub fn run() {
                 }
             };
 
+            // The AirPlay announcement, from the receiver that is actually
+            // listening. Two things decide its shape and both are measurements:
+            // the **port** is the one `start()` bound (macOS owns 7000, so this
+            // machine's answer is often 7001 and a sender told 7000 would reach
+            // Apple's receiver, not ours), and the **deviceid** is the receiver's
+            // own, so the TXT record and `GET /info` name the same device.
+            let (airplay, airplay_announce) = match airplay_started {
+                Some((recv, handle)) => {
+                    let receiver = Arc::clone(&recv);
+                    let announcer = {
+                        let service = announce::Service::airplay_from_setting(
+                            &setting,
+                            receiver.port(),
+                            receiver.device_id(),
+                            &discovery_log,
+                        );
+                        let instance = service.instance.clone();
+                        let published = service
+                            .addresses
+                            .iter()
+                            .map(|a| a.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let announcer =
+                            announce::Announcer::new(service, Arc::clone(&discovery_log));
+                        if announcer.start().is_err() {
+                            discovery_log.warning(&format!(
+                                "mDNS: not announcing {instance} — see {}",
+                                discovery_log_path.display()
+                            ));
+                            None
+                        } else {
+                            discovery_log.info(&format!(
+                                "mDNS: announcing {instance} on port {} over [{published}]; \
+                                 it announces only — queries about this type are not answered, \
+                                 because the responder's table was measured for \
+                                 _googlecast._tcp",
+                                receiver.port()
+                            ));
+                            Some(announcer)
+                        }
+                    };
+                    (Some((recv, handle)), announcer)
+                }
+                None => (None, None),
+            };
+
             // Managed before anything is started, and this ordering is load-bearing
             // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
             // `Hooks::stop_service`, which resolves the services through
@@ -1335,6 +1398,7 @@ pub fn run() {
                 setup,
                 announce: announcer,
                 airplay: Mutex::new(airplay),
+                airplay_announce,
             });
 
             player.start();

@@ -107,6 +107,7 @@ fn fixture_service() -> Service {
         port,
         txt,
         addresses: vec![address],
+        service_type: SERVICE_TYPE.to_string(),
         clipped: Vec::new(),
     }
 }
@@ -149,6 +150,7 @@ fn service(friendly: &str, port: u16, addresses: Vec<Ipv4Addr>) -> Service {
         port,
         txt,
         addresses,
+        service_type: SERVICE_TYPE.to_string(),
         clipped,
     }
 }
@@ -620,6 +622,7 @@ fn the_run_function_goodbyes_even_when_the_flag_is_already_down() {
         let mut no_recv = || Ok(None);
         run(
             &service,
+            true,
             &mut send,
             &mut no_unicast,
             &mut no_recv,
@@ -762,44 +765,93 @@ fn the_published_addresses_come_from_the_reachable_owner() {
     let dir = setting("addresses");
     let logger = Logger::named(LOGGER_NAME);
     let s = Service::from_setting(&dir, 8009, &logger);
+    let a = Service::airplay_from_setting(&dir, 7000, "11:22:33:44:55:66", &logger);
     let reachable = macast_core::net::advertised_addresses(&dir);
     let joinable = macast_core::net::advertised_hosts(&dir);
-    let published: Vec<String> = s.addresses.iter().map(|a| a.to_string()).collect();
-    for one in &published {
-        assert!(
-            reachable.iter().any(|held| held == one),
-            "announced {}, which is not in the set a sender can reach ({:?})",
-            one,
-            reachable
-        );
-    }
-    // The count comparison only says something where the two lists differ, so the
-    // reading is printed rather than assumed.
-    if reachable.len() != joinable.len() {
-        assert_eq!(
-            published.len(),
-            reachable.len(),
-            "this machine has {} reachable of {} joinable interfaces and the announcement \
-             carried {} — the wide list is the §4.1 bug",
-            reachable.len(),
-            joinable.len(),
-            published.len()
-        );
+    // Both builders, because they are the two announcements this port makes and the
+    // narrow list is a property of the owner they share — checking one of them and
+    // refactoring the other into the same helper is exactly the shape of edit that
+    // leaves a stale assertion behind.
+    for (which, published) in [
+        (
+            "Chromecast",
+            s.addresses
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<String>>(),
+        ),
+        (
+            "AirPlay",
+            a.addresses
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<String>>(),
+        ),
+    ] {
+        for one in &published {
+            assert!(
+                reachable.iter().any(|held| held == one),
+                "the {which} announcement carries {}, which is not in the set a \
+                 sender can reach ({:?})",
+                one,
+                reachable
+            );
+        }
+        // The count comparison only says something where the two lists differ, so the
+        // reading is printed rather than assumed.
+        if reachable.len() != joinable.len() {
+            assert_eq!(
+                published.len(),
+                reachable.len(),
+                "this machine has {} reachable of {} joinable interfaces and the {which} \
+                 announcement carried {} — the wide list is the §4.1 bug",
+                reachable.len(),
+                joinable.len(),
+                published.len()
+            );
+        }
     }
     // …and the audit, because "the lists differ here" is a fact about the machine,
     // not about the code: an edit that swaps back to the join list would go green
     // on a laptop with one NIC and red here only by luck.
+    //
+    // The audit walks **to the owner**, not to the caller. Both announcement
+    // builders — the Chromecast one and the AirPlay one — now read the list through
+    // one private helper, so the rule is two facts joined: every builder routes
+    // through that helper, and the helper is the place the narrow call lives. A
+    // test that only looked inside `from_setting` would go red on a clean refactor
+    // (which is how it read when the helper was introduced) and a test that only
+    // looked at the helper would miss a builder that quietly went back to the wide
+    // list beside it.
     let src = include_str!("announce.rs");
-    let at = src.find("pub fn from_setting").expect("from_setting exists");
-    let body = &src[at..at + 1200];
+    for (builder, needle) in [
+        ("pub fn from_setting", "the Chromecast announcement"),
+        ("pub fn airplay_from_setting", "the AirPlay announcement"),
+    ] {
+        let at = src.find(builder).unwrap_or_else(|| panic!("{builder} exists"));
+        let body = &src[at..at + 1200];
+        assert!(
+            body.contains("advertisable(setting, log)"),
+            "{builder} does not read the addresses through the one owner, so it is \
+             free to pick a list — and {} is the builder a reader would least expect \
+             to have drifted",
+            needle
+        );
+        assert!(
+            !body.contains("net::advertised_hosts("),
+            "{builder} reads the join list again — that is the four-address bug §22 \
+             caught on the wire on 2026-10-18"
+        );
+    }
+    let at = src.find("fn advertisable(").expect("the owner exists");
+    let helper = &src[at..at + 900];
     assert!(
-        body.contains("net::advertised_addresses("),
-        "from_setting no longer reads the reachable list"
+        helper.contains("net::advertised_addresses("),
+        "the address owner no longer reads the reachable list"
     );
     assert!(
-        !body.contains("net::advertised_hosts("),
-        "from_setting reads the join list again — that is the four-address bug §22 \
-         caught on the wire on 2026-10-18"
+        !helper.contains("net::advertised_hosts("),
+        "the address owner reads the join list: every announcement is now the §4.1 bug"
     );
 }
 
@@ -818,6 +870,13 @@ fn no_advertisable_address_says_which_half_failed() {
         "the refusal has to name the half that failed, got: {}",
         text
     );
+    // …and name it **by the service type**, which is what the reference's `%s` is
+    // (`discovery.py:268-269` formats `service_type`): a reader who arrives at this
+    // line has to know which of the two announcements died, and today there are two.
+    assert!(
+        text.contains(SERVICE_TYPE),
+        "the refusal does not name the service type it refused ({SERVICE_TYPE})"
+    );
     // And it must not be a second socket's failure: nothing was bound, so no
     // 「cannot bind」 line either.
     assert!(
@@ -825,6 +884,84 @@ fn no_advertisable_address_says_which_half_failed() {
         "the empty-address path reached the socket: {}",
         text
     );
+}
+
+/// The same `start()` now serves **two** service types, and the refusal sentence used
+/// to name one of them by its marketing name — so an AirPlay advertisement that failed
+/// reported "Chromecast will not be discoverable" and sent the reader to the Cast
+/// settings. The reference never had that shape: `discovery.py:268-269` formats the
+/// **service type the caller passed**, which is the one name that stays true for both.
+/// Separate logger name because this row asserts an absence and `claim()` is
+/// first-wins — two tests reading one file would make the absence about scheduling.
+#[test]
+fn an_airplay_refusal_names_airplay_and_never_blames_the_chromecast() {
+    crate::pin_test_dir();
+    let logger = Logger::named("Discovery-AirPlayRefusal");
+    let path = logger.claim();
+    let airplay = Service::for_airplay(
+        &setting("airplay-refusal"),
+        7001,
+        Vec::new(),
+        "11:22:33:44:55:66",
+    );
+    assert_eq!(airplay.service_type, crate::airplay::AIRPLAY_SERVICE);
+    let announcer = Announcer::new(airplay, Arc::clone(&logger));
+    let outcome = announcer.start();
+    assert!(
+        outcome.is_err(),
+        "an AirPlay service with no addresses must not pretend to announce"
+    );
+    assert!(!announcer.is_running());
+    let text = loud(&path);
+    assert!(
+        text.contains(crate::airplay::AIRPLAY_SERVICE)
+            && text.contains("will not be discoverable"),
+        "the AirPlay refusal has to name the AirPlay type, got: {text}"
+    );
+    assert!(
+        !text.contains("Chromecast") && !text.contains(SERVICE_TYPE),
+        "the AirPlay path still blames the Chromecast: {text}"
+    );
+}
+
+/// `start()` must **derive** the answering half from [`Service::responder_answers`]
+/// rather than write a literal at the call site. The predicate is the one line that
+/// says which service type the 17-row responder corpus covers, so a `true` hardcoded
+/// here would give `_airplay._tcp` a responder nobody measured and a `false` would
+/// switch the Chromecast one off.
+///
+/// Why this is an audit and not a behaviour test: the behavioural witness for the
+/// `false` direction is a real sender asking a real socket, which is §25 — and §25's
+/// LAN row is a **skip on this machine** (the query never reaches this binary, §16 第
+/// 24 条). A row that is skipped cannot be described as coverage, and 「不提问的检查等
+/// 于通过的检查」 is the same failure one layer over: the honest object here is the
+/// wiring, so the wiring is what gets asked. When §25 lands a second machine's
+/// reading, that becomes the stronger witness and this stays as the structural one.
+#[test]
+fn the_answering_half_is_derived_not_written() {
+    crate::pin_test_dir();
+    let src = include_str!("announce.rs");
+    let at = src
+        .find("pub fn start(self: &Arc<Self>)")
+        .expect("start exists");
+    let body = &src[at..at + 1500];
+    assert!(
+        body.contains("let answers = self.service.responder_answers();"),
+        "start() no longer derives the answering half from the predicate"
+    );
+    assert!(
+        body.contains("bind_engine(&self.service.addresses, &self.log, answers)"),
+        "start() passes something other than the derived flag to the engine"
+    );
+    for hardcoded in [
+        "bind_engine(&self.service.addresses, &self.log, true)",
+        "bind_engine(&self.service.addresses, &self.log, false)",
+    ] {
+        assert!(
+            !body.contains(hardcoded),
+            "start() hardcodes the answering half: {hardcoded}"
+        );
+    }
 }
 
 #[test]
@@ -1098,6 +1235,7 @@ fn e7_the_loop_answers_between_bursts_and_survives_a_failed_read() {
         };
         run(
             &service,
+            true,
             &mut send,
             &mut unicast,
             &mut recv,
@@ -1136,7 +1274,7 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
     // and answers it to a real querier.
     let logger = Logger::named(LOGGER_NAME);
     let service = fixture_service();
-    let engine = match bind_engine(&[V4::LOCALHOST], &logger) {
+    let engine = match bind_engine(&[V4::LOCALHOST], &logger, true) {
         Ok(engine) => engine,
         // Not a skip. Binding 5353 with the reuse options *is* the product's path,
         // and "we could not try it" must never read as "it works" (§4.2's
@@ -1234,6 +1372,17 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
 /// The queue is the only clock: when it runs dry the loop's flag goes down, so a
 /// test never waits on `REANNOUNCE` to reach its assertions.
 fn drive(service: &Service, logger: &Logger, packets: Vec<(Vec<u8>, SocketAddr)>) {
+    drive_answering(service, true, logger, packets);
+}
+
+/// `drive` with the responder's mode spelled out, because one of this module's
+/// jobs is the send-only shape.
+fn drive_answering(
+    service: &Service,
+    answers: bool,
+    logger: &Logger,
+    packets: Vec<(Vec<u8>, SocketAddr)>,
+) {
     let running = AtomicBool::new(true);
     let mut queue: std::collections::VecDeque<(Vec<u8>, SocketAddr)> = packets.into();
     let mut send = |_bytes: &[u8]| Ok(());
@@ -1247,6 +1396,7 @@ fn drive(service: &Service, logger: &Logger, packets: Vec<(Vec<u8>, SocketAddr)>
     };
     run(
         service,
+        answers,
         &mut send,
         &mut unicast,
         &mut recv,
@@ -1503,4 +1653,211 @@ fn e10_a_query_written_by_a_foreign_stack_is_answered() {
         served.group + served.direct
     );
     assert!(sent.group.is_empty() && sent.direct.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// G. The second service type: announce, and stay quiet
+// ---------------------------------------------------------------------------
+
+/// The AirPlay corpus, frozen by the same probe with `--protocol airplay`.
+const AIRPLAY_HEX: &str = include_str!("../tests/golden/mdns_airplay.hex");
+
+/// One shape from the AirPlay corpus. Deliberately a second copy of the reader
+/// rather than a parameterised first one: the two files are the same format, and
+/// sharing the parser would let a header change in one corpus quietly redefine
+/// what the other one is being compared against.
+fn airplay_corpus(name: &str) -> Vec<u8> {
+    for line in AIRPLAY_HEX.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(2, ' ');
+        if fields.next().unwrap_or("") == name {
+            let hex = fields.next().unwrap_or("");
+            return (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit"))
+                .collect();
+        }
+    }
+    panic!("the AirPlay corpus has no `{}` line", name);
+}
+
+/// The inputs behind that file, read **out of its header**. The friendly name and
+/// the MAC are not this test's to invent: the first version of this row hardcoded
+/// `Macast-Fixture-1` for both, and the corpus's TXT `name=` is the *unsanitized*
+/// friendly name — so a hand-typed fixture would have compared our bytes against a
+/// table this file made up (§4.13's 「每个数字问两遍」, here on an instrument).
+fn airplay_inputs() -> (String, String, u16, Ipv4Addr, Vec<(String, String)>) {
+    let mut instance = String::new();
+    let mut server = String::new();
+    let mut port = 0u16;
+    let mut address = String::new();
+    let mut txt: Vec<(String, String)> = Vec::new();
+    for line in AIRPLAY_HEX.lines() {
+        if line.starts_with("# inputs:") {
+            for token in line.split_whitespace().skip(2) {
+                if let Some(v) = token.strip_prefix("instance=") {
+                    instance = v.to_string();
+                } else if let Some(v) = token.strip_prefix("server=") {
+                    server = v.to_string();
+                } else if let Some(v) = token.strip_prefix("port=") {
+                    port = v.parse().expect("a port number");
+                } else if let Some(v) = token.strip_prefix("address=") {
+                    address = v.to_string();
+                }
+            }
+        } else if line.starts_with("# txt") {
+            let table = line.split(": ").nth(1).unwrap_or("");
+            for cell in table.split(';') {
+                let mut halves = cell.splitn(2, '=');
+                let key = halves.next().unwrap_or("").to_string();
+                let value = halves.next().unwrap_or("").to_string();
+                if !key.is_empty() {
+                    txt.push((key, value));
+                }
+            }
+        }
+    }
+    assert!(!instance.is_empty() && !server.is_empty() && port > 0, "header unreadable");
+    (instance, server, port, address.parse().expect("IPv4"), txt)
+}
+
+fn airplay_service(txt: &[(String, String)], port: u16, address: Ipv4Addr) -> Service {
+    let friendly = txt
+        .iter()
+        .find(|(k, _)| k == "name")
+        .map(|(_, v)| v.clone())
+        .expect("the corpus's TXT table carries `name`");
+    let device_id = txt
+        .iter()
+        .find(|(k, _)| k == "deviceid")
+        .map(|(_, v)| v.clone())
+        .expect("…and `deviceid`");
+    let dir = setting("airplay-bytes");
+    dir.set(macast_core::setting::Key::DlnaFriendlyName, serde_json::json!(friendly));
+    Service::for_airplay(&dir, port, vec![address], &device_id)
+}
+
+#[test]
+fn the_airplay_announcement_is_the_reference_s_bytes() {
+    crate::pin_test_dir();
+    let (instance, server, port, address, txt) = airplay_inputs();
+    let service = airplay_service(&txt, port, address);
+    // The two things a builder can get wrong about a *second* service type: whose
+    // name is on the wire, and which table rides along.
+    assert_eq!(service.instance, instance, "the instance name is not the reference's");
+    assert_eq!(service.server, server, "the SRV target is not the reference's");
+    assert_eq!(
+        service.service_type,
+        crate::airplay::AIRPLAY_SERVICE,
+        "announcing the Chromecast type under an AirPlay name would be worse than not announcing"
+    );
+    // The reference's `A`/`NSEC` pair has no order (the corpus carries both lines
+    // for that reason), so either match is faithful — and **both** are asserted,
+    // because "one of these two" alone would also be true of a writer that emitted
+    // neither.
+    let announced = vec![
+        airplay_corpus("announce-nsec-first"),
+        airplay_corpus("announce-a-first"),
+    ];
+    assert!(
+        announced.contains(&service.announcement()) || announced.contains(&service.announcement_a_first()),
+        "neither of our two orders is one of the reference's two"
+    );
+    assert_eq!(service.announcement(), announced[0], "our nsec-first order is not the reference's");
+    assert_eq!(service.announcement_a_first(), announced[1], "our a-first order is not the reference's");
+    assert_eq!(service.goodbye(), airplay_corpus("goodbye-nsec-first"));
+    assert_eq!(service.goodbye_a_first(), airplay_corpus("goodbye-a-first"));
+    // The TXT order is on the wire, so byte parity above already proves the table
+    // is in the reference's order — this row says *which* claim that is, because a
+    // reader comparing key sets would accept any order and the senders that cache
+    // this record do not.
+    assert_eq!(
+        service.txt.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+        txt.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+        "the nine keys are not in the order the reference writes them"
+    );
+}
+
+#[test]
+fn the_airplay_service_is_announced_and_never_answered() {
+    crate::pin_test_dir();
+    let (_instance, _server, port, address, txt) = airplay_inputs();
+    let airplay = airplay_service(&txt, port, address);
+    let cast = fixture_service();
+    assert!(
+        cast.responder_answers(),
+        "the Chromecast service is the one the 17-row corpus measured"
+    );
+    assert!(
+        !airplay.responder_answers(),
+        "a second service type answers nothing until the reference is asked about it"
+    );
+
+    // And the flag is obeyed, not just computed: feed the send-only loop a query
+    // this same service **would** answer if it were allowed to, and check what left
+    // the socket. Every packet must be one of our own announcements or the goodbye —
+    // a reply is the only other shape, and it is the one with a question section.
+    let logger = Logger::named("Discovery-SendOnly");
+    let path = logger.claim();
+    let running = AtomicBool::new(true);
+    let sent: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&sent);
+    let mut send = move |bytes: &[u8]| {
+        sink.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    };
+    let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
+    let announced = cast.announcement();
+    let question = ptr_query(SERVICE_TYPE);
+    let mut queue = std::collections::VecDeque::from(vec![question.clone()]);
+    let mut recv = || match queue.pop_front() {
+        Some(bytes) => Ok(Some((bytes, peer(MDNS_PORT)))),
+        None => {
+            running.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
+    };
+    {
+        // The one-time "I am not answering" line is DEBUG, so without the window
+        // this assertion would be about the scheduler rather than the product.
+        let _debug = crate::DebugWindow::armed();
+        run(
+            &cast,
+            false,
+            &mut send,
+            &mut unicast,
+            &mut recv,
+            &running,
+            &logger,
+        );
+    }
+    let wrote = sent.lock().unwrap();
+    assert!(!wrote.is_empty(), "the announcer sent nothing at all — the fixture is broken");
+    let replies: Vec<&Vec<u8>> = wrote
+        .iter()
+        .filter(|bytes| *bytes != &announced && mdns::parse_message(bytes, "test", &logger)
+            .map(|doc| !doc.questions.is_empty())
+            .unwrap_or(false))
+        .collect();
+    assert!(
+        replies.is_empty(),
+        "a send-only socket answered {} packet(s) with a question section in them",
+        replies.len()
+    );
+    let text = read_tail(&path, 200).text;
+    assert!(
+        !text.contains("mDNS engine heard query"),
+        "the answering sentences fired on a socket that is not allowed to answer: {text}"
+    );
+    assert!(
+        !text.contains("answered its first query"),
+        "same, for the answering half: {text}"
+    );
+    assert!(
+        text.contains("did not answer it"),
+        "it stayed quiet without saying why — that is the reading that costs an hour: {text}"
+    );
 }

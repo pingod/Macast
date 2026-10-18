@@ -2114,7 +2114,26 @@ echo "== 22: another implementation reads the announcement this shell broadcasts
 # that one instead: `the_run_function_goodbyes_even_when_the_flag_is_already_down` drives
 # `run()` with the flag already down and requires three zero-TTL packets. Recording the
 # gap is the point — a section that silently skipped would read like coverage.
-MDNS_LINE=$(log_grep 'mDNS: announcing ' | tail -1)
+# **By name, not across every file.** `log_grep` searches the shared log *and* every
+# claimed module file, which is the right breadth for an absence ("nothing anywhere
+# said X") and the wrong breadth for a presence: it cannot tell a reader who wrote the
+# sentence in the file the question belongs to from one who wrote it in the player's.
+# These four lines used to be written through the MPV logger — a reader following
+# AGENTS.md §5's troubleshooting recipe (which greps `macast.log`) or the Discovery
+# question 「why doesn't my phone see this Macast」 would have found neither — so the
+# announcer's summary now lives in `logs/Discovery.log`, beside the
+# 「mDNS advertised …」 line the module itself writes, and this grep is the witness
+# that the destination is the one the section claims (§27 set the rule).
+MDNS_LINE=$(grep -ahF 'mDNS: announcing ' "$SDIR/logs/Discovery.log" 2>/dev/null \
+    | grep -F '_googlecast._tcp.local.' | tail -1)
+# The type filter is not decoration. `tail -1` alone picked **the last** announcing
+# line, and since the AirPlay face got its own announcer this main instance writes two
+# — so §22 asked its `_googlecast._tcp` browser to resolve an `_airplay._tcp` name,
+# read 「unresolved」, and reported seven product failures about TXT order, `ca`, the
+# SRV target and the A record on a run whose Chromecast announcement was byte-for-byte
+# right (measured 2026-10-18: the same browse had in fact *seen* the Cast instance in
+# its own list). A reader choosing the last line of a log that now has one line per
+# service type is choosing a service type by accident.
 MDNS_INSTANCE=$(printf '%s' "$MDNS_LINE" | sed -n 's/.*announcing \([^ ]*\) on port .*/\1/p')
 MDNS_PORT=$(printf '%s' "$MDNS_LINE" | sed -n 's/.* on port \([0-9][0-9]*\) over .*/\1/p')
 
@@ -2123,7 +2142,7 @@ if [ -z "$MDNS_INSTANCE" ]; then
     # listening. Silence here would be the failure — a receiver that came up and
     # quietly never announced is exactly the state a user reads as "搜到但投不上",
     # and a run that printed neither line is a run that did not look.
-    if [ -n "$(log_grep 'mDNS: not announcing')" ]; then
+    if [ -n "$(grep -ahF 'mDNS: not announcing' "$SDIR/logs/Discovery.log" 2>/dev/null)" ]; then
         pass "no announcement, and the shell said why instead of leaving it out"
     else
         fail "no announcement line and no refusal line — the announcer said nothing"
@@ -2846,7 +2865,10 @@ seen = set()
 
 class L(z.ServiceListener):
     def add_service(self, zc, type_, name):
-        seen.add(name)
+        # The type travels with the name: this one listener now serves two browses,
+        # because the door being closed covers three faces, and "no Cast announcement"
+        # was never evidence about the AirPlay one.
+        seen.add("%s::%s" % (type_, name))
 
     def remove_service(self, *a):
         pass
@@ -2858,9 +2880,11 @@ class L(z.ServiceListener):
 # The file appears only when the window closes, so the shell's wait is a wait for the
 # answer, not for a line that may never have been written.
 zc = z.Zeroconf(ip_version=z.IPVersion.V4Only)
-b = z.ServiceBrowser(zc, "_googlecast._tcp.local.", L())
+cast_browser = z.ServiceBrowser(zc, "_googlecast._tcp.local.", L())
+airplay_browser = z.ServiceBrowser(zc, "_airplay._tcp.local.", L())
 time.sleep(budget)
-b.cancel()
+cast_browser.cancel()
+airplay_browser.cancel()
 zc.close()
 with open(out, "w") as fh:
     fh.write(",".join(sorted(seen)))
@@ -2961,6 +2985,8 @@ PY
         case "$SEEN" in
             *"Macast-Gate-Off._googlecast._tcp.local."*)
                 fail "the gated instance announced itself anyway: $SEEN" ;;
+            *"Macast-Gate-Off._airplay._tcp.local."*)
+                fail "the gated instance announced an AirPlay receiver although its list is DLNA only: $SEEN" ;;
             *) pass "no announcement from the gated instance (browse saw: ${SEEN:-nothing})" ;;
         esac
     fi
@@ -3225,6 +3251,85 @@ AP_PORT=$((PORT + 6))
 AP_SOCK="$AP_SDIR/mpvsocket"
 printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust AirPlay", "Macast_Protocols": ["DLNA Protocol", "AirPlay Protocol"]}' "$AP_PORT" \
     > "$AP_SDIR/macast_setting.json"
+# The browse starts **before** this instance exists, for the reason §24 writes out in
+# full: the announcer's first burst is three packets 225 ms apart and then nothing for
+# 60 s, so a browser opened after startup reports "saw nothing" about a run that
+# announced loudly and is merely between bursts. Here that ordering is the whole
+# difference between a check and a formality — the claim under test is "an iPhone's
+# AirPlay list would show this Mac", and that list is built from unsolicited packets.
+#
+# It resolves **every** `_airplay._tcp` instance it can fold, for two reasons: the
+# instance name is not known before launch (the friendly name is sanitised by the
+# product, and reading it back from the announcer's own log line is §22's habit), and
+# this machine's ControlCenter may advertise a receiver of its own — the shell picks
+# our row by name, so a neighbour's row cannot be mistaken for a pass.
+AP_BROWSE_PY="$AP_SDIR/browse.py"
+AP_BROWSE_OUT="$AP_SDIR/browse.txt"
+cat > "$AP_BROWSE_PY" <<'PY'
+import sys, time, zeroconf as z
+
+budget, out = float(sys.argv[1]), sys.argv[2]
+TYPE = "_airplay._tcp.local."
+seen, attempted = set(), set()
+
+
+class L(z.ServiceListener):
+    def add_service(self, zc, type_, name):
+        seen.add(name)
+
+    def remove_service(self, *a):
+        pass
+
+    def update_service(self, *a):
+        pass
+
+
+def load(zc, name):
+    info = z.ServiceInfo(TYPE, name)
+    # `load_from_cache` is yes-only-when-complete: PTR **and** SRV **and** TXT **and**
+    # A. A half-folded service answers False — and unlike §22, which waits for one
+    # known name, a name dropped here is a name the section never reports, so it is
+    # put back for another pass instead of being marked attempted.
+    return info if info.load_from_cache(zc) else None
+
+
+zc = z.Zeroconf(ip_version=z.IPVersion.V4Only)
+browser = z.ServiceBrowser(zc, TYPE, L())
+rows = []
+deadline = time.monotonic() + budget
+while time.monotonic() < deadline:
+    for name in sorted(seen - attempted):
+        info = load(zc, name)
+        if info is None:
+            continue
+        attempted.add(name)
+        props = info.properties or {}
+        rows.append(
+            "\t".join(
+                (
+                    name,
+                    "" if info.port is None else str(info.port),
+                    ";".join(
+                        "%s=%s"
+                        % (
+                            k.decode("utf-8", "replace"),
+                            (v or b"").decode("utf-8", "replace"),
+                        )
+                        for k, v in props.items()
+                    ),
+                )
+            )
+        )
+    time.sleep(0.2)
+browser.cancel()
+zc.close()
+with open(out, "w") as fh:
+    fh.write("\n".join(rows))
+PY
+env -u PYTHONPATH -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
+    "$CAST_PY" "$AP_BROWSE_PY" 30 "$AP_BROWSE_OUT" >/dev/null 2>&1 &
+AP_BROWSE_PID=$!
+disown "$AP_BROWSE_PID" 2>/dev/null || true
 env MACAST_SETTING_DIR="$AP_SDIR" MACAST_MPV_SOCKET="$AP_SOCK" \
     MACAST_RESOURCE_DIR="$REPO/macast" \
     perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
@@ -3256,6 +3361,100 @@ else
     else
         pass "with Chromecast off, 8009 refuses while AirPlay answers"
     fi
+fi
+
+# ---- the announcement: can a sender that knows nothing find **this** receiver?
+#
+# Two claims, asked separately, because they have different failure modes and the
+# second one is the reason §22 exists at all:
+#   1. the AirPlay run announces an **_airplay._tcp** instance — not nothing, and not
+#      a second Chromecast record under the wrong type;
+#   2. a second implementation (the `zeroconf` in this repository's `.venv`, the stack
+#      the Python app runs) folds those bytes into a complete service, and the numbers
+#      it reads are the ones this run actually bound.
+#
+# What is deliberately **not** claimed here: that a cold sender's *query* about
+# `_airplay._tcp` gets an answer. The responder's table was measured for one service
+# type only (`Service::responder_answers`), so this browser succeeds on the bursts, not
+# on an answer, and a pass below must not be read as "an iPhone can also ask". The
+# announcer says the limitation out loud in its own log line, and check 3 is that
+# sentence — §16's 「别让『会广播』被读成『会答问』」 made visible on the wire run.
+if [ -n "$RTSP_PORT" ]; then
+    AP_MDNS_LINE=$(grep -ahF 'mDNS: announcing ' "$AP_SDIR/logs/Discovery.log" 2>/dev/null | tail -1)
+    AP_MDNS_INSTANCE=$(printf '%s' "$AP_MDNS_LINE" \
+        | sed -n 's/.*announcing \([^ ]*\) on port .*/\1/p')
+    for _ in $(seq 1 170); do
+        [ -e "$AP_BROWSE_OUT" ] && break
+        sleep 0.25
+    done
+    BROWSE_LEFT=$(pgrep -f "$AP_BROWSE_PY" | tr '\n' ' ')
+    [ -n "$BROWSE_LEFT" ] && kill -9 $BROWSE_LEFT 2>/dev/null
+
+    if [ -z "$AP_MDNS_INSTANCE" ]; then
+        if [ -n "$(grep -ahF 'mDNS: not announcing' "$AP_SDIR/logs/Discovery.log" 2>/dev/null)" ]; then
+            fail "the RTSP receiver answered on $RTSP_PORT and the announcer still refused: \
+$(grep -ahF 'mDNS: not announcing' "$AP_SDIR/logs/Discovery.log" | tail -1)"
+        else
+            fail "neither an announcement nor a refusal: the AirPlay face never said whether \
+a sender could find it"
+        fi
+    else
+        case "$AP_MDNS_INSTANCE" in
+            *._airplay._tcp.local.) pass "the AirPlay run announces an _airplay._tcp instance \
+($AP_MDNS_INSTANCE), not a second Chromecast record" ;;
+            *) fail "the AirPlay run announced $AP_MDNS_INSTANCE — the wrong service type on a \
+run whose Cast door is shut" ;;
+        esac
+    fi
+
+    if [ -n "$AP_MDNS_LINE" ] && printf '%s' "$AP_MDNS_LINE" | grep -qF 'it announces only'; then
+        pass "and the line says in words that this type is announced but not answered, so a \
+reader is not sent to fix a responder that was never asked to run"
+    else
+        fail "the AirPlay announcement line hides the responder limitation: ${AP_MDNS_LINE:-none}"
+    fi
+
+    if [ ! -e "$AP_BROWSE_OUT" ]; then
+        fail "the browse never finished — its window says nothing about any burst"
+    elif [ -z "$AP_MDNS_INSTANCE" ]; then
+        echo "  (the wire checks were not asked: no instance name to look for)"
+    else
+        AP_ROW=$(awk -F'\t' -v want="$AP_MDNS_INSTANCE" '$1 == want' "$AP_BROWSE_OUT" | head -1)
+        if [ -z "$AP_ROW" ]; then
+            fail "zeroconf could not fold $AP_MDNS_INSTANCE into a complete service \
+(browse saw: $(cut -f1 "$AP_BROWSE_OUT" | tr '\n' ' '))"
+        else
+            pass "another stack folded the announcement into a complete service \
+(PTR+SRV+TXT+A) without being told the address"
+            AP_RPORT=$(printf '%s' "$AP_ROW" | cut -f2)
+            if [ "$AP_RPORT" = "$RTSP_PORT" ]; then
+                pass "the port a sender reads is the RTSP port that actually answers ($AP_RPORT)"
+            else
+                fail "the announced port is ${AP_RPORT:-none} while the receiver bound $RTSP_PORT \
+— that is 「搜到但投不上」 written onto the wire"
+            fi
+            AP_TXT=$(printf '%s' "$AP_ROW" | cut -f3)
+            AP_DEVICEID=$(printf '%s' "$AP_TXT" | tr ';' '\n' | sed -n 's/^deviceid=//p')
+            if [ -n "$AP_DEVICEID" ]; then
+                pass "and the TXT carries a deviceid ($AP_DEVICEID), which is how an iPhone tells \
+two receivers apart"
+            else
+                fail "the TXT has no deviceid: $AP_TXT"
+            fi
+            case ";$AP_TXT;" in
+                *";model=Macast;"*)
+                    pass "model=Macast, so a reader knows this is ours and not Apple's receiver" ;;
+                *) fail "model is not Macast in: $AP_TXT" ;;
+            esac
+            case ";$AP_TXT;" in
+                *";name=Macast Rust AirPlay;"*)
+                    pass "and the TXT name is the friendly name this run was seeded with" ;;
+                *) fail "the TXT name is not the seeded friendly name: $AP_TXT" ;;
+            esac
+        fi
+    fi
+else
+    echo "  (the announcement checks were not asked: no RTSP port came up this run)"
 fi
 
 if [ -n "$RTSP_PORT" ]; then

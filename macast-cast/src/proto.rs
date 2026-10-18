@@ -434,7 +434,7 @@ mod tests {
     /// The scan is deliberately non-recursive, so the `#[path]`-included
     /// `*_tests.rs` files still land in it because they sit in `src/` itself.
     /// The previous floors — 603, 633, 637, 655, 656, 671, 672, 677, 678, 686,
-    /// 687, 688, 690 — were carried by the
+    /// 687, 688, 690, 695 — were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
@@ -446,13 +446,23 @@ mod tests {
     /// (+10 in `announce_tests`: the eight `e1`-`e8` answer-shape witnesses,
     /// `e9` — the one that asks whether anything ever *arrived* — and `e10`,
     /// which feeds in the 40-byte query a foreign python stack sent across the
-    /// LAN and asserts our own writer produces the same 40 bytes), and then 690
+    /// LAN and asserts our own writer produces the same 40 bytes), then 690
     /// → 695 on 2026-10-18 when the AirPlay RTSP face was wired into the shell:
     /// five rows in `airplay_tests` (the accept loop the shell actually runs and
     /// the port it lets go of, a connection that arrives after the first poll,
     /// the name the page would show, and the two `SET_PARAMETER` sentences — the
     /// handover said with both numbers, and the refusal said when the number
-    /// cannot be read). Two more rows in
+    /// cannot be read), and 695 → 699 the same day when `_airplay._tcp` got its
+    /// announcement: the byte-for-byte row against the third frozen corpus, the row
+    /// that says a service of that type is announced and **never answered** — the
+    /// second is a decision with a witness, the first is a corpus with a reader —
+    /// plus two that exist because the shared module started telling lies about a
+    /// second protocol: the refusal sentence naming the service type it actually
+    /// refused (it used to say "Chromecast" for both), and the audit that `start()`
+    /// **derives** the answering half from the predicate instead of hardcoding it —
+    /// whose behavioural witness is §25, which is a skip on this machine, so the
+    /// structural question is the one being asked here.
+    /// Two more rows in
     /// this crate are not about the responder at all: `airplay_tests`'s
     /// refusal-lines row and `relay_tests`'s sweep-names-its-files row, both of
     /// which exist because those two modules wrote through the `log` facade while
@@ -476,7 +486,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 695;
+    const TESTS_IN_THIS_CRATE: usize = 699;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

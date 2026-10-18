@@ -2657,8 +2657,10 @@ mod tests {
     /// `main.rs` as text: the one read of the gate has to come **before** any of the
     /// three faces is opened, there has to be **exactly one** read (so no face can
     /// consult the rule at its own door at its own moment), and each face has to be
-    /// **constructed exactly once** (so a second `SetupServer::start(` cannot hide
-    /// behind the first occurrence that `find` looks at).
+    /// **constructed exactly once per face** (so a second `SetupServer::start(` cannot
+    /// hide behind the first occurrence that `find` looks at), where "face" means one
+    /// announced service or one listening socket — and the announcer type, which
+    /// serves two of those, is pinned at exactly two call sites.
     ///
     /// What each half is witnessed by, since they are not the same:
     ///
@@ -2692,7 +2694,18 @@ mod tests {
         for (needle, what) in [
             ("CastChannel::new", "the 8009 receiver"),
             ("setup::SetupServer::start", "the setup face"),
-            ("announce::Announcer::new", "the announcement"),
+            // The two announcements are audited by the **service** each one builds,
+            // not by `Announcer::new`: since 2026-10-18 there are two announcers (a
+            // Chromecast receiver and an AirPlay one), so the type's call site is no
+            // longer one-per-face — the *table* it announces is. Counting the service
+            // constructors keeps the same teeth: a duplicated Cast announcement, or a
+            // third announcer invented at a call site nobody gated, moves one of these
+            // counts. The announcer count is asserted separately below.
+            ("announce::Service::from_setting", "the Chromecast announcement"),
+            (
+                "announce::Service::airplay_from_setting",
+                "the AirPlay announcement",
+            ),
             ("airplay::AirPlayReceiver::new", "the AirPlay receiver"),
         ] {
             let at = main.find(needle).unwrap_or_else(|| panic!("no {} in main.rs", what));
@@ -2713,6 +2726,15 @@ mod tests {
                  would be behind the gate only by accident"
             );
         }
+        // Two announcers, no more: one per service type this shell announces. A third
+        // would be a face nobody gated, and the per-service counts above would still
+        // read 1 each — which is exactly the blind spot this line is here to close.
+        assert_eq!(
+            main.matches("announce::Announcer::new(").count(),
+            2,
+            "the announcer is constructed at {} sites; the two doors above own one each",
+            main.matches("announce::Announcer::new(").count()
+        );
         // Exactly one read, so no two faces can consult a *different* answer to the
         // same question — and so that a stale entry says 「Skipping unknown protocol」
         // once per run rather than once per door (§4.10's growth-by-repetition).
