@@ -406,8 +406,8 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 678 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 678, and the scanner below counts 671 `#[test]`
+    /// 686 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 686, and the scanner below counts 671 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
     /// **replica of the scanner**, not a `grep -c '#\[test\]'`, which on this
     /// crate reads **678**: seven of those hits are the word inside doc prose and
@@ -446,7 +446,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 678;
+    const TESTS_IN_THIS_CRATE: usize = 686;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

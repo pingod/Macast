@@ -155,7 +155,7 @@ const MAX_LABEL_LENGTH: usize = 63;
 /// link MTA that RFC 6762 §17 asks for, but a Chromecast announcing fifteen
 /// records rides right up to the IP fragmentation limit, and an oversized
 /// buffer costs one allocation per poll — so 8 KiB, bounded rather than tight.
-const READ_MAX: usize = 8 * 1024;
+pub(crate) const READ_MAX: usize = 8 * 1024;
 
 /// How long one read blocks before the browse re-checks its deadline. Python
 /// has no equivalent: zeroconf keeps its own async timers and
@@ -199,11 +199,28 @@ pub enum RData {
     },
 }
 
+/// Which header section a parsed record came from.
+///
+/// The fold never needed this — `_receive_message` in Python appends everything to
+/// one list too — the **responder** does: known-answer suppression is about the
+/// records the querier put in its *answer* section, and reading the additional
+/// section as if it were known answers would silence answers a client never
+/// claimed. So the section is carried at the one place that can still tell: while
+/// the cursor is inside the count the header declared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Answer,
+    Authority,
+    Additional,
+}
+
 /// One resource record, as the fold needs it. `ttl` is kept because
 /// `ttl == 0` is the *shape* of a goodbye (see [`Ledger::ingest`]), not because
 /// this cache expires anything.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
+    /// The section this record was read out of. See [`Section`].
+    pub section: Section,
     pub name: String,
     /// Class **already masked** — this field never holds `0x8001`.
     pub class: u16,
@@ -226,6 +243,14 @@ impl Record {
 pub struct Question {
     pub name: String,
     pub rtype: u16,
+    /// The cache-flush bit **in the question's class field**, which is where mDNS
+    /// carries the unicast-request flag. Zeroconf reads it as exactly that
+    /// (`is_unicast = question.unique`), and a responder that ignores it answers a
+    /// "please unicast this" query to the group — which is a real behaviour
+    /// (`ptr-qu` in the corpus goes to the group anyway), but only because that
+    /// reference also checks whether it just multicast the record. To decide, the
+    /// bit has to survive parsing.
+    pub unicast_request: bool,
 }
 
 /// A parsed datagram: its id (kept for the tests and for a future responder,
@@ -472,7 +497,7 @@ pub fn parse_message(data: &[u8], source: &str, log: &Logger) -> Option<Message>
     // Widen each count before adding: three `u16`s sum to 196,605 at most,
     // which fits `u32`, but the arithmetic here is deliberately done in the
     // index type so `read_others` never has to re-widen or re-check.
-    let records = p.read_others(an as usize + ns as usize + ar as usize);
+    let records = p.read_others(an as usize, ns as usize, ar as usize);
     Some(Message {
         id,
         questions,
@@ -516,15 +541,20 @@ impl<'a> Parser<'a> {
         for _ in 0..count {
             let name = self.name().ok()?;
             let rtype = self.u16()?;
-            let _class = self.u16()?;
-            out.push(Question { name, rtype });
+            let class = self.u16()?;
+            out.push(Question {
+                name,
+                rtype,
+                unicast_request: class & CLASS_UNIQUE != 0,
+            });
         }
         Some(out)
     }
 
-    /// The record sections, merged, with the three recoveries described on
-    /// [`parse_message`].
-    fn read_others(&mut self, count: usize) -> Vec<Record> {
+    /// The record sections, merged **in order** but labelled with where each came
+    /// from, with the three recoveries described on [`parse_message`].
+    fn read_others(&mut self, an: usize, ns: usize, ar: usize) -> Vec<Record> {
+        let count = an + ns + ar;
         let mut out = Vec::new();
         for _ in 0..count {
             let start = self.offset;
@@ -589,7 +619,15 @@ impl<'a> Parser<'a> {
                 self.offset = end;
                 continue;
             }
+            let section = if out.len() < an {
+                Section::Answer
+            } else if out.len() < an + ns {
+                Section::Authority
+            } else {
+                Section::Additional
+            };
             out.push(Record {
+                section,
                 name,
                 class: class_field & CLASS_MASK,
                 flush: class_field & CLASS_UNIQUE != 0,
@@ -940,12 +978,14 @@ impl Ledger {
                     let entry = self.instance_entry(target);
                     if entry.server.is_none() {
                         asked.push(Question {
+                            unicast_request: false,
                             name: target.clone(),
                             rtype: TYPE_SRV,
                         });
                     }
                     if entry.txt.is_none() {
                         asked.push(Question {
+                            unicast_request: false,
                             name: target.clone(),
                             rtype: TYPE_TXT,
                         });
@@ -986,6 +1026,7 @@ impl Ledger {
                     entry.port = Some(*port);
                     if fresh_server {
                         asked.push(Question {
+                            unicast_request: false,
                             name: server,
                             rtype: TYPE_A,
                         });
@@ -1311,6 +1352,7 @@ pub fn browse(
         &Question {
             name: service_type.to_string(),
             rtype: TYPE_PTR,
+            unicast_request: false,
         },
         log,
     );

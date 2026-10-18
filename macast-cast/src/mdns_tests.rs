@@ -102,6 +102,7 @@ fn message(questions: &[(String, u16)], answers: &[Vec<u8>]) -> Vec<u8> {
 /// field the parser would never let through (the cache-flush bit included).
 fn record(name: &str, rtype: u16, ttl: u32, rdata: RData) -> Record {
     Record {
+        section: Section::Answer,
         name: name.to_string(),
         class: CLASS_IN,
         flush: false,
@@ -114,6 +115,7 @@ fn record(name: &str, rtype: u16, ttl: u32, rdata: RData) -> Record {
 /// The same with the class field raw, for the red line about masking.
 fn raw_record(name: &str, rtype: u16, class: u16, ttl: u32, rdata: RData) -> Record {
     Record {
+        section: Section::Answer,
         name: name.to_string(),
         class,
         flush: false,
@@ -551,7 +553,10 @@ fn o_a_record_claiming_more_bytes_than_the_packet_holds_stops_the_section() {
         source: "peer",
         log: &logger,
     };
-    let read = parser.read_others(2);
+    // Two records declared in the **answer** section, none elsewhere: the split the
+    // signature now takes is what labels sections, and this test is about the
+    // overrun recovery, so the counts put everything where the packet does.
+    let read = parser.read_others(2, 0, 0);
     assert!(read.is_empty(), "the overrun record contributes nothing");
     assert_eq!(parser.offset, start, "and the cursor is where the record started");
 }
@@ -1763,6 +1768,7 @@ fn u_b_an_unencodable_question_stays_asked() {
     // and this is the branch that needs a witness.
     let mut asked: Vec<(String, u16)> = Vec::new();
     let question = Question {
+        unicast_request: false,
         name: format!("{}.local.", bad),
         rtype: TYPE_A,
     };

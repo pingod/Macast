@@ -861,7 +861,7 @@ impl Announcer {
             );
             return Err("no advertisable address to publish".to_string());
         }
-        let sock = match bind_sender(&self.log) {
+        let sock = match bind_engine(&self.service.addresses, &self.log) {
             Ok(sock) => sock,
             Err(e) => {
                 self.log.error(&format!(
@@ -880,7 +880,34 @@ impl Announcer {
             .spawn(move || {
                 let group = SocketAddr::from((MDNS_GROUP, MDNS_PORT));
                 let mut send = |bytes: &[u8]| sock.send_to(bytes, group).map(|_| ());
-                run(&service, &mut send, &running, &log)
+                let mut unicast =
+                    |bytes: &[u8], peer: SocketAddr| sock.send_to(bytes, peer).map(|_| ());
+                let mut buf = vec![0u8; crate::mdns::READ_MAX];
+                let mut recv = || match sock.recv_from(&mut buf) {
+                    Ok((length, peer)) => {
+                        buf.truncate(length);
+                        Ok(Some((buf.clone(), peer)))
+                    }
+                    // The poll elapsing is not an event: nothing arrived, so do the
+                    // rest of the loop's work and ask again.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                };
+                run(
+                    &service,
+                    &mut send,
+                    &mut unicast,
+                    &mut recv,
+                    &running,
+                    &log,
+                )
             });
         match started {
             Ok(handle) => {
@@ -920,33 +947,218 @@ impl Announcer {
     }
 }
 
-/// One socket, bound to 5353 with the reuse options, **not joined** and **never
-/// read**. The module header's first divergence carries what that costs on each
-/// kernel (multicast: duplicated to every joined socket on macOS, and on Linux
-/// this unjoined one receives it anyway; unicast: one socket wins the whole
-/// stream), and why the responder must land on this socket rather than beside it.
-fn bind_sender(log: &Logger) -> io::Result<UdpSocket> {
+/// One socket, bound to 5353 with the reuse options, **joined**, with a short read
+/// timeout so the announcer can poll it.
+///
+/// It used to be a sender only — unjoined, unread, and defended by a claim about
+/// `SO_REUSEPORT` that turned out not to be what either kernel does
+/// (`scripts/mdns_reuseport_probe.py`; the module header's first divergence carries
+/// the readings). Joining is what makes *answering* possible at all, and the
+/// measurement is what makes it safe: multicast is **duplicated** to every joined
+/// socket, so this one does not take datagrams away from [`crate::mdns`]'s browser.
+///
+/// `interfaces` is a parameter rather than a read of `service.addresses` for the
+/// same reason `burst`'s `send` is a closure: the join list is the fact under test,
+/// and a test that wants to join on `127.0.0.1` (the only place a loopback witness
+/// can hear anything) must not have to fake an interface the machine does not have.
+/// The product passes the service's own addresses — the narrow set an announcement
+/// is allowed to name (`advertised_addresses`, not the browser's superset, which is
+/// §22's product bug). A querier that can reach us is on one of these; joining
+/// elsewhere would only hear traffic we cannot answer on.
+fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     crate::mdns::set_reuse_for_mdns(&sock, log);
     sock.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).into())?;
     // The responder's two options, from `set_respond_socket_multicast_options`.
     sock.set_multicast_ttl_v4(MULTICAST_TTL as u32)?;
     sock.set_multicast_loop_v4(true)?;
-    Ok(sock.into())
+    let mut joined = 0usize;
+    for address in interfaces {
+        match sock.join_multicast_v4(&MDNS_GROUP, address) {
+            Ok(()) => joined += 1,
+            Err(e) => log.warning(&format!(
+                "mDNS cannot join {} on {}: {}",
+                MDNS_GROUP, address, e
+            )),
+        }
+    }
+    if joined == 0 {
+        // Announce anyway: the unsolicited bursts leave from a bound socket whether
+        // or not a membership took, and a listener-only failure must not cost the
+        // receiver its discovery. But say which half broke — "searchable but
+        // unreachable" is otherwise indistinguishable from a network problem
+        // (§4.1's first row).
+        log.warning(&format!(
+            "mDNS joined {} on no interface ({} addresses offered) — this receiver \
+             will announce but will not answer queries",
+            MDNS_GROUP,
+            interfaces.len()
+        ));
+    }
+    let sock: UdpSocket = sock.into();
+    // The poll, not an infinite block: see [`run`]'s `recv`.
+    sock.set_read_timeout(Some(READ_POLL))?;
+    Ok(sock)
 }
 
-/// Three bursts now, then three more every [`REANNOUNCE`], until asked to stop —
-/// and then the goodbye, which the stop flag does **not** gate. See [`burst`]'s
-/// `abort` argument for why that asymmetry is load-bearing, and the test named
-/// `the_run_function_goodbyes_even_when_the_flag_is_already_down` for the
-/// statement about *this* function rather than about `burst`.
+/// How long a read may hold the announcer's thread before it is asked again.
 ///
-/// `send` is a closure so this whole order of operations can be driven by a
-/// `Vec` in a test instead of by 5353. The thread above wraps the socket into
-/// exactly this shape, so nothing here is a test-only path.
+/// The same budget `channel.rs` settled on for the Cast socket: long enough that
+/// polling is not a busy loop, short enough that neither the [`REANNOUNCE`]
+/// schedule nor [`Announcer::stop`] can sit behind it.
+const READ_POLL: Duration = Duration::from_millis(200);
+
+/// What one received datagram turned into.
+///
+/// The counters exist because **a drop is a fact, not an absence**. This socket now
+/// receives (see the module header's first divergence, measured by
+/// `scripts/mdns_reuseport_probe.py`): multicast is duplicated to every joined
+/// socket, so so is everything else on this group, and a **unicast** datagram to
+/// port 5353 is handed to exactly one socket in the reuse group — which may be this
+/// one. When that happens and the packet is not a query, there is nothing here to do
+/// with it: it was an answer meant for whoever else binds 5353, quite possibly our
+/// own browser. `absorbed` is where that loss stops being invisible.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Served {
+    /// Queries this datagram carried (of any type, answered or not).
+    pub queries: usize,
+    /// Replies written to the multicast group.
+    pub group: usize,
+    /// Replies written back to the asker's address.
+    pub direct: usize,
+    /// Non-query packets dropped here. See the doc above: this is the unicast hole,
+    /// counted rather than smoothed over.
+    pub absorbed: usize,
+}
+
+/// The DNS type number → the kind the decision layer speaks.
+///
+/// Unknown numbers come back as `None` rather than a guess: a question we cannot
+/// name is a question we cannot answer, and inventing a `Kind` for it would make
+/// the reply table claim things about types this port does not model.
+fn kind_from_rtype(rtype: u16) -> Option<crate::respond::Kind> {
+    use crate::respond::Kind;
+    match rtype {
+        TYPE_A => Some(Kind::A),
+        TYPE_PTR => Some(Kind::Ptr),
+        TYPE_TXT => Some(Kind::Txt),
+        TYPE_SRV => Some(Kind::Srv),
+        28 => Some(Kind::Aaaa),
+        47 => Some(Kind::Nsec),
+        255 => Some(Kind::Any),
+        _ => None,
+    }
+}
+
+/// Answer one received datagram, sending through the two closures.
+///
+/// `peer` is the source address, and its **port** is the input the reference uses
+/// to decide whether the querier wants a unicast reply (`ucast_source = port !=
+/// 5353`, `query_handler.py:272`). That is why this function takes a `SocketAddr`
+/// rather than an IP: the port is the question, and a caller that flattened it
+/// would silently stop answering legacy unicast queriers.
+///
+/// Known answers are read from the **answer section only**, because that is what
+/// the querier declared it holds; the additional section is records the querier is
+/// *sending to us*.
+pub fn serve(
+    bytes: &[u8],
+    peer: SocketAddr,
+    service: &Service,
+    multicast: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
+    log: &Logger,
+) -> Served {
+    use crate::mdns::Section;
+    use crate::respond::{self, Known, Question, Shape};
+    let mut out = Served::default();
+    let message = match crate::mdns::parse_message(bytes, &peer.to_string(), log) {
+        Some(message) => message,
+        None => {
+            out.absorbed = 1;
+            return out;
+        }
+    };
+    if message.questions.is_empty() {
+        // An announcement or an answer, not a question. Nothing to send.
+        out.absorbed = 1;
+        return out;
+    }
+    out.queries = message.questions.len();
+    let shape = Shape::new(&service.instance, &service.server, !service.addresses.is_empty());
+    let questions: Vec<Question> = message
+        .questions
+        .iter()
+        .filter_map(|question| {
+            kind_from_rtype(question.rtype).map(|kind| Question {
+                name: question.name.clone(),
+                kind,
+                unicast_request: question.unicast_request,
+            })
+        })
+        .collect();
+    let known: Vec<Known> = message
+        .records
+        .iter()
+        .filter(|record| record.section == Section::Answer)
+        .filter_map(|record| {
+            let alias = match &record.rdata {
+                crate::mdns::RData::Name(name) => Some(name.clone()),
+                _ => None,
+            };
+            kind_from_rtype(record.rtype).map(|kind| Known {
+                kind,
+                owner: record.name.clone(),
+                ttl: record.ttl,
+                alias,
+            })
+        })
+        .collect();
+    let ucast_source = peer.port() != MDNS_PORT;
+    for reply in respond::respond(&questions, &known, ucast_source, &shape, None, 0) {
+        let datagram = respond::datagram(&reply.records, service);
+        let sent = if reply.unicast {
+            unicast(&datagram, peer)
+        } else {
+            multicast(&datagram)
+        };
+        match sent {
+            Ok(()) => {
+                if reply.unicast {
+                    out.direct += 1;
+                } else {
+                    out.group += 1;
+                }
+            }
+            Err(e) => log.warning(&format!(
+                "mDNS answer could not be sent ({} bytes to {}): {}",
+                datagram.len(),
+                if reply.unicast { peer.to_string() } else { MDNS_GROUP.to_string() },
+                e
+            )),
+        }
+    }
+    out
+}
+
+/// The announcer's whole loop: shout, then answer questions until the next shout,
+/// then goodbye.
+///
+/// `send` writes to the group, `unicast` writes back to one asker, `recv` asks the
+/// socket for the next datagram without blocking longer than the poll interval.
+/// All three are closures for the reason `burst`'s `send` always was — the cadence
+/// and the dispatch can then be driven without binding 5353, which on this machine
+/// is shared with the OS responder and every other receiver running. The read is a
+/// **poll**, not a blocking read, because the same thread owns the 60-second
+/// re-announcement: a read that blocks forever would make the announcer silent
+/// forever, and that is the §4.2 shape where "the receiver is up and nobody finds
+/// it" reads like a network problem (`channel.rs`'s 「读不得跨阻塞持锁」 is the same
+/// thing one layer down, where the lock was the casualty rather than the schedule).
 fn run(
     service: &Service,
     send: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
+    recv: &mut dyn FnMut() -> io::Result<Option<(Vec<u8>, SocketAddr)>>,
     running: &AtomicBool,
     log: &Logger,
 ) {
@@ -956,24 +1168,63 @@ fn run(
         &burst(send, &bytes, REGISTER_GAP, Some(running)),
         "announcement",
     );
+    let mut next = Instant::now() + REANNOUNCE;
+    let mut served = Served::default();
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
         }
-        interrupted_sleep(REANNOUNCE, Some(running));
-        if !running.load(Ordering::SeqCst) {
-            break;
+        match recv() {
+            Ok(Some((data, peer))) => {
+                let one = serve(&data, peer, service, send, unicast, log);
+                served.queries += one.queries;
+                served.group += one.group;
+                served.direct += one.direct;
+                served.absorbed += one.absorbed;
+                if one.absorbed == 1 && served.absorbed == 1 {
+                    // Said once, not per packet. This socket now competes for unicast
+                    // traffic on port 5353 (measured: one socket in the reuse group
+                    // takes the whole stream), so a reply meant for another bound
+                    // socket can land here and be dropped. That is the honest name
+                    // for it, and a per-packet line would be the log flood §4.10
+                    // measured at 49% of one file.
+                    log.debug(
+                        "mDNS engine holds 5353 and received a non-query datagram: a \
+                         unicast reply aimed at another socket's query can arrive here \
+                         and is dropped (announce.rs's first divergence, and §16's \
+                         shared-reader note, carry why this is not new)",
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // One failed read is not the thread's last. An announcer that quits
+                // on a transient error leaves a receiver that is running, listening
+                // on 8009, and unfindable — which is exactly the class of complaint
+                // this module exists to prevent.
+                log.warning(&format!("mDNS receive failed: {}", e));
+            }
         }
-        report(
-            log,
-            &burst(send, &bytes, REGISTER_GAP, Some(running)),
-            "re-announcement",
-        );
+        if Instant::now() >= next {
+            report(
+                log,
+                &burst(send, &bytes, REGISTER_GAP, Some(running)),
+                "re-announcement",
+            );
+            next = Instant::now() + REANNOUNCE;
+        }
+    }
+    if served.queries > 0 {
+        log.debug(&format!(
+            "mDNS engine served {} queries ({} to the group, {} direct, {} non-query dropped)",
+            served.queries, served.group, served.direct, served.absorbed
+        ));
     }
     let goodbye = service.goodbye();
     report(log, &burst(send, &goodbye, GOODBYE_GAP, None), "goodbye");
     log.info("mDNS announcement stopped");
 }
+
 
 /// One sentence per failure, and silence when the burst was clean.
 ///

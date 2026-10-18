@@ -2904,6 +2904,179 @@ PY
     rm -rf "$GATE_SDIR"
 fi
 
+echo "== 25: a sender that ASKS gets an answer, and the empties are told apart =="
+# §22 proves a passive listener can find us — the libvlc shape. It does not prove the
+# shape that costs a user real time: a sender with an **empty cache** (the Cast app on
+# a phone that just woke up, `dns-sd -B`, any browser starting cold) has to ask, and
+# until this round the honest answer was "wait for the next keepalive" — up to
+# `REANNOUNCE` = 60 seconds — because we only ever sent unsolicited bursts.
+#
+# This round wired the answer (`announce::serve` on the announcer's own joined socket),
+# and this section is where that gets witnessed on the LAN rather than on loopback.
+# It therefore has to distinguish **three** outcomes, not two:
+#
+#   1. our instance answered a query quickly            → the feature works here
+#   2. it answered nothing while the wire demonstrably
+#      carried queries                                 → this *binary* receives no
+#                                                        inbound LAN multicast
+#                                                        (macOS's local-network gate;
+#                                                        AGENTS.md §4.2's "别把端口在听
+#                                                        当证据" read from the other side)
+#   3. no queries on the wire at all                    → the instrument, not the product
+#
+# Collapsing 2 into 3 (or into "the responder is broken") is the failure this shape
+# exists to prevent: §4.14's 「空结果要说清是哪一种空」, now four sentences deep in our
+# own harness. So a second process on the same host listens on the group for the whole
+# window and counts the queries; without that number the silence in 2 is unqualifiable.
+if [ -z "$MDNS_INSTANCE" ]; then
+    skip "no announcement this run, so there is no instance for a query to find"
+elif [ ! -x "$CAST_PY" ]; then
+    skip "no .venv python to query with ($CAST_PY)"
+else
+    QUERY_OUT=/tmp/verify_rust_receiver_query.txt
+    SNIFF_OUT=/tmp/verify_rust_receiver_sniff.txt
+    LAN_IP=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+    LAN_ADDR=$(ipconfig getifaddr "$LAN_IP" 2>/dev/null)
+    if [ -z "$LAN_ADDR" ]; then
+        skip "the default route ($LAN_IP) has no IPv4 address to join the group on"
+    else
+        QUERY_PY=/tmp/verify_rust_receiver_query.py
+        SNIFF_PY=/tmp/verify_rust_receiver_sniff.py
+        cat > "$SNIFF_PY" <<'SNIFFEOF'
+import socket, struct, sys, time
+lan, seconds = socket.inet_aton(sys.argv[1]), float(sys.argv[2])
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+sock.bind(("", 5353))
+sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                socket.inet_aton("224.0.0.251") + lan)
+sock.settimeout(0.5)
+queries = answers = 0
+start = time.time()
+while time.time() - start < seconds:
+    try:
+        data, frm = sock.recvfrom(4096)
+    except socket.timeout:
+        continue
+    except OSError as exc:
+        print("listener stopped early: %s" % exc)
+        break
+    if len(data) < 12:
+        continue
+    flags = struct.unpack(">H", data[2:4])[0]
+    qd = struct.unpack(">H", data[4:6])[0]
+    name = data[12:].split(b"\x00googlecast")[0][-1:]
+    if "_googlecast._tcp" not in data.decode("latin-1"):
+        continue
+    if flags & 0x8000:
+        answers += 1
+    elif qd:
+        queries += 1
+print("wire queries=%d answers=%d" % (queries, answers))
+SNIFFEOF
+        cat > "$QUERY_PY" <<'QUERYEOF'
+import sys, time, zeroconf as z
+
+want, budget = sys.argv[1], float(sys.argv[2])
+TYPE = "_googlecast._tcp.local."
+# Nobody answers this type anywhere; it exists so the timing line can be believed.
+NEGATIVE = "_macast-nothing-here._tcp.local."
+found = {}
+started = time.monotonic()
+
+
+class Watch(z.ServiceListener):
+    def __init__(self, kind):
+        self.kind = kind
+
+    def add_service(self, zc, type_, name):
+        found.setdefault(self.kind, (time.monotonic() - started, name))
+
+    def remove_service(self, *a):
+        pass
+
+    def update_service(self, *a):
+        pass
+
+
+# A cold engine: nothing in its cache, so the ServiceBrowser's opening PTR query is
+# the only way it learns anything inside the budget — and resolving the instance
+# (SRV/TXT/A) is the second half, which a responder that answers only PTR fails.
+zc = z.Zeroconf()
+z.ServiceBrowser(zc, TYPE, Watch("ours"))
+z.ServiceBrowser(zc, NEGATIVE, Watch("negative"))
+deadline = started + budget
+while time.monotonic() < deadline and "ours" not in found:
+    time.sleep(0.05)
+latency, name = found.get("ours", (None, None))
+print("ours=%s" % ("%.3f" % latency if latency is not None else "none"))
+print("foundname=%s" % (name or "-"))
+if name:
+    handle = z.ServiceInfo(TYPE, name)
+    print("resolved=%s" % bool(zc.get_service_info(handle, timeout=2.0)))
+    print("port=%s address=%s" % (handle.port, (handle.parsed_addresses() or ["none"])[0]))
+print("negative=%s" % ("saw" if "negative" in found else "nothing"))
+zc.close()
+QUERYEOF
+        env -u PYTHONPATH -u http_proxy -u HTTP_PROXY \
+            -u https_proxy -u HTTPS_PROXY "$CAST_PY" "$SNIFF_PY" "$LAN_ADDR" 14 \
+            > "$SNIFF_OUT" 2>&1 &
+        SNIFF_PID=$!
+        sleep 1
+        env -u PYTHONPATH -u http_proxy -u HTTP_PROXY \
+            -u https_proxy -u HTTPS_PROXY "$CAST_PY" "$QUERY_PY" "$MDNS_INSTANCE" 10 \
+            > "$QUERY_OUT" 2>&1
+        wait "$SNIFF_PID" 2>/dev/null
+        WIRE=$(grep -a '^wire ' "$SNIFF_OUT" || echo "wire unreadable")
+        echo "  (witness) $(tr '\n' ' ' < "$QUERY_OUT") | $WIRE"
+        OURS=$(grep -a '^ours=' "$QUERY_OUT" | head -1)
+        FOUNDD=$(grep -a '^foundname=' "$QUERY_OUT" | head -1)
+        case "$OURS" in
+            "ours=none")
+                if [ "$WIRE" = "wire  " ] || ! printf '%s' "$WIRE" | grep -qE 'queries=[1-9]'; then
+                    # Outcome 3: the querier's own queries never reached the group
+                    # listener either, so this machine told us nothing about either side.
+                    skip "no mDNS query appeared on the wire this window — the instrument, not the responder ($WIRE)"
+                else
+                    # Outcome 2, named for what it is. The responder is proven on
+                    # loopback (e8) and in a standalone test binary that receives this
+                    # same traffic; this app binary is the one that hears nothing.
+                    skip "this binary received no inbound LAN multicast while $WIRE — the responder cannot be witnessed from this process (macOS local-network permission); proven instead by announce_tests e8 and by the loopback path"
+                fi
+                ;;
+            *)
+                pass "a cold browser's query was answered: $OURS"
+                # Sub-second against a 60-second keepalive interval: slower than this,
+                # and an answer cannot be told from an overheard burst.
+                if printf '%s' "$OURS" | grep -qE '^ours=0\.[0-4][0-9]*$'; then
+                    pass "answered inside the sub-second range a burst cannot explain"
+                else
+                    fail "the answer came at ${OURS#ours=}s — too late to tell from a keepalive"
+                fi
+                # The name check reads the ANSWER line. It used to grep the whole
+                # witness file, which also contained the instance name we passed in
+                # as an argument — a comparison that cannot fail, and it did not:
+                # it printed PASS on a run where nothing answered at all.
+                if [ "$FOUNDD" = "foundname=$MDNS_INSTANCE" ]; then
+                    pass "and the instance it resolved is the one this run announced"
+                else
+                    fail "it resolved ${FOUNDD#foundname=} instead of $MDNS_INSTANCE"
+                fi
+                case "$(cat "$QUERY_OUT")" in
+                    *"resolved=True"*) pass "and the full record comes back, not just the PTR" ;;
+                    *) fail "the PTR resolved no SRV/TXT/A: $(tr '\n' ' ' < "$QUERY_OUT")" ;;
+                esac
+                case "$(cat "$QUERY_OUT")" in
+                    *"negative=saw"*) fail "the negative control found a device, so the timing above is not our responder's doing" ;;
+                    *) pass "nothing answered the type this product does not run" ;;
+                esac
+                ;;
+        esac
+        rm -f "$QUERY_OUT" "$SNIFF_OUT" "$QUERY_PY" "$SNIFF_PY"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

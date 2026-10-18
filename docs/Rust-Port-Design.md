@@ -808,7 +808,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
 | Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT/NSEC/A，unsolicited） | **已交付**（2026-10-18，`macast-cast/src/announce.rs` + 壳在 `main.rs` 里随 8009 起停） | 判据不是"我们自己读得懂"：`verify_rust_receiver.sh` §22 让 `.venv` 里那套 **zeroconf**（参考实现自己用的栈）冷启动去解析，**42.8 秒**后交回完整设备（那一趟整套 **183 条 / 0 失败 / EXIT=0**）—— 而第一串广播那时早就发完了，所以这条同时是 **60 秒 keepalive 的真机见证**。字节层面另有两条冻结语料（`macast-cast/tests/golden/mdns_announce.hex`、`mdns_names.jsonl`，由 `scripts/mdns_announce_probe.py` 产出），其中 announce 有**两行**，因为参考实现那一对 `A/NSEC` 的先后随 `PYTHONHASHSEED` 变（§8 的偏离表与探针注释都写了这一条）。**剩下的不是这一行**：下一行 |
-| mDNS **responder**（回答别人的查询） | **判决层 + 装配层已交付**（2026-10-18，`macast-cast/src/respond.rs`，22 条用例逐行对拍 17 行语料 + 自解码与独立遍历）；**socket 接线尚未** | 还没有接线，所以今天仍然只发 unsolicited 广播、不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
+| mDNS **responder**（回答别人的查询） | **已接线**（2026-10-18：判决层 + 装配层 + `announce::serve` 挂在 announcer 那个 join 且读的 socket 上）；**局域网那一格在本机无见证** | 回环上有端到端见证（`announce_tests` 的 e8：真 socket、真查询、真答复），独立测试进程也量到 `bind_engine` 在 LAN 口 12 秒收到 42 条多播；但 `verify_rust_receiver.sh` §25 在**这一个 app 进程**里问不到东西，于是它按三种空说话（见 §16 第 22 条）。今天用户能读到的话仍然要说清：后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
 `respond::datagram` 按 `Section` 分派，广播那五条记录的字节**一个都没变**（19 条 golden 对拍用例
 照旧绿就是这一句的见证）。剩下的是 (b)：让 `announce.rs` 那个长期在场的 socket join 且读，
 读到的查询交 `respond::respond`，读到的别的记录喂设备账本 —— 后者就是 §8/§16 那条"合并"结论落地的地方。
@@ -1104,6 +1104,16 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     那一个，`--selftest` 把出事那一行原样造进内存并要求报 **1**（量过：1；同时要求转义那行
     报 0）。**一条没有正控的扫描器，它的 0 只是"它没在工作的另一种写法"**（Part 50 那一族），
     而**一个不再复测的数字会伪装成一条判据**（§4.13）。
+22. **responder 接上线之后，局域网那一格在本机问不出来，而 §25 拒绝把它读成产品坏了**
+    （2026-10-18）。接线本身有见证：回环端到端（`announce_tests::e8`，真 socket 真查询真答复）、
+    产品路径的 `Announcer::start()` 在独立测试进程里对 LAN 组答出 296 字节、`bind_engine`
+    在 LAN 口 12 秒收到 42 条多播。但验收脚本跑起来时，`macast-tauri` 这个 app 进程既没答
+    （`ours=none`），同窗口那台**加入同一个组、绑在同一个口**的 python 监听器也报告
+    `wire queries=0 answers=0`。这一种空与"responder 坏了"不是一回事，与"仪器没听到"也不是同一句：
+    所以 §25 分三种答案说话，并把两个读数一起印出来，第三种走 `skip`（本脚本里 skip 计败，
+    不会静默）。要么在系统设置里给这个 dev 二进制允许「本地网络」（**那是用户的系统设置，我不代点**），
+    要么等局域网里真有 mDNS 流量在跑时重问一次。**在这之前，"手机上的 Cast 按钮现在能看到这台 Mac
+    并被秒答"这句话，本机说不出口。**
 ---
 
 ## 17. 提交与文档的规矩
@@ -1165,9 +1175,10 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **27**（§24 是最后一节；
-#   §23 是 2026-10-18 的 status 一节，门那一节因此从 §23 挪到 §24 —— 本文、脚本注释与
-#   `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，编号变了而判据没变）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **28**（§25 是最后一节，
+#   responder 的局域网问答；§24 是门。§23 是 2026-10-18 的 status 一节，门那一节当时从 §23
+#   挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
+#   编号变了而判据没变）
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行

@@ -613,7 +613,19 @@ fn the_run_function_goodbyes_even_when_the_flag_is_already_down() {
             seen.push(bytes.to_vec());
             Ok(())
         };
-        run(&service, &mut send, &running, &logger);
+        // The two seams this test never reaches: the flag is already down, so the
+        // loop's first check ends it before a read or an answer is asked for. They
+        // are here because the signature says so, not to simulate anything.
+        let mut no_unicast = |_bytes: &[u8], _peer: std::net::SocketAddr| Ok(());
+        let mut no_recv = || Ok(None);
+        run(
+            &service,
+            &mut send,
+            &mut no_unicast,
+            &mut no_recv,
+            &running,
+            &logger,
+        );
     }
     let announced = seen.iter().filter(|bytes| *bytes != &goodbye).count();
     let goodbyed = seen.iter().filter(|bytes| *bytes == &goodbye).count();
@@ -830,4 +842,377 @@ fn the_announcer_never_writes_to_stdout() {
             needle
         );
     }
+}
+// ---------------------------------------------------------------------------
+// The engine: answering a query that arrives on the socket
+// ---------------------------------------------------------------------------
+//
+// Everything above this line is about the packet a receiver *sends*. These are about
+// the one it answers, and they run through `serve` and `run`'s seams — except the
+// last, which binds the real socket on loopback because a seam cannot prove a
+// joined socket hears anything.
+
+use std::cell::RefCell;
+use std::net::{IpAddr, Ipv4Addr as V4, SocketAddr, UdpSocket};
+use std::rc::Rc;
+
+/// Where the engine's bytes went, as a pair of sinks a test can read afterwards.
+#[derive(Clone, Debug, Default)]
+struct Sent {
+    group: Vec<Vec<u8>>,
+    direct: Vec<(Vec<u8>, SocketAddr)>,
+}
+
+fn peer(port: u16) -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(V4::LOCALHOST), port)
+}
+
+/// A PTR query for our own type, built by this crate's own query writer.
+fn ptr_query(service_type: &str) -> Vec<u8> {
+    mdns::query(service_type, TYPE_PTR).expect("the query encodes")
+}
+
+fn wire_name(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for label in name.trim_end_matches('.').split('.') {
+        if label.is_empty() {
+            continue;
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+/// A PTR query that also carries **one record of ours it claims to hold**, placed in
+/// the answer section (`in_answers`) or the additional section (not).
+///
+/// The two placements are the point: this is the only difference the `section` field
+/// on `mdns::Record` exists to make, and before it the two packets were the same to
+/// us. Written by hand onto the end of a real `mdns::query` packet — same names, same
+/// TTL, only the header count and the section differ, so no test can accuse the
+/// fixture of being what it is comparing.
+fn query_with_known(ttl: u32, in_answers: bool) -> Vec<u8> {
+    let (instance, _server, _port, _address, _txt) = fixture_inputs();
+    let mut packet = ptr_query(SERVICE_TYPE);
+    let mut record = Vec::new();
+    record.extend_from_slice(&wire_name(SERVICE_TYPE));
+    record.extend_from_slice(&TYPE_PTR.to_be_bytes());
+    record.extend_from_slice(&1u16.to_be_bytes()); // CLASS_IN, no cache-flush bit
+    record.extend_from_slice(&ttl.to_be_bytes());
+    let alias = wire_name(&instance);
+    record.extend_from_slice(&(alias.len() as u16).to_be_bytes());
+    record.extend_from_slice(&alias);
+    packet.extend_from_slice(&record);
+    let (an, ar): (u16, u16) = if in_answers { (1, 0) } else { (0, 1) };
+    packet[6..8].copy_from_slice(&an.to_be_bytes());
+    packet[10..12].copy_from_slice(&ar.to_be_bytes());
+    packet
+}
+
+/// Drive `serve` with recording sinks.
+fn served_by(service: &Service, data: &[u8], from: SocketAddr) -> (Served, Sent) {
+    let logger = Logger::named(LOGGER_NAME);
+    let sent = Rc::<RefCell<Sent>>::default();
+    let group_sink = {
+        let sent = Rc::clone(&sent);
+        move |bytes: &[u8]| {
+            sent.borrow_mut().group.push(bytes.to_vec());
+            Ok(())
+        }
+    };
+    let direct_sink = {
+        let sent = Rc::clone(&sent);
+        move |bytes: &[u8], peer: SocketAddr| {
+            sent.borrow_mut().direct.push((bytes.to_vec(), peer));
+            Ok(())
+        }
+    };
+    let mut group_sink = group_sink;
+    let mut direct_sink = direct_sink;
+    let served = serve(data, from, service, &mut group_sink, &mut direct_sink, &logger);
+    // Borrowed rather than `Rc::try_unwrap`: this function's own handle is one of
+    // the strong counts, so a unwrap that expected to be the last owner failed for
+    // the wrong reason and made four answering tests look like four wrong answers.
+    let captured = sent.borrow().clone();
+    (served, captured)
+}
+
+#[test]
+fn e1_a_query_from_port_5353_is_answered_on_the_group_and_nowhere_else() {
+    crate::pin_test_dir();
+    let service = fixture_service();
+    let (served, sent) = served_by(&service, &ptr_query(SERVICE_TYPE), peer(5353));
+    assert_eq!(served.queries, 1);
+    assert_eq!(served.group, 1, "one datagram to the group: {:?}", served);
+    assert_eq!(
+        served.direct, 0,
+        "a multicast querier must not get a unicast leg"
+    );
+    let logger = Logger::named(LOGGER_NAME);
+    let message = mdns::parse_message(&sent.group[0], "peer", &logger).expect("parses");
+    assert!(
+        message.records.iter().any(|record| {
+            record.rtype == TYPE_PTR && record.rdata == RData::Name(service.instance.clone())
+        }),
+        "the answer did not name this instance: {:?}",
+        message.records
+    );
+}
+
+#[test]
+fn e2_a_query_from_an_ephemeral_port_is_answered_twice_the_reference_way() {
+    crate::pin_test_dir();
+    // `ucast_source = port != 5353`, and the reference answers such a querier **both**
+    // ways. Witnessed in the corpus by `ptr-ephemeral-src`, whose capture holds a
+    // datagram to `127.0.0.1:55759` and one to the group.
+    let service = fixture_service();
+    let asker = peer(55759);
+    let (served, sent) = served_by(&service, &ptr_query(SERVICE_TYPE), asker);
+    assert_eq!(served.group, 1);
+    assert_eq!(served.direct, 1);
+    assert_eq!(sent.direct[0].1, asker, "the direct leg went elsewhere");
+}
+
+#[test]
+fn e3_a_packet_that_is_not_a_query_is_counted_rather_than_answered() {
+    crate::pin_test_dir();
+    // The honest half of the merge. A socket bound to 5353 can be handed a **unicast**
+    // datagram meant for another bound socket (measured on both kernels by
+    // `mdns_reuseport_probe.py`). Nothing here can use it, and the loss has to show up
+    // in a counter rather than be inferred from an answer that is not there.
+    let service = fixture_service();
+    let announcement = service.announcement();
+    let (served, sent) = served_by(&service, &announcement, peer(5353));
+    assert_eq!(served.queries, 0);
+    assert_eq!(served.absorbed, 1, "a non-query must be counted");
+    assert_eq!(served.group + served.direct, 0);
+    assert!(sent.group.is_empty() && sent.direct.is_empty());
+}
+
+#[test]
+fn e4_a_query_for_a_service_we_do_not_run_costs_no_bytes_and_no_error_line() {
+    crate::pin_test_dir();
+    // `other-service` in the corpus: silence, and silence that is not an error. A
+    // responder that complained about every unanswered question would let a chatty
+    // scanner fill the log — §4.10's measured 49%-of-one-file is the warning.
+    let logger = Logger::named(LOGGER_NAME);
+    let path = logger.claim();
+    let service = fixture_service();
+    let (served, _sent) = served_by(&service, &ptr_query("_airplay._tcp.local."), peer(5353));
+    assert_eq!(served.queries, 1, "the question was understood");
+    assert_eq!(served.group + served.direct, 0, "and declined");
+    assert_eq!(served.absorbed, 0, "a query is not an absorbed packet");
+    assert!(
+        !lines(&path).contains("ERROR"),
+        "declining a foreign query logged an error: {}",
+        lines(&path)
+    );
+}
+
+#[test]
+fn e5_a_known_answer_in_the_answer_section_silences_the_reply_as_the_reference_does() {
+    crate::pin_test_dir();
+    let service = fixture_service();
+    let (served, _sent) = served_by(
+        &service,
+        &query_with_known(OTHER_TTL, true),
+        peer(5353),
+    );
+    assert_eq!(served.queries, 1);
+    assert_eq!(
+        served.group + served.direct,
+        0,
+        "the asker said it holds this PTR with a full TTL; answering is the flooding \
+         the suppression rule exists to stop"
+    );
+}
+
+#[test]
+fn e6_a_known_answer_in_the_additional_section_does_not_silence_anything() {
+    crate::pin_test_dir();
+    // The reason `mdns::Record` carries a section at all: a querier's *additional*
+    // section is records it is telling us about, not records it claims to hold.
+    // Before the field these two packets were indistinguishable, so a responder could
+    // have stopped answering while every corpus test stayed green.
+    let service = fixture_service();
+    let (served, _sent) = served_by(
+        &service,
+        &query_with_known(OTHER_TTL, false),
+        peer(5353),
+    );
+    assert_eq!(
+        served.group,
+        1,
+        "an additional-section record was read as a known answer: {:?}",
+        served
+    );
+}
+
+#[test]
+fn e7_the_loop_answers_between_bursts_and_survives_a_failed_read() {
+    crate::pin_test_dir();
+    // `run` now owns two clocks: the 60-second re-announcement and the read it polls.
+    // A blocking read lets a quiet network starve the announcement (a receiver that
+    // stops advertising is the complaint this module exists to prevent), and a read
+    // error that ends the thread leaves 8009 listening to nobody. Both are asked
+    // through the seams instead of by waiting on a timer.
+    let logger = Logger::named(LOGGER_NAME);
+    let service = fixture_service();
+    let announcement = service.announcement();
+    let goodbye = service.goodbye();
+    let query = ptr_query(SERVICE_TYPE);
+    let running = AtomicBool::new(true);
+    let sends = Rc::<RefCell<Vec<Vec<u8>>>>::default();
+    let mut calls = 0usize;
+    {
+        let mut send = {
+            let sends = Rc::clone(&sends);
+            move |bytes: &[u8]| {
+                sends.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            }
+        };
+        let mut unicast = {
+            let sends = Rc::clone(&sends);
+            move |bytes: &[u8], _peer: SocketAddr| {
+                sends.borrow_mut().push(bytes.to_vec());
+                Ok(())
+            }
+        };
+        let mut recv = || {
+            calls += 1;
+            match calls {
+                // A query first: the loop must answer it without waiting for the
+                // next minute's burst.
+                1 => Ok(Some((query.clone(), peer(5353)))),
+                // Then a failed read: logged, not fatal.
+                2 => Err(std::io::Error::other("transient read failure")),
+                // Then nothing, and the announcer is asked to stop.
+                _ => {
+                    running.store(false, Ordering::SeqCst);
+                    Ok(None)
+                }
+            }
+        };
+        run(
+            &service,
+            &mut send,
+            &mut unicast,
+            &mut recv,
+            &running,
+            &logger,
+        );
+    }
+    let held = sends.borrow();
+    let answered = held
+        .iter()
+        .filter(|bytes| *bytes != &announcement && *bytes != &goodbye)
+        .count();
+    assert_eq!(
+        answered, 1,
+        "the query the loop received was not answered (sends: {})",
+        held.len()
+    );
+    assert_eq!(
+        held.iter().filter(|bytes| *bytes == &goodbye).count(),
+        BROADCASTS,
+        "a read error or a stop must not cut the goodbye"
+    );
+    assert!(
+        calls >= 3,
+        "the loop stopped polling after the error (calls: {})",
+        calls
+    );
+}
+
+#[test]
+fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
+    crate::pin_test_dir();
+    // Every case above goes through an injected sink, which proves the decision and
+    // nothing about the socket. This one binds what the product binds, joined on lo
+    // (the join list is a parameter for exactly this reason), hears a real datagram,
+    // and answers it to a real querier.
+    let logger = Logger::named(LOGGER_NAME);
+    let service = fixture_service();
+    let engine = match bind_engine(&[V4::LOCALHOST], &logger) {
+        Ok(sock) => sock,
+        // Not a skip. Binding 5353 with the reuse options *is* the product's path,
+        // and "we could not try it" must never read as "it works" (§4.2's
+        // 「不提问的检查」 with the exit code as the mask).
+        Err(e) => panic!("cannot bind the engine socket the product binds: {}", e),
+    };
+    let group = SocketAddr::new(IpAddr::V4(V4::new(224, 0, 0, 251)), MDNS_PORT);
+    let asker = UdpSocket::bind("127.0.0.1:0").expect("an ephemeral asker binds");
+    // Pin its egress to loopback with TTL 1 so no byte of this test reaches the LAN.
+    let sock2 = socket2::SockRef::from(&asker);
+    sock2
+        .set_multicast_if_v4(&V4::LOCALHOST)
+        .expect("lo0 can be the multicast interface");
+    sock2.set_multicast_ttl_v4(1).expect("TTL 1 stays on this host");
+    let query = ptr_query(SERVICE_TYPE);
+    asker.send_to(&query, group).expect("the query leaves on lo");
+
+    let mut buf = vec![0u8; crate::mdns::READ_MAX];
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut answered = 0usize;
+    let mut ask_again = std::time::Instant::now();
+    while std::time::Instant::now() < deadline && answered == 0 {
+        match engine.recv_from(&mut buf) {
+            Ok((length, from)) => {
+                let data = buf[..length].to_vec();
+                let mut send = |bytes: &[u8]| engine.send_to(bytes, group).map(|_| ());
+                let mut unicast = |bytes: &[u8], peer: SocketAddr| {
+                    engine.send_to(bytes, peer).map(|_| ())
+                };
+                let served = serve(
+                    &data,
+                    from,
+                    &service,
+                    &mut send,
+                    &mut unicast,
+                    &logger,
+                );
+                answered = served.group + served.direct;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Re-ask every second: the querier's own stack repeats a query it gets
+                // no answer to, and so does a test that wants a witness rather than a
+                // timeout.
+                if std::time::Instant::now() >= ask_again {
+                    asker.send_to(&query, group).expect("the retry leaves");
+                    ask_again = std::time::Instant::now() + Duration::from_secs(1);
+                }
+            }
+            Err(e) => panic!("the engine socket's read failed: {}", e),
+        }
+    }
+    assert!(
+        answered > 0,
+        "the engine never answered a query on its own joined socket"
+    );
+    // And the bytes have to reach the asker: an answer written by a socket that
+    // cannot route back to the querier is the same class of bug the dispatch
+    // measurement was about.
+    let mut got = vec![0u8; crate::mdns::READ_MAX];
+    asker
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a read timeout on the asker");
+    let (length, from) = asker.recv_from(&mut got).expect("the querier got an answer");
+    got.truncate(length);
+    let message = mdns::parse_message(&got, "engine", &logger).expect("the answer parses");
+    assert!(
+        message.records.iter().any(|record| record.rtype == TYPE_PTR
+            && record.rdata == RData::Name(service.instance.clone())),
+        "the querier got a packet that does not name us: {:?}",
+        message.records
+    );
+    assert_eq!(
+        from.port(),
+        MDNS_PORT,
+        "an mDNS answer must come from 5353 — a querier that filters on the source \
+         port would drop a reply written from an ephemeral one"
+    );
 }
