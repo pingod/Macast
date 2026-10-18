@@ -384,6 +384,12 @@ cleanup() {
     [ -n "${MEDIA_PID:-}" ] && kill -9 "$MEDIA_PID" 2>/dev/null
     app=$(pgrep -f "target/debug/macast-tauri" 2>/dev/null)
     [ -n "$app" ] && kill -9 $app 2>/dev/null
+    # The gated instance from section 23 has a socket of its own; reaping only
+    # `$SDIR` would leave its mpv behind as a `ppid=1` orphan — the exact
+    # accumulation AGENTS.md §4.2 records for the Python app.
+    for probe_dir in "${SDIR:-}" "${GATE_SDIR:-}"; do
+        [ -n "$probe_dir" ] && [ -f "$probe_dir/.socket" ] && pgrep -f "$(cat "$probe_dir/.socket")" 2>/dev/null | xargs -r kill -9 2>/dev/null
+    done
     if [ -n "${SDIR:-}" ] && [ -f "$SDIR/.socket" ]; then
         sock=$(cat "$SDIR/.socket")
         # Reap only *our* mpv, by its unique socket path — never a bare pkill
@@ -434,7 +440,16 @@ fi
 echo "== launch (port $PORT, temp config, own mpv socket) =="
 SDIR=$(mktemp -d /tmp/macast-rust-verify.XXXXXX)
 SOCK="$SDIR/mpvsocket"
-printf '{"ApplicationPort": %d, "FriendlyName": "Macast Rust Verify"}' "$PORT" \
+# `DLNA_FriendlyName`, **not** `FriendlyName`: that is the key name `Key::
+# DlnaFriendlyName` maps to (`macast-core/src/setting.rs:94`), and the reference
+# spells it the same way. The first version of this line wrote `FriendlyName`, which
+# is a key nothing reads — so the label this run intended never reached the wire.
+# Cost measured on 2026-10-18: §23's browse answered "no announcement" about a run
+# that *was* announcing, because the announcer had published the fallback name
+# (`Macast-Pavia-MacBookPro-…`) instead of the `Macast-Gate-Off` the check matched.
+# A harness that writes into a key no reader owns is the same failure §4.2 calls
+# 「不提问的检查」, one layer over: it produces a green out of a typo.
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Verify"}' "$PORT" \
     > "$SDIR/macast_setting.json"
 echo "$SOCK" > "$SDIR/.socket"
 env MACAST_SETTING_DIR="$SDIR" MACAST_MPV_SOCKET="$SOCK" \
@@ -2198,6 +2213,209 @@ PY
         *[!A-Za-z0-9._-]*) fail "the announced instance carries bytes a DNS label cannot hold: $MDNS_INSTANCE" ;;
         *) pass "the announced instance name is DNS-SD legal ($MDNS_INSTANCE)" ;;
     esac
+fi
+
+
+echo "== 23: switching Chromecast off closes all three faces =="
+# `host::tests` proves the predicate reads the enable list the way the reference
+# does — coercion of a stored string, the legacy key appended, unknown titles
+# skipped with a sentence, and a fresh install meaning "everything". None of that
+# can prove the **sockets stay shut**: a gate consulted once and then bypassed by a
+# fourth `start()` would stay green in every unit test in this tree. So this
+# section binds nothing and asks.
+#
+# The first instance is stopped on purpose, and only because it is ours. 8009 and
+# 8008 are hardcoded by senders (`dial.py:25-26`), so while it is up a second
+# instance could not tell "we refused to start" apart from "someone else holds the
+# port" — the exact ambiguity §20's no-fallback rule exists to avoid.
+kill -9 "$APP_PID" 2>/dev/null
+GATE_SDIR=$(mktemp -d /tmp/macast-rust-gate.XXXXXX)
+gate_grep() {
+    # `log_grep` looks in the **first** instance's directory; this section runs a
+    # second one with its own settings dir, so reading the shared log here would
+    # have answered "no refusal line" about the wrong process entirely.
+    grep -ahF "$1" "$GATE_SDIR/macast.log" "$GATE_SDIR"/logs/*.log 2>/dev/null
+}
+GATE_SOCK="$GATE_SDIR/mpvsocket"
+# `["DLNA Protocol"]` is the canonical spelling `resolve_title` returns; the test
+# for the tolerant spellings is in the crate, and this is the strict one — what a
+# user gets after pressing the switch in the page.
+echo "$GATE_SOCK" > "$GATE_SDIR/.socket"
+# **The browse starts before the instance it watches.** This section's answer about
+# the announcement has to be a measurement, not the absence of one: the announcer's
+# first burst is three packets 225 ms apart and then nothing for 60 s (`REANNOUNCE`),
+# so a browser opened *after* startup — which is what this block used to do, with an
+# eight second window — reports "saw nothing" for a run that announced loudly and is
+# merely between bursts. Measured, not reasoned: with the certificate's gate removed
+# as a mutant, so the gated instance really did build an announcer, bind 8009 and log
+# `mDNS: announcing Macast-Gate-Off`, the old check answered **pass**. The section
+# still went red on that mutant (5 checks), but on the sockets, the log line and the
+# key material — the wire-level half was not asking, which is 「不提问的检查等于通过的检查」
+# in its purest shape: one green that a broken run and a working run both produce.
+# Starting the browser first puts the window across the burst, so the same check can
+# tell those two runs apart.
+#
+# §22 is this check's positive control: minutes earlier the same browser code on this
+# machine folded a **keepalive** burst into a device. If no announcement happened
+# anywhere in the run (`MDNS_INSTANCE` empty), "nothing on the wire here" has no
+# witness and is said as a skip instead of counted green — 「空结果要说清是哪一种空」.
+GATE_BROWSE_PY="$GATE_SDIR/browse.py"
+GATE_BROWSE_OUT="$GATE_SDIR/browse.txt"
+cat > "$GATE_BROWSE_PY" <<'PY'
+import sys, time, zeroconf as z
+
+budget, out = float(sys.argv[1]), sys.argv[2]
+seen = set()
+
+
+class L(z.ServiceListener):
+    def add_service(self, zc, type_, name):
+        seen.add(name)
+
+    def remove_service(self, *a):
+        pass
+
+    def update_service(self, *a):
+        pass
+
+
+# The file appears only when the window closes, so the shell's wait is a wait for the
+# answer, not for a line that may never have been written.
+zc = z.Zeroconf(ip_version=z.IPVersion.V4Only)
+b = z.ServiceBrowser(zc, "_googlecast._tcp.local.", L())
+time.sleep(budget)
+b.cancel()
+zc.close()
+with open(out, "w") as fh:
+    fh.write(",".join(sorted(seen)))
+PY
+# 30 s covers startup plus the initial burst with room, and deliberately does not
+# reach the 60 s keepalive — catching a keepalive is §22's job, with its 75 s window.
+env -u PYTHONPATH -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
+    "$CAST_PY" "$GATE_BROWSE_PY" 30 "$GATE_BROWSE_OUT" >/dev/null 2>&1 &
+GATE_BROWSE_PID=$!
+disown "$GATE_BROWSE_PID" 2>/dev/null || true
+# shellcheck disable=SC2016
+# The key is `DLNA_FriendlyName` for the reason recorded at the launch block above,
+# and here it is load-bearing twice: the sanitiser turns "Macast Gate Off" into the
+# DNS-SD label §23 matches on the wire.
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Gate Off", "Macast_Protocols": ["DLNA Protocol"]}' \
+    "$PORT" > "$GATE_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$GATE_SDIR" MACAST_MPV_SOCKET="$GATE_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$GATE_SDIR/stdout.log" 2>&1 &
+GATE_PID=$!
+disown "$GATE_PID" 2>/dev/null || true
+ok=""
+for _ in $(seq 1 40); do
+    [ "$(listener_pid)" = "$GATE_PID" ] && { ok=1; break; }
+    sleep 0.25
+done
+if [ -z "$ok" ]; then
+    fail "the gated instance never became the listener on $PORT (pid $(listener_pid))"
+    kill -9 "$GATE_PID" 2>/dev/null
+    rm -rf "$GATE_SDIR"
+else
+    # The positive control is `description.xml`, **not** `query=status`: that
+    # management query is one of the ten this shell has not ported yet, and it
+    # answers the honest 「不认识的字段」 sentence — which a check written as
+    # `code == 0` would have read as the gate having broken the app. Asking a
+    # route that exists is the whole difference between a red test and a red
+    # product (§4.2's 「空结果要说清是哪一种空」, one layer over).
+    GATE_DESC_CODE=$(curl -s --noproxy '*' -m 5 -o /dev/null -w '%{http_code}' \
+        "$BASE/description.xml")
+    [ "$GATE_DESC_CODE" = "200" ] \
+        && pass "a DLNA-only run still serves the page and the discovery document" \
+        || fail "description.xml answered HTTP $GATE_DESC_CODE on the gated instance"
+
+    # The sentence the gate writes, read out of the log rather than inferred from
+    # a port that happens to be shut.
+    if [ -n "$(gate_grep 'Chromecast is switched off')" ]; then
+        pass "the run says which switch closed the faces, instead of leaving no Cast receiver unexplained"
+    else
+        fail "no refusal line in the log for a run that was told to switch Chromecast off"
+    fi
+
+    closed=0
+    for probe in 8009 8008; do
+        if env -u PYTHONPATH "$CAST_PY" - "$probe" <<'PY' 2>/dev/null | grep -q refused
+import socket, sys
+port = int(sys.argv[1])
+sock = socket.socket()
+sock.settimeout(2)
+try:
+    sock.connect(("127.0.0.1", port))
+except ConnectionRefusedError:
+    print("refused")
+except Exception as exc:
+    print("other %s" % exc)
+else:
+    print("open")
+PY
+        then
+            closed=$((closed + 1))
+        else
+            fail "port $probe is answering on a run that switched Chromecast off"
+        fi
+    done
+    [ "$closed" = "2" ] \
+        && pass "8009 and 8008 both refuse — the receiver and the setup face are one protocol" \
+        || fail "only $closed of 2 Cast ports refused"
+
+    # Read the browser that was started before this instance existed. Its window
+    # (30 s from before launch) straddles the announcer's initial burst, so an
+    # announcement made during it is reported — see the note above the launch for
+    # what the previous ordering cost.
+    for _ in $(seq 1 160); do
+        [ -e "$GATE_BROWSE_OUT" ] && break
+        sleep 0.25
+    done
+    BROWSE_LEFT=$(pgrep -f "$GATE_BROWSE_PY" | tr '\n' ' ')
+    [ -n "$BROWSE_LEFT" ] && kill -9 $BROWSE_LEFT 2>/dev/null
+    SEEN=$(cat "$GATE_BROWSE_OUT" 2>/dev/null)
+    if [ -z "$MDNS_INSTANCE" ]; then
+        # Nothing announced itself anywhere on this run, so §22 never proved a
+        # browse on this machine can see one of our bursts. A silent wire here
+        # would then be an answer about the instrument, not about the gate.
+        skip "no announcement happened anywhere this run, so 'nothing on the wire' here has no positive control"
+    elif [ ! -e "$GATE_BROWSE_OUT" ]; then
+        fail "the browse never finished — its window says nothing about any burst"
+    else
+        case "$SEEN" in
+            *"Macast-Gate-Off._googlecast._tcp.local."*)
+                fail "the gated instance announced itself anyway: $SEEN" ;;
+            *) pass "no announcement from the gated instance (browse saw: ${SEEN:-nothing})" ;;
+        esac
+    fi
+    if [ -n "$(gate_grep 'mDNS: announcing')" ]; then
+        fail "the announcer logged a start on a run that switched Chromecast off"
+    else
+        pass "and the announcer said nothing, because it was never built"
+    fi
+
+    # The side effect behind the door: the certificate is generated on this path,
+    # so a protocol the user switched off must not leave key material in his
+    # settings directory.
+    if [ -e "$GATE_SDIR/macast_cast.key" ] || [ -e "$GATE_SDIR/macast.key" ]; then
+        fail "a switched-off protocol still wrote a certificate into its settings dir"
+    else
+        pass "no certificate was generated for a protocol that is off"
+    fi
+    # The refusal has to name the **switch**. This is the second reason this
+    # section exists: the summary line used to say "no certificate to wrap 8009
+    # with" on this path too, which is true only of a run that asked for a
+    # certificate and did not get one — here nothing asked. A reader sent to the
+    # certificate is being sent to fix something that is not broken.
+    if [ -n "$(gate_grep 'switched off in the settings page')" ]; then
+        pass "and the line that explains 8009 names the switch, not the certificate"
+    else
+        fail "the gated run explained itself by blaming a certificate: $(gate_grep 'Cast receiver:' | tail -2)"
+    fi
+
+    kill -9 "$GATE_PID" 2>/dev/null
+    pkill -9 -f "$GATE_SOCK" 2>/dev/null
+    rm -rf "$GATE_SDIR"
 fi
 
 echo

@@ -542,6 +542,7 @@ reaches the mpv this page drives.'"*
 - **`api_post` 故意不带令牌**：loopback **就是**这些路由的管理门准入（§4.7），
   段 15–16 有意义的断言是**门文案缺席**，不是秘密的存在。
 - **段 22 是这一份脚本里唯一一段**用**别人家的栈**当判据的**：`.venv` 里的 zeroconf 冷启动当监听者（它的 `ServiceBrowser` 只登记名字，完整性由 `load_from_cache` 逐条问 PTR/SRV/TXT/A），所以"我们的写包器和我们的读包器互相认同"这种自证在这一段不成立。两个坑记在这里：① 0.151.3 的 `ServiceBrowser` 第三个位置参数是 handlers 不是 timeout，写错之后一段变 7 条红；② `IPVersion` 的成员叫 `V4Only` 不叫 `V4`，写错之后 traceback 打进本该放数据的那个文件，后面 5 条检查全读成 `none`。**两次都是仪器先坏，产品没事** —— 判据（§4.2）在这里的形状是"先去看那条已经 PASS 的解析检查"。另外这一段的等待时长本身是读数：跑在第一串广播之后好几分钟，能解析就等于 60 秒重播活着。
+- **段 23 先杀掉第一段的那个实例，这不是收尾是判据的一部分**：8009 与 8008 是发送端钉死的两个口，第一台还活着的时候，第二台"没起来"和"起来了但抢不到口"在外部**长得一模一样** —— 而 §20 那条"8008 不回落"的决定之所以成立，正是为了不让这两种状态混起来。所以这一段的顺序是：确认监听者就是我们自己那个 pid → 杀掉 → 等端口真的空了 → 再起第二台。第二台的临时目录写进 `.socket`，`cleanup` 按套接字路径收掉它的 mpv —— `AGENTS.md` §4.2「被反复重启的 Macast 会攒播放器」那一格，在这份脚本里同样要还。
 - **正文解析而非 grep**（§9.3 那个转义后果）。`--noproxy`：一个游离的 `http_proxy`
   会把回环请求送去代理，产出一个看起来像"端口死了"的 `000`。
   `-m 40`：`cast-resolved` 会同步跑源站探测（`probe_proxy`，转封装那一路最长
@@ -856,15 +857,43 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     教训的形状：**这一族 bug 只有真 socket 才教得了**，而"接进壳"之所以是一等里程碑，
     就是因为它把单元层够不到的那部分换成了 §21 与四条新用例（饿死见证、帧上限、
     分片帧在轮询之间补齐、对端关掉时结束会话而不是空转）。
-12. **壳对所有脸都不看 `Macast_Protocols`**（一处既有缺口，setup 与本轮接进来的 8009 都继承它）：
-    那份协议启用表今天只用来生成 `query=status` 的 `protocol` 字段，DLNA 的 HTTP/SSDP、
-    8008/8443 与 **Cast 的 8009 TLS 会话**都无条件起。后果是可行动的：一个在页面里
-    "关掉 Chromecast"的用户，仍会在 8008 上被问到设备身份、**并真的能在 8009 上完成一次投屏**。
-    这一格**记在代码注释里**（`main.rs` 的那段
-    "Started unconditionally"）并在这里登记；等启用表变成门的时候，那**三**处是同一批要改的地方。
-    缓解只有一条事实那么宽：setup 那张脸不吐令牌、不吐路径、不吐任何控制动词 ——
-    §20 拿**局域网地址**（不是回环）问过一遍，正文里既没有 `Api_Token` 也没有 `$SDIR`。
-    （8009 那一侧**没有**这条缓解：它就是控制面，所以这一格的真实代价要按 §21 那条路读。）
+12. **`Macast_Protocols` 现在是 Chromecast 三张脸的门；DLNA 那一半仍然不是**
+    （2026-10-18 关掉一半，剩下一半是有意的）：
+    `host::cast_enabled` 一次读取，门住 8009 接收端、8008/8443 setup 脸与 `_googlecast._tcp`
+    广播 —— 三者是一个协议，分开门会得到"身份答得出来、连接握不上"的那台设备。
+    证书生成也在门后（它往设置目录里写两个文件；一个用户关掉的协议不该留下密钥材料）。
+    判据两层：`host::tests` 问**读法**（存的字符串要当成一条记录、legacy 键是追加不是优先、
+    不认识的标题跳过并说一句、空表 = 全开、`ChromecastProtocol` 这种紧凑拼写在**两边都**解不出——
+    参考实现的 `canonical_title` 只去 `" protocol"` 带空格那一截），
+    §23 问**关上的门**（第二个实例只开 DLNA：8009/8008 必须拒连、日志必须说出是谁关的、
+    浏览器必须看不见它、证书文件必须不存在）。
+    **剩下那一半不是遗漏**：DLNA 的 HTTP 脸在这份壳里同时承载设置页与管理 API，
+    把它一起门住 = 用户关掉 DLNA 就没有页面可改回来。参考实现里 DLNA 关闭时页面还在不在，
+    本机**没有量过**（`build_protocol_group` 只在分组为空时兜底加回 DLNA，正好说明它考虑过
+    "一个都不剩"的情形，但没考虑"只剩 Chromecast"时页面归属谁）。那一格要先量再改，
+    所以它记在这里而不是顺手做掉。§20/§21/§22 的真机读数也因此都来自"全开"的那台。
+    **§23 的两条仪器错，是变异体把它们逼出来的**（同日，`host.rs` 9 支 + `main.rs` 2 支）：
+    ① 广播那一问原来是"实例起来之后再浏览 8 秒"，而发送端的节奏是 3 包 / 225 ms、之后
+    `REANNOUNCE` 静默 60 秒 —— 删掉证书的门当变异体时（gated 实例真的建了 announcer、真的绑了
+    8009、日志里真的写了 `mDNS: announcing`），§23 红 5 条而**这一条照旧绿**：它答的是"我这个窗口
+    没赶上突发"，不是"这台没广播"。修法是浏览**排在实例启动之前**，窗口 30 秒横跨初始突发
+    （§22 的 75 秒窗口负责 keepalive 那一次，两个窗口问的是两段）。重测同一支变异体：红 **6** 条，
+    多出的那条点名 `Macast-Gate-Off._googlecast._tcp.local.`。清洁跑不变，仍 **190 条 / 0 失败**。
+    ② 两段 seed JSON 写的键是 `FriendlyName`，而真正的键名是 `DLNA_FriendlyName`
+    （`macast-core/src/setting.rs:94`）—— 一个没有读者拥有的键，于是①里那台广播的是回退默认名，
+    §23 按名字匹配自然看不见。今天 §22 印的是 `Macast-Rust-Verify`，那是键真的生效的证据。
+    ③ 电池里最有用的是两支 **0 红**：`canonical_title` 的 `trim()` 与末尾 `strip()` 各自删掉都
+    不响（折叠空白之后两者都不可能留下边界空格），而删折叠 1 红、删大小写 4 红。docstring 原来
+    写"每一步都承重"，现在写的是**两颗牙 + 两个保险**，并且写明"删掉保险听不到声音"这件事 ——
+    读信"全都承重"的人会删掉一个保险然后什么也不听见。
+    ④ 那条审计现在按**三问**问 `main.rs` 这段文本：门读在每张脸**之前**、整份运行**只读一次**、
+    每张脸的构造点**恰好一个**（针眼带 `(`，注释里提类型名不算）。后两问各有自己的变异体
+    （第二次读门 1 红 / 第二处构造 announcer 1 红）；第一问**没有可编译的同型变异体** —— 挪读取
+    必须同时删掉它前面的两个用户，那是重写不是替换。它的见证是 §23 那 6 条一起红。这句局限写在
+    测试的注释里，不当成覆盖。
+    ⑤ 一支方法学的读数：第二处构造那支的第一版**是编译错误**（`setup::SetupServer::start` 把
+    `setup_config` 移走了），`cargo test` 于是既不打印 `test result` 也不打印红 —— 只看退出码会把它
+    读成"这一格没人问"。同型替换要连"能编译"一起满足。
 13. **5353 上第二个加入组的 socket 会偷走设备列表的读数**（本轮设计 responder 时撞到的边界，
     记下来因为它决定下一轮的形状）：`SO_REUSEPORT` 的语义是把每个**进来的**数据报只交给
     绑在同一端口上的**一个** socket。我们的浏览器（`mdns.rs::open`）已经加入组并在听
@@ -917,7 +946,7 @@ for c in macast-core macast-mpv macast-upnp macast-cast src-tauri; do
   t=$(grep -rn '#\[test\]' $c/src | wc -l | tr -d ' ')
   echo "$c lines=$n tests=$t"
 done
-cargo test -p macast-core -p macast-mpv -p macast-upnp -p macast-cast   # 逐 crate，不跑全工作区
+cargo test -p macast-core -p macast-mpv -p macast-upnp -p macast-cast -p macast-tauri   # 逐 crate，不跑全工作区
 ```
 
 ## 附录 B：引用体检（改完文档跑）
@@ -946,12 +975,19 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **25**（§22 是最后一节）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **26**（§23 是最后一节）
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行
 grep -c 'set_multicast_loop_v4(true)' macast-cast/src/announce.rs            # 期望 **1**（发送侧，参考实现的 responder socket 也开环回）
 grep -c 'join_multicast_v4' macast-cast/src/announce.rs                      # 期望 **0**：广播口故意不入组，见 §16 第 13 条
+grep -c 'pub fn cast_enabled' src-tauri/src/host.rs                          # 期望 **1**（门只有一个主人）
+grep -c 'host::cast_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
+#   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **2**（两个 seed 各一），且下面这条 **0**：
+grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
+#   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §23 的
+#   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
 ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl
 #   两份 mDNS 语料都在，且产生器在仓库里：
 #   scripts/mdns_announce_probe.py --fixture --dump-hex <前者> / --dump-names <后者>

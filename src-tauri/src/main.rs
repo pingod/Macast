@@ -1064,21 +1064,40 @@ pub fn run() {
             // server first), and `setup.rs`'s header says why this port does not
             // copy the range at all.
             //
+            // One read of the enable list, **before** any Chromecast socket is
+            // touched: the receiver, the setup face and the announcement are one
+            // protocol, and a run that gated 8009 but left 8008 answering would
+            // hand a sender an identity for a device it cannot connect to. The
+            // certificate is behind the same door because generating it writes two
+            // files into the settings directory — a protocol the user switched off
+            // should not leave key material behind.
+            let cast_on = host::cast_enabled(&setting, &log);
+            if !cast_on {
+                log.info(
+                    "Chromecast is switched off (Macast_Protocols): not starting 8009, 8008/8443, \
+                     or the mDNS announcement",
+                );
+            }
             // The certificate is the shared `macast.*` pair when one is already
             // there and our own otherwise (`ensure_in_setting_dir` owns that rule,
             // including "a broken foreign pair is reported by name and left
             // alone"). No pair costs 8009 and 8443; the plain 8008 face needs no
             // certificate and still answers.
-            let cast_pair = match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
-                Ok(pair) => Some(pair),
-                Err(e) => {
-                    cast_log.warning(&format!(
-                        "Cast certificate unavailable ({}) — neither 8009 nor 8443 can start; 8008 still answers",
-                        e.message()
-                    ));
-                    None
+            let cast_pair = if !cast_on {
+                None
+            } else {
+                match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
+                    Ok(pair) => Some(pair),
+                    Err(e) => {
+                        cast_log.warning(&format!(
+                            "Cast certificate unavailable ({}) — neither 8009 nor 8443 can start; 8008 still answers",
+                            e.message()
+                        ));
+                        None
+                    }
                 }
             };
+
             let cast_channel = {
                 let channel = macast_cast::CastChannel::new(
                     Arc::clone(&cast_log),
@@ -1122,25 +1141,26 @@ pub fn run() {
                 },
                 None => None,
             };
-            // **Started unconditionally**, which is a gap this shell has already
-            // and not one this face introduces: the DLNA receiver answers
-            // regardless of `Macast_Protocols`, because the protocol enable list
-            // is read for the status document only. When that list becomes a gate,
-            // this line and the HTTP/SSDP starts above are the places that have to
-            // read it — and until then a user who "disabled Chromecast" in the
-            // page still gets a listener on 8008 answering what the device is.
-            // What it answers is deliberately nothing secret: name, USN, version.
-            let setup_server = match setup::SetupServer::start(
-                setting.clone(),
-                Arc::clone(&cast_log),
-                setup_config,
-            ) {
-                Ok(server) => Some(server),
-                Err(e) => {
-                    cast_log.warning(&format!(
-                        "Cast setup face did not start: {e} — senders that probe 8008 will get nothing"
-                    ));
-                    None
+            // **Behind the same door as 8009 and the announcement** — see the one
+            // `host::cast_enabled` read above. Before that gate existed this face
+            // started unconditionally, which is the state docs §16 item 12 was
+            // written to close: a user who switched Chromecast off in the page kept
+            // a listener on 8008 answering what the device is. What it answers is
+            // still deliberately nothing secret (name, USN, version), and the
+            // DLNA/HTTP face is **still** unconditional for the reason recorded
+            // there — that one carries the settings page, so gating it would take
+            // away the place the switch lives in.
+            let setup_server = if !cast_on {
+                None
+            } else {
+                match setup::SetupServer::start(setting.clone(), Arc::clone(&cast_log), setup_config) {
+                    Ok(server) => Some(server),
+                    Err(e) => {
+                        cast_log.warning(&format!(
+                            "Cast setup face did not start: {e} — senders that probe 8008 will get nothing"
+                        ));
+                        None
+                    }
                 }
             };
             // One summary line's worth of facts, taken **before** the handle moves
@@ -1265,14 +1285,28 @@ pub fn run() {
                 // phrased the way the HTTP and SSDP lines above are — the bound
                 // number, or the reason there is none.
                 Some(port) => log.info(&format!("Cast receiver: 8009 listening on {port}")),
-                None => log.info(
+                None => log.info(if cast_on {
                     "Cast receiver: not listening — no certificate to wrap 8009 with \
-                     (the setup face says the same about 8443)",
-                ),
+                     (the setup face says the same about 8443)"
+                } else {
+                    // The certificate sentence above is **false** on this path: no
+                    // pair was ever asked for, because the protocol is switched
+                    // off. Naming the missing key when the user pressed the switch
+                    // is the §4.2/§4.3 failure this repository has been bitten by
+                    // twice — a log line that points at the wrong suspect costs
+                    // more than no log line, because it sends whoever reads it to
+                    // fix something that is not broken.
+                    "Cast receiver: not starting — Chromecast is switched off in the \
+                     settings page (nothing was bound, and no certificate was asked for)"
+                }),
             }
             match &setup_report {
                 Some(text) => log.info(&format!("setup face: {text}")),
-                None => log.info("setup face: not listening on 8008"),
+                None => log.info(if cast_on {
+                    "setup face: not listening on 8008"
+                } else {
+                    "setup face: not starting — Chromecast is switched off"
+                }),
             }
             log.info(&format!("renderer log: {}", log_path.display()));
             Ok(())

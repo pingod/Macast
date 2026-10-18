@@ -1974,3 +1974,510 @@ pub fn lua_scripts(dir: &Path) -> Vec<String> {
     }
     names
 }
+
+// ---------------------------------------------------------------------------
+// Which faces this run is allowed to open
+// ---------------------------------------------------------------------------
+
+/// The three protocol titles the reference's plugin list can hold, spelled as
+/// `format_class_name()` spells them — `DLNA Protocol`, `Chromecast Protocol`,
+/// `AirPlay Protocol`. They live here rather than inline at each gate because
+/// AGENTS.md §4.2's rule about plugin titles is exactly this: the stored value
+/// is a *title*, and `resolve_title()` is what tolerates the user's older or
+/// shorter spelling. Hard-coding one spelling in one place is how 「DLNA」 ends up
+/// silently dropping SSDP (the docstring at `macast.py:706-713` says as much).
+pub const DLNA_TITLE: &str = "DLNA Protocol";
+pub const CAST_TITLE: &str = "Chromecast Protocol";
+pub const AIRPLAY_TITLE: &str = "AirPlay Protocol";
+
+/// `Macast.canonical_title` (`macast/macast.py:702-704`): trim, fold case,
+/// collapse internal runs of whitespace, drop a trailing word `protocol`.
+///
+/// Which part of this fold actually carries weight was asked, not assumed (the
+/// shapes below are in the spelling table of this file's tests, and every answer
+/// was read off CPython's own function before being frozen here):
+///
+/// * the **collapse** is load-bearing. It is the step that lets the `" protocol"`
+///   replace fire at all on a tab- or newline-separated spelling: `"Chromecast
+///   \tProtocol"` without it stays `"chromecast\tprotocol"`, and there is no
+///   literal `" protocol"` inside that string to remove. CPython's no-argument
+///   `str.split()` is Unicode-aware and folds `\t`, `\n`, `\r\n` and `\u{a0}` to
+///   one space; Rust's `split_whitespace()` is too, so the two agree — and a value
+///   pasted out of a JSON editor can carry any of them.
+/// * **folding case** is load-bearing, and for the mirrored reason: the replace
+///   tests a lowercase `" protocol"`, so `"Chromecast  PROTOCOL "` needs the
+///   lowercase step to reach it at all.
+/// * the two **strips** are guards, not teeth, and that is a measurement rather
+///   than a guess: deleting the leading one, or the trailing one, leaves every
+///   the trailing one, leaves every case in the table answering the same —
+///   `split_whitespace()` yields no empty tokens, so a leading or trailing run is
+///   gone before the replace looks. The trailing strip would earn its place the
+///   moment the collapse left: a double-spaced `"Chromecast  Protocol"` folded
+///   without the collapse reaches `"chromecast "` (the replace eats one of the two
+///   spaces), and only that strip turns it into `"chromecast"`. They stay because
+///   the reference writes them (`macast.py:703` is `strip().lower().split()`
+///   joined, then `strip()`) and this function's job is to agree with the reference
+///   even where agreeing is redundant.
+///
+/// So the fold has two teeth and two guards, and which is which was asked of both
+/// machines: deleting the collapse goes red on 1 case, deleting the case fold on
+/// 4, deleting either strip on none. That last half belongs here rather than in a
+/// comment claiming "every step matters", because a reader who trusts the latter
+/// will delete a guard and hear nothing — or, worse, keep a tooth on the strength
+/// of the guards.
+pub fn canonical_title(title: &str) -> String {
+    let folded = title.trim().to_lowercase();
+    let collapsed = folded
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    collapsed
+        .replace(" protocol", "")
+        .trim()
+        .to_string()
+}
+
+/// What the run should treat as the set of *available* protocol titles: the
+/// faces this shell can actually open.
+///
+/// The reference derives this from the loaded plugin list, so a protocol whose
+/// plugin is missing is not available and its title resolves to nothing. This
+/// shell has no plugin manager yet (that subsystem is unported), so the list is
+/// the faces `main.rs` knows how to start. AirPlay is named here even though its
+/// receiver is not wired to the shell yet: the *title* is part of the stored
+/// vocabulary a user may already have in `Macast_Protocols`, and treating it as
+/// unknown would make a three-protocol settings file lose an entry.
+pub fn available_titles() -> Vec<&'static str> {
+    vec![DLNA_TITLE, CAST_TITLE, AIRPLAY_TITLE]
+}
+
+/// `Macast.enabled_protocol_titles` (`macast/macast.py:763-784`) plus the two
+/// rules that live around it: the fresh-install default at `:1268-1271` and the
+/// never-listen-with-nothing fallback at `build_protocol_group` (`:757-760`).
+///
+/// The reading is the reference's, line for line, and the three places it could
+/// plausibly be gotten wrong are the three this function's tests ask about:
+///
+/// * a stored **string** where a list belongs is coerced to one entry. The
+///   shared [`Setting::get_str_list`] returns an empty list for that shape —
+///   correct for the status document, which only reports — but here an empty
+///   list means "fresh install, enable everything", so the coercion is the
+///   difference between honouring a user's narrowing and silently opening every
+///   face they just closed.
+/// * the legacy single-protocol key is appended, not preferred: an install that
+///   has both keeps the list and gains the legacy entry if it is not already in
+///   it. `has()` gates the read so a missing key stays "nothing configured";
+///   [`Setting::get_str`] would insert an empty string on a miss, which is
+///   §4.2's oldest trap in this repository.
+/// * unknown titles are **skipped with a warning** rather than fatal, and a
+///   stored list whose every entry is unknown falls back to DLNA alone. That is
+///   the reference's rule — a removed plugin must not be able to leave the app
+///   listening on nothing.
+pub fn enabled_protocols(setting: &Setting, log: &Logger) -> Vec<String> {
+    let available = available_titles();
+    let mut stored: Vec<String> = match setting.peek(Key::MacastProtocols) {
+        Some(Value::String(text)) => vec![text],
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if setting.has(Key::MacastProtocol) {
+        stored.push(setting.get_str(Key::MacastProtocol, ""));
+    }
+    if stored.iter().all(|entry| entry.trim().is_empty()) {
+        // Nothing usable yet: a fresh install gets every protocol at once.
+        return available.iter().map(|title| (*title).to_string()).collect();
+    }
+    let mut titles: Vec<String> = Vec::new();
+    for entry in &stored {
+        if entry.trim().is_empty() {
+            continue;
+        }
+        match resolve_title(entry, &available) {
+            Some(title) => {
+                if !titles.contains(&title) {
+                    titles.push(title);
+                }
+            }
+            None => log.warning(&format!("Skipping unknown protocol: {}", entry)),
+        }
+    }
+    if titles.is_empty() {
+        log.warning("no listed protocol is known to this build; running DLNA only");
+        titles.push(DLNA_TITLE.to_string());
+    }
+    titles
+}
+
+/// `Macast.resolve_title` (`macast/macast.py:706-722`): exact title first, then
+/// the canonical comparison, and `None` when nothing matches. Always returns the
+/// **real** title, so a stored `"chromecast"` cannot become the string that the
+/// next read fails to match.
+pub fn resolve_title(title: &str, available: &[&str]) -> Option<String> {
+    if let Some(exact) = available.iter().find(|held| **held == title) {
+        return Some((*exact).to_string());
+    }
+    let canonical = canonical_title(title);
+    available
+        .iter()
+        .find(|held| canonical_title(held) == canonical)
+        .map(|held| (*held).to_string())
+}
+
+/// Is the Chromecast protocol switched on? One call site per face, all reading
+/// this, because the three Cast faces are one protocol: a run that gated 8009
+/// but not 8008 would answer `eureka_info` about a device that cannot be cast
+/// to, and a run that gated both but not the announcement would put the device
+/// in every phone's list while refusing the connection.
+pub fn cast_enabled(setting: &Setting, log: &Logger) -> bool {
+    enabled_protocols(setting, log)
+        .iter()
+        .any(|title| title == CAST_TITLE)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The shell's own tests, the first ones in this crate.
+    //!
+    //! Two rules are carried over from the library crates rather than invented
+    //! here: every test pins the settings/log directory **as its first statement**
+    //! (`AGENTS.md` §10 — nothing in a test may write into the user's real
+    //! configuration, and a `Logger::named` from this crate would do exactly that),
+    //! and the gate below is tested through the *reference's* rules, not through
+    //! the spelling this file happens to use.
+
+    use super::*;
+    use macast_core::logging::Logger;
+
+    /// The same mechanism as `macast-cast`'s `pin_test_dir`, with this crate's
+    /// directory name: `macast-core` compiles without the `cfg(test)` of a
+    /// dependent crate, so each crate that reaches for a `Logger` pins for
+    /// itself.
+    #[cfg(test)]
+    fn pin_test_dir() {
+        static PIN: std::sync::Once = std::sync::Once::new();
+        PIN.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("macast-tauri-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
+            macast_core::logging::remove_log_files(&dir);
+            macast_core::paths::set_setting_dir_override(&dir);
+        });
+    }
+
+    fn setting(tag: &str) -> Arc<Setting> {
+        Arc::new(Setting::new(
+            macast_core::paths::setting_dir().join(format!("gate-{tag}.json")),
+        ))
+    }
+
+    fn logger() -> Arc<Logger> {
+        Logger::named("Macast")
+    }
+
+    #[test]
+    fn a_fresh_install_gets_every_face() {
+        pin_test_dir();
+        // `_load_enabled_protocols` ends with 「Nothing usable yet: a fresh install
+        // gets every protocol at once」. A brand-new settings file must not be read
+        // as "the user switched Chromecast off" — that shape would ship with no
+        // Cast receiver at all and the sentence in the log would name a choice
+        // nobody made.
+        let enabled = enabled_protocols(&setting("fresh"), &logger());
+        assert_eq!(enabled, vec![DLNA_TITLE, CAST_TITLE, AIRPLAY_TITLE]);
+        assert!(cast_enabled(&setting("fresh"), &logger()));
+    }
+
+    #[test]
+    fn a_list_of_one_closes_the_other_two() {
+        pin_test_dir();
+        let dir = setting("dlna-only");
+        dir.set(Key::MacastProtocols, json!(["DLNA Protocol"]));
+        assert_eq!(enabled_protocols(&dir, &logger()), vec![DLNA_TITLE]);
+        assert!(!cast_enabled(&dir, &logger()));
+    }
+
+    #[test]
+    fn a_stored_string_is_one_entry_not_nothing() {
+        pin_test_dir();
+        // The reference coerces `isinstance(stored, str)` to a single entry. The
+        // shared reader returns an empty list for that shape, which here would
+        // mean "fresh install" — so a user who hand-edited the JSON to narrow the
+        // run to DLNA would get every face opened instead. This is the one place
+        // the gate may not use the convenient reader.
+        let dir = setting("string");
+        dir.set(Key::MacastProtocols, json!("DLNA Protocol"));
+        assert_eq!(
+            dir.get_str_list(Key::MacastProtocols),
+            Vec::<String>::new(),
+            "the shared reader's behaviour is the trap this test names"
+        );
+        assert_eq!(enabled_protocols(&dir, &logger()), vec![DLNA_TITLE]);
+        assert!(!cast_enabled(&dir, &logger()));
+    }
+
+    #[test]
+    fn the_legacy_key_is_appended_not_preferred() {
+        pin_test_dir();
+        let both = setting("legacy-both");
+        both.set(Key::MacastProtocols, json!(["DLNA Protocol"]));
+        both.set(Key::MacastProtocol, json!("Chromecast"));
+        // Both are honoured, in the stored order, with the legacy entry last.
+        assert_eq!(
+            enabled_protocols(&both, &logger()),
+            vec![DLNA_TITLE.to_string(), CAST_TITLE.to_string()]
+        );
+        // And a missing legacy key stays "nothing configured" rather than
+        // becoming an empty stored entry: `has()` before `get()`, §4.2's rule.
+        let one = setting("legacy-only");
+        one.set(Key::MacastProtocol, json!("DLNA"));
+        assert_eq!(enabled_protocols(&one, &logger()), vec![DLNA_TITLE]);
+        assert!(!one.has(Key::MacastProtocols));
+        // The other half of that rule, and the one a `get_str` refactor would
+        // lose silently: **the read must not create the key it is gating on.**
+        // `Setting::get` takes its default into the table and the next `save`
+        // persists it, so an ungated `get_str(Macast_Protocol, "")` would write
+        // `Macast_Protocol = ""` into the settings file of every install that
+        // never had the legacy key — the side effect this repository is oldest
+        // about, landing in a user's configuration on a plain app start.
+        let untouched = setting("no-legacy");
+        assert!(!untouched.has(Key::MacastProtocol));
+        enabled_protocols(&untouched, &logger());
+        assert!(
+            !untouched.has(Key::MacastProtocol),
+            "the gate read created Macast_Protocol in a settings file that had no such key"
+        );
+    }
+
+    #[test]
+    fn spellings_resolve_to_the_title_that_is_stored() {
+        pin_test_dir();
+        let available = available_titles();
+        for (spelling, want) in [
+            ("DLNA Protocol", DLNA_TITLE),
+            ("DLNA", DLNA_TITLE),
+            ("dlna protocol", DLNA_TITLE),
+            ("Chromecast", CAST_TITLE),
+            ("chromecast  PROTOCOL ", CAST_TITLE),
+            ("AirPlay", AIRPLAY_TITLE),
+            // Measured against CPython's own `canonical_title` before being
+            // frozen: every one of these answers only because the whitespace
+            // collapse runs before the `" protocol"` replace. Delete the collapse
+            // and the first three stop resolving — that is the load-bearing half
+            // of the three-step fold, and it is what a value pasted out of a JSON
+            // editor or a log line can carry.
+            ("Chromecast\tProtocol", CAST_TITLE),
+            ("AirPlay\nProtocol", AIRPLAY_TITLE),
+            ("Chromecast\r\nProtocol", CAST_TITLE),
+            // U+00A0 is whitespace to both `str.split()` and `split_whitespace()`,
+            // so a non-breaking space inside the word — the one a browser puts in
+            // a copied label — behaves like any other run.
+            ("DLNA\u{a0}Protocol", DLNA_TITLE),
+            ("\u{a0}Chromecast\u{a0}Protocol", CAST_TITLE),
+            ("\tDLNA ", DLNA_TITLE),
+        ] {
+            assert_eq!(
+                resolve_title(spelling, &available).as_deref(),
+                Some(want),
+                "{:?} did not resolve to {:?}",
+                spelling,
+                want
+            );
+        }
+        assert_eq!(resolve_title("Nirvana", &available), None);
+        // The one spelling the reference does **not** tolerate, asserted rather
+        // than fixed: `canonical_title` strips " protocol" with a space
+        // (`macast.py:704`), so a class name written tight — what a log line or a
+        // pasted Python repr looks like — resolves to nothing here and there.
+        // "Fixing" it on one side only would make the two disagree about which
+        // stored values mean something, which is worse than a shared, logged gap:
+        // an unresolvable entry is skipped with a warning, and a list whose every
+        // entry is unknown falls back to DLNA rather than listening on nothing.
+        assert_eq!(resolve_title("ChromecastProtocol", &available), None);
+        // The canonical fold itself, since every one of those matches rides on it.
+        assert_eq!(canonical_title("Chromecast  Protocol "), "chromecast");
+        assert_eq!(canonical_title("  DLNA   protocol  "), "dlna");
+        assert_eq!(canonical_title("Nirvana Protocol"), "nirvana");
+        assert_eq!(canonical_title("Chromecast\tProtocol"), "chromecast");
+        assert_eq!(canonical_title("\u{a0}AirPlay\u{a0}protocol"), "airplay");
+        // `replace` is replace-**all** in both languages, so a doubled word loses
+        // both copies and still resolves. Frozen because the two sides could
+        // plausibly disagree here (a first-occurrence-only fold would leave
+        // "chromecastprotocol") and only a measurement says which is the rule.
+        assert_eq!(canonical_title("Chromecast Protocol Protocol"), "chromecast");
+        assert_eq!(resolve_title("Chromecast Protocol Protocol", &available).as_deref(),
+                   Some(CAST_TITLE));
+    }
+
+    #[test]
+    fn an_unknown_title_is_skipped_and_said_out_loud() {
+        pin_test_dir();
+        let log = Logger::named("Macast");
+        let path = log.claim();
+        let dir = setting("unknown");
+        dir.set(
+            Key::MacastProtocols,
+            json!(["Nirvana Protocol", "Chromecast"]),
+        );
+        assert_eq!(enabled_protocols(&dir, &log), vec![CAST_TITLE]);
+        let text = macast_core::logging::read_tail(&path, 200).text;
+        assert!(
+            text.contains("Skipping unknown protocol: Nirvana Protocol"),
+            "the skip has to be readable, not silent: {}",
+            text
+        );
+        // …and a list whose every entry is unknown leaves DLNA, because the
+        // reference would rather listen on one protocol than on none.
+        let all_unknown = setting("all-unknown");
+        all_unknown.set(Key::MacastProtocols, json!(["Nirvana Protocol"]));
+        assert_eq!(enabled_protocols(&all_unknown, &log), vec![DLNA_TITLE]);
+        assert!(!cast_enabled(&all_unknown, &log));
+    }
+
+    #[test]
+    fn duplicates_collapse_and_the_stored_order_wins() {
+        pin_test_dir();
+        let dir = setting("dupe");
+        dir.set(
+            Key::MacastProtocols,
+            json!(["Chromecast", "chromecast protocol", "DLNA"]),
+        );
+        // One entry per protocol, in first-seen order, each spelled canonically —
+        // `resolve_title`'s promise that what gets persisted stays canonical.
+        assert_eq!(
+            enabled_protocols(&dir, &logger()),
+            vec![CAST_TITLE.to_string(), DLNA_TITLE.to_string()]
+        );
+    }
+
+    /// The gate is a door only if every face walks through it. `main.rs` has no
+    /// compiler help for this: a fourth `SetupServer::start` added after the
+    /// existing `if` would compile and would open a Cast face on a run that
+    /// switched Chromecast off, which is the exact state `docs/Rust-Port-Design.md`
+    /// §16 item 12 was written to close. So the audit is three questions about
+    /// `main.rs` as text: the one read of the gate has to come **before** any of the
+    /// three faces is opened, there has to be **exactly one** read (so no face can
+    /// consult the rule at its own door at its own moment), and each face has to be
+    /// **constructed exactly once** (so a second `SetupServer::start(` cannot hide
+    /// behind the first occurrence that `find` looks at).
+    ///
+    /// What each half is witnessed by, since they are not the same:
+    ///
+    /// * **one read, and one construction per face** each have their own mutants:
+    ///   writing the predicate a second time at the setup face's door (red here, on
+    ///   the count, and nowhere else — the run behaves identically either way, which
+    ///   is exactly why the assertion is about the read count and not the outcome),
+    ///   and constructing the announcer a second time in a closure that is never
+    ///   called (red here, on the per-face count). Both witnesses were measured
+    ///   2026-10-18 at 1 red each; the first attempt at the second one came back a
+    ///   **compile error** instead (the setup-face version moved `setup_config`),
+    ///   which is not a red and would have read as "no teeth" from an exit code.
+    /// * **position** has no compilable same-type mutant. Moving the read below
+    ///   `CastChannel::new` means deleting the two users that come before it (the
+    ///   refusal sentence and the certificate's `if`), and that is a rewrite, not a
+    ///   substitution — its red would say as much about the rewrite as about the
+    ///   rule. What really witnesses position is §23 of
+    ///   `scripts/verify_rust_receiver.sh`: delete the certificate's gate and the
+    ///   socket, the announcement on the wire, and the key material all go red
+    ///   together — 6 checks, measured 2026-10-18.
+    ///
+    /// Recorded as a limitation rather than written as coverage: the two assertions
+    /// in this test are not equally armed.
+    #[test]
+    fn every_cast_face_is_behind_the_gate() {
+        pin_test_dir();
+        let main = include_str!("main.rs");
+        let gate = main.find("host::cast_enabled(").expect("main.rs reads the gate");
+        for (needle, what) in [
+            ("CastChannel::new", "the 8009 receiver"),
+            ("setup::SetupServer::start", "the setup face"),
+            ("announce::Announcer::new", "the announcement"),
+        ] {
+            let at = main.find(needle).unwrap_or_else(|| panic!("no {} in main.rs", what));
+            assert!(
+                gate < at,
+                "{} is opened before the gate is read",
+                what
+            );
+            // **Exactly one call site per face.** `find` above only ever looks at
+            // the first, so a second `SetupServer::start(` written somewhere else
+            // in `main.rs` — the fourth face this audit exists to catch — would sit
+            // behind the needle and never be looked at. The `(` is part of the
+            // needle so a doc comment naming the type cannot count as a call.
+            let calls = main.matches(&format!("{needle}(")).count();
+            assert_eq!(
+                calls, 1,
+                "{what} is constructed {calls} times in main.rs; a second call site \
+                 would be behind the gate only by accident"
+            );
+        }
+        // Exactly one read, so a second face cannot consult a *different* rule.
+        assert_eq!(
+            main.matches("host::cast_enabled(").count(),
+            1,
+            "the gate is read more than once, so the three faces can disagree"
+        );
+    }
+
+    /// Same discipline as the library crates: a test added without the pin would
+    /// write into the user's configuration directory, so the count is checked
+    /// rather than trusted.
+    #[test]
+    fn every_test_in_this_crate_pins_the_log_directory_first() {
+        pin_test_dir();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0usize;
+        let mut files = std::fs::read_dir(&root)
+            .unwrap_or_else(|e| panic!("read {}: {e}", root.display()))
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "rs").unwrap_or(false))
+            .collect::<Vec<_>>();
+        files.sort();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if line.trim() != "#[test]" {
+                    continue;
+                }
+                let mut j = index + 1;
+                while j < lines.len() && lines[j].trim().starts_with("#[") {
+                    j += 1;
+                }
+                let signature = lines.get(j).unwrap_or(&"");
+                assert!(
+                    signature.trim_start().starts_with("fn ") && signature.contains('{'),
+                    "{}:{}: no test signature follows the attribute",
+                    path.display(),
+                    index + 1
+                );
+                scanned += 1;
+                let mut k = j + 1;
+                while k < lines.len() {
+                    let body = lines[k].trim();
+                    if !body.is_empty() && !body.starts_with("//") && !body.starts_with("///") {
+                        break;
+                    }
+                    k += 1;
+                }
+                let first = lines.get(k).unwrap_or(&"").trim();
+                assert_eq!(
+                    first,
+                    "pin_test_dir();",
+                    "{}:{}: this test does not pin its log directory first",
+                    path.display(),
+                    k + 1
+                );
+            }
+        }
+        assert!(
+            scanned >= 9,
+            "only {} tests scanned in this crate — an empty scan is not a pass",
+            scanned
+        );
+    }
+}
