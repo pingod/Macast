@@ -1902,6 +1902,63 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   一并删掉了 —— 一个手算的差值会随下一次加用例变成第二句谎，改成"65 对着上面量出的 637"。
   **以及本分支从未推送 ⇒ 上面这些用例与那 174 条真机读数没有任何 CI 见证过。**
 
+**Rust 侧把 `_googlecast._tcp` 接上广播时量到的事**（2026-10-18，`macast-cast/src/announce.rs` +
+`scripts/mdns_announce_probe.py` + `macast-cast/tests/golden/`，`announce_tests` **19** 条 + 真机脚本 §22 的 **9** 条）：
+
+* **先取证，再写包**：探针只替换 `zeroconf._core.async_send_with_transport`（grep 过整包，
+  那是**唯一**一处 `transport.sendto`），所以一个字节都没上局域网 —— 真广播会在跑的这一段时间里
+  让本机多出一台 Chromecast。每条报文用**两个**读者解码（手写遍历 + `DNSIncoming`）并逐记录比对
+  name/type/TTL/class，其中 class 必须把 zeroconf 掩掉的 flush 位从 `.unique` 拼回来
+  （`_dns.py:121-122`）—— 否则"探针看到了 flush 位"这句是假的，而那一位正是本节第一行
+  「搜到但投不上」那一族里读侧掩码漏掉的同一个东西。
+* 广播的形状（全部是读数）：5 条记录 PTR/SRV/TXT/NSEC/A；TTL 4500/120/4500/120/120；
+  **除 PTR 外全带 cache-flush**；`flags=0x8400`；注册 3 串 × 225 ms，`update_service` 同形，
+  goodbye 3 串 × 125 ms 且**每条 TTL 写成 0**（不是空报文）；本机参考实现开了 **6 个**发送
+  socket（`127.0.0.1`、局域网口、Tailscale、三个虚拟网桥），每串各发一份同样的字节。
+* **`A` 与 `NSEC` 的先后不是协议事实**：`get_address_and_nsec_records` 交回的是 `set`，
+  本机实测 `PYTHONHASHSEED` 0/1/2 出 `NSEC,A`、12345 出 `A,NSEC`。所以语料冻了**两行**，
+  而 `announce_tests` 两条都要比 —— 第一版只冻一行，那是把一个哈希种子钉成规范。
+  固定前缀（PTR/SRV/TXT）在两行里逐字节相同，用例把"两行第一次不同的偏移 = 266"也钉住：
+  不同的如果更早，说明 set 顺序不是唯一的非确定性，逐字节对拍这个目标本身就不成立。
+* **§22 首跑就抓到一条产品 bug，是我自己的**：A 记录建在 `advertised_hosts`（浏览器**加入组**
+  用的宽集合）上，线上于是出现 `192.168.1.5, 192.168.148.0, 192.168.215.0, 192.168.139.3`
+  —— 三个 VMware/VirtualBox/Docker 网桥。**这就是本节第一行的成因，而这次是我们在发**：
+  发送端随机挑一个，没有路由，用户读到的是"能搜到、点投屏没反应"，我们这边一句错误都没有。
+  主人换成 `advertised_addresses`（发送端够得着的窄集合）。判据一条同时问两遍：
+  行为上，本机两个集合长度不同（1 对 4），所以"广播的条数 == 窄集合的条数"问得出东西；
+  源码上，按名字审计 `from_setting` 的函数体**只许**出现 `net::advertised_addresses(` ——
+  因为"只有一块网口的笔记本"上两个集合相同，那条行为断言会**空转**。
+  变异体（换回宽集合）红 **1** 条，正是这一条。
+* **广播的 socket 故意不 join 组**：`SO_REUSEPORT` 把每个**进来的**数据报只交给绑在同端口的
+  一个 socket，第二个 joined socket 会随机吃掉设备列表的一半 —— 这条在单元层不可见（每个测试
+  各开各的 socket），在真机上读起来像网络不稳。**代价**写在设计文档 §16 第 13 条：responder
+  （答别人的查询）落地时必须把这两个读者**合成一个**，不是再加第三个 socket。
+* **改一个超长友好名 = 参考实现整个 Chromecast 起不来**（本机实测）：`ServiceInfo(...)` 打包
+  TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而那一行**不在**
+  `advertise()` 的两个 `try` 里（200 字节过、300 字节抛），于是一路冲出 `_advertise()` 与
+  `ChromecastProtocol.start()` —— 用户改一个设备名，买到的是接收端没有了。Rust 侧**截属性不截接收端**
+  （按字符边界截到 255，WARNING 里点名字段、原长度与上限），判据两条。**Python 侧今天仍然如此** ——
+  这句话不是"已修"，而它记在这里是因为下一次"照抄参考实现"会把它抄回来。
+* **两条我自己仪器的错，都长得像产品坏了**（§4.2 那一族，这次抄的是**第三方库的 API**）：
+  ① `ServiceBrowser(zc, type_, 6.0, listener)` —— 0.151.3 的第三个位置参数是 handlers，
+  于是 `'float' object has no attribute 'append'` 变成 §22 的 **7 条红**；
+  ② `IPVersion.V4` 不存在（叫 `V4Only`），traceback 打在数据要去的那个文件里，
+  于是后面 5 条检查全读成 `none`。两次都是**先怀疑仪器再怀疑产品**才对：第一条里
+  "解析成功"那一条已经是 PASS，产品没问题 —— 红的形状是 harness 的 API 记忆。
+* 读数：`macast-cast` **656**（两台仪器一致：`--list` 656、逐文件字面扫描 656；
+  `announce_tests` 19、`channel_tests` 40、`setup_tests` 30），整 crate `656 passed; 0 failed`，
+  模块级 `announce::` 19/19；真机脚本 **183 条 / 0 失败 / EXIT=0**，其中 §22 用 `.venv` 里那套
+  **zeroconf** 冷启动解析成功、**42.8 秒** —— 而那一节跑在第一串广播之后好几分钟，所以这一条同时是
+  **60 秒 keepalive** 的真机见证（libvlc 那类"只听不问"的发送端就靠它）。端口 == 8009 实际绑定口、
+  TXT `id` == 设置里那个 USN、`ca=5`、TXT 键序、SRV 目标、A 集合与广播者自己声明的那一份逐条对上。
+* **七个变异体，逐支的红数**（一条命令一支，`/tmp` 备份 + EXIT trap 还原 + md5 回到
+  `9262bde80c94e50004b84953565a6e0e`；这一节的每个数都能从当时的输出重算）：goodbye 被停止标志
+  门住 → **1**（只有 `run()` 那一格红，`burst()` 那一格照绿 —— 这就是为什么要两条）；压缩表不再记
+  后缀偏移 → **2**（两条逐字节对拍，语义级的读回用例不动）；PTR 挂上 flush 位 → **3**；
+  截断改成空操作 → **2**；重播间隔 60 → 600 秒 → **1**；名字规则不去首尾连字符 → **3**；
+  A 记录改读宽集合 → **1**。**没有一支是 0 红**，这一轮不需要"覆盖空洞"那一格的新记录。
+  **以及本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

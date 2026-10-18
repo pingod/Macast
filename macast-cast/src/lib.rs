@@ -52,14 +52,18 @@
 //!   compression pointers, `parse_message`, the PTR→SRV→A/TXT ledger with
 //!   RFC 6762 §10.1 goodbye handling, and `discover_cast`, which finds the
 //!   *senders'* receivers on 5353 so the settings page has devices to name.
-//!   Reading a reply is not the same job as broadcasting our own receiver, and
-//!   the broadcast side is still ahead of this module.
+//!   Reading a reply is not the same job as broadcasting our own receiver —
+//!   that half is [`announce`], and it deliberately keeps its own socket so the
+//!   two never fight over what an incoming datagram means.
 //! * [`setup`] — HTTP/8008 and HTTPS/8443: `/setup/eureka_info` with a **bare**
 //!   UUID in `ssdp_udn`, `params=` filtering that keeps the document's key order,
 //!   `/setup/icon.png`, and the two listeners whose ports a sender hardcodes.
 //!   The face is ungated by design, and the module header says what that means.
-//! * *(next)* the `_googlecast._tcp` **announcement** — our own receiver's PTR,
-//!   SRV and TXT records, broadcast unsolicited so senders can find it.
+//! * [`announce`] — the `_googlecast._tcp` **announcement**: PTR, SRV, TXT, NSEC
+//!   and A written byte-for-byte the way zeroconf writes them (two frozen
+//!   corpora under `tests/golden/` say so), three bursts on start, a re-announce
+//!   every 60 s, and a zero-TTL goodbye on stop. **Not** here yet: answering
+//!   somebody else's query — see the module header's last divergence and §15.
 //!
 //! ## The one thing to know before editing
 //!
@@ -73,6 +77,7 @@
 //! uncastable (§4.1), and it produces no error on our side at all.
 
 pub mod airplay;
+pub mod announce;
 pub mod cert;
 pub mod channel;
 pub mod charmap;

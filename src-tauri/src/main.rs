@@ -50,6 +50,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{Manager, State};
 
+use macast_cast::announce;
 use macast_cast::relay;
 use macast_cast::setup;
 use macast_cast::targets;
@@ -121,6 +122,11 @@ struct Runtime {
     /// 8008) and `SetupServer` itself already carries "is 8443 up" in
     /// `https_port`; the outer `Option` is only "did this run get a face at all".
     setup: Mutex<Option<setup::SetupServer>>,
+    /// The `_googlecast._tcp` announcement. `None` means 8009 never came up, so
+    /// there was no port worth announcing — not that announcing failed on a
+    /// listening receiver, which is the case whose reason went to
+    /// `logs/Discovery.log`.
+    announce: Option<Arc<announce::Announcer>>,
 }
 
 impl Runtime {
@@ -166,6 +172,15 @@ impl Runtime {
         // fanned into a stopped channel would be updating a table that can never
         // be read again — and the day a restart path exists, the last thing that
         // should happen is a new session reading the previous one's `PLAYING`.
+        // The announcement goes **before** the receiver's socket closes, which is
+        // the reference's order (`protocol_cast.py:417-421` closes the advertiser
+        // — and with it the goodbye — ahead of the connections) and the same
+        // reasoning as the `byebye` above: a sender that never hears we are gone
+        // keeps the PTR for [`announce::OTHER_TTL`], i.e. 75 minutes of a dead
+        // device in a phone's list.
+        if let Some(announcer) = self.announce.as_ref() {
+            announcer.stop();
+        }
         if let Some(channel) = self.cast.as_ref() {
             let owned = Arc::clone(channel);
             owned.stop();
@@ -902,6 +917,13 @@ pub fn run() {
             // read from the other side: one record type, one file).
             let cast_log = Logger::named(setup::LOGGER_NAME);
             let _cast_log_path = cast_log.claim();
+            // A third file, because the advertiser is a different module in the
+            // reference too: `discovery.py:26` logs under `Discovery`, and the
+            // question that reads this file is 「why doesn't my phone see this
+            // Macast」 — which is an announcement question, not a Cast-session one
+            // (§4.10b: one module, one file).
+            let discovery_log = Logger::named(announce::LOGGER_NAME);
+            let discovery_log_path = discovery_log.claim();
 
             let host = TauriHost {
                 app: handle,
@@ -1135,6 +1157,59 @@ pub fn run() {
                 )
             });
             let setup = Mutex::new(setup_server);
+            // The **announcement**: 8009 answers a sender that already knows our
+            // address, and this is the half that lets a sender find that address
+            // without being told. Started only when the channel is really
+            // listening — the reference advertises `cast_port` even when the TLS
+            // bind failed, which puts a device in a menu that cannot be cast to
+            // (AGENTS.md §4.1's first symptom row), and `announce`'s module header
+            // records that as a deliberate divergence rather than a silent one.
+            let announcer = match cast_channel.as_ref() {
+                Some(channel) => {
+                    let service =
+                        announce::Service::from_setting(&setting, channel.port(), &discovery_log);
+                    let instance = service.instance.clone();
+                    let port = service.port;
+                    // The list, not just the count: §22 of the acceptance script
+                    // compares what the announcer decided to publish against what
+                    // a second stack reads off the wire, and "3 interfaces" cannot
+                    // be compared to a set of addresses. This is also the line a
+                    // human reads when a phone picks an unreachable address — the
+                    // §4.1 first row, which is a wrong-list bug and shows up here.
+                    let published = service
+                        .addresses
+                        .iter()
+                        .map(|a| a.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let announcer = announce::Announcer::new(service, Arc::clone(&discovery_log));
+                    // `start` logged its own reason on `Discovery.log`; the
+                    // summary line here answers "did it" for whoever reads the
+                    // startup log, and a refusal keeps `None` so `stop_services`
+                    // never joins a thread that did not exist.
+                    if announcer.start().is_err() {
+                        log.warning(&format!(
+                            "mDNS: not announcing {instance} — see {}",
+                            discovery_log_path.display()
+                        ));
+                        None
+                    } else {
+                        log.info(&format!(
+                            "mDNS: announcing {instance} on port {port} over [{published}]; \
+                             re-announcing every {} s",
+                            announce::REANNOUNCE.as_secs()
+                        ));
+                        Some(announcer)
+                    }
+                }
+                None => {
+                    log.info(
+                        "mDNS: not announcing — 8009 is not listening, and a device that \
+                         cannot be cast to is worse than no device",
+                    );
+                    None
+                }
+            };
 
             // Managed before anything is started, and this ordering is load-bearing
             // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
@@ -1160,6 +1235,7 @@ pub fn run() {
                 relay: relay_store,
                 cast: cast_channel,
                 setup,
+                announce: announcer,
             });
 
             player.start();

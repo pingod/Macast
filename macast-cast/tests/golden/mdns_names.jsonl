@@ -1,0 +1,29 @@
+# frozen from macast/discovery.py: sanitize_instance_name + _normalize_server
+# regenerate: env -u PYTHONPATH .venv/bin/python \
+#   scripts/mdns_announce_probe.py --dump-names <this file>
+{"input": "Macast", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "Macast(Pavia-MacBookPro-1859.local)", "instance": "Macast-Pavia-MacBookPro-1859._googlecast._tcp.local.", "server": "Macast-Pavia-MacBookPro-1859.local."}
+{"input": "Macast(0123)", "instance": "Macast-0123._googlecast._tcp.local.", "server": "Macast-0123.local."}
+{"input": "Macast E2E Smoke", "instance": "Macast-E2E-Smoke._googlecast._tcp.local.", "server": "Macast-E2E-Smoke.local."}
+{"input": "Macast-MyHost-1754", "instance": "Macast-MyHost-1754._googlecast._tcp.local.", "server": "Macast-MyHost-1754.local."}
+{"input": "Macast(MyHost).local", "instance": "Macast-MyHost._googlecast._tcp.local.", "server": "Macast-MyHost.local."}
+{"input": "Macast._googlecast._tcp.local.", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "Macast._googlecast._tcp.local", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "Macast.子域._googlecast._tcp.local.", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "中文名字", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": ".", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "...", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "-Macast-", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}
+{"input": "Macast 1", "instance": "Macast-1._googlecast._tcp.local.", "server": "Macast-1.local."}
+{"input": "Macast:8009", "instance": "Macast-8009._googlecast._tcp.local.", "server": "Macast-8009.local."}
+{"input": "Macast/host", "instance": "Macast-host._googlecast._tcp.local.", "server": "Macast-host.local."}
+{"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa._googlecast._tcp.local.", "server": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.local."}
+{"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa._googlecast._tcp.local.", "server": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.local."}
+{"input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "instance": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa._googlecast._tcp.local.", "server": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.local."}
+{"input": "Macast(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)", "instance": "Macast-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb._googlecast._tcp.local.", "server": "Macast-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.local."}
+{"input": "Mäcast(local)", "instance": "M-cast-local._googlecast._tcp.local.", "server": "M-cast-local.local."}
+{"input": "Macast\t(tab)", "instance": "Macast--tab._googlecast._tcp.local.", "server": "Macast--tab.local."}
+{"input": "Macast(parens)(more)", "instance": "Macast-parens--more._googlecast._tcp.local.", "server": "Macast-parens--more.local."}
+{"input": "UPPERCASE-Macast", "instance": "UPPERCASE-Macast._googlecast._tcp.local.", "server": "UPPERCASE-Macast.local."}
+{"input": "Macast._GOOGLECAST._TCP.local.", "instance": "Macast._googlecast._tcp.local.", "server": "Macast.local."}

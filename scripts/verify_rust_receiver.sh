@@ -26,8 +26,19 @@
 # it *after* the no-token refusal is measured, in that order — see 9 then 10).
 #
 # Cost to know: for the run's duration this machine announces a **second**
-# Macast on the LAN via SSDP (UDP/1900). The teardown sends a goodbye and the
-# run is short, but do not run this during a demo.
+# Macast on the LAN via SSDP (UDP/1900) **and**, since section 22, via mDNS
+# (`_googlecast._tcp`, UDP/5353) — so a phone with the Cast button open will
+# list it too. The teardown sends both goodbyes and the run is short, but do not
+# run this during a demo.
+#
+# Section 22 is the only part that needs a third-party stack: it runs the
+# `zeroconf` from this repository's `.venv` as a passive browser, because our own
+# parser agreeing with our own writer proves nothing (§4.2's 「桩自己也会撒谎」).
+# It therefore **skips** — and a skip counts as a failure, as everywhere here —
+# when `.venv` is missing. And because the announcer has no responder yet (it only
+# sends unsolicited bursts, every 60 s), the browser is waiting for a re-announce:
+# a green 22 takes ~45 s, and a resolution that came faster would mean it read
+# the startup burst rather than the keepalive.
 #
 # Usage:
 #   scripts/verify_rust_receiver.sh            # build if needed, then verify
@@ -1970,6 +1981,223 @@ else
     else
         fail "no new video-reconfig in MPV.log ($RECONFIG_BEFORE -> $RECONFIG_AFTER): audio-only or never started"
     fi
+fi
+
+echo "== 22: another implementation reads the announcement this shell broadcasts =="
+# Everything above answers a caller that already knew an address. This section asks
+# the other question — **can a sender that knows nothing find us** — and it refuses to
+# answer it with our own parser, because a writer and a reader from the same crate
+# agree by construction (§4.2's 「桩自己也会撒谎」, and §4.9's whole reason for
+# `cast_conformance.py` existing). The witness is the **`zeroconf` in this repository's
+# `.venv`**: the stack the Python app itself runs, given nothing but our bytes on the
+# wire and asked to fold them into a device.
+#
+# Why this can only be a re-announcement: the announcer's first burst is three packets
+# 225 ms apart at start, and by the time §21 finishes that is minutes behind us. So a
+# browser with a cold cache that resolves this instance has resolved a **keepalive** —
+# `REANNOUNCE_SECONDS` doing the job `discovery.py:230-237` says it exists for (libvlc's
+# microdns 「never sends a query of its own」).
+#
+# **Cost, added to the one the header declares:** for the run's duration this machine
+# now also announces a second Macast over **mDNS** (UDP/5353), not just SSDP. A phone
+# with the Cast button open will see it. Do not run this during a demo.
+#
+# What is NOT checked here, and why: the **goodbye**. Tearing this instance down is
+# `kill -9` (a SIGTERM leaves the Tauri app running, and SIGINT is the only signal it
+# honours — AGENTS.md §4.2's SIGTERM row — and neither goes through `stop_services` from
+# this harness), so a live goodbye is not reachable from a script. `announce_tests` holds
+# that one instead: `the_run_function_goodbyes_even_when_the_flag_is_already_down` drives
+# `run()` with the flag already down and requires three zero-TTL packets. Recording the
+# gap is the point — a section that silently skipped would read like coverage.
+MDNS_LINE=$(log_grep 'mDNS: announcing ' | tail -1)
+MDNS_INSTANCE=$(printf '%s' "$MDNS_LINE" | sed -n 's/.*announcing \([^ ]*\) on port .*/\1/p')
+MDNS_PORT=$(printf '%s' "$MDNS_LINE" | sed -n 's/.* on port \([0-9][0-9]*\) over .*/\1/p')
+
+if [ -z "$MDNS_INSTANCE" ]; then
+    # The legitimate second outcome: nothing to announce, because 8009 is not
+    # listening. Silence here would be the failure — a receiver that came up and
+    # quietly never announced is exactly the state a user reads as "搜到但投不上",
+    # and a run that printed neither line is a run that did not look.
+    if [ -n "$(log_grep 'mDNS: not announcing')" ]; then
+        pass "no announcement, and the shell said why instead of leaving it out"
+    else
+        fail "no announcement line and no refusal line — the announcer said nothing"
+    fi
+elif [ ! -x "$CAST_PY" ]; then
+    skip "no .venv python to browse with ($CAST_PY)"
+else
+    MDNS_OUT=/tmp/verify_rust_receiver_mdns.txt
+    env -u PYTHONPATH -u http_proxy -u HTTP_PROXY \
+        -u https_proxy -u HTTPS_PROXY "$CAST_PY" - "$MDNS_INSTANCE" 75 \
+        > "$MDNS_OUT" <<'PY'
+import sys, time, zeroconf as z
+
+want, budget = sys.argv[1], float(sys.argv[2])
+seen = set()
+attempted = set()
+
+
+class Listener(z.ServiceListener):
+    # Names the browse has announced. Nothing in this listener queries: the whole
+    # claim under test is that an **unsolicited announcement** is enough for
+    # another stack to know a device — so calling `get_service_info` here would
+    # ask the question we are trying to answer and go green for the wrong reason.
+    def add_service(self, zc, type_, name):
+        seen.add(name)
+
+    def remove_service(self, *args):
+        pass
+
+    def update_service(self, *args):
+        pass
+
+
+def load(zc, name):
+    info = z.ServiceInfo("_googlecast._tcp.local.", name)
+    # `load_from_cache` is yes-only-when-complete: PTR **and** SRV **and** TXT
+    # **and** A. A half-folded service answers False, which is the failure mode.
+    return info if info.load_from_cache(zc) else None
+
+
+zc = z.Zeroconf(ip_version=z.IPVersion.V4Only)
+# 0.151.3 takes the handler as the third positional (`handlers`), not a
+# timeout — the first version of this line passed `6.0` there and the
+# constructor answered `AttributeError: 'float' object has no attribute
+# 'append'`, which the section reported as seven product failures. A harness
+# bug wearing the product's clothes (§4.2), caught because the traceback was
+# printed and not swallowed.
+browser = z.ServiceBrowser(zc, "_googlecast._tcp.local.", Listener())
+start = time.monotonic()
+info = None
+while time.monotonic() - start < budget:
+    for name in sorted(seen - attempted):
+        attempted.add(name)
+        got = load(zc, name)
+        if got is not None and name == want:
+            info = got
+            break
+    if info is not None:
+        break
+    time.sleep(0.2)
+elapsed = time.monotonic() - start
+if info is None:
+    print("status\tunresolved")
+    print("seen\t%s" % ",".join(sorted(seen)))
+else:
+    print("status\tresolved")
+    print("seconds\t%.1f" % elapsed)
+    print("server\t%s" % (info.server or ""))
+    print("port\t%s" % (info.port if info.port is not None else ""))
+    print("addresses\t%s" % ",".join(
+        # The member is `V4Only`, not `V4`: the first version of this line
+        # asked for a name that does not exist, and the traceback printed
+        # where the data goes — which is why the five checks below it came
+        # back "none" while the resolve itself passed.
+        str(a) for a in info.ip_addresses_by_version(z.IPVersion.V4Only)))
+    # The TXT keys in the order the reader parsed them, which is the order we
+    # wrote: `properties` walks the rdata front to back.
+    props = info.properties or {}
+    print("txt_order\t%s" % ",".join(
+        k.decode("utf-8", "replace") for k in props))
+    print("txt\t%s" % ";".join(
+        "%s=%s" % (k.decode("utf-8", "replace"),
+                   (v or b"").decode("utf-8", "replace")) for k, v in props.items()))
+browser.cancel()
+zc.close()
+PY
+    MDNS_STATUS=$(awk -F'\t' '$1=="status"{print $2}' "$MDNS_OUT" | head -1)
+
+    if [ "$MDNS_STATUS" = "resolved" ]; then
+        pass "zeroconf folded our announcement into a complete device (PTR+SRV+TXT+A) in $(awk -F'\t' '$1=="seconds"{print $2}' "$MDNS_OUT") s"
+    else
+        fail "another stack could not resolve $MDNS_INSTANCE: $(tr '\n' ' ' < "$MDNS_OUT")"
+    fi
+
+    # 1. The port it read is the port 8009 actually bound (§21 read that off the
+    #    log), and the same number the announcement line carries. A device whose
+    #    announcement names a port nothing listens on is the 「搜到但投不上」 bug
+    #    this repository has already been blamed for twice.
+    RESOLVED_PORT=$(awk -F'\t' '$1=="port"{print $2}' "$MDNS_OUT" | head -1)
+    if [ -n "$CAST_PORT_ACTUAL" ] && [ "$RESOLVED_PORT" = "$CAST_PORT_ACTUAL" ] \
+        && [ "$RESOLVED_PORT" = "$MDNS_PORT" ]; then
+        pass "the port a sender resolves is the port that answers ($RESOLVED_PORT)"
+    else
+        fail "announced $MDNS_PORT, bound ${CAST_PORT_ACTUAL:-none}, resolved ${RESOLVED_PORT:-none}"
+    fi
+
+    # 2. The identity half: the TXT `id` is the same USN the setup face answers
+    #    with, and the same one the settings file holds. Two faces, one owner —
+    #    §4.14's 「advertise_host 有两份副本」 is the failure this closes.
+    TXT_ID=$(awk -F'\t' '$1=="txt"{print $2}' "$MDNS_OUT" | head -1 \
+        | tr ';' '\n' | sed -n 's/^id=//p')
+    STORED_USN=$(stored_setting USN 2>/dev/null || echo "")
+    if [ -n "$TXT_ID" ] && [ "$TXT_ID" = "$STORED_USN" ]; then
+        pass "TXT id == the stored USN, so mDNS and this face name one device"
+    else
+        fail "TXT id '${TXT_ID:-none}' vs stored USN '${STORED_USN:-none}'"
+    fi
+
+    # 3. `ca` is the bitmask VLC reads. Not 5 and it drops every video stream on
+    #    the floor with no error anywhere — AGENTS.md §4.1's 「有声音没画面」.
+    TXT_CA=$(awk -F'\t' '$1=="txt"{print $2}' "$MDNS_OUT" | head -1 \
+        | tr ';' '\n' | sed -n 's/^ca=//p')
+    [ "$TXT_CA" = "5" ] \
+        && pass "ca=5 on the wire, the value that keeps VLC sending video" \
+        || fail "TXT ca is '${TXT_CA:-absent}', expected 5"
+
+    # 4. The order the properties arrive in. A reader that shows a device name
+    #    reads `fn`; the order is not cosmetic and `_advertise`'s dict order is
+    #    the contract (§9.2).
+    TXT_ORDER=$(awk -F'\t' '$1=="txt_order"{print $2}' "$MDNS_OUT" | head -1)
+    [ "$TXT_ORDER" = "id,fn,ca,st,bs,ic,ve,md,rm,rs" ] \
+        && pass "the TXT keys arrive in the order the reference writes them" \
+        || fail "TXT order was '${TXT_ORDER:-none}'"
+
+    # 5. The SRV target and its A record: one name, and an address a sender on
+    #    another machine can actually open (never loopback — §19's same rule).
+    RESOLVED_SERVER=$(awk -F'\t' '$1=="server"{print $2}' "$MDNS_OUT" | head -1)
+    RESOLVED_ADDRS=$(awk -F'\t' '$1=="addresses"{print $2}' "$MDNS_OUT" | head -1)
+    WANT_SERVER="${MDNS_INSTANCE%%.*}.local."
+    if [ "$RESOLVED_SERVER" = "$WANT_SERVER" ]; then
+        pass "the SRV target is the instance's own label under .local."
+    else
+        fail "SRV target '${RESOLVED_SERVER:-none}', expected $WANT_SERVER"
+    fi
+    # The A set has to equal **the list the announcer said it published** — not
+    # merely contain the LAN address. Two directions of wrong live here: publishing
+    # the join list (a VMware/VirtualBox/Docker adapter among the answers, which is
+    # `AGENTS.md` §4.1's first row — a sender picks one, gets no route, and nothing
+    # on our side is wrong; that is exactly what this line measured on 2026-10-18),
+    # and publishing fewer than the wire carries, which would mean the packet we
+    # built is not the packet that arrived.
+    ANNOUNCED_LIST=$(printf '%s' "$MDNS_LINE" | sed -n 's/.*over \[\([^]]*\)\].*/\1/p')
+    SORTED_RESOLVED=$(printf '%s' "$RESOLVED_ADDRS" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+    SORTED_ANNOUNCED=$(printf '%s' "$ANNOUNCED_LIST" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+    case "$RESOLVED_ADDRS" in
+        "") fail "no A record arrived for $RESOLVED_SERVER — the service is named but unreachable" ;;
+        127.*|*,127.*) fail "a loopback address is in the A set ($RESOLVED_ADDRS): a phone would find a device it cannot reach" ;;
+        *)
+            if [ -n "$SORTED_ANNOUNCED" ] && [ "$SORTED_RESOLVED" = "$SORTED_ANNOUNCED" ]; then
+                pass "the A set on the wire is exactly the set the announcer published ($SORTED_RESOLVED)"
+            else
+                fail "announced [${ANNOUNCED_LIST:-none}] but the wire carries $SORTED_RESOLVED"
+            fi
+            if [ -n "$LAN" ] && [ ",$SORTED_RESOLVED," = ",$LAN," ]                 || printf '%s' ",$SORTED_RESOLVED," | grep -q ",$LAN,"; then
+                pass "and the address the other faces use ($LAN) is one of them"
+            else
+                fail "the advertised LAN address '$LAN' is not in the A set ($SORTED_RESOLVED)"
+            fi
+            ;;
+    esac
+
+    # 6. The instance name is one DNS-SD label: no parentheses, no dots. The
+    #    browse matched it (check 1) which is the proof, but the sentence is worth
+    #    its own line because the reference's failure mode here is *silence*:
+    #    zeroconf registers `Macast(host.local)` happily and no query ever matches.
+    case "$MDNS_INSTANCE" in
+        *[!A-Za-z0-9._-]*) fail "the announced instance carries bytes a DNS label cannot hold: $MDNS_INSTANCE" ;;
+        *) pass "the announced instance name is DNS-SD legal ($MDNS_INSTANCE)" ;;
+    esac
 fi
 
 echo

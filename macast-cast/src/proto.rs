@@ -406,20 +406,23 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 637 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 637, and the scanner below counts 637 `#[test]`
+    /// 656 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 656, and the scanner below counts 656 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
     /// check that neither is reading a stale file (it is deliberately
     /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
     /// the scan because they sit in `src/` itself). The largest contributors are
     /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
     /// `airplay_tests` 60, `push_tests` 46, `channel_tests` 40, `resolve` 39,
-    /// `setup_tests` 30, this file 19, `engine_tests` 17 and `cert` 12. The
-    /// previous values, 603 and 633, were carried by the same two instruments
-    /// until `setup.rs` landed with its own module, and then until the Cast
+    /// `setup_tests` 30, this file 19, `announce_tests` 19, `engine_tests` 17 and
+    /// `cert` 12. The previous values, 603, 633, 637 and 655, were carried by the
+    /// same two instruments
+    /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
     /// `channel_tests`: the starvation witness plus the frame cap, the split
-    /// frame and the peer that closes);
+    /// frame and the peer that closes), then until `announce.rs` landed with the
+    /// two frozen corpora, and then until §22 of the acceptance script caught that
+    /// module reading the wrong interface list (+1: the owner audit);
     /// `601 passed; 1 failed` in an older run is a *602-test* run with one
     /// failure, not a third floor — the sum of passed and failed is what has to
     /// reach this number.
@@ -438,7 +441,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 637;
+    const TESTS_IN_THIS_CRATE: usize = 656;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

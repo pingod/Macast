@@ -1609,7 +1609,7 @@ fn describe_interfaces(interfaces: &[Ipv4Addr]) -> String {
 /// Linux arm (`sock.rs:310-330`): `debug` on success, and on failure two
 /// `error` lines with the OS text on its **own** line — the split AGENTS.md
 /// §5 keeps so `grep -aE "ERROR|Traceback"` finds a reason next to the label.
-fn set_reuse_for_mdns(sock: &Socket, log: &Logger) {
+pub(crate) fn set_reuse_for_mdns(sock: &Socket, log: &Logger) {
     match sock.set_reuse_address(true) {
         Ok(()) => log.debug("mDNS set SO_REUSEADDR"),
         Err(e) => log_reuse_failure("SO_REUSEADDR", &e, log),
