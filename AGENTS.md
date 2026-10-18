@@ -2170,6 +2170,39 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   三个读者先后覆盖一个临时文件，与 §4.2「计数器在 flush 之后才加」「夹具里那对括号是承重的」
   同族：**下一个读者之前先重新问一次**（这条写在检查上方，不留在提交信息里）。
 
+**Rust 侧给 mDNS responder 取证时量到的事**（2026-10-18，`scripts/mdns_responder_probe.py` +
+`scripts/mdns_reuseport_probe.py` + `macast-cast/tests/golden/mdns_responder.jsonl`，16 例；
+产品代码一个字节没改，改的是两句从未问过内核的话）：
+
+* **本分支第一次把一台 Linux 问进判据**：`SO_REUSEPORT` 那两句话（多播会分摊、所以 responder
+  必须与 announce 合成一个读者）此前只有 macOS 一侧的猜测。现在两台都量过 —— **多播在两边都是
+  复制**（macOS `[12,12,0]` / `[12,12,12]`，Linux `[8,8,8]` 且第三格是**没加入组**的那个：Linux 上
+  绑 5353 就收得到多播），**单播整条只交给一个 socket 且交给谁随流变**（Linux 同进程三趟
+  `[8,0,0]`，换进程 `[0,0,12]`、`[0,8,0]`；macOS wildcard 连对照组都 0，而绑到确切目的地址的那个
+  把整条流全部拿走）。所以"合并"这个结论留着，**理由从多播换成单播**，位置换成长期在场的那个
+  socket。仪器第一次在 Linux 上读出 `14 of 12` —— 那是场上真实 mDNS 的包，**不过滤成"只数自己
+  发出的那些 id"就会被读成分发规则**。
+* **`ptr-known-half` 那一行是整个抑制判据唯一的分界见证**：规则是 `other.ttl > record.ttl / 2`，
+  所以 asker 声称还剩 2250 秒（4500 的一半）时**必须仍然答**，4500 时沉默，100 时答。三行一起
+  才把 `>` 与 `>=` 分开 —— 少任何一行，一个用错比较符的移植与正确的移植交回一样的答案。
+  另有三条不显然的：**PTR 的相等包含 alias**（指向 `Other-Box` 的 known PTR 不抑制任何东西）、
+  **单播源的查询会同时收到单播与多播两份**、**`AAAA` 答 NSEC 而不是沉默**（mDNS 的"名字存在但
+  没有这个类型"）。`*._dns-sd._udp.local.` 那个 RFC 6763 星形写法参考实现**根本不答**，
+  答的只有 `_services._dns-sd._udp.local.`。
+* **仪器改了产品，而它伪装成一条规则**（§4.2 那一族，这次抄的是 zeroconf 的两个 API）：
+  ① `add_answer_at_time(record, now)` 的第二参是**按哪个时钟算剩余**，不是"asker 拿到的时刻" ——
+  传过去的时间戳把写出的 TTL **变大**（4500 秒的记录变成 `9000`），三条抑制行于是全部沉默，
+  读起来像"参考实现比源码更激进"。② `ServiceInfo.dns_pointer()` 返回**缓存对象**，往它上面写
+  `ttl` 就是改注册着的服务：第一版把 responder 自己的 PTR 改成 100 秒，之后三条答的全是污染，
+  而第四行的答案里直接印着 `an PTR ttl=100`。收口两条：known 段一律 `copy.deepcopy`，且**每个
+  用例建完 known 之后都问一遍注册着的那三条记录的 TTL 还是不是 4500/120/4500**
+  （`assert_service_untouched`）—— 这条断言就是这一格不会再静默发生的地方。
+* **答复语料冻解码表而不是字节**：additionals 是 set 序，本机同一道题两次跑分别给
+  `TXT/SRV/A/NSEC` 与 `SRV/TXT/A/NSEC`，同一次运行里另一行又是 `A/TXT/SRV/NSEC`。广播语料那边
+  只有 `A/NSEC` 一对不确定所以冻两行够用，这里不行。**延迟记着但不作判据**（`delays_ms`，
+  实测 0.3–110.4 ms，模型是 `{SRV,A,AAAA,NSEC}` 立即、其余进 `U(20,120)` ms 的聚合队列）——
+  断言毫秒数就是断言这台机器的计时器。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

@@ -509,6 +509,7 @@ glob 本 crate `src/` 下每个 `.rs`，对每一行 `#[test]` 找到函数体�
 | `pyjson` | CPython JSON 扫描器重放 | `macast-mpv/src/pyjson.rs` |
 | mDNS 广播报文 | **4 行**（announce ×2、goodbye ×2，加一行 probe）| `macast-cast/tests/golden/mdns_announce.hex`，由 `scripts/mdns_announce_probe.py --fixture --dump-hex` 产出 |
 | mDNS 名字规则 | **26 例**（友好名 → instance → SRV 目标）| `macast-cast/tests/golden/mdns_names.jsonl`，同一支探针的 `--dump-names` |
+| mDNS **答复**规则 | **16 例**（一道查询形状一行：哪些记录、哪个段、TTL、flush、目的、抑制结果）| `macast-cast/tests/golden/mdns_responder.jsonl`，由 `scripts/mdns_responder_probe.py --dump-corpus` 产出。**冻解码表不冻字节**，理由见 §14.6 |
 
 **这两行与上面几行的区别值得写出来**：它们是仓库里的文件而不是测试源码里的行，因为报文是
 二进制 —— 而语料的产生器在仓库里（`scripts/mdns_announce_probe.py`），所以"重新冻一次"是一条
@@ -729,6 +730,63 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 命令不是「零匹配」**。）
 
 
+### 14.6 responder 的规则表（取证产出，实现是下一轮）
+
+参考实现**会**回答查询，而我们的端口不会。这一节的每一条都不是从 `zeroconf` 源码读的，
+是 `scripts/mdns_responder_probe.py` 量出来的：起一个只绑 `127.0.0.1` 的真 `Zeroconf`，
+注册**产品自己**会注册的那个服务（属性表来自 `_advertise` 换掉 advertiser，与广播语料同一个
+主人），把查询真的发到 lo0 上的 `224.0.0.251:5353`，再把 `zeroconf._core.async_send_with_transport`
+ recorder 截住的**答复字节**解码。一个字节都没上局域网（查询钉在 lo0 / TTL 1，答复被记录不发送）。
+语料冻在 **`macast-cast/tests/golden/mdns_responder.jsonl`**（16 行，一行一个查询形状）。
+
+冻的是**解码后的记录表**而不是原始字节，这是刻意的，理由与广播语料不同要写清：广播那侧的
+不确定性只有 `A/NSEC` 一对（于是冻两行就够），而**答复里的 additionals 是 set 序**，本机两次跑
+`ptr` 这一道题就分别交出 `TXT/SRV/A/NSEC` 与 `SRV/TXT/A/NSEC`，同一次运行里 `ptr-known-half` 又是
+`A/TXT/SRV/NSEC`。所以比对的是「哪一条记录、在哪个段、TTL 多少、cache-flush 有没有」，不比对字节；
+冻字节的代价是每一次跑都会红一条与产品无关的用例（§4.3 那对 `A/NSEC` 已经教过一次）。**延迟不是判据**：`delays_ms` 在语料里记着，因为它是量到的，
+但 Rust 侧不许断言它——那是这台机器的计时器，不是协议事实。
+
+| 问的是 | 答什么（an=答案段，ar=附带段） |
+|---|---|
+| `PTR _googlecast._tcp.local.` | `an PTR/4500`（无 flush）+ `ar SRV/120 TXT/4500 A/120 NSEC/120`（都带 flush） |
+| `SRV <instance>` | `an SRV/120` + `ar A/120 NSEC/120` |
+| `A <server>.local` | `an A/120` + `ar NSEC/120` |
+| `TXT <instance>` | **只有** `an TXT/4500`，没有任何附带段 |
+| `ANY <instance>` | `an TXT/4500 an SRV/120` + `ar A/120 NSEC/120`（PTR 不在答案里） |
+| `AAAA <server>.local` | `an NSEC/120` —— 这是 mDNS 的"这个名字存在，但没有这个类型"，**不是**沉默 |
+| `PTR _services._dns-sd._udp.local.` | `an PTR/4500` 指向**类型本身**，不是实例 |
+| `PTR *._dns-sd._udp.local.`（RFC 6763 的 DQE 星形写法） | **不答**：参考实现只认识长名字那一个 |
+| `PTR _airplay._tcp.local.`（我们不跑的类型） | **不答**，也不报错 |
+
+四条判决规则，全部在语料里有自己的那一行：
+
+* **已知应答抑制按记录，不按问题，且比较是严格的 `>`**。判据是
+  `other.ttl > record.ttl / 2`（`_dns.py:609-615`），而语料里三行把它夹住了：known=4500 ⇒ 沉默、
+  known=2250（正好一半）⇒ **仍然答**、known=100 ⇒ 答。谁把判据写成 `>=`，除了中间那一行之外
+  没有别的可见后果 —— 所以那一行是这个 Part 存在的理由。
+* **匹配是"记录相等"，而 PTR 的相等包含 alias**：喂一条名字相同、指向 `Other-Box` 的 known PTR ⇒
+  答。这一行同时证明 `known` 段没被当成"同名即算"。
+* **QU 位在读作"单播请求"，但答案仍然走多播**，除非这个记录最近四分之一 TTL 内多播过
+  （`add_qu_question_response`）；本机那一次就是 `+0.3 ms → 224.0.0.251:5353`。
+* **源端口不是 5353 ⇒ 单播回给询问者，并且照样多播一份**（`ptr-ephemeral-src` 那一行抓到**两个**
+  目的：`127.0.0.1:55759` 在 0.3 ms、组播在 110.4 ms）。这是参考实现自己的注释：
+  「We always multicast as well … as long as we haven't done it recently」。
+
+分桶与延迟（记着，不作为判据）：`{SRV, A, AAAA, NSEC}` 是"立即"类型（`_RESPOND_IMMEDIATE_TYPES`），
+其余进聚合队列，延迟 `U(20, 120)` ms、窗口 500 ms（刚多播过的那一支换成 200 ms + 1 s 保护）。
+本机 16 行的实测范围 **0.3–110.4 ms**，与这个模型一致。
+
+**仪器自己犯过的两个错，都长得像产品规则**（§4.2 那一族，这次是 zeroconf 的 API 记忆）：
+① `add_answer_at_time(record, now)` 的第二个参数是**"按哪个时钟算剩余 TTL"**，不是"asker 拿到它的
+时刻"——传一个过去的时间戳会把写出去的 TTL **变大**（本机量到 `ttl=9000` 配一条 4500 的记录），
+于是三条抑制行全部沉默，读起来像"参考实现比源码更激进"。所以记录的"旧"要用**它自己的 ttl** 表达。
+② `ServiceInfo.dns_pointer()` 返回的是**缓存对象**，往它上面写 `ttl` 就是改注册着的那个服务：
+第一版因此把 responder 自己的 PTR 改成了 100 秒，接下来三条抑制行答的全是这次污染，而第四行的
+答案里直接印出 `an PTR ttl=100`。现在 known 段一律走 `copy.deepcopy`，并且**每个用例建完 known
+之后都问一遍"注册着的那三条记录的 TTL 还是不是 4500/120/4500"**（`assert_service_untouched`）——
+这条断言就是这一格不会再次静默发生的地方。
+
+
 ---
 
 ## 15. 刻意不做 / 尚未做
@@ -741,7 +799,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
 | Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT/NSEC/A，unsolicited） | **已交付**（2026-10-18，`macast-cast/src/announce.rs` + 壳在 `main.rs` 里随 8009 起停） | 判据不是"我们自己读得懂"：`verify_rust_receiver.sh` §22 让 `.venv` 里那套 **zeroconf**（参考实现自己用的栈）冷启动去解析，**42.8 秒**后交回完整设备（那一趟整套 **183 条 / 0 失败 / EXIT=0**）—— 而第一串广播那时早就发完了，所以这条同时是 **60 秒 keepalive 的真机见证**。字节层面另有两条冻结语料（`macast-cast/tests/golden/mdns_announce.hex`、`mdns_names.jsonl`，由 `scripts/mdns_announce_probe.py` 产出），其中 announce 有**两行**，因为参考实现那一对 `A/NSEC` 的先后随 `PYTHONHASHSEED` 变（§8 的偏离表与探针注释都写了这一条）。**剩下的不是这一行**：下一行 |
-| mDNS **responder**（回答别人的查询） | **尚未**（形状已定） | 我们只发 unsolicited 广播，不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读，答查询 + 把听到的喂进设备账本。见 §8 的 `announce` 行与 §16 第 13 条（仪器、逐趟读数、以及"第一版结论也错在哪"都记在那里） |
+| mDNS **responder**（回答别人的查询） | **规则已定、实现尚未**（2026-10-18 取证完成，见 §14.6） | 我们只发 unsolicited 广播，不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。**下一轮照 §14.6 那张表写**：16 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 在内存不在设置文件）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
@@ -1111,6 +1169,15 @@ grep -c 'STATUS_MEDIA_NAMES' macast-upnp/src/http.rs            # 期望 **4**�
 ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl
 #   两份 mDNS 语料都在，且产生器在仓库里：
 #   scripts/mdns_announce_probe.py --fixture --dump-hex <前者> / --dump-names <后者>
+ls macast-cast/tests/golden/mdns_responder.jsonl   # 16 行，一行一道查询形状（§14.6）
+grep -c '"case"' macast-cast/tests/golden/mdns_responder.jsonl
+#   期望 **16**。它与 `respond` 那一节的关系是"规则 → 判据"：**实现落地那一轮必须逐行读它**，
+#   而 `ptr-known-half`（2250 = 恰好一半）那一行是抑制判据 `>` 与 `>=` 唯一的分界见证。
+grep -c '^def assert_service_untouched' scripts/mdns_responder_probe.py   # 期望 **1**
+grep -c 'assert_service_untouched(info, baseline' scripts/mdns_responder_probe.py
+#   期望 **1**（每个用例都过一遍）。这条断言之所以存在：第一版仪器把 responder 自己注册着的
+#   PTR 记录的 ttl 改成了 100 —— 三条抑制行的"沉默"全是那次污染，而第四行的答案里直接印着
+#   `an PTR ttl=100`。见 §14.6 末「仪器自己犯过的两个错」。
 grep -c '^    ("multicast\|^    ("unicast' scripts/mdns_reuseport_probe.py
 #   期望 **6**（三例多播 + 三例单播，两种形状各自带一个对照组）。这一支探针是 §8 的 `announce` 行、
 #   §16 第 13 条与 `announce.rs` 头部那一整段读数的**出处**；两种形状必须**成对存在** —— 只留一种
