@@ -548,6 +548,45 @@ pub struct TauriHost {
     pub table: Arc<StateTable>,
     pub log: Arc<Logger>,
     pub service_stopped: Arc<AtomicBool>,
+    /// The Chromecast receiver, once `main.rs` has built one.
+    ///
+    /// A slot rather than a field on `Player` because the direction is
+    /// **inbound**: mpv's events arrive here as [`StateCall`]s, and Python's
+    /// `ProtocolGroup` fans each one out to every protocol in the group — which
+    /// is how `protocol_cast.py:774-795`'s five `set_state_*` methods have any
+    /// content at all. Without that fan-out the Cast wire answers
+    /// `MEDIA_STATUS` from a ledger nothing ever fed: a phone that casts, then
+    /// presses play, reads back whatever the LOAD happened to say.
+    ///
+    /// `Arc<Mutex<..>>` and not a plain field because this struct is cloned into
+    /// `Player` and into every `SharedHooks`; a fresh `Mutex` per clone would
+    /// mean the clone that receives mpv's events is not the clone that was given
+    /// the receiver, and the fan-out would silently never fire.
+    pub cast: Arc<Mutex<Option<Arc<macast_cast::channel::CastChannel>>>>,
+}
+
+impl TauriHost {
+    /// Hand the host its Cast receiver. Called once, from `main.rs`, before the
+    /// player starts — a `StateCall` that arrives first would simply not find a
+    /// receiver to tell, which is the same nothing that happens today.
+    pub fn set_cast(&self, channel: Arc<macast_cast::channel::CastChannel>) {
+        *lock(&self.cast) = Some(channel);
+    }
+
+    /// Empty the slot on the way out, so a stopped receiver cannot be fanned
+    /// into any longer. `stop_services` does it because the alternative is a
+    /// `StateCall` updating the ledger of a channel whose sockets are gone: quiet,
+    /// harmless today (this shell has no restart path), and exactly the kind of
+    /// stale answer that costs someone an afternoon when the path appears.
+    pub fn clear_cast(&self) {
+        *lock(&self.cast) = None;
+    }
+
+    /// The receiver, if one is wired. Cloned out of the lock so no `CastChannel`
+    /// method is ever called while this table's mutex is held.
+    fn cast(&self) -> Option<Arc<macast_cast::channel::CastChannel>> {
+        lock(&self.cast).clone()
+    }
 }
 
 impl Clone for TauriHost {
@@ -558,6 +597,7 @@ impl Clone for TauriHost {
             table: self.table.clone(),
             log: self.log.clone(),
             service_stopped: self.service_stopped.clone(),
+            cast: Arc::clone(&self.cast),
         }
     }
 }
@@ -632,6 +672,15 @@ impl Host for TauriHost {
     fn set_state(&self, call: StateCall) {
         let table = self.table.as_ref();
         let log = self.log.as_ref();
+        // The `ProtocolGroup` fan-out, held until **after** the table writes
+        // below: in the group the DLNA child is primary and its write is what a
+        // GENA subscriber hears, so fanning second means a Cast listener that is
+        // asked `MEDIA_STATUS` right after the event reads a ledger that agrees
+        // with the table instead of racing it. `StateCall` is `Clone`, and the
+        // clone is cheap next to a socket write — the alternative, matching twice
+        // on one owned value, cannot compile at all.
+        let cast = self.cast();
+        let fan = call.clone();
         match call {
             // set_state_position: RelativeTimePosition + AbsoluteTimePosition
             StateCall::Position(text) => {
@@ -676,6 +725,22 @@ impl Host for TauriHost {
             StateCall::TransportError => {
                 table.write("TransportState", json!("STOPPED"), log, true);
                 table.write("TransportStatus", json!("ERROR_OCCURRED"), log, true);
+            }
+        }
+        // Only the five transport-ish calls go out. The rest (`Volume`, `Mute`,
+        // positions, track counters) have no counterpart in the reference:
+        // `grep -n 'def set_state' macast/protocol_cast.py` finds exactly
+        // `eof/transport_error/stop/pause/play` (`:774-795`) and nothing else, so
+        // a sixth call here would be this port inventing a fan-out target the
+        // Python receiver does not have.
+        if let Some(channel) = &cast {
+            match fan {
+                StateCall::Pause => channel.set_state_pause(),
+                StateCall::Play => channel.set_state_play(),
+                StateCall::Stop => channel.set_state_stop(),
+                StateCall::Eof => channel.set_state_eof(),
+                StateCall::TransportError => channel.set_state_transport_error(),
+                _ => {}
             }
         }
     }
@@ -777,6 +842,17 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
 
     // 3. `set_media_live(None)` for the displaced protocol.
     player.note_media_live(None);
+    // The same moment tells the *other* door to give up its opinion —
+    // `ProtocolGroup` fans `release_playback()` to every child that is not the
+    // new owner (`macast/protocol.py`'s guard hands the player over), and on the
+    // Cast side that child is `protocol_cast.py:946`, whose `_media` stays while
+    // `_media_live` clears. Skipping this line is not cosmetic: the next LOAD on
+    // the Cast wire would inherit "this is live" from a clip that stopped playing
+    // minutes ago, and AGENTS.md §4.1's whole three-state rule is about not
+    // letting a stale answer drive a fresh handover.
+    if let Some(channel) = host.cast() {
+        channel.release_playback();
+    }
 
     // 4. `set_state_url(uri)`.
     host.table

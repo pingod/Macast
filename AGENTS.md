@@ -1826,16 +1826,81 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   而且是用**局域网地址**（不是回环）问过的：这张脸不吐令牌、不吐路径、不吐控制动词
   （`$SDIR` 与 `Api_Token` 都不在正文里，非 `GET` 一律 501）。等启用表变成门的时候，
   `main.rs` 里那两处 "Started unconditionally" 注释就是同一批要改的地方。
-* **诚实边界（这条比读数重要）**：`grep -rn "CastChannel" src-tauri/src/` 回 **0 行** —— Cast 的
-  8009 通道还没接进壳，`_googlecast._tcp` 的广播也还是 `*(next)*`，所以**今天没有任何发送端会走到这张脸**。
+  （**同一天的下一轮把这一格变贵了**：Cast 的 8009 也无条件起，见下面那条 —— 那里没有
+  "这张脸不吐控制动词"这条缓解，它就是控制面。）
+* **诚实边界（这条比读数重要，但只活了几个小时）**：那一轮 `grep -rn "CastChannel" src-tauri/src/` 回
+  **0 行** —— Cast 的 8009 通道还没接进壳，`_googlecast._tcp` 的广播也还是 `*(next)*`，所以**当时没有任何发送端会走到这张脸**。
   §20 那 26 条证明的是线与文档的形状（含一次真 TLS 握手 + "8008/8443 交回同一串字节"），
-  不证明"手机找得到这台 Mac"。登记在 `docs/Rust-Port-Design.md` §15（新增一行）与 §16 第 10 条。
-* **计数与一次自我更正**：`macast-cast` 现在 **633** 条，两台仪器都说这个数
+  不证明"手机找得到这台 Mac"。8009 那一格**同一天的下一轮就翻面了**（见下面那条"把 Cast 的 8009
+  通道接进壳"，`grep` 现在回 **6 行**）；广播那一格**仍开着**，所以最后那半句还是今天的读数。
+  登记在 `docs/Rust-Port-Design.md` §15 与 §16 第 10 条。
+* **计数与一次自我更正**：那一轮收尾时 `macast-cast` **633** 条，两台仪器都说这个数
   （`--list` 与逐文件字面扫描；`setup_tests` 30）；`macast-core` 86、`macast-upnp` 316；
   `src-tauri` 2,975 → **3,077 行**。本轮把 `TESTS_IN_THIS_CRATE` 的**散文**先改成了 633、
   常量还留在 632 —— 是附录 B 那条按名字的引用体检抓回来的（下限是 `>=`，低 1 不会红 ⇒
   **没有任何用例会替你发现它**，这正是 §4.13 那句"一个没被机器问过的数字"的形状）。
   **以及本分支从未推送 ⇒ 上面这些用例与那 169 条真机读数没有任何 CI 见证过。**
+
+**Rust 侧把 Cast 的 8009 通道接进壳时量到的事**（2026-10-18，`macast-cast/src/channel.rs` +
+`src-tauri/src/{host,main}.rs`；`channel_tests` **40** 条 + 真机脚本 §21 的 **5** 条）：
+
+* **上一轮那条"诚实边界"翻面了，而翻面之后现形的是一条产品 bug**。`grep -rn "CastChannel" src-tauri/src/`
+  从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）：`main.rs` 走
+  `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，
+  并且**排在 setup 脸之前**（8009 才是发送端要连的口，也是 `setup` 那条"8008 不回落"的理由另一半）。
+  第一次让真发送端连上之后，`vlc_sender_sim.py` 走完 auth → LAUNCH → transportId → LOAD，
+  而 **LOAD 之后只拿到那一次请求驱动的答复，此后一句话都没有**，直到 20 秒耐心用尽自己断开
+  （`READ_POLL` 的 doc 记的就是这三段：一次 BUFFERING、沉默、`Cast sender dropped`）。
+* **成因是"读跨一次阻塞持锁"**（本轮最贵的一格，因为它**不可能**从参考实现抄出来）：
+  `client_loop` 在**持有这条连接的 `Mutex` 期间**做 `read_exact`，而读超时是
+  `set_read_timeout(None)`。rustls 的一次 `read` 会动会话状态，所以必须串行化 —— 但推送
+  （`_watch_playback` 与每一次状态变化）排在同一把锁后面，于是它拿不到锁、发不出去。
+  Python 那边**根本没有这一层**：裸 socket 不需要锁保护加密状态，所以它的写法在这里是错的。
+  修法是 `READ_POLL`（200 ms）轮询 + `read_frame`，**锁在两批字节之间放开**。
+  **牙齿按 §13.4 量过**：把超时改回 `None`（同型替换）之后 §21 **恰好红 1 条**，
+  红的那条交出的就是"投屏之后表从没动过 PLAYING"这句解释；还原 md5 一致
+  （`f9b0bd56ca5fe60ff0ed5c00ffa84b1f`），且**改完必须重新构建**再跑 —— 同一长度的还原会留下
+  一个"有效"的旧产物，那是 Python 侧 stale `.pyc` 那一族的 Rust 版本。
+* **第二格同样只有真 socket 才问得到：先拒再分配**。帧头那 4 字节是**对端给的**（`>I` 能声称
+  4 GiB），而旧实现 `vec![0u8; length]` 先申请再读。参考实现的 `_recv_exact(sock, length)` 是
+  **累积**读，从未一次性申请，所以这条也不是照抄。新增 `MAX_FRAME_BYTES`（8 MiB，
+  **我们选的数，不是从设备上量出来的**），超了交 `InvalidData` 结束会话；
+  这条拒绝今天只到 **DEBUG** 那句 `Cast client disconnected: …`（与对端正常断开同一句），
+  默认阈值下**不进日志** —— 形状记在 `docs/Rust-Port-Design.md` §8 与 §16 第 11 条，
+  要改的是分级，不是上限。
+* **`is_none()` 不是"这一刻写下去能不能被读到"，而 `expect` 的文本可以正好是反面的谎**：
+  `slot()` 从 `expect` 改成 `Option`，因为"表里没有这个 id"是**可达状态** —— `stop()` 会清空整张表，
+  而状态 watcher 比它启动时那个 reader 多活 `LOAD_GRACE_SECONDS`。旧那句 `expect` 写的是
+  "connection slot exists while its client loop runs"，而循环之所以从没回来确认这一点，
+  **正是因为它阻塞在那把需要同一把锁才能注意到的读上** —— 症状与成因同形，
+  这也是上一轮那条 socket 判据（`socket_carries_writes`）的同一族第三格。
+* **夹具自己撒的一次谎（§4.2 那一族，这次是我的 socket 替身）**：第一版用 `Cursor` 当假流，
+  它对短读回的是 `Ok(0)` —— 那是 EOF，走 `BrokenPipe` 分支 —— 于是"分片帧要等下一次轮询才补齐"
+  这条用例**测的是夹具的结束，不是产品的等待**。换成 `LiveSocket`（队列空时交 `WouldBlock`）
+  之后才真的经过 `Ok(None)` 那一路。判据的形状：**替身要按协议交回"还没有"，而不是交回"没有了"**。
+* **验收脚本这一轮错的那一半是观察时机，不是产品**：第一版把状态表放在发送端脚本**返回之后**读，
+  于是永远读回 `STOPPED` 并红 —— 而那支脚本读到 `PLAYING` 就退出，切片 12 秒、发送端耐心 20 秒，
+  **任何"在投屏期间发生"的判据都必须并发地问**（现在先 `soap_action Stop` 当控制，
+  再起一条后台轮询 `STATE_WAIT`，然后才跑发送端）。§4.2 那条「等那个账本，不要抓客户端返回的那一瞬间」
+  第三次在 Rust 侧现形，这次的账本是我们自己的共享状态表。
+* **一处未解释的读数，留在这里而不是被"修好了"覆盖**：§21 第一跑（两处改动之前）的
+  `logs/MPV.log` 里，HTTP 切片投出去**约一秒之后**就有一行 `end-file reason=eof`。
+  两处改动之后这一格没有再现，但**没有任何一次测量把 EOF 归给其中任何一个改动**，
+  而那一趟的临时目录没有保留下来（`MACAST_VERIFY_KEEP=1` 才保留），所以现在**无法复算**。
+  它记为"未解释的观察"，不是"已修"；下一次跑 §21 若再现，判据是那条 `end-file` 的 `reason`
+  与 `file_error`，不是"画面播了"。
+* **两处仍然欠着，方向别读错**：① `_googlecast._tcp` 的广播还没接（§15 那行），
+  §20/§21 能跑只因为脚本**手动填 IP:端口** —— 所以"手机 Cast 按钮里看得到这台 Mac"
+  这句话今天说不出口；② `Macast_Protocols` 那道门现在**比上一轮更贵**：它漏的不只是 8008 上的
+  身份问答，而是**一条真能完成投屏的 8009 控制面**（一个在页面里"关掉 Chromecast"的用户，
+  局域网里任何知道地址的发送端仍然能投）—— 登记在 §16 第 12 条，改的时候 `main.rs` 里那几处
+  "Started unconditionally" 是同一批地方。
+* **计数（两台仪器一致）**：`macast-cast` **637** 条（`--list` 637、逐文件字面扫描 637，整 crate
+  `637 passed; 0 failed; finished in 6.85s`；`channel_tests` 40、`setup_tests` 30），
+  `macast-core` 86、`macast-upnp` 316；真机脚本 **174 条 / 0 失败 / EXIT=0**（§21 5/5、§20 26/26）。
+  `TESTS_IN_THIS_CRATE` 从 633 走到 637 是**量出来的**，而它下面那句"地板比真值低 537"的算术
+  一并删掉了 —— 一个手算的差值会随下一次加用例变成第二句谎，改成"65 对着上面量出的 637"。
+  **以及本分支从未推送 ⇒ 上面这些用例与那 174 条真机读数没有任何 CI 见证过。**
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、

@@ -1858,6 +1858,120 @@ else
     fail "the log never said what the setup face did: '$SETUP_REPORT'"
 fi
 
+echo "== 21: a Chromecast sender's handshake reaches the mpv behind this shell =="
+# The 8009 door, driven by `scripts/vlc_sender_sim.py` — the repo's own replay of
+# VLC's state machine, including its **strict** device-auth parse (`AuthResponse`
+# has two `required` fields, and C++ protobuf refuses a reply that omits them,
+# which is the bug that once made VLC stop after the first byte). Nothing here is
+# stubbed: real TLS, real protobuf-shaped frames, real LOAD, and then mpv.
+#
+# The face is read from the log rather than assumed to be 8009, for the same
+# reason §20 reads the setup port: the number that answers is the number that was
+# bound.
+transport_state() {
+    printf '<?xml version="1.0"?>\n<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">\n<s:Body><u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID></u:GetTransportInfo></s:Body></s:Envelope>' \
+        | curl -s -m 5 -X POST "$BASE/AVTransport/action" \
+            -H 'Content-Type: text/xml; charset="utf-8"' \
+            -H "SOAPACTION: \"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"" \
+            --data-binary @- \
+        | grep -oE '<CurrentTransportState>[A-Z_]+' | sed 's/.*>//' | head -1
+}
+
+wait_transport() {
+    # $1 = the state to wait for, $2 = how many quarters of a second to spend.
+    local i
+    for i in $(seq 1 "$2"); do
+        [ "$(transport_state)" = "$1" ] && return 0
+        sleep 0.25
+    done
+    return 1
+}
+
+CAST_PY="$REPO/.venv/bin/python"
+CAST_PORT_ACTUAL=$(log_grep 'Cast receiver: ' | tail -1 \
+    | sed -n 's/.*listening on \([0-9][0-9]*\).*/\1/p')
+
+if [ -z "$CAST_PORT_ACTUAL" ]; then
+    # Legitimate second outcome: no certificate, so 8009 never came up. The
+    # certificate rule is `cert.rs`'s (adopt an existing pair, never overwrite a
+    # foreign one), and a foreign pair that will not parse is reported by name —
+    # so the absence must be **explained**, or a silent skip becomes a green run
+    # that never knocked on the Cast door at all.
+    if [ -n "$(log_grep 'Cast certificate unavailable')" ] \
+        || [ -n "$(log_grep 'Cast channel could not start')" ]; then
+        pass "8009 is down and the log names the certificate reason"
+    else
+        fail "no Cast receiver and no reason in the log"
+    fi
+elif [ ! -x "$CAST_PY" ]; then
+    skip "no .venv python to run the VLC replay with ($CAST_PY)"
+else
+    # Put the table somewhere else first, so "it reached PLAYING" cannot be the
+    # leftover of §4's or §16's cast. Without this control the assertion below
+    # would pass for a reason that has nothing to do with the Cast door.
+    soap_action Stop >/dev/null 2>&1
+    if wait_transport STOPPED 40; then
+        pass "the DLNA door was told to stop first, so the next PLAYING has one candidate author"
+    else
+        fail "TransportState never read STOPPED (reads $(transport_state))"
+    fi
+    RECONFIG_BEFORE=$(grep -ac 'video-reconfig' "$SDIR/logs/MPV.log" 2>/dev/null)
+
+    # Poll the table **while** the cast is happening, not after it: the clip is
+    # twelve seconds long and the sender's patience is twenty, so a check that
+    # reads the state once the handshake script has returned can only report
+    # `STOPPED` — which is what the first version of this section did, and it read
+    # like a broken fan-out rather than a mistimed look (AGENTS.md §4.2's 「等那个
+    # 事实，不要抓一瞬间」, this time in the reader's favour).
+    (
+        for _ in $(seq 1 240); do
+            [ "$(transport_state)" = "PLAYING" ] && exit 0
+            sleep 0.25
+        done
+        exit 1
+    ) &
+    STATE_WAIT=$!
+
+    SIM_OUT=$(cd "$REPO" && env -u PYTHONPATH -u http_proxy -u HTTP_PROXY -u https_proxy -u HTTPS_PROXY \
+        "$CAST_PY" scripts/vlc_sender_sim.py 127.0.0.1 "$CAST_PORT_ACTUAL" "$MEDIA_URL" 2>&1)
+    SIM_RC=$?
+    wait "$STATE_WAIT"
+    PLAY_SEEN=$?
+    # A zero exit here is a load-bearing claim, not a summary: the simulator
+    # returns True **only** when the Cast wire's own `MEDIA_STATUS.playerState`
+    # says `PLAYING`, and it deliberately refuses `BUFFERING` / `LOADING` as
+    # success ("accepting BUFFERING as success would make this harness pass on a
+    # receiver that never actually plays anything"). The channel's ledger has one
+    # writer — `set_state_play`, reached only through this shell's
+    # `ProtocolGroup`-style fan-out of mpv's events — so this line is the
+    # witness that the fan-out exists. No separate grep of its prose: that would
+    # be the same claim with two authors.
+    if [ "$SIM_RC" = "0" ]; then
+        pass "VLC's state machine got through auth, LAUNCH, transportId and LOAD, and read PLAYING back"
+    else
+        fail "the sender's run failed (rc $SIM_RC):"
+        printf '%s\n' "$SIM_OUT" | tail -14 | sed 's/^/      /'
+    fi
+    printf '%s\n' "$SIM_OUT" | grep -q "transportId=" \
+        && pass "and it was handed a transportId from the LAUNCH reply, not a hardcoded one" \
+        || fail "no transportId in the sender's output"
+
+    # The two doors, one room: the LOAD reached mpv, mpv's own event thread wrote
+    # the shared table, and that is the only path left that can move it now.
+    if [ "$PLAY_SEEN" = "0" ]; then
+        pass "the Cast door moved the shared transport state to PLAYING"
+    else
+        fail "after a cast the table never read PLAYING (now '$(transport_state)') — the doors disagree"
+        echo "  --- logs/MPV.log (tail) ---"; tail -14 "$SDIR/logs/MPV.log" 2>/dev/null
+    fi
+    RECONFIG_AFTER=$(grep -ac 'video-reconfig' "$SDIR/logs/MPV.log" 2>/dev/null)
+    if [ "${RECONFIG_AFTER:-0}" -gt "${RECONFIG_BEFORE:-0}" ]; then
+        pass "mpv reconfigured for video, so the stream really carried a picture"
+    else
+        fail "no new video-reconfig in MPV.log ($RECONFIG_BEFORE -> $RECONFIG_AFTER): audio-only or never started"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

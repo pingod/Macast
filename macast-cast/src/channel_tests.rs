@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macast_core::logging::Logger;
-use macast_upnp::store::{self, Broadcast, SharedBroadcast, SharedRenderer, SharedStore, StateStore};
+use macast_upnp::store::{self, SharedRenderer, SharedStore, StateStore};
 
 use crate::proto::{
     encode_cast_message, parse_cast_message, APP_NAMESPACES,
@@ -101,11 +101,6 @@ impl store::Renderer for RecordingRenderer {
     }
 }
 
-struct NoBroadcast;
-impl Broadcast for NoBroadcast {
-    fn enqueue(&self, _name: &str, _value: &Value) {}
-}
-
 impl Harness {
     fn new() -> Self {
         crate::pin_test_dir();
@@ -121,7 +116,6 @@ impl Harness {
             log,
             Arc::clone(&store) as SharedStore,
             Arc::clone(&renderer) as SharedRenderer,
-            Arc::new(NoBroadcast) as SharedBroadcast,
         );
         Harness {
             store,
@@ -1068,4 +1062,227 @@ fn end_to_end_over_a_real_tls_socket() {
     server.join().unwrap();
     client.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The unsolicited-push witness: a sender that LOADs and then **says nothing**
+/// must still be told when playback actually starts.
+///
+/// Every other test in this file drives the message handlers directly (with a
+/// fake slot and the outbox) or hand-rolls the server side of a frame exchange.
+/// Neither shape can see the bug this one exists for: the client loop used to
+/// hold the connection mutex across a blocking `read_exact` with no timeout, so
+/// a write from any *other* thread — the status watcher's `PLAYING`, which is the
+/// whole reason `LOAD_GRACE_SECONDS` exists — waited for the next inbound frame.
+/// A sender that waits quietly therefore got exactly one status, the
+/// request-driven `BUFFERING`, and gave up. `verify_rust_receiver.sh` §21
+/// measured that on 2026-10-18 against a real `vlc_sender_sim.py`; this is the
+/// same claim at unit speed, and it fails for the same reason: no second
+/// `MEDIA_STATUS` inside the window.
+#[test]
+fn a_quiet_sender_still_hears_about_playback() {
+    crate::pin_test_dir();
+    let dir = std::env::temp_dir().join(format!("macast-cast-quiet-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = Logger::named("Chromecast");
+    let pair = crate::cert::ensure_pair(&dir, &log).expect("a test pair");
+    let config = pair.server_config().expect("a server config");
+
+    // The player already says PLAYING: on a real receiver the event thread gets
+    // there in a few hundred ms after LOAD. What is under test is not how the
+    // table learned it but whether the message can *leave*.
+    let store = Arc::new(RecordingStore {
+        transport_state: Mutex::new("PLAYING".into()),
+        transport_status: Mutex::new("OK".into()),
+    });
+    let renderer = Arc::new(RecordingRenderer {
+        calls: Mutex::new(Vec::new()),
+    });
+    let channel = CastChannel::new(
+        Arc::clone(&log),
+        Arc::clone(&store) as SharedStore,
+        Arc::clone(&renderer) as SharedRenderer,
+    );
+    *channel.config.lock().unwrap() = Some(config);
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_channel = Arc::clone(&channel);
+    let server = std::thread::spawn(move || {
+        let (stream, addr) = listener.accept().unwrap();
+        server_channel.handle_connection(stream, addr)
+    });
+
+    let socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    // Short and bounded: `read_frame` reports "nothing yet" rather than holding
+    // the client hostage, which is what lets this test have a deadline at all.
+    socket.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in crate::cert::read_certs(&pair.cert).unwrap() {
+        roots.add(certificate.clone()).unwrap();
+    }
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap();
+    let conn = rustls::ClientConnection::new(Arc::new(client_config), name).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, socket);
+
+    let load = wrap_frame(&encode_cast_message(
+        "sender-1",
+        TRANSPORT_ID,
+        NS_MEDIA,
+        json!({
+            "type": "LOAD",
+            "requestId": 7,
+            "autoplay": true,
+            "currentTime": 0,
+            "media": {
+                "contentId": "http://example.invalid/clip.mp4",
+                "contentType": "video/mp4",
+                "streamType": "BUFFERED",
+                "metadata": {"type": 0, "metadataType": 0, "title": "quiet witness"},
+            },
+        })
+        .to_string(),
+    ));
+    tls.write_all(&load).unwrap();
+    tls.flush().unwrap();
+
+    let mut pending: Vec<u8> = Vec::new();
+    let mut states: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline && !states.iter().any(|s| s == "PLAYING") {
+        match read_frame(&mut tls, &mut pending) {
+            Ok(Some(body)) => {
+                let msg = parse_cast_message(&body);
+                let payload: Value = serde_json::from_str(&msg.payload_utf8).unwrap_or(Value::Null);
+                for status in payload
+                    .get("status")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                {
+                    if let Some(state) = status.get("playerState").and_then(Value::as_str) {
+                        states.push(state.to_string());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => panic!("the connection ended early: {e}"),
+        }
+    }
+
+    // Hang the receiver up so the server thread's loop sees EOF and exits.
+    drop(tls);
+    let _ = server.join();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        states.iter().any(|s| s == "BUFFERING"),
+        "the request-driven BUFFERING never arrived: {states:?}"
+    );
+    assert!(
+        states.iter().any(|s| s == "PLAYING"),
+        "the sender heard nothing after LOAD while it stayed quiet — got {states:?}. \
+         That is the read-holds-the-write bug: the watcher's push was blocked on the \
+         mutex the reader owns."
+    );
+}
+
+/// A stand-in for a **live** socket mid-handshake: it hands over whatever bytes
+/// have arrived and says `WouldBlock` when there is nothing, which is the only
+/// thing that makes `read_frame`'s `Ok(None)` reachable.
+///
+/// A `Cursor` cannot express this, and the difference is the branch under test:
+/// an exhausted `Cursor` returns `Ok(0)` — EOF, "the peer is gone" — while a
+/// quiet socket returns nothing at all and stays open. The first test that tried
+/// the `Cursor` here "passed" only because the read happened to end at a frame
+/// boundary; the moment it did not, the assertion failed with `BrokenPipe` and
+/// said the real thing: the fixture was claiming a disconnection.
+struct LiveSocket {
+    queued: Vec<u8>,
+}
+
+impl std::io::Read for LiveSocket {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.queued.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "nothing has arrived",
+            ));
+        }
+        let n = self.queued.len().min(buf.len());
+        buf[..n].copy_from_slice(&self.queued[..n]);
+        self.queued.drain(..n);
+        Ok(n)
+    }
+}
+
+fn frame_of(body: &[u8]) -> Vec<u8> {
+    let mut bytes = (body.len() as u32).to_be_bytes().to_vec();
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+#[test]
+fn a_frame_claiming_more_than_the_cap_is_refused_before_it_is_allocated() {
+    crate::pin_test_dir();
+    // `proto`'s own reading of a high-bit prefix is 2 GiB (its test asserts
+    // `frame_length(&[0x80, 0, 0, 0]) == 2_147_483_648`), and the peer that sent
+    // those four bytes has authenticated as nothing. The old loop answered that
+    // with `vec![0u8; length]`.
+    let claim = frame_of(&[0u8; 0]);
+    let mut lying = claim[..FRAME_HEADER_LEN].to_vec();
+    lying[0..4].copy_from_slice(&(MAX_FRAME_BYTES as u32 + 1).to_be_bytes());
+    let mut source = LiveSocket { queued: lying };
+    let mut pending = Vec::new();
+    let error = read_frame(&mut source, &mut pending)
+        .err()
+        .expect("an over-long claim is refused, not allocated");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+    assert!(
+        error.to_string().contains("past the"),
+        "the message must name the rule: {error}"
+    );
+}
+
+#[test]
+fn a_split_frame_waits_without_the_lock_and_completes_on_the_next_poll() {
+    crate::pin_test_dir();
+    let body = b"{\"type\":\"PING\"}";
+    let whole = frame_of(body);
+    let mut source = LiveSocket {
+        queued: whole[..FRAME_HEADER_LEN + 3].to_vec(),
+    };
+    let mut pending = Vec::new();
+    assert!(
+        read_frame(&mut source, &mut pending).unwrap().is_none(),
+        "three bytes of a sixteen-byte body is not a frame"
+    );
+    assert_eq!(
+        pending.len(),
+        FRAME_HEADER_LEN + 3,
+        "the partial frame is this function's state, not something dropped on the floor"
+    );
+    // The rest arrives on a later poll — the same buffer, the same call.
+    source.queued = whole[FRAME_HEADER_LEN + 3..].to_vec();
+    let frame = read_frame(&mut source, &mut pending)
+        .unwrap()
+        .expect("the frame completes");
+    assert_eq!(frame, body);
+    assert!(pending.is_empty(), "the buffer is drained for the next frame");
+}
+
+#[test]
+fn a_peer_that_closes_ends_the_session_instead_of_spinning() {
+    crate::pin_test_dir();
+    // `Ok(0)` is EOF, and EOF is not "nothing yet": the client loop must return,
+    // not re-lock and re-poll a socket nobody is going to write on again.
+    let mut closed = std::io::Cursor::new(Vec::new());
+    let mut pending = Vec::new();
+    assert_eq!(
+        read_frame(&mut closed, &mut pending).err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::BrokenPipe),
+        "an immediate EOF must not read as a quiet poll"
+    );
 }

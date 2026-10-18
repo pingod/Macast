@@ -406,17 +406,20 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 633 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 633, and the scanner below counts 633 `#[test]`
+    /// 637 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 637, and the scanner below counts 637 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
     /// check that neither is reading a stale file (it is deliberately
     /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
     /// the scan because they sit in `src/` itself). The largest contributors are
     /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
-    /// `airplay_tests` 60, `push_tests` 46, `resolve` 39, `channel_tests` 36,
+    /// `airplay_tests` 60, `push_tests` 46, `channel_tests` 40, `resolve` 39,
     /// `setup_tests` 30, this file 19, `engine_tests` 17 and `cert` 12. The
-    /// previous value, 603, was carried by the same two instruments until
-    /// `setup.rs` landed with its own module;
+    /// previous values, 603 and 633, were carried by the same two instruments
+    /// until `setup.rs` landed with its own module, and then until the Cast
+    /// connection itself was reached by a real socket (2026-10-18, +4 in
+    /// `channel_tests`: the starvation witness plus the frame cap, the split
+    /// frame and the peer that closes);
     /// `601 passed; 1 failed` in an older run is a *602-test* run with one
     /// failure, not a third floor — the sum of passed and failed is what has to
     /// reach this number.
@@ -428,13 +431,14 @@ mod tests {
     ///
     /// **The stale half of this cell belongs to the record**: the value two floors
     /// ago was 65 — "35 channel + 18 proto + 12 cert" — and it was never brought
-    /// back here while seven later modules were added. That is not a harmless under-floor: `scanned >= floor` with a floor 537 below the truth
-    /// means the audit cannot see a deleted module at all, and the one thing the
+    /// back here while seven later modules were added. That is not a harmless under-floor: `scanned >= floor` with a floor that far below the truth (65 against the
+    /// 637 measured above) means the audit cannot see a deleted module at all, and
+    /// the one thing the
     /// number exists to catch stops being caught. So a round that adds tests must
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 633;
+    const TESTS_IN_THIS_CRATE: usize = 637;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

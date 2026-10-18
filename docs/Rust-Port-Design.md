@@ -322,6 +322,8 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `setup`（非 `GET`） | `501` + **无正文**；Python 也回 501，但带 `BaseHTTPRequestHandler` 生成的 `text/html` 错误页 | 抄那页 HTML 就是把 CPython 的模板串放进我们的字节里，而唯一的读者（`dial.py:173-184`）把 `HTTPError` 折成一句 warning，从不渲染正文 |
 | `setup`（8008 的端口回落） | **不回落**：绑不上 8008 就交回 `Err`，而不是参考实现那样沿 `PORT_FALLBACK_RANGE` 走 20 个口 | 两条理由合成一条：`dial.py:25` 把 8008 钉死，所以 8010 上的这张脸是"绑上了但没人敲"；而回落的第一步就是 **8009**，那是 Cast socket 的口。参考实现能承受这个重叠，是因为它 `start()` 里**先**绑 Cast 再绑 setup（`protocol_cast.py:411-413`），8009 已在自己手里；一个还没接上 Cast 通道的壳只会把它抢走。判据：`setup_tests` 的 `d_a_taken_port_…` 用一份**同样绑在 0.0.0.0** 的夹具占住口（第一版用 `127.0.0.1` 占，结果 wildcard 绑定照样成功，那条"拒绝"从未发生 —— 夹具没生产会遇到的形状，用例就是在测夹具） |
 | `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
+| `channel`（读的方式） | Python 在**裸 socket** 上阻塞读、读期间不持任何锁；本端口**每条连接一把锁**，所以读改成 `READ_POLL`（200 ms）轮询，**锁在两批字节之间放开** | 这是"参考实现做不到"的那一类，不是风格：rustls 的一次 `read` 会动会话状态，必须串行化，而把锁跨在一次无限阻塞读上会让**同一根 socket 上的所有推送饿死** —— `_watch_playback` 与状态变化都排在那把锁后面，发送端 LOAD 之后只拿到那一次请求驱动的答复、此后一句话都没有，直到它自己断开（2026-10-18 接进壳之后由 §21 量出，见 §16 第 11 条）。Python 那边根本没有这一层，所以这一格**不可能**由"照抄它的写法"得到正确答案 |
+| `channel`（`MAX_FRAME_BYTES`） | 帧头声称的长度 > 8 MiB 时**先拒再分配**（`InvalidData`，不 `vec![0u8; length]`）；参考实现没有这个上限，它 `_recv_exact(sock, length)` 一路累积 | 那 4 字节是**对端给的**，`>I` 能声称 4 GiB。Python 的累积读至少不会一次性申请，而我们的实现一旦先申请就给了"一个谎长度打爆接收端"的形状。代价要写清：一台**真的**发 >8 MiB 帧的发送端在这里会被断开而不是收下。**8 MiB 是我们选的数，不是从设备上量出来的上限**（本局域网没有真 Chromecast，§16 第 1 条），它的依据只有两条：正文是 JSON 与 protobuf 控制消息，而 `>I` 那个字段可以对端随口写。**这一句只到"会话结束"，不到"用户看得见"**：`client_loop` 的错误统一走那句 `Cast client disconnected: {e}`，而它是 **DEBUG** 级（与对端正常断开同一句，`channel.rs` 的 `handle_connection` 尾部），所以默认阈值下这条拒绝**不进日志**。这是今天的形状，不是已验证的决定 —— 要把安全侧的那一格抬到 INFO，改的是这一句分级，不是上限 |
 
 **读代码时要找的下一类偏离**：任何一处"Rust 里做不到 / 做起来别扭"的 Python 行为，
 就是必须新增一行账的地方。不允许的处理方式是把它简化掉并在提交信息里不提。
@@ -530,6 +532,13 @@ reaches the mpv this page drives.'"*
   会把回环请求送去代理，产出一个看起来像"端口死了"的 `000`。
   `-m 40`：`cast-resolved` 会同步跑源站探测（`probe_proxy`，转封装那一路最长
   `GROW_WAIT_SECONDS` = 20）。
+- **段 21 的"投屏进 Cast 通道"要**并发**轮状态表，不能等发送端脚本返回**（2026-10-18 自己踩过）：
+  `vlc_sender_sim.py` 跑到自己是 `PLAYING` 就退出，而共享传输状态表在那之后还会继续被
+  渲染器更新；第一版把 `wait_transport` 写在脚本返回**之后**，于是**产品是对的、读数是空的**。
+  现在先 `soap_action Stop` 当控制（证明"表停在 STOPPED 不是因为我们没问"），再起一条
+  后台轮询（`STATE_WAIT`），然后才跑发送端 —— 与 `AGENTS.md` §4.2 那条
+  「凡是"某件事发生过"的判据坐在别人的账本上，就要等那个账本」同一条规矩，
+  只是这次的账本是我们自己的状态表。
 
 ### 13.4 变异纪律：0 红是问题，不是成绩
 
@@ -707,7 +716,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | 事项 | 状态 | 出处 |
 |---|---|---|
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
-| Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、播放看门狗） | **尚未** —— 本轮才发现并登记 | 判据：`grep -rn "CastChannel" src-tauri/src/` 在这台机器上回 **0 行**。也就是说今天这个壳对外只有 DLNA + 这张 setup 脸；setup 面答得再对，也没有发送端会走到它 —— 下一行那条广播是同一件事的另一半 |
+| Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT，unsolicited） | **尚未** | `lib.rs` 的 `*(next)*`；`mdns.rs` 只做了**浏览器**那半 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
@@ -721,8 +730,12 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 1. **这个局域网里没有真 Chromecast**（项目 memory 记录）。电视 192.168.1.13 常常整机关掉，
    看到的 `Macast(...)` 是**别的 Macast 实例**（192.168.1.68），不是接收端；
    自己应答自己的 mDNS/SSDP 查询**不算"发现了设备"**。
-   所以 §13.3 的真机脚本验的是**控制点侧**（DLNA 那一族），Cast 的 TLS 那一侧
-   目前只有我们自己的假设备与单元层。
+   所以 §13.3 的真机脚本从头到尾验的都是**我们这侧的接口认不认账**，不是"别人家的设备行不行"。
+   Cast 的 TLS 那一侧**从 2026-10-18 起多了一个见证者**：真机脚本的 §21 用仓库里那支
+   **复刻 VLC 状态机**的发送端（`scripts/vlc_sender_sim.py`，含严格 protobuf 语义、必须读到
+   `PLAYING` 才算通过）打我们自己这张脸。但它**不是手机/HA 实际用的那套 pychromecast 栈**
+   （AGENTS.md §4.9 那一族靠的是 `cast_conformance.py`，而它打的是 **Python** 接收端），
+   也**不是真电视**：Google 官方发送端的设备认证那一格，本局域网里没有设备可问，仍然欠着。
 2. **本分支从不推送**（项目 memory：`refactor/rust-tauri-2 … never push it`）。
    因此**没有任何 CI 见证**过这里的任何一条用例；每一句"通过"都必须来自本机的读数。
 3. **两处"陈述落后于代码"的债，本轮（2026-10-18）关掉，写法改成不钉行号**：
@@ -793,7 +806,8 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
    `lib.rs` 的 `DebugWindow` 故意一次只让一个用例抬高它）。改成按**级别**断言（`loud()`：
    只看 INFO 及以上）之前的读数是 **`--lib targets` 14 跑红 12**，而**整 crate 6 跑红 0**；
    之后是模块级 4 跑 0 红、整 crate 3 跑 0 红（603 passed 每次，约 7 秒 —— 那两个读数都是
-   **setup 落进之前**的 603；本轮结束时同两台仪器都说 **633**）。
+   **setup 落进之前**的 603；Cast 接进壳之后（2026-10-18）同两台仪器都说 **637**，
+   整 crate 那一趟是 `637 passed; 0 failed; finished in 6.85s`）。
    上一轮那次"并发整 crate 5 红 / 24 次、串行 12 次 0 红"的读数让人以为
    `DebugWindow` 已经收干了这一族 —— **它只收了读 DEBUG 的那一半，没收断言沉默的那一半**，
    而后者只在模块级过滤器下才现形。所以 §13 那三层里第一层的正确做法是
@@ -803,19 +817,38 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
    默认阈值 INFO 把它滤掉了。修法不是放宽断言，是**把窗口打开再问**（`crate::DebugWindow::armed()`
    包住那一次 `start_on`，断言之后再放手）：**沉默的证据要按级别问，响亮的证据也一样**，
    两边都不能让别人的调度决定这一格有没有被问过。
-10. **setup 面今天没有任何发送端会走到**（本轮登记的新边界）：这张脸答得再对，
-    发现它的那两条路都还没接进壳 —— `_googlecast._tcp` 的广播仍是 `*(next)*`（§15），
-    而 Cast 的 8009 通道 `grep -rn "CastChannel" src-tauri/src/` 回 **0 行**。
-    所以 §20 那 26 条证明的是**线与文档的形状**（含一次真 TLS 握手），
-    不证明"手机找得到这台 Mac"。把这两格里任何一格接上之前，
-    谁把 setup 面交付读成"Chromecast 接收端可用"都是读错了。
-11. **壳对所有脸都不看 `Macast_Protocols`**（本轮发现的一处既有缺口，setup 也继承它）：
-    那份协议启用表今天只用来生成 `query=status` 的 `protocol` 字段，DLNA 的 HTTP/SSDP
-    与本节的 8008/8443 都无条件起。后果是可行动的：一个在页面里"关掉 Chromecast"的用户
-    仍会在 8008 上被问到设备身份。这一格**记在代码注释里**（`main.rs` 的那段
-    "Started unconditionally"）并在这里登记；等启用表变成门的时候，那两处是同一批要改的地方。
-    缓解只有一条事实那么宽：这张脸不吐令牌、不吐路径、不吐任何控制动词 ——
+10. **靠发现找设备的发送端仍然找不到这台 Mac**（2026-10-18 关掉这一条的一半）：
+    它原来写的是"setup 面今天没有任何发送端会走到"，理由有两格 —— `_googlecast._tcp`
+    的广播还是 `*(next)*`（§15），而 Cast 的 8009 通道在壳里 `grep -rn "CastChannel" src-tauri/src/`
+    回 **0 行**。**后一格已翻面**（6 行，且 §21 真的把一支发送端打了进去），
+    **前一格仍开着**：没有 PTR/SRV/TXT 广播，手机 Cast 按钮的设备列表里就不会出现这个接收端。
+    §20 与 §21 能跑，只因为脚本**手动填了 IP:端口**。
+    所以"Chromecast 接收端可用"今天能说到的范围是：**已经知道地址的发送端**能用；
+    **指望 mDNS 发现**的那一类不能用。这句边界在 §15 的广播那一行有对应的待做条目，
+    两处必须一起读，别只读交付了的那一半。
+11. **读不许跨阻塞持锁 —— 这一格是接进壳之后才现形的产品 bug**（同一轮，2026-10-18）：
+    `client_loop` 第一版在**持有那条连接的 `Mutex` 期间**做 `read_exact`，而读超时是
+    `set_read_timeout(None)`（无限）。后果不是崩溃，是**推送饿死**：`_watch_playback`
+    和状态变化都想 `send` 到同一个 socket，它们拿不到锁，于是发送端 LOAD 之后**只拿到那一次
+    请求驱动的答复，此后一句话都没有**，直到它自己断开。Python 那边根本没有这一层 —— 它的裸 socket
+    不需要一把锁来保护加密状态，而 rustls 需要（一次 `read` 会动到会话状态）。
+    现在读走 `READ_POLL`（200 ms）轮询 + `read_frame`，**锁在两批字节之间放开**；
+    同一趟还把 `vec![0u8; length]` 换成 `MAX_FRAME_BYTES`（8 MiB）之上的**先拒后分配**，
+    因为参考实现的 `_recv_exact` 是**累积**读的，从未按对端声称的长度一次性分配 ——
+    那是"一个谎言长度就能让接收端 malloc"的形状，而它在 36 条老的 `channel_tests` 里
+    **一条都问不到**（它们喂的是已经到齐的帧）。
+    教训的形状：**这一族 bug 只有真 socket 才教得了**，而"接进壳"之所以是一等里程碑，
+    就是因为它把单元层够不到的那部分换成了 §21 与四条新用例（饿死见证、帧上限、
+    分片帧在轮询之间补齐、对端关掉时结束会话而不是空转）。
+12. **壳对所有脸都不看 `Macast_Protocols`**（一处既有缺口，setup 与本轮接进来的 8009 都继承它）：
+    那份协议启用表今天只用来生成 `query=status` 的 `protocol` 字段，DLNA 的 HTTP/SSDP、
+    8008/8443 与 **Cast 的 8009 TLS 会话**都无条件起。后果是可行动的：一个在页面里
+    "关掉 Chromecast"的用户，仍会在 8008 上被问到设备身份、**并真的能在 8009 上完成一次投屏**。
+    这一格**记在代码注释里**（`main.rs` 的那段
+    "Started unconditionally"）并在这里登记；等启用表变成门的时候，那**三**处是同一批要改的地方。
+    缓解只有一条事实那么宽：setup 那张脸不吐令牌、不吐路径、不吐任何控制动词 ——
     §20 拿**局域网地址**（不是回环）问过一遍，正文里既没有 `Api_Token` 也没有 `$SDIR`。
+    （8009 那一侧**没有**这条缓解：它就是控制面，所以这一格的真实代价要按 §21 那条路读。）
 
 ---
 
@@ -861,14 +894,19 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
   | sort -u | while read f; do [ -f "$f" ] || echo "MISSING $f"; done
 # 本文引用的**语句**仍在（每条都有唯一的字串可搜；右边的期望值是 2026-10-18 量出来的，
 # 不是"看起来应该"）
-grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs          # 期望 **633**
+grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs          # 期望 **637**
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
 grep -c "has not been written yet" macast-mpv/src/lib.rs        # 期望 **0**（本轮改的注释）
 grep -rn "targets::" src-tauri/src/                             # 期望 ≥2 行（§15）
-grep -rn "CastChannel" src-tauri/src/                           # 期望 **0**（§16 第 10 条）
+grep -rn "CastChannel" src-tauri/src/                           # 期望 **6** 行（`host.rs` 4 + `main.rs` 2，§15）
+grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**（§8 与 §16 第 11 条那一格：
+#   一次跨阻塞读的无限超时就是那次推送饿死；这一行是那条修复的**反向**哨兵，
+#   谁把它改回 `None`，§21 与 `a_quiet_sender_still_hears_about_playback` 会红，
+#   而这条 grep 是它在文档里的对应物）
+grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **23**（§20 是最后一节）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **24**（§21 是最后一节）
 grep -n "DEVICE_PUSH_UNAVAILABLE\|这台设备还投不了" src-tauri/src/host.rs \
      scripts/verify_rust_receiver.sh
 #   期望恰好两处，而且**都不是产品代码**：host.rs 里那句"这替换了什么"的历史说明，

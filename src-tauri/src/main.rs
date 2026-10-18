@@ -113,6 +113,9 @@ struct Runtime {
     ssdp: Arc<SsdpPlugin>,
     eventing: Arc<Eventing>,
     relay: Arc<relay::RelayStore>,
+    /// The Chromecast receiver on 8009, when it started. `None` means there was
+    /// no certificate to serve, and the setup face said so on its own line.
+    cast: Option<Arc<macast_cast::CastChannel>>,
     /// The Chromecast setup face (8008, and 8443 when a certificate came up).
     /// `Option` because the plain listener may be refused (someone else holds
     /// 8008) and `SetupServer` itself already carries "is 8443 up" in
@@ -158,6 +161,19 @@ impl Runtime {
         self.relay.clear();
         self.ssdp.stop();
         self.http.stop();
+        // The Cast receiver stops with the other listeners, and its slot in the
+        // host is emptied on the way: `stop()` wipes the ledger, so a `StateCall`
+        // fanned into a stopped channel would be updating a table that can never
+        // be read again — and the day a restart path exists, the last thing that
+        // should happen is a new session reading the previous one's `PLAYING`.
+        if let Some(channel) = self.cast.as_ref() {
+            let owned = Arc::clone(channel);
+            owned.stop();
+            self.host.clear_cast();
+            self.host
+                .log
+                .info(&format!("Cast receiver on {} stopped", owned.port()));
+        }
         // The setup face closes with the other two HTTP faces rather than first:
         // a sender that already read `eureka_info` has our USN and 8009 for the
         // length of its cache, and there is no goodbye to send on this face — it
@@ -880,12 +896,20 @@ pub fn run() {
                 config.scripts_dir,
             ));
 
+            // One logger for both Chromecast faces — the 8009 receiver and the
+            // 8008/8443 setup face share `protocol_cast.py`'s module, so their
+            // rows land in the same claimed file (§4.10b's "one record, one file"
+            // read from the other side: one record type, one file).
+            let cast_log = Logger::named(setup::LOGGER_NAME);
+            let _cast_log_path = cast_log.claim();
+
             let host = TauriHost {
                 app: handle,
                 setting: setting.clone(),
                 table: table.clone(),
                 log: log.clone(),
                 service_stopped: service_stopped.clone(),
+                cast: Arc::new(Mutex::new(None)),
             };
             let player = Player::new(host.clone(), config);
 
@@ -903,6 +927,15 @@ pub fn run() {
             // object, both roles, because in the reference they are one thread.
             let eventing = Eventing::new(table.clone() as SharedStore);
             table.set_broadcaster(eventing.clone() as SharedBroadcast);
+            // One renderer object, two doors. `ShellRenderer` is stateless over
+            // the `Player`, so two instances would *answer* the same today — and
+            // the day one of them gains a field (the last-cast title, say) the
+            // DLNA door and the Cast door would start disagreeing about what the
+            // player was handed, which is exactly the class of bug §4.8 keeps
+            // naming. Hoisted above `Soap::new` for that reason, not for tidiness.
+            let renderer = Arc::new(host::ShellRenderer {
+                player: player.clone(),
+            }) as SharedRenderer;
             let scpd = Arc::new(Scpd::embedded()?);
             let soap = Soap::new(
                 scpd,
@@ -911,9 +944,7 @@ pub fn run() {
                 // renderer, so there is no `ProtocolGroup` fan-out to reproduce here
                 // (`macast/protocol_group.py`), and `ShellRenderer` is the single
                 // delegate `Renderer::methods()` would have enumerated.
-                Arc::new(host::ShellRenderer {
-                    player: player.clone(),
-                }) as SharedRenderer,
+                Arc::clone(&renderer),
                 eventing.clone() as SharedBroadcast,
                 setting.clone(),
             );
@@ -1002,22 +1033,62 @@ pub fn run() {
             // it reaches *this* struct's `stop_services`.
             let ssdp = SsdpPlugin::new(Arc::new(host.clone()) as SharedHooks, setting.clone());
 
-            // The Chromecast setup face (8008, plus 8443 when a certificate
-            // exists). Its lines belong to the module's own log file: Python's
-            // `protocol_cast.py:35` writes through `logging.getLogger("Chromecast")`,
-            // which `logsplit` claims, so claiming here is what keeps §4.10b's
-            // "one record, one file" true instead of dropping these rows into
-            // `macast.log` beside the DLNA ones.
-            let cast_log = Logger::named(setup::LOGGER_NAME);
-            let _cast_log_path = cast_log.claim();
+            // The Chromecast receiver and its setup face are one protocol, so they
+            // share a certificate, a log file, and — load-bearing — an **order**:
+            // 8009 binds before the setup face looks for 8008, because a setup
+            // listener that walks its fallback range would step onto 8009 and take
+            // the socket from under the receiver. The reference is in the same
+            // order for the same reason (`protocol_cast.py:411-413` starts the TLS
+            // server first), and `setup.rs`'s header says why this port does not
+            // copy the range at all.
+            //
             // The certificate is the shared `macast.*` pair when one is already
             // there and our own otherwise (`ensure_in_setting_dir` owns that rule,
             // including "a broken foreign pair is reported by name and left
-            // alone"). A pair we cannot load is not a reason to lose the plain
-            // face, so the failure path hands `None` down and the module logs the
-            // reference's own sentence about 8443.
-            let setup_config = match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
-                Ok(pair) => match pair.server_config() {
+            // alone"). No pair costs 8009 and 8443; the plain 8008 face needs no
+            // certificate and still answers.
+            let cast_pair = match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
+                Ok(pair) => Some(pair),
+                Err(e) => {
+                    cast_log.warning(&format!(
+                        "Cast certificate unavailable ({}) — neither 8009 nor 8443 can start; 8008 still answers",
+                        e.message()
+                    ));
+                    None
+                }
+            };
+            let cast_channel = {
+                let channel = macast_cast::CastChannel::new(
+                    Arc::clone(&cast_log),
+                    table.clone() as SharedStore,
+                    Arc::clone(&renderer),
+                );
+                // Registered **before** it starts: a `StateCall` that arrives in
+                // between should fan out to a receiver that has not bound yet
+                // rather than be dropped, because the Cast ledger is only a record
+                // of what mpv says and a missed `PLAYING` is a wrong
+                // `MEDIA_STATUS` for the rest of that session.
+                host.set_cast(Arc::clone(&channel));
+                match &cast_pair {
+                    Some(pair) => match channel.start(pair) {
+                        Ok(()) => Some(channel),
+                        Err(e) => {
+                            cast_log.warning(&format!(
+                                "Cast channel could not start: {e} — senders will find no 8009 here"
+                            ));
+                            None
+                        }
+                    },
+                    // `start` needs a certificate to wrap connections with; the
+                    // refusal above already said which ports that costs.
+                    None => None,
+                }
+            };
+            let cast_report = cast_channel
+                .as_ref()
+                .map(|channel| channel.port().to_string());
+            let setup_config = match &cast_pair {
+                Some(pair) => match pair.server_config() {
                     Ok(config) => Some(config),
                     Err(e) => {
                         cast_log.warning(&format!(
@@ -1027,13 +1098,7 @@ pub fn run() {
                         None
                     }
                 },
-                Err(e) => {
-                    cast_log.warning(&format!(
-                        "Cast HTTPS setup: no certificate available ({}); answering over 8008 only",
-                        e.message()
-                    ));
-                    None
-                }
+                None => None,
             };
             // **Started unconditionally**, which is a gap this shell has already
             // and not one this face introduces: the DLNA receiver answers
@@ -1093,6 +1158,7 @@ pub fn run() {
                 ssdp: ssdp.clone(),
                 eventing: eventing.clone(),
                 relay: relay_store,
+                cast: cast_channel,
                 setup,
             });
 
@@ -1117,6 +1183,17 @@ pub fn run() {
             // requested one, and say plainly when 8443 is not there — a user
             // comparing this line with a sender's "Failed to determine cast type"
             // warning is reading the two halves of one fact.
+            match &cast_report {
+                // The channel logs its own "ChromecastProtocol started on port"
+                // line inside `start()`; this is the shell's answer to "did it",
+                // phrased the way the HTTP and SSDP lines above are — the bound
+                // number, or the reason there is none.
+                Some(port) => log.info(&format!("Cast receiver: 8009 listening on {port}")),
+                None => log.info(
+                    "Cast receiver: not listening — no certificate to wrap 8009 with \
+                     (the setup face says the same about 8443)",
+                ),
+            }
             match &setup_report {
                 Some(text) => log.info(&format!("setup face: {text}")),
                 None => log.info("setup face: not listening on 8008"),

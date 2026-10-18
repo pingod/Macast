@@ -15,6 +15,19 @@
 //! the traits is the whole point; depending on a second table would be the bug
 //! AGENTS.md §4.8's oldest lesson says always shows up in front of a user.
 //!
+//! **This face reads the table; it never writes it and never enqueues GENA.**
+//! That is the reference's shape, not a shortcut: `grep -n set_state
+//! macast/protocol_cast.py` returns only the *definitions* of
+//! `set_state_eof/stop/pause/play` (`:774-795`) — the five methods a
+//! `ProtocolGroup` fans *into* this protocol when mpv reports what it is doing.
+//! A previous version of this struct held a `SharedBroadcast` "for when the
+//! wiring layer lands"; the wiring landed on 2026-10-18 and the measurement
+//! above is why the handle was **dropped** rather than used: the Cast door has no
+//! announcement to make, because the door that owns the announcement is the
+//! player's own event path (`macast_renderer/mpv.py` → `set_state_*` → the
+//! DLNA-side table). What `src-tauri` owes this crate instead is the inbound
+//! fan-out — see [`CastChannel::set_state_play`] and friends.
+//!
 //! ## Key order is the wire format
 //!
 //! Both status faces are JSON objects whose **key order is the answer a sender
@@ -42,7 +55,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use macast_core::logging::Logger;
-use macast_upnp::store::{self, SharedBroadcast, SharedRenderer, SharedStore};
+use macast_upnp::store::{self, SharedRenderer, SharedStore};
 
 use crate::cert::Pair;
 use crate::proto::{
@@ -72,6 +85,30 @@ pub const SERVED_APP_IDS: [&str; 2] = [DEFAULT_MEDIA_APP_ID, APP_BACKDROP_ID];
 /// Rust accept loop that spawns without one will happily spawn until the
 /// machine refuses.
 pub const MAX_CONNECTIONS: usize = 32;
+
+/// How long a client loop may hold the connection mutex while waiting for bytes.
+///
+/// The number is not a tuning knob; it is the ceiling on how long any *other*
+/// thread can be blocked from writing to that connection — the status watcher
+/// most of all, whose whole purpose is to speak when nobody asked. The loop used
+/// to read with **no** timeout while holding the lock, and a real sender that
+/// LOADs and then waits quietly starved it for the entire 20 s of
+/// `vlc_sender_sim.py`'s patience (`verify_rust_receiver.sh` §21, 2026-10-18:
+/// one request-driven BUFFERING, then silence, then "Cast sender dropped" at the
+/// moment the write finally came free). Python cannot have that bug: it reads and
+/// writes the same socket from different threads with no lock at all, and rustls
+/// is the only reason this port needs one.
+pub const READ_POLL: Duration = Duration::from_millis(200);
+
+/// The most body bytes one frame may claim.
+///
+/// Not a port of a Python limit — the opposite. `_recv_exact`
+/// (`protocol_cast.py:586-593`) accumulates as bytes arrive, so a prefix claiming
+/// 2 GiB costs the reference patience; a Rust `vec![0u8; length]` would hand an
+/// unauthenticated TCP peer a 2 GiB allocation on a socket that has not even
+/// finished a device-auth exchange. Real Cast frames carry JSON statuses and a
+/// DIDL-less LOAD; a few megabytes is orders of magnitude past either.
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Bound the handshake only; the session itself must not time out (senders
 /// only PING every ~5s and may idle for longer).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -283,8 +320,6 @@ pub struct CastChannel {
     log: Arc<Logger>,
     store: SharedStore,
     renderer: SharedRenderer,
-    #[allow(dead_code)] // wired for broadcast when the wiring layer lands
-    broadcast: SharedBroadcast,
     ledger: Mutex<Ledger>,
     /// `connection id → stream`. Inserted after a successful handshake, removed
     /// when the client loop ends; `stop()` drops every entry, which closes the
@@ -308,13 +343,11 @@ impl CastChannel {
         log: Arc<Logger>,
         store: SharedStore,
         renderer: SharedRenderer,
-        broadcast: SharedBroadcast,
     ) -> Arc<Self> {
         Arc::new(CastChannel {
             log,
             store,
             renderer,
-            broadcast,
             ledger: Mutex::new(Ledger::new()),
             conns: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -448,8 +481,11 @@ impl CastChannel {
                 .debug(&format!("Cast handshake failed from {addr}: {e}"));
             return;
         }
-        // The session itself must not time out.
-        if stream.sock.set_read_timeout(None).is_err() {
+        // A *bounded* wait, not a session timeout: the client loop treats a read
+        // timeout as "nothing yet" and keeps going, so an idle sender is never
+        // dropped — it is only ever the reason the connection mutex gets
+        // released. See [`READ_POLL`].
+        if stream.sock.set_read_timeout(Some(READ_POLL)).is_err() {
             return;
         }
         self.log.info(&format!("Cast connection from {addr}"));
@@ -485,32 +521,52 @@ impl CastChannel {
     }
 
     /// `_handle_client` (`macast/protocol_cast.py:561`): the frame-read loop.
+    ///
+    /// The connection mutex is taken **per frame and released between polls** —
+    /// see [`READ_POLL`] for what the alternative cost us on a real sender.
+    /// `pending` carries a half-read frame across polls, which is the only
+    /// reason the accumulation lives outside the loop body.
     pub(crate) fn client_loop(self: &Arc<Self>, conn_id: &usize) -> std::io::Result<()> {
+        let mut pending: Vec<u8> = Vec::new();
         loop {
-            let (header, body) = {
-                let slot = self.conn_slot(*conn_id);
+            let frame = {
+                let Some(slot) = self.slot(*conn_id) else {
+                    // The id is gone — `stop()` cleared the table, or the client
+                    // loop that owned it has already removed it. Either way this
+                    // thread's job is over; `handle_connection` does the
+                    // forgetting. Returning `Ok` rather than an error keeps the
+                    // log quiet for what is a normal shutdown, and it is the
+                    // shape the reference has: its loop exits on
+                    // `while not self._stop_event.is_set()`.
+                    return Ok(());
+                };
                 let mut guard = slot.lock().unwrap();
                 let stream = guard.as_mut().ok_or_else(broken_pipe)?;
-                let mut header = [0u8; FRAME_HEADER_LEN];
-                stream.read_exact(&mut header)?;
-                let length = proto::frame_length(&header);
-                let mut body = vec![0u8; length];
-                stream.read_exact(&mut body)?;
-                (header, body)
+                read_frame(stream, &mut pending)?
             };
-            let _ = header;
-            let msg = parse_cast_message(&body);
-            self.on_message(*conn_id, &msg);
+            if let Some(body) = frame {
+                let msg = parse_cast_message(&body);
+                self.on_message(*conn_id, &msg);
+            }
         }
     }
 
-    pub(crate) fn conn_slot(&self, conn_id: usize) -> Arc<ConnStream> {
-        self.conns
-            .lock()
-            .unwrap()
-            .get(&conn_id)
-            .cloned()
-            .expect("connection slot exists while its client loop runs")
+    /// The stream behind one connection, or `None` once it is gone.
+    ///
+    /// `None`-returning rather than `expect`-ing because a vanished connection is
+    /// a **reachable** state, not a broken invariant: `stop()` clears the whole
+    /// table, and a status watcher outlives the reader it was started for by up
+    /// to [`LOAD_GRACE_SECONDS`]. The old `expect` text even asserted the opposite
+    /// ("connection slot exists while its client loop runs") — the loop had simply
+    /// never come back around after a stop, because it was blocked holding the
+    /// lock it needed to notice.
+    ///
+    /// Dropping a frame with nowhere to go is also what the reference does:
+    /// `_send` on a closed socket raises, and `protocol_cast.py:1094` catches it
+    /// as `logger.debug("Cast status push failed: %s", e)`. Same judgement, one
+    /// fewer way to kill a process from a worker thread.
+    pub(crate) fn slot(&self, conn_id: usize) -> Option<Arc<ConnStream>> {
+        self.conns.lock().unwrap().get(&conn_id).cloned()
     }
 
     /// One frame out one connection. The payload is built by the caller in the
@@ -560,7 +616,17 @@ impl CastChannel {
                 }
             }
         }
-        let slot = self.conn_slot(conn_id);
+        let Some(slot) = self.slot(conn_id) else {
+            // A push for a sender that already left. The sentence is the
+            // reference's own (`protocol_cast.py:1094` catches the closed-socket
+            // write as a DEBUG "Cast status push failed"), because the honest
+            // report is "this frame went nowhere", not silence.
+            self.log.debug(&format!(
+                "Cast status push failed: the sender's connection is gone, {} bytes dropped",
+                blob.len()
+            ));
+            return;
+        };
         let mut guard = slot.lock().unwrap();
         if let Some(stream) = guard.as_mut() {
             if let Err(e) = stream.write_all(blob) {
@@ -1240,6 +1306,65 @@ fn py_repr(v: &Value) -> String {
 
 fn broken_pipe() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::BrokenPipe, "connection is gone")
+}
+
+/// Pull one frame out of a stream that may have nothing to give yet.
+///
+/// `Ok(None)` means "nothing arrived inside [`READ_POLL`]" — the caller releases
+/// the connection lock and comes back, which is the entire point of this shape.
+/// A peer that closed is an error (the session is over), and so is a body longer
+/// than [`MAX_FRAME_BYTES`] — refused rather than allocated, because the length
+/// arrives before a single payload byte does and the socket is not yet
+/// authenticated. `pending` is this function's property across calls: half a
+/// frame is normal between polls.
+fn read_frame(
+    stream: &mut impl Read,
+    pending: &mut Vec<u8>,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        if pending.len() >= FRAME_HEADER_LEN {
+            let mut header = [0u8; FRAME_HEADER_LEN];
+            header.copy_from_slice(&pending[..FRAME_HEADER_LEN]);
+            let length = proto::frame_length(&header);
+            if length > MAX_FRAME_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("cast frame claims {length} bytes, past the {MAX_FRAME_BYTES} cap"),
+                ));
+            }
+            let total = FRAME_HEADER_LEN + length;
+            if pending.len() >= total {
+                let body = pending[FRAME_HEADER_LEN..total].to_vec();
+                pending.drain(..total);
+                return Ok(Some(body));
+            }
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err(broken_pipe()),
+            Ok(n) => {
+                pending.extend_from_slice(&chunk[..n]);
+                if pending.len() > MAX_FRAME_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "cast frame grew past the cap",
+                    ));
+                }
+            }
+            // rustls surfaces a socket read timeout as either kind depending on
+            // where in the TLS record it happens; both mean "no bytes yet".
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// `_start_tls_server`'s bind loop (`macast/protocol_cast.py:490`): 8009, then
