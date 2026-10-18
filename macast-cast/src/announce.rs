@@ -186,18 +186,18 @@ pub const MDNS_PORT: u16 = 5353;
 /// The DNS numbers. Reading lives in [`crate::mdns`]; these are the writing side
 /// of the same table, and a mismatch between the two is a packet our own browser
 /// would not recognise — `announce_tests` asks that directly.
-const TYPE_A: u16 = 1;
-const TYPE_PTR: u16 = 12;
-const TYPE_TXT: u16 = 16;
-const TYPE_SRV: u16 = 33;
-const TYPE_NSEC: u16 = 47;
+pub(crate) const TYPE_A: u16 = 1;
+pub(crate) const TYPE_PTR: u16 = 12;
+pub(crate) const TYPE_TXT: u16 = 16;
+pub(crate) const TYPE_SRV: u16 = 33;
+pub(crate) const TYPE_NSEC: u16 = 47;
 const CLASS_IN: u16 = 1;
 /// The cache-flush bit as it sits **on the wire**, inside the class field.
 const CLASS_UNIQUE: u16 = 0x8000;
 
 /// response + authoritative answer — `DNSOutgoing(_FLAGS_QR_RESPONSE |
 /// _FLAGS_AA)` (`_core.py:523`).
-const FLAGS_ANNOUNCE: u16 = 0x8400;
+pub(crate) const FLAGS_ANNOUNCE: u16 = 0x8400;
 
 /// The longest one TXT property may be on the wire. Not a guess: measured by
 /// handing zeroconf values of 254 / 255 / 256 / 257 bytes and reading which
@@ -424,7 +424,7 @@ impl Service {
 /// there is no value. This is the reference's rule
 /// (`_services/info.py`'s `_set_properties`), and it matters for `fn` — an empty
 /// friendly name would otherwise write `fn=` where the reference writes `fn`.
-fn property_bytes(key: &str, value: &[u8]) -> Vec<u8> {
+pub(crate) fn property_bytes(key: &str, value: &[u8]) -> Vec<u8> {
     if value.is_empty() {
         return key.as_bytes().to_vec();
     }
@@ -578,15 +578,16 @@ pub fn machine_hostname() -> String {
 /// Skipping the recording step still produces a packet that parses — it is just
 /// not the packet the reference sends, and the difference is most of the 296
 /// bytes the corpus pins.
-struct Writer {
+pub(crate) struct Writer {
     buf: Vec<u8>,
     /// (name without its trailing dot, byte offset of its first label)
     names: Vec<(String, usize)>,
     answers: u16,
+    additionals: u16,
 }
 
 impl Writer {
-    fn new(flags: u16) -> Writer {
+    pub(crate) fn new(flags: u16) -> Writer {
         let mut buf = Vec::with_capacity(320);
         buf.extend_from_slice(&0u16.to_be_bytes()); // transaction id
         buf.extend_from_slice(&flags.to_be_bytes());
@@ -595,29 +596,30 @@ impl Writer {
             buf,
             names: Vec::new(),
             answers: 0,
+            additionals: 0,
         }
     }
 
-    fn u8(&mut self, value: u8) {
+    pub(crate) fn u8(&mut self, value: u8) {
         self.buf.push(value);
     }
 
-    fn u16(&mut self, value: u16) {
+    pub(crate) fn u16(&mut self, value: u16) {
         self.buf.extend_from_slice(&value.to_be_bytes());
     }
 
-    fn u32(&mut self, value: u32) {
+    pub(crate) fn u32(&mut self, value: u32) {
         self.buf.extend_from_slice(&value.to_be_bytes());
     }
 
-    fn octets(&mut self, bytes: &[u8]) {
+    pub(crate) fn octets(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
     }
 
     /// `write_name`: the whole name if it has never been written; otherwise a
     /// two-byte pointer; and if only a *suffix* is known, write the labels up to
     /// where the known part begins and point there.
-    fn name(&mut self, name: &str) {
+    pub(crate) fn name(&mut self, name: &str) {
         let trimmed = name.strip_suffix('.').unwrap_or(name);
         if let Some(&(_, offset)) = self.names.iter().find(|(held, _)| held == trimmed) {
             self.pointer(offset);
@@ -679,7 +681,31 @@ impl Writer {
     /// One resource record: owner name, type, class (with the flush bit when the
     /// record is unique), TTL, then rdata whose length is patched in afterwards
     /// — nothing knows it until the closure has written it.
-    fn record<F>(&mut self, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
+    pub(crate) fn record<F>(&mut self, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
+    where
+        F: FnOnce(&mut Writer),
+    {
+        self.write_record(name, rtype, ttl, unique, rdata);
+        self.answers += 1;
+    }
+
+    /// The same record, counted into the **additional** section instead.
+    ///
+    /// A response is not an announcement: the reference puts the record the
+    /// question earned in AN and everything that rides along in AR, and the
+    /// corpus rows carry that split. `finish()` used to write the AN count and
+    /// leave AR at zero, which was right for the five-record announcement and
+    /// would be wrong for every answer — a client that walks only AN would read
+    /// an answer with no host under it.
+    pub(crate) fn record_additional<F>(&mut self, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
+    where
+        F: FnOnce(&mut Writer),
+    {
+        self.write_record(name, rtype, ttl, unique, rdata);
+        self.additionals += 1;
+    }
+
+    fn write_record<F>(&mut self, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
     where
         F: FnOnce(&mut Writer),
     {
@@ -694,15 +720,14 @@ impl Writer {
         rdata(self);
         let written = (self.buf.len() - rdata_at) as u16;
         self.buf[length_at..length_at + 2].copy_from_slice(&written.to_be_bytes());
-        self.answers += 1;
     }
 
-    fn finish(self) -> Vec<u8> {
+    pub(crate) fn finish(self) -> Vec<u8> {
         let mut buf = self.buf;
         buf[4..6].copy_from_slice(&0u16.to_be_bytes()); // questions
         buf[6..8].copy_from_slice(&self.answers.to_be_bytes());
         buf[8..10].copy_from_slice(&0u16.to_be_bytes()); // authority
-        buf[10..12].copy_from_slice(&0u16.to_be_bytes()); // additional
+        buf[10..12].copy_from_slice(&self.additionals.to_be_bytes());
         buf
     }
 }

@@ -406,8 +406,8 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 672 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 672, and the scanner below counts 671 `#[test]`
+    /// 678 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 678, and the scanner below counts 671 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
     /// **replica of the scanner**, not a `grep -c '#\[test\]'`, which on this
     /// crate reads **678**: seven of those hits are the word inside doc prose and
@@ -419,7 +419,7 @@ mod tests {
     /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
     /// `airplay_tests` 60, `push_tests` 46, `channel_tests` 40, `resolve` 39,
     /// `setup_tests` 30, this file 19, `announce_tests` 19, `engine_tests` 17,
-    /// `respond_tests` 16 and `cert` 12. The previous values, 603, 633, 637, 655
+    /// `respond_tests` 22 and `cert` 12. The previous values, 603, 633, 637, 655
     /// and 656, were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
@@ -446,7 +446,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 672;
+    const TESTS_IN_THIS_CRATE: usize = 678;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

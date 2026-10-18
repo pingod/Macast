@@ -738,8 +738,9 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 主人），把查询真的发到 lo0 上的 `224.0.0.251:5353`，再把 `zeroconf._core.async_send_with_transport`
  recorder 截住的**答复字节**解码。一个字节都没上局域网（查询钉在 lo0 / TTL 1，答复被记录不发送）。
 语料冻在 **`macast-cast/tests/golden/mdns_responder.jsonl`**（17 行，一行一个查询形状），
-对拍它的是 `macast-cast/src/respond.rs` 的判决层（16 条用例）—— 字节装配与 socket 接线
-还没接，见 §15 那一行。
+对拍它的是 `macast-cast/src/respond.rs`（判决层 + 装配层，22 条用例）—— 还差的只有 socket
+接线，见 §15 那一行。装配层的判据分两条读者：一条独立遍历（自己走记录骨架，读得到 NSEC 的
+位置与字节）+ 一条 `mdns::parse_message`（证明发给发送端的字节我们自己的浏览器读得懂）。
 
 冻的是**解码后的记录表**而不是原始字节，这是刻意的，理由与广播语料不同要写清：广播那侧的
 不确定性只有 `A/NSEC` 一对（于是冻两行就够），而**答复里的 additionals 是 set 序**，本机两次跑
@@ -807,8 +808,9 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | setup 面（HTTP/8008 + HTTPS/8443：`/setup/eureka_info` 裸 UUID、`params=` 过滤、`/setup/icon.png`） | **已交付**（2026-10-18，`macast-cast/src/setup.rs` 655 行 + 壳在 `main.rs` 里起它） | 三处**刻意偏离**写在模块头，不在这里复述：`Server:` 说我们自己的名字、非 `GET` 回 501 且无正文、以及 **8008 不回落**（参考实现走 20 个口，而发送端把 8008 钉死在 `dial.py:25` —— 回落只买到一个没人敲的口，还会在通道没起来时把 8009 从它嘴里抢走）。判据：`verify_rust_receiver.sh` §20（**26 条**，含一次真 TLS 握手与"8008/8443 交回同一串字节"）+ `setup_tests` 的 30 条 |
 | Cast 接收端接进壳（`channel.rs` 的 8009 TLS 会话、`RECEIVER_STATUS` 回报、`_watch_playback` 那一格） | **已交付**（2026-10-18）：`main.rs` 走 `cert::ensure_in_setting_dir` → `CastChannel::new` → `host.set_cast` → `channel.start(pair)`，且**排在 setup 脸之前**（8009 才是发送端要连的那个口，两句话都在 `main.rs` 的注释里）；`host.rs` 把 `Pause`/`Play`/`Stop`/`Eof`/`TransportError` 五次 `set_state` 扇进这根通道，`cast_uri` 交还播放权时调 `release_playback()` | 判据是同一句 grep：`grep -rn "CastChannel" src-tauri/src/` 从 **0 行** 变成 **6 行**（`host.rs` 4、`main.rs` 2）。**接进来才现形的那一格：读不许跨阻塞持锁** —— 见 §16 第 10 条与 `AGENTS.md` §4.14 的 2026-10-18 段。见证 = 真机 §21 的 **5 条**（一支按 VLC 状态机写的发送端打进来并读回 `PLAYING`）+ `channel_tests` 的 **40 条**。这一行标题里的"播放看门狗"指的是参考实现的 `_watch_playback`（`protocol_cast.py:1056`），**不是**重投看门狗：接收端那侧的参考实现里没有重投，那是 `cast_local_file` 发送侧的东西 |
 | `_googlecast._tcp` 的**广播**（我们自己接收端的 PTR/SRV/TXT/NSEC/A，unsolicited） | **已交付**（2026-10-18，`macast-cast/src/announce.rs` + 壳在 `main.rs` 里随 8009 起停） | 判据不是"我们自己读得懂"：`verify_rust_receiver.sh` §22 让 `.venv` 里那套 **zeroconf**（参考实现自己用的栈）冷启动去解析，**42.8 秒**后交回完整设备（那一趟整套 **183 条 / 0 失败 / EXIT=0**）—— 而第一串广播那时早就发完了，所以这条同时是 **60 秒 keepalive 的真机见证**。字节层面另有两条冻结语料（`macast-cast/tests/golden/mdns_announce.hex`、`mdns_names.jsonl`，由 `scripts/mdns_announce_probe.py` 产出），其中 announce 有**两行**，因为参考实现那一对 `A/NSEC` 的先后随 `PYTHONHASHSEED` 变（§8 的偏离表与探针注释都写了这一条）。**剩下的不是这一行**：下一行 |
-| mDNS **responder**（回答别人的查询） | **判决层已交付**（2026-10-18，`macast-cast/src/respond.rs` + 16 条用例逐行对拍 17 行语料）；**字节装配与 socket 接线尚未** | 还没有接线，所以今天仍然只发 unsolicited 广播、不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6；剩下两步是 (a) 把 `Group` 装配成 datagram（复用 `announce.rs` 的 `Writer` 与压缩表，
-它今天把五个段一次写完，需要能分段写 an/ar 计数），(b) 让 `announce.rs` 那个长期在场的 socket join 且读，
+| mDNS **responder**（回答别人的查询） | **判决层 + 装配层已交付**（2026-10-18，`macast-cast/src/respond.rs`，22 条用例逐行对拍 17 行语料 + 自解码与独立遍历）；**socket 接线尚未** | 还没有接线，所以今天仍然只发 unsolicited 广播、不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。判据与规则都在 §14.6。(a) 已经做完：`Writer` 现在有两个段计数器，`record_additional` 写 AR，
+`respond::datagram` 按 `Section` 分派，广播那五条记录的字节**一个都没变**（19 条 golden 对拍用例
+照旧绿就是这一句的见证）。剩下的是 (b)：让 `announce.rs` 那个长期在场的 socket join 且读，
 读到的查询交 `respond::respond`，读到的别的记录喂设备账本 —— 后者就是 §8/§16 那条"合并"结论落地的地方。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
@@ -1076,6 +1078,32 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     这正是 §4.7c 的设计在测试层现形）；删掉"注释行不算"红 **2** 条，其中一条是真实扫描本身 ——
     我们仓库里关于这条不变式的散文正是那句话的活样本，一个会对文档变红的扫描器的寿命是
     一次"这测试干嘛挡我写注释"。
+20. **responder 的判决层与装配层落地，十支 + 六支变异，其中一格从 0 红补成真判据**（2026-10-18，
+    `respond.rs`）。判决层电池：`>` 改 `>=` 红 **2** / 抑制不看 alias **2** / 不抑制 **2** /
+    共享 PTR 自称 flush **6** / 单播那份保留 flush **2** / ANY 多答 PTR **2** / `AAAA` 改沉默 **2** /
+    TXT 拖上 host pair **2** / 无视 `has_v4` **1** / **M10（把抑制扩到附带段）第一版 0 红**。
+    那支 0 红是本轮唯一的新形状：语料里没有任何一行问过"asker 已经知道 SRV、问的是 PTR 时
+    那条搭车的 SRV 还发不发"，两种实现都绿。闭洞的方式是**去问参考实现**（探针加
+    `ptr-known-srv` 一行，量到照发五条），而不是放宽断言 —— 语料因此 17 行，同一支变异体现在
+    红 **2**。装配层电池六支：分段记错 **1** / 只写第一个地址 **1** / PTR 指主机 **2** /
+    SRV 端口 +1 **1** / TXT 丢键名 **1** / **NSEC 位图清零 1**。最后一支之前**完全没有见证者**
+    （我们的 parser 按设计跳过 NSEC，语料对拍不比正文），补的判据是把答复里那条 NSEC 的字节
+    与广播语料逐字节钉住的那一条对齐 —— 同一个派生、两条路，而不是"再断言一次"。
+    另两处仪器自己的错都在这一段：`walk` 先推进游标再切片（于是每条 rdata 都从下一条的开头
+    读起，报"range end index 258 out of range"，读起来像 writer 写坏了长度），和我给 NSEC
+    手抄的那个期望字节串 —— 压缩指针是**包内偏移**，广播与答复记录次序不同指针就不同，
+    不变的只有最后三个字节。**语料对拍看得见 (section, type, ttl, owner, flush)，看不见
+    rdata**，所以段这一层的判据是一条独立遍历（不走 `mdns::parse_message`）+ 一条把 PTR
+    指向谁、SRV 端口与目标、A 的四个字节、TXT 的 `id=` 全部读回来的用例。
+21. **`verify_rust_receiver.sh` 第四次被同一个反引号形状骗过，而这次连"守卫"也在撒谎**
+    （2026-10-18）：`§23:2592` 的文案把字段名 `_add_history` 用反引号包起来 ⇒ 双引号里那是
+    命令替换 ⇒ 脚本执行一条不存在的命令、标签塌成空串、**照记 PASS、EXIT 仍为 0**。
+    更该留的一句是上一轮那条"必须是 0"的 grep：它**既漏报又误报** —— 分不清 `\``（合法的
+    字面反引号，场上有两行）与裸反引号；而它当时报的 0 是在这两行与 2592 写进去**之前**量的，
+    之后被当成规则抄了下去。现在换成 `scripts/check_verify_script_shapes.py`：只数未转义的
+    那一个，`--selftest` 把出事那一行原样造进内存并要求报 **1**（量过：1；同时要求转义那行
+    报 0）。**一条没有正控的扫描器，它的 0 只是"它没在工作的另一种写法"**（Part 50 那一族），
+    而**一个不再复测的数字会伪装成一条判据**（§4.13）。
 ---
 
 ## 17. 提交与文档的规矩
@@ -1187,6 +1215,17 @@ grep -c '"case"' macast-cast/tests/golden/mdns_responder.jsonl
 #   钉住"没有哪一行没人映射"。`ptr-known-half`（2250 = 恰好一半）那一行是抑制判据 `>` 与 `>=`
 #   唯一的分界见证；`ptr-known-srv` 那一行是 M10 从 0 红补成 2 红的那一格（§14.6 末条）。
 grep -c '^pub fn respond' macast-cast/src/respond.rs   # 期望 **1**（判决层只有一个入口）
+grep -c '^pub fn datagram' macast-cast/src/respond.rs   # 期望 **1**（装配层也只有一个）
+python3 scripts/check_verify_script_shapes.py scripts/verify_rust_receiver.sh
+#   期望 **0**（干净树，本轮量过）。形状判据的来源：`verify_rust_receiver.sh:2592` 用反引号
+#   包住了一个字段名，而双引号里的反引号是**命令替换** ⇒ 脚本执行了一条不存在的命令
+#   （`_add_history: command not found`）、把文案印成空串、**照样记了一条 PASS**，EXIT 还是 0。
+#   上一版那条 `grep -c 'pass "[^"]*\|fail "[^"]*`'` 既漏报又误报：它分不清 `\``（合法的
+#   字面反引号，本轮场上有两行）与裸反引号，所以它对两行安全文案报"命中"，而那句
+#   "本轮量过：0" 是在这两行写进去**之前**量的 —— 一个抄下来的 0 不是测量（§4.13）。
+#   工具自带合成正控：`scripts/check_verify_script_shapes.py --selftest` 把出事那一行原样
+#   造进内存里的副本，审计**必须**报 1（本轮量过：1）。没有正控的扫描器，它的 0 只是
+#   "它没在工作的另一种写法"（Part 50 那条同一形状）。
 grep -c '^def assert_service_untouched' scripts/mdns_responder_probe.py   # 期望 **1**
 grep -c 'assert_service_untouched(info, baseline' scripts/mdns_responder_probe.py
 #   期望 **1**（每个用例都过一遍）。这条断言之所以存在：第一版仪器把 responder 自己注册着的

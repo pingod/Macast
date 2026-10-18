@@ -2589,7 +2589,7 @@ ROWPY
         && pass "the cast left a play-history row the page can offer back" \
         || fail "history is empty after a cast: '$(json_ask history)'"
     [ "$(json_ask history.0.uri)" = "$MEDIA_URL" ] \
-        && pass "newest first, as `_add_history` writes it" \
+        && pass "newest first, as the reference's _add_history writes it" \
         || fail "history.0.uri='$(json_ask history.0.uri)' expected '$MEDIA_URL'"
 
     # ---- interfaces ---------------------------------------------------------------

@@ -426,3 +426,426 @@ fn the_ptr_answer_carries_no_flush_bit_while_every_riding_record_carries_one() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The assembly layer: our bytes, read back by our own parser
+// ---------------------------------------------------------------------------
+
+/// The service the corpus fixture describes. `192.0.2.7` is TEST-NET-1, and the
+/// TXT table only has to be *something* — the corpus diff compares record types,
+/// TTLs, owners and flush bits, not the property bytes, because the property
+/// payload is already pinned byte-for-byte by the announcement corpus.
+fn fixture_service() -> crate::announce::Service {
+    crate::announce::Service {
+        instance: INSTANCE.to_string(),
+        server: SERVER.to_string(),
+        port: 8009,
+        txt: vec![
+            ("id".to_string(), b"00000000-0000-4000-8000-000000000007".to_vec()),
+            ("fn".to_string(), b"Macast(Fixture-1.local)".to_vec()),
+            ("ca".to_string(), b"5".to_vec()),
+        ],
+        addresses: vec!["192.0.2.7".parse().unwrap()],
+        clipped: Vec::new(),
+    }
+}
+
+/// An **independent** walk of a datagram's record skeleton.
+///
+/// Deliberately not `crate::mdns::parse_message`: that parser decodes the rdata of
+/// five types and skips every other record (`mdns.rs:566-569`), so a round trip
+/// through it cannot tell which *section* a skipped NSEC sat in, and the very
+/// thing this test is for is the AN/AR split. Two readers, different code, same
+/// bytes — the shape `announce_tests` uses for the announcement corpus, and the
+/// reason `read_back` below stays: it proves the records we hand a sender are
+/// records a sender using our own parser can read.
+fn walk(bytes: &[u8]) -> Vec<(String, u16, u32, String, bool, Vec<u8>)> {
+    crate::pin_test_dir();
+    assert!(bytes.len() > 12, "a datagram with no header is not a datagram");
+    let count = |at: usize| u16::from_be_bytes([bytes[at], bytes[at + 1]]) as usize;
+    let (qd, an, ns, ar) = (count(4), count(6), count(8), count(10));
+    let mut offset = 12;
+    /// Skip or read a name, following the compression pointer that ends it.
+    fn name_at(bytes: &[u8], at: usize) -> (String, usize) {
+        let mut labels = Vec::new();
+        let mut cursor = at;
+        let mut resume = None;
+        loop {
+            let length = bytes[cursor] as usize;
+            if length == 0 {
+                cursor += 1;
+                break;
+            }
+            if length & 0xC0 == 0xC0 {
+                let target = ((length & 0x3F) << 8) | bytes[cursor + 1] as usize;
+                resume = Some(cursor + 2);
+                let (decoded, _) = name_at(bytes, target);
+                for label in decoded.split('.').filter(|label| !label.is_empty()) {
+                    labels.push(label.to_string());
+                }
+                break;
+            }
+            cursor += 1;
+            labels.push(String::from_utf8_lossy(&bytes[cursor..cursor + length]).to_string());
+            cursor += length;
+        }
+        (labels.join(".") + ".", resume.unwrap_or(cursor))
+    }
+    for _ in 0..qd {
+        let (_, next) = name_at(bytes, offset);
+        offset = next + 4; // qtype, qclass
+    }
+    let mut out = Vec::new();
+    for section in std::iter::repeat("an").take(an)
+        .chain(std::iter::repeat("ns").take(ns))
+        .chain(std::iter::repeat("ar").take(ar))
+    {
+        let (owner, next) = name_at(bytes, offset);
+        offset = next;
+        let rtype = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+        let class = u16::from_be_bytes([bytes[offset + 2], bytes[offset + 3]]);
+        let ttl = u32::from_be_bytes([
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ]);
+        let length = u16::from_be_bytes([bytes[offset + 8], bytes[offset + 9]]) as usize;
+        // Read the rdata **before** advancing: the slice is inside the record, and
+        // the cursor has to end up after it. First version advanced first and then
+        // sliced, which ran off the end of the packet.
+        let rdata = bytes[offset + 10..offset + 10 + length].to_vec();
+        offset += 10 + length;
+        out.push((
+            section.to_string(),
+            rtype,
+            ttl,
+            owner,
+            class & 0x8000 != 0,
+            rdata,
+        ));
+    }
+    assert_eq!(offset, bytes.len(), "the walk lost track of the packet's length");
+    out
+}
+
+/// One record in the corpus's string form, so `walk` and the JSON compare directly.
+/// (`record_row`, not `row`: the corpus loop binds `row` for its own
+/// row, and a helper with the same name would be shadowed rather than called —
+/// the `_restore59` shape AGENTS.md §4.14 already carries, arriving here on the
+/// Rust side.)
+fn record_row(section: &str, rtype: u16, ttl: u32, name: &str, flush: bool) -> String {
+    format!("{}/{}/{}/{}/flush={}", section, kind_name(rtype), ttl, name, flush)
+}
+
+/// Decode our own datagram with **our browser's** parser, for the types it reads.
+///
+/// `_read_others` decodes A, PTR, CNAME, TXT and SRV and contributes nothing for
+/// any other type (NSEC is 47), so this is a statement about our reader, not the
+/// wire: the answers we send contain records our own discovery code cannot read.
+/// That is worth saying out loud — and it is why `walk`, not this, carries the
+/// section assertions above.
+fn read_back(bytes: &[u8]) -> BTreeSet<String> {
+    crate::pin_test_dir();
+    let log = macast_core::logging::Logger::named("respond-selftest");
+    let message = crate::mdns::parse_message(bytes, "127.0.0.1:5353", &log)
+        .expect("our own answer did not parse — the writer produced bytes our reader refuses");
+    message
+        .records
+        .iter()
+        .map(|record| record_row("?", record.rtype, record.ttl, &record.name, record.flush))
+        .collect()
+}
+
+/// The subset of a corpus row our own parser can see, so the two comparisons use
+/// the same filter on both sides instead of one side quietly holding NSEC.
+/// The wire number for one of our kinds. Written out rather than matched on the
+/// constant names so a renamed arm in [`Kind`] shows up here as a compile error.
+fn rtype_of(kind: Kind) -> u16 {
+    match kind {
+        Kind::A => 1,
+        Kind::Ptr => 12,
+        Kind::Txt => 16,
+        Kind::Aaaa => 28,
+        Kind::Srv => 33,
+        Kind::Nsec => 47,
+        Kind::Any => 255,
+    }
+}
+
+fn readable_rows(rows: &BTreeSet<String>) -> BTreeSet<String> {
+    rows.iter()
+        .filter(|row| !row.contains("/NSEC/"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn every_corpus_answer_survives_our_own_writer_and_our_own_parser() {
+    crate::pin_test_dir();
+    let service = fixture_service();
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let rows = corpus();
+    // Which rows are silent is **read off the corpus**, not remembered: three
+    // measured nothing (`ptr-known-live` by suppression, `other-service` and
+    // `enum-star` because the reference has no strategy for them). The count is
+    // derived; the names are asserted, so a fourth silence cannot join unnoticed and
+    // a vanished one cannot leave a rule unenforced.
+    let silent: Vec<String> = rows
+        .iter()
+        .filter(|row| row.answers.is_empty())
+        .map(|row| row.case.clone())
+        .collect();
+    assert_eq!(
+        silent,
+        vec![
+            "ptr-known-live".to_string(),
+            "other-service".to_string(),
+            "enum-star".to_string()
+        ],
+        "the set of questions the reference does not answer changed"
+    );
+    let mut rows_checked = 0usize;
+    for row in rows {
+        let (questions, known, ucast_source) = inputs_for(&row, &shape);
+        let replies = respond(&questions, &known, ucast_source, &shape, None, 0);
+        if replies.is_empty() {
+            assert!(
+                row.answers.is_empty(),
+                "{} answered nothing but the reference sent {:?}",
+                row.case,
+                row.answers
+            );
+            continue;
+        }
+        // The corpus row holds **every** datagram the reference sent for that
+        // question (the unicast-sourced case holds two), so the comparison is over
+        // the union of our legs too.
+        let mut seen = BTreeSet::new();
+        for reply in &replies {
+            let bytes = datagram(&reply.records, &service);
+            // (1) The independent walk: sections, types, TTLs, owners, flush bits.
+            let walked: BTreeSet<String> = walk(&bytes)
+                .into_iter()
+                .map(|(section, rtype, ttl, name, flush, _)| {
+                    record_row(&section, rtype, ttl, &name, flush)
+                })
+                .collect();
+            let planned: BTreeSet<String> = reply
+                .records
+                .iter()
+                .map(|record| {
+                    record_row(
+                        match record.section {
+                            Section::Answer => "an",
+                            Section::Additional => "ar",
+                        },
+                        rtype_of(record.kind),
+                        record.ttl,
+                        &record.owner,
+                        record.flush,
+                    )
+                })
+                // An `A` choice is **one per address**: the plan says the host
+                // rides, the writer decides how many records that is.
+                .collect::<BTreeSet<String>>()
+                .into_iter()
+                .collect();
+            assert!(
+                walked.len() >= planned.len(),
+                "case {}: the bytes hold fewer records than the plan",
+                row.case
+            );
+            for entry in &planned {
+                assert!(
+                    walked.contains(entry) || entry.contains("/A/"),
+                    "case {}: the plan asked for {} and the bytes do not hold it",
+                    row.case,
+                    entry
+                );
+            }
+            seen.extend(walked);
+            // (2) Our own browser parser must be able to read what we hand out, for
+            // every type it claims to support. NSEC is not one of them (see
+            // `read_back`), so the comparison runs through the same filter on both
+            // sides rather than pretending the header and the record list disagree.
+            let parsed = read_back(&bytes);
+            // `read_back` has no section labels to give — `mdns::parse_message`
+            // merges the three sections into one list by design — so this half of
+            // the comparison drops the prefix on both sides. The sections are not
+            // unchecked: `walk` above compares them, and it is a different reader.
+            let readable_plan: BTreeSet<String> = planned
+                .into_iter()
+                .filter(|entry| !entry.contains("/NSEC/"))
+                .map(|entry| entry.splitn(2, '/').last().unwrap_or(&entry).to_string())
+                .map(|entry| format!("?/{}", entry))
+                .collect();
+            assert_eq!(
+                readable_rows(&parsed),
+                readable_plan,
+                "case {}: our parser reads a different answer than we wrote",
+                row.case
+            );
+        }
+        assert_eq!(
+            seen, row.answers,
+            "case {} does not match what the reference sent, after the round trip through our bytes",
+            row.case
+        );
+        rows_checked += 1;
+    }
+    assert_eq!(
+        rows_checked + silent.len(),
+        17,
+        "17 rows, {} answered, {} silent — the numbers do not add up to the corpus",
+        rows_checked,
+        silent.len()
+    );
+    assert_eq!(rows_checked, 14, "the corpus answers 14 of its 17 rows");
+}
+
+#[test]
+fn the_nsec_record_is_written_even_though_our_parser_skips_it() {
+    crate::pin_test_dir();
+    // `read_back` cannot see NSEC, so the filter above must never become "we
+    // stopped writing it". The walk counts it, and the answer the phone reads
+    // depends on it being there.
+    let service = fixture_service();
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
+    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let bytes = datagram(&replies[0].records, &service);
+    let nsec = walk(&bytes)
+        .into_iter()
+        .filter(|(_, rtype, ..)| *rtype == 47)
+        .count();
+    assert_eq!(nsec, 1, "the NSEC vanished from the answer: {:?}", walk(&bytes));
+    assert!(
+        read_back(&bytes).iter().all(|entry| !entry.contains("/NSEC/")),
+        "the claim above is that our parser skips NSEC"
+    );
+}
+
+#[test]
+fn two_addresses_answer_with_two_a_records_not_one() {
+    crate::pin_test_dir();
+    // The plan layer says "the host rides along"; the assembly layer decides how
+    // many records that is. A second interface means a second A — and a sender that
+    // picks the wrong one is the §4.1 first-row complaint, so the count is the fact.
+    let mut service = fixture_service();
+    service.addresses.push("192.0.2.8".parse().unwrap());
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
+    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let bytes = datagram(&replies[0].records, &service);
+    let a_rows = walk(&bytes)
+        .into_iter()
+        .filter(|(_, rtype, ..)| *rtype == 1)
+        .count();
+    assert_eq!(a_rows, 2, "two addresses produced {} A records", a_rows);
+}
+
+#[test]
+fn kind_names_are_the_wire_names_not_our_rust_names() {
+    crate::pin_test_dir();
+    // The corpus spells PTR/SRV/TXT/A/AAAA/NSEC; the diff test compares strings, so
+    // a renamed arm in `kind_name` silently makes every row compare against a name
+    // nothing on the wire uses. Asked directly, because nothing else asks it.
+    for (rtype, name) in [
+        (1u16, "A"),
+        (12, "PTR"),
+        (16, "TXT"),
+        (33, "SRV"),
+        (28, "AAAA"),
+        (47, "NSEC"),
+    ] {
+        assert_eq!(crate::respond::kind_name(rtype), name, "type {}", rtype);
+    }
+    assert_eq!(crate::respond::kind_name(99), "99", "an unknown type must print its number");
+}
+
+#[test]
+fn the_answer_names_the_host_and_the_port_a_sender_would_connect_to() {
+    crate::pin_test_dir();
+    // The corpus diff compares (section, type, ttl, owner, flush) and **cannot see
+    // rdata** — which is the part an answering service can get wrong in the way that
+    // matters: a PTR pointing at the wrong instance, an SRV naming a host nothing
+    // owns, an A carrying an address that is not ours. So the bytes are decoded with
+    // our own reader and their payloads are checked against the service that was
+    // asked about.
+    let service = fixture_service();
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
+    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let bytes = datagram(&replies[0].records, &service);
+    let log = macast_core::logging::Logger::named("respond-selftest");
+    let message = crate::mdns::parse_message(&bytes, "127.0.0.1:5353", &log).unwrap();
+    let find = |rtype: u16| -> &crate::mdns::RData {
+        &message
+            .records
+            .iter()
+            .find(|record| record.rtype == rtype)
+            .unwrap_or_else(|| panic!("no record of type {} in {:?}", rtype, message.records))
+            .rdata
+    };
+    assert_eq!(
+        find(12),
+        &crate::mdns::RData::Name(INSTANCE.to_string()),
+        "the PTR pointed somewhere other than this instance"
+    );
+    let srv = find(33);
+    match srv {
+        crate::mdns::RData::Srv { priority, weight, port, target } => {
+            assert_eq!((*priority, *weight), (0, 0), "the reference writes zeros for both");
+            assert_eq!(*port, 8009, "the answer promised a port the service does not run on");
+            assert_eq!(target, SERVER, "the SRV names a host nothing in the packet owns");
+        }
+        other => panic!("SRV decoded as {:?}", other),
+    }
+    assert_eq!(find(1), &crate::mdns::RData::A("192.0.2.7".parse().unwrap()));
+    let txt = find(16);
+    match txt {
+        crate::mdns::RData::Txt(bytes) => {
+            let pairs = crate::mdns::txt_pairs(bytes);
+            let id = crate::mdns::txt_value(&pairs, "id");
+            assert_eq!(id.as_deref(), Some("00000000-0000-4000-8000-000000000007"));
+        }
+        other => panic!("TXT decoded as {:?}", other),
+    }
+}
+
+#[test]
+fn the_answer_carries_the_same_nsec_bytes_as_the_announcement() {
+    crate::pin_test_dir();
+    // Neither reader in this file can see inside an NSEC: `mdns::parse_message`
+    // skips the type by design, and `walk` only labels records. That left the
+    // responder's NSEC rdata with **no witness at all** until a mutant that wrote an
+    // empty type bitmap passed every test — so this compares its bytes with the one
+    // record the announcement corpus already pins byte-for-byte. Same name, same
+    // bitmap, one derivation: a reply that contradicts the burst that preceded it is
+    // a sender caching two different answers about the same host.
+    let service = fixture_service();
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
+    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let answered = walk(&datagram(&replies[0].records, &service))
+        .into_iter()
+        .find(|(_, rtype, ..)| *rtype == 47)
+        .expect("the answer carried no NSEC")
+        .5;
+    let announced = walk(&service.announcement())
+        .into_iter()
+        .find(|(_, rtype, ..)| *rtype == 47)
+        .expect("the announcement carried no NSEC")
+        .5;
+    assert_eq!(
+        answered, announced,
+        "the reply's NSEC is {:?} and the announcement's is {:?}",
+        answered, announced
+    );
+    // The pointer at the front is **not** invariant — it is an offset into whichever
+    // packet this record happens to sit in, and the announcement and the answer
+    // order their records differently. What must match is the bitmap the two paths
+    // derive from the same three lines: window 0, one octet, the A bit.
+    assert_eq!(&answered[answered.len() - 3..], &[0x00, 0x01, 0x40]);
+}

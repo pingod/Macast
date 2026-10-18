@@ -40,7 +40,11 @@
 //!   points at a *different* instance, and the reference answers. A port that keyed
 //!   suppression on `(name, type)` alone would go silent there.
 
-use crate::announce::{HOST_TTL, OTHER_TTL, SERVICE_TYPE};
+use crate::announce::{
+    property_bytes, FLAGS_ANNOUNCE, HOST_TTL, OTHER_TTL, SERVICE_TYPE, TYPE_A, TYPE_NSEC,
+    TYPE_PTR, TYPE_SRV, TYPE_TXT, Writer,
+};
+use crate::announce::Service;
 
 /// The enumeration question's owner name, spelled the way the reference answers.
 ///
@@ -478,6 +482,105 @@ pub fn respond(
         timing: group_reply,
     });
     replies
+}
+
+/// The name the corpus uses for a wire type number. Unknown numbers print as
+/// themselves: a summary that drops an unexpected record type is how a new answer
+/// becomes invisible (`mdns.rs`'s own parser holds the same line).
+pub fn kind_name(rtype: u16) -> String {
+    match rtype {
+        1 => "A".to_string(),
+        12 => "PTR".to_string(),
+        16 => "TXT".to_string(),
+        28 => "AAAA".to_string(),
+        33 => "SRV".to_string(),
+        47 => "NSEC".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Assemble one [`Reply`] into a datagram.
+///
+/// The bytes are built by [`crate::announce`]'s `Writer`, so the name-compression
+/// table is the same one the announcement corpus pinned — a second writer here
+/// would be a second thing to get wrong, and the reference's answers compress the
+/// same way its announcements do.
+///
+/// Two expansions worth naming, because neither is visible in the record *list*:
+///
+/// * An `A` choice expands to **one record per address** the service publishes.
+///   `Chosen` carries no address because the plan layer decides *whether* the host
+///   rides along, not which of several it has; a machine with two advertisable
+///   interfaces answers with two A records, which is what the reference does.
+/// * The flags are `0x8400` — response plus authoritative — and `id` is 0. Both
+///   are read from the captures, not chosen: every answer the reference sent in
+///   `mdns_responder.jsonl` came back `id=0 aa=True`.
+pub fn datagram(records: &[Chosen], service: &Service) -> Vec<u8> {
+    let mut w = Writer::new(FLAGS_ANNOUNCE);
+    let txt = service.txt.as_slice();
+    let addresses = service.addresses.as_slice();
+    let server = service.server.as_str();
+    let port = service.port;
+    for record in records {
+        let unique = record.flush;
+        match record.kind {
+            Kind::Ptr => {
+                let alias = record
+                    .alias
+                    .as_deref()
+                    .unwrap_or(record.owner.as_str());
+                emit(&mut w, record.section, &record.owner, TYPE_PTR, record.ttl, unique, |w| {
+                    w.name(alias)
+                });
+            }
+            Kind::Srv => emit(&mut w, record.section, &record.owner, TYPE_SRV, record.ttl, unique, |w| {
+                w.u16(0);
+                w.u16(0);
+                w.u16(port);
+                w.name(server);
+            }),
+            Kind::Txt => emit(&mut w, record.section, &record.owner, TYPE_TXT, record.ttl, unique, |w| {
+                for (key, value) in txt {
+                    let body = property_bytes(key, value);
+                    w.u8(body.len() as u8);
+                    w.octets(&body);
+                }
+            }),
+            Kind::A => {
+                for address in addresses {
+                    emit(&mut w, record.section, &record.owner, TYPE_A, record.ttl, unique, |w| {
+                        w.octets(&address.octets());
+                    });
+                }
+            }
+            Kind::Nsec => emit(&mut w, record.section, &record.owner, TYPE_NSEC, record.ttl, unique, |w| {
+                w.name(server);
+                w.u8(0);
+                w.u8(1);
+                w.u8(0x40);
+            }),
+            Kind::Any | Kind::Aaaa => {
+                // BOTH are question-only types: `AAAA` is answered with an NSEC (see
+                // the `aaaa` corpus row), and `ANY` is expanded into TXT and SRV.
+                // Nothing should ever choose one as an answer record, and a reply
+                // that carries one means the plan layer leaked a question through.
+                // Loud, not silent.
+                debug_assert!(false, "respond::datagram was handed a question-only kind");
+            }
+        }
+    }
+    w.finish()
+}
+
+/// Write one record into the section the plan chose.
+fn emit<F>(w: &mut Writer, section: Section, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
+where
+    F: FnOnce(&mut Writer),
+{
+    match section {
+        Section::Answer => w.record(name, rtype, ttl, unique, rdata),
+        Section::Additional => w.record_additional(name, rtype, ttl, unique, rdata),
+    }
 }
 
 #[cfg(test)]
