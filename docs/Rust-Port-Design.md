@@ -930,8 +930,8 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
-| `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
-| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting` + `main.rs` 在**已经绑好口的 receiver** 之后起第二个 announcer）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**仍然欠的那半句换了位置，但没有消失**：**会广播 ≠ 会答问** —— responder 的判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门，`run()` 的 `answers` 参数把它带到 socket 上），所以对 `_airplay._tcp` 的**查询**这一侧我们不答，iPhone 靠的是那三包突发与 60 秒 keepalive。这一格要说成"没有见证"而不是"验证过不行"：§26 的 browse 从突发里就能成功，它既证不了答问也证不了不答问；announcer 自己的那一行日志**明说了这件事**（`it announces only — queries about this type are not answered`），§26 有一条就是问这句话在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
+| 管理面的 `query=module-settings`（「模块设置」那张卡的唯一数据源） | **已交付**（2026-10-19，`macast-core/src/module_settings.rs` 一张归属表 + `macast-upnp/src/http.rs` GET 表的第 **13** 行，门 = management） | 判据三层。**单元 11 条**：`Key::all()` 的每一个名字被恰好一张表认领（两张表的行数之和 **恰好等于** 键表，两个方向都问 —— 有键没标签 = 漂移，有标签没键 = 指向一个这台机器写不了的键）、label 必须是中文（唯一例外是参考实现自己写成 `SSDP USN` 的那一格，例外表钉成 1 条且必须继续对得上）、七种 `type(value).__name__` 与 `editable` 的规则、缺席的键仍然是**一行**（`present: false` + `type: ''` + 可写）、其他（未归类）逐字用键名当 label 并给那句下一步、**建 payload 不创造键**（对着真的 `Setting` 问 `has()` 仍然为假 —— §4.2 第一条陷阱）。**HTTP 3 条**：文档形状与 absent 行、`launch-param` 与这份读文档**逐键比同一个值**（一份文件两个读者 —— §4.8 那条「两处答案不一致比没有数字更糟」的第三种形状）、LAN 无令牌整份拒。**真机 §28 共 16 条**：把 `macast/module_settings.py` **按文件路径** load 进来（`import macast` 会把 cherrypy 和 `SETTING_DIR` 一起拖进来），用**本机 HTTP 刚交回来的那些行**重算一份文档，再逐格对拍 —— 对拍用 present 行重建输入，是为了不去和"启动时实例自己写了 USN 与友好名"这件事赛跑。**三处记账的偏离**：① **没有插件组** —— 本壳还没有插件子系统，而参考实现在 `plugins=[]` 时交回的就是这个形状，所以这一格不是"我们少了"而是**用参考实现自己算一遍来证明**；② **`Timeout` 从 `cast_local_file` 的键变成本壳 core 的键**，连带 hint 改成本壳的读者（对拍时按名字排除这一格，并且**数过**：排除必须恰好一行、参考侧必须没有 Timeout，否则判据自己变红 —— 一条允许无界差异的比较就不再是比较，与 `--ci` 的豁免名单是同一条规矩）；③ 每格内部字段顺序两侧**相同**（工作区 manifest 开了 `serde_json` 的 `preserve_order`），§8 那条字母序偏离说的是 `Setting` 自己的 `BTreeMap` 表（`launch-param` 交回的就是它），不是文档格 —— 这两件事在写这一节的第一版里被我混成一件事，于是报出一条不存在的产品偏离，见 §16 第 30 条 |
+| `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 || AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting` + `main.rs` 在**已经绑好口的 receiver** 之后起第二个 announcer）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**仍然欠的那半句换了位置，但没有消失**：**会广播 ≠ 会答问** —— responder 的判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门，`run()` 的 `answers` 参数把它带到 socket 上），所以对 `_airplay._tcp` 的**查询**这一侧我们不答，iPhone 靠的是那三包突发与 60 秒 keepalive。这一格要说成"没有见证"而不是"验证过不行"：§26 的 browse 从突发里就能成功，它既证不了答问也证不了不答问；announcer 自己的那一行日志**明说了这件事**（`it announces only — queries about this type are not answered`），§26 有一条就是问这句话在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
 ---
@@ -1451,6 +1451,19 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     ③ **没有任何一台 iPhone 连过这台接收端**：§26 的发送端是本脚本自己写的 RTSP 字节，
     真机的"手机列表里看得见并投进来"仍然欠着。**以及本分支从未推送 ⇒ 这一轮的 699 条与那 288 条读数没有任何 CI 见证过。**
 
+30. **`query=module-settings` 接进管理面，而电池逼出三条「同源等式」与一次把自己读成产品的假偏离**（2026-10-19，`macast-core/src/module_settings.rs` + `macast-upnp/src/http.rs` 的 GET 表第 13 行 + 真机 §28 的 **16 条**）：
+    *为什么是一张表而不是一个路由*：这一张脸的答复是**给用户读的文字**（label / hint）加三个派生布尔（`present` / `type` / `editable`），而参考实现里那张表是 `module_settings.py` 的唯一主人。所以移植的形状是"core 一张表 + http 一行"，写侧（`set-module-setting`，门是 code-execution）以后必须问**同一张表**，不能长第二份归属名单 —— §4.7c 那张 POST 表教的是同一件事：归属一旦散在两个读者手里，页面就会写着"这一格可写"而后端拒收。
+    *跨实现的那道对拍是这一节的主体*：`scripts/verify_rust_receiver.sh` §28 把 `macast/module_settings.py` **按文件路径** load 进来（`import macast` 会把 cherrypy 与 `SETTING_DIR` 一起拖进来，而 `SETTING_DIR` 是 import 时冻住的常量 —— 那条已经写进 §4.9），用**本机 HTTP 刚交回来的 present 行**重建成 `stored`，再让参考实现算一份文档与本机那份**逐格 canonically 比**。输入取自答复而不是设置文件，是为了不去和"实例在启动时自己写了 USN 与友好名"赛跑；这一点在第一版里就红过，因为那一版拿种子文件当输入，而字段顺序那一问又把"文档里格子的顺序"与"设置表键的顺序"混成一件事（见下面第 ③ 条）。
+    *三处偏离，各处都有自己的写法*：① **没有插件组** —— 本壳没有插件子系统。这一格没有用"我们还没做"答辩，而是让**参考实现在 `plugins=[]` 时自己算一遍**：它算出来的就是同一个形状，所以"两边在这个壳的现实里一致"是一句读数。② **`Timeout` 的归属换了**（Python 里它是 `cast_local_file` 的键，本壳是 core 的键，hint 也跟着改成本壳的读者）。对拍时按名字**排除**这一格，并且**数过排除**：必须恰好一行、必须来自 core、参考侧必须完全没有 Timeout —— 任何第二条差异仍然把比较判红。一个允许无界差异的"对拍"不是对拍，这一条与 `--ci` 的豁免名单是同一条规矩（§4.12 末）。③ **格子字段顺序两侧相同**（工作区开了 `serde_json` 的 `preserve_order`，root `Cargo.toml` 里那条注释说它是为 `LIVE_LOAD_OPTIONS` 开的）；§8 那条"键按字母排"的偏离讲的是 `Setting` 自己的 `BTreeMap` 表，也就是 `launch-param` 交回的那一份，**不是**文档格子。第一版把两件事当成一件，于是报出一条**不存在的产品偏离**，并且把它写成了判据 —— 修法是把判据改成问真实的那一侧（两侧顺序必须等于参考实现的 `key,label,hint,present,value,type,editable`），并把这句话留在检查上方，免得下一个人再把两个 map 混起来。
+    *电池逼出来的四条「同源等式」/盲区*（S 系列八支，一支一条命令，`/tmp` 备份 + trap 还原 + md5 回到当轮基线；每支先验证文件确实变了）：
+    S1 把 `Timeout` 那一行的键名改错 → **2** 红（认领表 + `is_owned`）；S2 `py_type_name` 里"是不是整数"那一问改成恒真 → **1** 红；S3 `editable` 对在场值恒真 → **1** 红；S4 `is_claimed` 恒真（于是永远没有"其他"桶）→ **2** 红；S5 把格子的 label 换成键名 → **macast-core 0 红 / macast-upnp 1 红**；S6 成功文档多长一个 `message` 键 → **1** 红；S7 「其他」桶那句下一步被截短 → **1** 红；S8 `is_owned` 恒真（invent 一个名字也认）→ **1** 红。
+    **S5 那一支是这一轮学到的形状**：一个**建造者**的性质，在建造者自己的 crate 里没人问 —— `labels_are_not_empty_and_are_written_in_chinese` 读的是**表**，而把表里的 label 交出去那一步（`item()`）只有 HTTP 层在用。补的是 core 自己读一格（`first["label"] == "SSDP USN"`，顺带成了那条中文例外表的使用见证）。**"0 红"在这里不等于"覆盖够"，等于"这一格没人问"**（§4.14 中转那一节同一条）。
+    **三条本来永远问不出东西的断言，是被电池而不是被机器发现的**：`assert_eq!(groups[0]["title"], json!(CORE_TITLE))` 这种写法拿常量和常量比，对任何标题都成立 —— 三处（两个组名 + 那句未识别 hint）全部换成字面量。这一族的判据已经写在 memory 里（「同源等式对任何常量都成立」），本轮第一次是在**自己刚写的代码**里抓到三条。
+    *一条仪器谎，第五次是同一个形状*：§28 的 `pass "… \`preserve_order\`, so the page's row layout is not a coin flip"` 在双引号里放了两枚反引号，于是 bash 真去执行了 `preserve_order`，把那句话印成空串。**这一次是脚本自己的第一道闸抓的**（`bt-hits=1`，那一道带栽赃正控的审计，见 §16 第 27 条末）—— 记在这里是因为它是 AGENTS.md §4.13 那一族**第五次**现形，而且是第一次由闸而不是由人拦住：没有那道闸，这一行会以一条绿色进仓库。
+    *LAN 那一格读错了层*：第一版拿 `sed` 在原始正文里找 `"code": 403`，而拒绝是 `{"code": 1, "message": "管理接口只回答…"}` 配 **HTTP 403** —— 状态码与正文里的 code 是两层，写成一层的判据会对着一台正确的机器变红（§9.3 那条"`ensure_ascii` 的正文不许裸 grep"也是同一族的邻居）。改走 `api_probe` + `json_ask` / `json_has`：先解析再问，四条各自独立（403、那句管理话、正文 code 是 1、正文里没有表）。
+    *计数*：`macast-core` **101**（+11，`cargo test --lib` 与 `--list` 两台仪器一致）、`macast-upnp` **350**（+3）、`macast-cast` 699、`macast-mpv` 149、`macast-tauri` 18。GET 表 12 → **13** 行，而 `the_get_route_table_is_well_formed` 里那句地板从 `>= 12` 换成 `== 13`：**低一行的地板拦不住删掉一行**，而"这张表还在不在"正是它存在的理由。真机 **304 PASS / 0 FAIL / 1 SKIP，退出码 1**（那一条 SKIP 仍是 §25 的送达那一格；上一轮的读数是 288/0/1，这一轮 §28 带来 16 条新判据）。
+    *诚实边界*：① **写侧还没移植** —— `set-module-settings`（门 = code-execution，且参考实现拒绝 list/dict 值）留在 POST 那一轮，所以这张卡今天读得到、点不动；② **没有浏览器读过这份文档**（`frontend/index.html` 还是占位页），所以"页面按这个形状渲染得出来"仍然是文本契约而不是截图；③ **`plugin-info` / `mirror-state` / `mirror-snapshot` 三张脸仍未移植**，而 `cast-targets` 那种"交回参考实现的完整拒绝文档"的形状是给它们预备的，不是已经给出去了。**以及本分支从未推送 ⇒ 这一轮的 101 + 3 条与那 304 条读数没有任何 CI 见证过。**
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1517,7 +1530,8 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **30**（§27 是最后一节，
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **31**（§28 是最后一节：
+#   两份实现各自把「哪个键属于谁」这张表写一遍，再逐格对拍；§27 是重投历史那一节，
 #   重启之后重投历史还在；§26 是 iPhone 的 RTSP 问答，§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
 #   门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
 #   编号变了而判据没变）
@@ -1578,10 +1592,20 @@ grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
 #   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
-grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **12**（GET 表：cast/cast-info/
+grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **13**（GET 表：cast/cast-info/
 #   resolve-status/resolve-cookies/cast-targets/status/interfaces/subscribers/log/log-modules/
-#   log-download / launch-param —— 参考实现十五个里的十二个，剩下三个是 plugin-info /
-#   module-settings / mirror-* 那批还没移植的）
+#   log-download / launch-param / module-settings —— 参考实现十五个里的十二个，剩下三个是
+#   plugin-info 与 mirror-state / mirror-snapshot。这个数**不是地板是判据**：`the_get_route_table_is_well_formed`
+#   钉的是 `len() == 13`（§16 第 29 条那一格的形状 —— 地板比真值低一行，删掉一行照样过，而删掉的正是"这张表
+#   还在不在"这一问），所以改这张表的人两处一起动，文档里的这一行才有意义）
+grep -c 'entry!(' macast-core/src/module_settings.rs                    # 期望 **27** = `Key::all().len()`，
+#   而 `every_key_in_the_table_is_owned_by_exactly_one_group` 钉的是"两张表加起来恰好等于键表"
+#   这个**双向**问句（有键没标签 = 漂移；有标签没这个键 = 表在指向一台机器写不了的键）
+grep -c 'module_settings::' macast-upnp/src/http.rs                     # 期望 **1**（这张脸只有一个读者；
+#   写侧 `set-module-setting` 移植时必须叫同一个名字，不能长第二份归属名单 —— §4.7c 的理由）
+grep -cE 'pub fn (groups|payload)|fn is_claimed' macast-core/src/module_settings.rs  # 期望 **3**
+#   （表 → 组 → 文档，各一个主人；`is_claimed` 是"这一格属不属于某张表"的唯一问句）
+
 grep -rc 'fn header_emissions' macast-upnp/src/http.rs          # 期望 **1**（CORS 不变式的扫描器在这里，
 #   它扫的是三个 crate 的所有 `.rs`；`the_cors_scanner_answers_when_a_cors_header_exists` 是它的合成正控，
 #   删掉"注释行不算"那一支就会红 2 条 —— 见 §16 第 19 条）

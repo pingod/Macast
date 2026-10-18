@@ -449,19 +449,26 @@ enum Action {
     /// `query=launch-param`: the raw settings table, which is what the page's
     /// 高级设置 tab edits.
     LaunchParam,
+    /// `query=module-settings`: the same table **grouped by who owns each key** —
+    /// 模块设置 tab. `launch-param` answers "what is stored"; this answers "who wrote
+    /// it and what does it do", and the answer is a table the port owns
+    /// ([`macast_core::module_settings`]), not a second copy of the settings file.
+    ModuleSettings,
 }
 
-/// The eleven answers this port implements out of the shipped management API's
+/// The twelve answers this port implements out of the shipped management API's
 /// fifteen GET queries. Each is a **cumulative** check, not a choice: see
 /// [`Face::gate_refusal`].
 ///
-/// The four that are still missing are `plugin-info`, `module-settings`,
-/// `launch-param` and the two `mirror-state`/`mirror-snapshot` reads. The first
-/// three belong to plugin and module subsystems this shell has not ported at all,
-/// so there is nothing to answer yet; `launch-param` is a different case — the
-/// reference hands back the **whole settings table**, `Api_Token` included, so it
-/// waits for its own decision about who may read it rather than being wired to the
-/// same management gate on the theory that the gate is enough.
+/// The three that are still missing are `plugin-info` and the two
+/// `mirror-state`/`mirror-snapshot` reads. All three belong to plugin subsystems this
+/// shell has not ported at all, so there is nothing to answer yet — which is a
+/// different thing from *not answering*: `cast-targets` set the pattern of answering
+/// the reference's **full refusal document** (shape included, both booleans present and
+/// false) so the card stops polling, and `plugin-info` is the next candidate for that
+/// shape. `launch-param` was the one that did *not* wait for a decision — it answers the
+/// whole settings table, `Api_Token` included, and §4.7b's no-CORS invariant plus this
+/// gate are the argument for why that is survivable.
 ///
 /// **Two deviations from Python's *structure*, both recorded rather than copied
 /// silently** (`protocol.py:2066-2120`). First, Python asks the cast question
@@ -478,7 +485,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 12] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 13] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -612,6 +619,20 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 12] = [
         // order-preserving table, not a sort in this route.
         gate: "management",
         action: Action::LaunchParam,
+    },
+    GetRoute {
+        query: "module-settings",
+        // Management-gated, and the reference lists it among the sensitive queries
+        // (`protocol.py:2080-2088` — the same `_management_allowed()` membership test
+        // that carries `cast-info` and `resolve-cookies`). The reason is not that the
+        // *labels* are secret: they are UI prose. It is that every row answers with the
+        // **stored value** next to its name, so this document contains `Api_Token`
+        // whenever the user has one — the credential that opens `query=cast` and every
+        // code-executing POST. A read that shows the token is the same read
+        // `launch-param` already makes, which is why both sit behind the same door and
+        // neither is demoted to "public status".
+        gate: "management",
+        action: Action::ModuleSettings,
     },
 ];
 
@@ -1614,6 +1635,7 @@ impl Face {
             Action::LogModules => self.log_modules_entry(),
             Action::LogDownload => self.log_download_entry(req),
             Action::LaunchParam => self.launch_param_entry(),
+            Action::ModuleSettings => self.module_settings_entry(),
         }
     }
 
@@ -1900,6 +1922,23 @@ impl Face {
     /// polling read must not).
     fn launch_param_entry(&self) -> Response {
         json_value_response(&Value::Object(self.setting.snapshot()))
+    }
+
+    /// `query=module-settings` — the settings table **grouped by owner**.
+    ///
+    /// Read-only for the same reason `launch_param_entry` is: the page polls it, and a
+    /// poll must not create the keys it reports. That is not a style rule here — the
+    /// document is *built* from 27 named rows whether or not the file holds them, so an
+    /// implementation that fetched each key through `Setting::get` would write all 27
+    /// defaults on a clean install (AGENTS.md §4.2's oldest trap, and
+    /// `the_module_settings_read_creates_no_key` asks exactly that of this route).
+    ///
+    /// The ownership map itself lives in `macast-core::module_settings`, not here: the
+    /// POST write path (`set-module-setting`, a code-executing gate) needs the same
+    /// "who owns this name" answer, and two tables that can disagree about a key's owner
+    /// is how a page ends up writing a key the read side put in 其他（未归类）.
+    fn module_settings_entry(&self) -> Response {
+        json_value_response(&macast_core::module_settings::payload(&self.setting.snapshot()))
     }
 
     /// `query=log` — the panel's tail of one log file.
@@ -5732,7 +5771,14 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 12);
+        //
+        // **13, not "at least 12"**: a floor that trails the size by one row stops
+        // asking anything the day a row is deleted — the point of the count is to notice
+        // rows *disappearing*, and `>= 12` cleared a 12-row table built by deleting one.
+        // The number is a measurement (`grep -c '        query: "' http.rs`), and the
+        // per-row loop below is what gives it teeth: a row that is counted but not gated
+        // fails there, not here.
+        assert_eq!(GET_MANAGEMENT_ROUTES.len(), 13, "the GET table changed size; move this number from a count, and the docs' route count with it");
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -7714,6 +7760,217 @@ mod tests {
             LAN,
         ));
         assert_eq!(served.status, 200);
+    }
+
+    /// Pull one cell out of a `module-settings` document by group id and key name.
+    fn setting_cell(doc: &serde_json::Value, group: &str, key: &str) -> serde_json::Value {
+        doc["groups"]
+            .as_array()
+            .and_then(|groups| {
+                groups.iter().find(|g| g["id"] == json!(group)).and_then(|g| {
+                    g["keys"]
+                        .as_array()
+                        .and_then(|rows| rows.iter().find(|r| r["key"] == json!(key)).cloned())
+                })
+            })
+            .unwrap_or_else(|| panic!("no row {key} in group {group}: {doc}"))
+    }
+
+    #[test]
+    fn module_settings_answers_the_owner_table_and_still_creates_nothing() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("module-settings-doc");
+        face.setting.set(Key::DlnaFriendlyName, Value::String("客厅的电视".into()));
+        face.setting.set(Key::ApplicationPort, serde_json::json!(58880));
+        face.setting.set(Key::PlayHistory, serde_json::json!([{"uri": "x"}]));
+        store_token(&face.setting, Some(SECRET));
+        // A key no table owns — the shape a hand-edited settings file produces.
+        face.setting.set(Key::Timeout, serde_json::json!(9));
+        let response = face.answer(&get_api("/api?query=module-settings", LOCAL));
+        assert_eq!(response.status, 200);
+        let doc = serde_json::from_slice::<serde_json::Value>(&response.body).expect("an object");
+        assert_eq!(doc["code"], json!(0));
+        assert!(
+            doc.as_object().expect("object").get("message").is_none(),
+            "success grew a `message` key the reference's success dict does not have"
+        );
+        let groups = doc["groups"].as_array().expect("groups");
+        let ids: Vec<&str> = groups.iter().map(|g| g["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["core", "player"], "every stored key is owned here, so no 其他 bucket: {ids:?}");
+
+        let name = setting_cell(&doc, "core", "DLNA_FriendlyName");
+        assert_eq!(name["label"], json!("DLNA 设备名"));
+        assert_eq!(name["present"], json!(true));
+        assert_eq!(name["value"], json!("客厅的电视"));
+        assert_eq!(name["type"], json!("str"));
+        assert_eq!(name["editable"], json!(true));
+
+        // A list is structure: shown, not edited from this tab (高级设置's JSON editor
+        // is the only place that may half-edit it — `module_settings.py:202`).
+        let history = setting_cell(&doc, "core", "Play_History");
+        assert_eq!(history["type"], json!("list"));
+        assert_eq!(history["editable"], json!(false));
+
+        // The one row whose *ownership* is a port decision: in Python it belongs to the
+        // `cast_local_file` plugin, and the hint there names a plugin. This build has no
+        // plugin subsystem, and the reader is the device hand-off sender, so the hint has
+        // to name what actually reads it — a label table that describes a module that is
+        // not loaded is the page pointing at something the user cannot open.
+        let timeout = setting_cell(&doc, "core", "Timeout");
+        assert_eq!(timeout["label"], json!("网络超时"));
+        assert_eq!(timeout["value"], json!(9));
+        let hint = timeout["hint"].as_str().expect("a hint");
+        assert!(hint.contains("投给"), "the hint names a plugin, not this build: {hint}");
+        assert!(!hint.contains("插件"), "the hint still claims a plugin owns this: {hint}");
+
+        // And the unowned half of the table is absent-but-shown: 27 rows appear whether or
+        // not the file holds them, which is the whole reason this read must not go
+        // through `Setting::get`. Taken before/after the **call**, because building the
+        // face already writes the friendly name (the device description asks for it).
+        let fresh = fresh_setting("module-settings-no-write");
+        let (face2, _) = {
+            let f = Face::new(
+                Arc::new(FakeControl::soap_ok()),
+                Arc::new(FakeSubscription::new()),
+                Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+                fresh.clone(),
+                TestStore::new() as SharedStore,
+            )
+            .expect("face builds");
+            (Arc::new(f), ())
+        };
+        let before: Vec<String> =
+            fresh.snapshot().into_iter().map(|(name, _)| name).collect();
+        // The baseline is not empty — face construction put the USN and the friendly
+        // name in — which is what makes the equality below a question rather than a
+        // tautology about two empty lists.
+        assert!(!before.is_empty(), "the fixture's table is empty, so compare nothing");
+        let served = face2.answer(&get_api("/api?query=module-settings", LOCAL));
+        assert_eq!(served.status, 200);
+        let after: Vec<String> = fresh.snapshot().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(before, after, "a polled read grew the settings file it reports");
+        // …asked about a **player** key, not `USN`. The first version of this line
+        // asserted `!fresh.has(Key::Usn)` and went red on correct code: building the face
+        // already writes the USN and the friendly name (the device description asks for
+        // both through the shared reader — the reference does the same at startup), so
+        // that assertion was about the harness, not about this route. `PlayerDefaultVolume`
+        // is read by nothing on this face, so if a snapshot route ever re-derived its rows
+        // through `Setting::get`, this is the key that shows up in the file.
+        assert!(
+            !fresh.has(Key::PlayerDefaultVolume),
+            "the settings read created a key no boot path touches"
+        );
+        // …and an absent row is still a row. Asked about `PlayerDefaultVolume`, not
+        // `USN`: the line above just proved this table does not hold the player's volume,
+        // while face construction *does* write the USN and the friendly name (the device
+        // description asks for both), so "USN must read as absent" is false about this
+        // harness and was the second time this test blamed the route for the face.
+        let absent = setting_cell(
+            &serde_json::from_slice::<serde_json::Value>(&served.body).expect("an object"),
+            "player",
+            "PlayerDefaultVolume",
+        );
+        assert_eq!(absent["present"], json!(false));
+        assert_eq!(absent["label"], json!("默认音量"));
+        assert_eq!(absent["value"], Value::Null);
+        assert_eq!(absent["type"], json!(""));
+        assert_eq!(absent["editable"], json!(true), "a key that is not there is creatable");
+    }
+
+    /// The two settings reads must never disagree, because they read **one** snapshot:
+    /// `launch-param` is the raw table and `module-settings` is the same table grouped by
+    /// owner, and a user with both tabs open is looking at one file. The reference gets
+    /// this for free (both call `_load_stored()`); a port that re-derived the values in
+    /// the grouped document would have two answers for `Api_Token` — and AGENTS.md §4.8's
+    /// 「两处答案不一致比没有数字更糟」 is the reason this test exists rather than a
+    /// comment.
+    #[test]
+    fn the_two_settings_reads_answer_from_one_table_not_two_copies() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("module-settings-same-source");
+        face.setting.set(Key::ApiToken, serde_json::json!("tok-abc"));
+        face.setting.set(Key::GithubCnMirror, serde_json::json!(true));
+        face.setting.set(Key::BlockedInterfaces, serde_json::json!(["vmnet8"]));
+        face.setting.set(Key::PlayerDefaultVolume, serde_json::json!(42));
+        let raw = face.answer(&get_api("/api?query=launch-param", LOCAL));
+        let raw_doc = serde_json::from_slice::<serde_json::Value>(&raw.body).expect("an object");
+        let grouped = face.answer(&get_api("/api?query=module-settings", LOCAL));
+        let grouped_doc =
+            serde_json::from_slice::<serde_json::Value>(&grouped.body).expect("an object");
+
+        // Every stored key appears in exactly one group, with the value the raw dump
+        // shows — including the credential, which both routes hand to the same caller.
+        let stored: Vec<(String, serde_json::Value)> = raw_doc
+            .as_object()
+            .expect("object")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        assert!(!stored.is_empty(), "the fixture stored nothing, so this compares nothing");
+        let mut seen: Vec<String> = Vec::new();
+        for (name, value) in &stored {
+            let group = grouped_doc["groups"]
+                .as_array()
+                .expect("groups")
+                .iter()
+                .find(|g| setting_cell_exists(g, name))
+                .map(|g| g["id"].as_str().unwrap_or("?").to_string())
+                .unwrap_or_else(|| panic!("{name} appears in no group of {grouped_doc}"));
+            let cell = setting_cell(&grouped_doc, &group, name);
+            assert_eq!(&cell["value"], value, "{name}: the grouped read disagrees with the dump");
+            seen.push(name.clone());
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), seen.len(), "a stored key appeared in two groups");
+        // …and the dump is not silently shrinking: the grouped document owns at least the
+        // 27 rows of the two tables, so a table row cannot vanish without this noticing.
+        let rows: usize = grouped_doc["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .map(|g| g["keys"].as_array().expect("rows").len())
+            .sum();
+        assert!(rows >= 27, "the label tables lost rows: {rows}");
+    }
+
+    fn setting_cell_exists(group: &serde_json::Value, key: &str) -> bool {
+        group["keys"]
+            .as_array()
+            .map(|rows| rows.iter().any(|r| r["key"] == json!(key)))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn module_settings_is_refused_to_a_lan_caller_that_brings_no_token() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("module-settings-gate");
+        face.setting.set(Key::DlnaFriendlyName, Value::String("客厅的电视".into()));
+        store_token(&face.setting, Some(SECRET));
+        let refused = face.answer(&get_api("/api?query=module-settings", LAN));
+        assert_eq!(refused.status, 403);
+        let body: serde_json::Value =
+            serde_json::from_slice(&refused.body).expect("a refusal is JSON");
+        assert_eq!(body["message"].as_str(), Some(MANAGEMENT_REFUSAL));
+        // The refusal must not leak even the *shape* of the table: a LAN caller learning
+        // which keys this machine has is a starting point, not a status light.
+        assert!(
+            !text(&refused.body).contains("DLNA_FriendlyName")
+                && !text(&refused.body).contains(SECRET)
+                && !text(&refused.body).contains("groups"),
+            "the refusal still dumped the grouped table: {}",
+            text(&refused.body)
+        );
+        let served =
+            face.answer(&get_api(&format!("/api?query=module-settings&token={SECRET}"), LAN));
+        assert_eq!(served.status, 200);
+        let doc = serde_json::from_slice::<serde_json::Value>(&served.body).expect("an object");
+        assert_eq!(
+            setting_cell(&doc, "core", "Api_Token")["value"],
+            json!(SECRET),
+            "the grouped read hides the token the dump hands over — two answers, one file"
+        );
     }
 
     #[test]

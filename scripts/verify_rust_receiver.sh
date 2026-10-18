@@ -3863,6 +3863,350 @@ else
     fi
 fi
 
+echo "== 28: the 模块设置 table is the one the reference module writes =="
+# Two implementations read the same file and answer "who owns this key, what is it
+# called, and can the page edit it". The Rust side answers through its HTTP face; the
+# Python side is the shipped module (`macast/module_settings.py`) loaded **by file
+# path**, because `import macast` would drag in cherrypy and a settings directory
+# (`macast/__init__.py` imports `.utils`, which freezes `SETTING_DIR` at import time).
+#
+# Why a cross-implementation check and not just a Rust unit test: this table is **text
+# a user reads** plus **three derived booleans** (`present`, `type`, `editable`). The
+# unit tests can prove the Rust side is self-consistent; only the other implementation
+# proves the strings and the `type` names are the ones the page was written against —
+# the same reason §22 hands our bytes to `zeroconf` instead of to our own parser, and
+# §23 compares `sys.platform` against the interpreter that runs the app.
+#
+# The comparison is done against **the document Rust just returned**, not against the
+# settings file: the instance writes its own USN and friendly name at boot, so the file
+# and the answer are different moments. Rebuilding Python's groups from the rows the
+# face actually served asks the question we care about — same table, same values, same
+# verdicts — without racing the boot path.
+MS_SDIR=$(mktemp -d /tmp/macast-rust-modulesettings.XXXXXX)
+MS_PORT=$((PORT + 8))
+MS_SOCK="$MS_SDIR/mpvsocket"
+MS_TOKEN=0123456789abcdef0123456789abcdef
+# Seven value shapes on purpose (`str`, `int`, `float`, `bool`, `null`, `list`, `dict`),
+# because `type` is a string the page branches on and `editable` is derived from it;
+# plus two keys no table owns — one that is a *plugin's* key in the reference
+# (`Mirror_Target`) and one that is nothing at all (`zeta_custom`) — because this shell
+# has no plugin subsystem and both sides must therefore agree the bucket is 其他.
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust ModuleSettings", "Macast_Protocols": ["DLNA Protocol"], "Api_Token": "%s", "CheckUpdate": true, "Https_Port": 58443, "Https_Cert": null, "Blocked_Interfaces": ["vmnet8"], "PlayerDefaultVolume": 42.5, "Mirror_Target": "192.168.1.13:8009", "zeta_custom": {"nested": [1, 2]}}' \
+    "$MS_PORT" "$MS_TOKEN" > "$MS_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$MS_SDIR" MACAST_MPV_SOCKET="$MS_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$MS_SDIR/stdout.log" 2>&1 &
+MS_PID=$!
+disown "$MS_PID" 2>/dev/null || true
+MS_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$MS_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$MS_PID" ]; then
+        MS_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$MS_READY" ]; then
+    fail "the module-settings instance never became the listener on $MS_PORT"
+    kill -9 "$MS_PID" 2>/dev/null
+    rm -rf "$MS_SDIR"
+else
+    MS_DOC="$MS_SDIR/rust.json"
+    # **Before the query**, so the after-the-query comparison below is about the read and
+    # not about the boot that already happened.
+    MS_MD5_BEFORE=$(md5 -q "$MS_SDIR/macast_setting.json")
+    curl -s --noproxy '*' -m 5 \
+        "http://127.0.0.1:$MS_PORT/api?query=module-settings&token=$MS_TOKEN" \
+        > "$MS_DOC"
+    ms_ask() {
+        # $1 = a python expression over `doc` (the parsed document). The expression
+        # travels as **argv**, not stdin, because the program itself arrives as a heredoc
+        # — two things cannot own the same stdin, and the first version of this helper
+        # read `sys.stdin` while the shell fed it a heredoc, so every call printed the
+        # same empty answer. Compiled in single-eval mode and printed as `repr` for
+        # non-strings, so a tuple/list answer compares literally instead of depending on
+        # how `print` renders one.
+        env -u PYTHONPATH "$CAST_PY" - "$MS_DOC" "$1" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+answer = eval(compile(sys.argv[2], "<ms_ask>", "eval"), {"doc": doc, "json": json})
+print(answer if isinstance(answer, str) else repr(answer))
+PY
+    }
+
+    CODE=$(ms_ask 'doc["code"]')
+    HAS_MSG=$(ms_ask '"message" in doc')
+    [ "$CODE" = "0" ] && [ "$HAS_MSG" = "False" ] \
+        && pass "the grouped read answers {code, groups} — success carries no message key" \
+        || fail "code=$CODE message=$HAS_MSG body=$(head -c 200 "$MS_DOC")"
+
+    IDS=$(ms_ask '"|".join(g["id"] for g in doc["groups"])')
+    [ "$IDS" = "core|player|other" ] \
+        && pass "group order is core → player → 其他（未归类）, with an unowned bucket this run really has" \
+        || fail "group ids came out as: $IDS"
+
+    # A key the boot path never touches: the row must be *shown* as absent, with the
+    # empty type string and editable true (writing it creates it).
+    #
+    # Compared as **canonically sorted JSON against a hand-written literal**, never as
+    # `repr` of a parsed dict: a parsed dict keeps the *document's* field order, and this
+    # port writes cells alphabetically (its table is a `BTreeMap`), so repr-vs-literal
+    # would be red about ordering while pretending to ask about values. The literal is
+    # typed here rather than generated from the reference module on purpose — the
+    # whole-document comparison below already asks the reference, and a second copy of the
+    # same source would let a table that drifts on both sides pass twice.
+    START=$(ms_ask 'json.dumps([c for g in doc["groups"] if g["id"]=="core" for c in g["keys"] if c["key"]=="StartAtLogin"][0], sort_keys=True, ensure_ascii=False)')
+    WANT_START=$(env -u PYTHONPATH "$CAST_PY" - <<'PY'
+import json
+print(json.dumps({
+    "key": "StartAtLogin",
+    "label": "开机自启",
+    "hint": "bool：登录后自动运行 Macast。",
+    "present": False,
+    "value": None,
+    "type": "",
+    "editable": True,
+}, sort_keys=True, ensure_ascii=False))
+PY
+)
+    [ "$START" = "$WANT_START" ] \
+        && pass "an absent key is still a row: present false, type the empty string, editable true" \
+        || fail "the absent row came out as: $START (wanted $WANT_START)"
+
+        # Each seeded shape, asked of the document by **name** rather than as a comparison of
+    # the whole present set. The first version sorted every present row against a literal
+    # list and forgot that the instance writes its own `USN` and friendly name at boot —
+    # so the expected set grew with whatever the harness did that day, which is the same
+    # mistake as a test that depends on which machine runs it (AGENTS.md §4.2's
+    # 「空结果要说清是哪一种空」 family). Per-name questions cannot drift with the boot path.
+    SHAPE=$(env -u PYTHONPATH "$CAST_PY" - "$MS_DOC" <<'PY'
+import json, sys
+
+doc = json.load(open(sys.argv[1]))
+cells = {c["key"]: c for g in doc["groups"] for c in g["keys"]}
+# (key, type(value).__name__, editable) for the eleven values this section seeds.
+# `Https_Cert: null` is deliberately in here: a stored null is **present**, and Python's
+# rule makes it editable (`or value is None`), which is the one cell in the table where
+# "absent" and "present as null" have to be told apart by `present` alone.
+EXPECTED = [
+    ("DLNA_FriendlyName", "str", True),
+    ("Api_Token", "str", True),
+    ("Mirror_Target", "str", True),
+    ("ApplicationPort", "int", True),
+    ("Https_Port", "int", True),
+    ("PlayerDefaultVolume", "float", True),
+    ("CheckUpdate", "bool", True),
+    ("Https_Cert", "NoneType", True),
+    ("Blocked_Interfaces", "list", False),
+    ("Macast_Protocols", "list", False),
+    ("zeta_custom", "dict", False),
+]
+bad = []
+for name, want_type, want_editable in EXPECTED:
+    cell = cells.get(name)
+    if cell is None:
+        bad.append("%s: no row at all" % name)
+        continue
+    if not cell["present"]:
+        bad.append("%s: the file holds it and the row says absent" % name)
+    if cell["type"] != want_type:
+        bad.append("%s: type %r, expected %r" % (name, cell["type"], want_type))
+    if cell["editable"] is not want_editable:
+        bad.append("%s: editable %r, expected %r" % (name, cell["editable"], want_editable))
+# And the shape list is not vacuous: this section's own fixture has to have written them.
+assert len(EXPECTED) == 11, "the expected table shrank to %d" % len(EXPECTED)
+print("OK" if not bad else "; ".join(bad))
+PY
+)
+    [ "$SHAPE" = "OK" ] \
+        && pass "all seven type names are Python's type(value).__name__, and only scalars are editable" \
+        || fail "shape table differs: $SHAPE"
+
+    OTHER=$(ms_ask '[c for g in doc["groups"] if g["id"]=="other" for c in g["keys"]][0]')
+    case "$OTHER" in
+        *"未识别归属的键"*) pass "the unowned bucket names the key verbatim and says what to do with it" ;;
+        *) fail "the 其他 row gives no next step: $OTHER" ;;
+    esac
+
+    # The one row whose ownership is a **port decision** (module header): in the reference
+    # `Timeout` is a plugin key; here the device hand-off sender reads it, so the hint has
+    # to name this build instead of a plugin that is not loaded.
+    TO_HINT=$(ms_ask '[c["hint"] for g in doc["groups"] for c in g["keys"] if c["key"]=="Timeout"][0]')
+    case "$TO_HINT" in
+        *"插件"*) fail "the Timeout row still describes a plugin this shell does not run: $TO_HINT" ;;
+        *"投给"*) pass "Timeout is a core row here, and its hint names the reader in *this* build" ;;
+        *) fail "the Timeout hint says nothing about who reads it: $TO_HINT" ;;
+    esac
+
+    # The token is in the answer. Asserted, not assumed away: both settings reads hand
+    # over the whole table because that is what the tab edits, and the thing keeping it
+    # from a browser is the missing CORS header (§23's invariant scan), not a silent
+    # redaction that would make the page's own editor wrong.
+    TOK=$(ms_ask '[c["value"] for g in doc["groups"] for c in g["keys"] if c["key"]=="Api_Token"][0]')
+    [ "$TOK" = "$MS_TOKEN" ] \
+        && pass "and the grouped read gives the token the raw dump gives — one table, two readers" \
+        || fail "Api_Token came back as: $TOK"
+
+    # The real cross-check, in one python program that reads both sides.
+    MS_CROSS=$(env -u PYTHONPATH "$CAST_PY" - "$REPO" "$MS_DOC" <<'PY'
+import importlib.util, json, sys
+
+repo, doc_path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location(
+    "module_settings_ref", repo + "/macast/module_settings.py")
+ref = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ref)
+
+rust = json.load(open(doc_path))
+# The stored table as the Rust face saw it: every row that says it is present, with the
+# value it reported. `build_groups([], stored)` is the reference's no-manager shape —
+# which is what this shell actually is until the plugin subsystem is ported.
+stored = {}
+for group in rust["groups"]:
+    for cell in group["keys"]:
+        if cell["present"]:
+            stored[cell["key"]] = cell["value"]
+
+mine = ref.payload([], stored)
+
+
+def canon(x):
+    return json.dumps(x, sort_keys=True, ensure_ascii=False)
+
+
+# **The one row this port moves is excluded by name, counted, and checked empty on the
+# reference's side.** `Timeout` belongs to the `cast_local_file` plugin there
+# (`module_settings.py:113`) and to the core here (this build has no plugin subsystem and
+# the device hand-off sender reads it), so the two documents cannot be equal at that
+# cell. Excluding it is legitimate; excluding it *open-endedly* is not — a comparison
+# that allows an unbounded set of differences stops being a comparison, which is the same
+# failure as a CI gate whose exemption list grows to cover whatever is red. So: exactly
+# one row removed, from `core`, and no `Timeout` row anywhere in the reference's document.
+# Any *other* divergence still reddens the comparison below.
+removed = []
+for group in rust["groups"]:
+    kept = []
+    for cell in group["keys"]:
+        if group["id"] == "core" and cell["key"] == "Timeout":
+            removed.append(cell)
+            continue
+        kept.append(cell)
+    group["keys"] = kept
+in_reference = {c["key"] for g in mine["groups"] for c in g["keys"] if c["key"] == "Timeout"}
+if len(removed) != 1 or in_reference:
+    rows_note = "TIMEOUT_EXCLUSION_UNSAFE removed=%d in_reference=%s" % (len(removed), sorted(in_reference))
+else:
+    rows_note = "MOVED=core/Timeout"
+same = canon(mine) == canon(rust)
+rows = []
+if same:
+    rows.append("EQUAL")
+else:
+    rows.append("DIFFER")
+    # Say **which cell** disagrees; a whole-document diff printed into a log line is the
+    # reading that gets ignored.
+    for g_mine, g_rust in zip(mine["groups"], rust["groups"]):
+        if canon(g_mine) != canon(g_rust):
+            names_m = {c["key"]: c for c in g_mine["keys"]}
+            names_r = {c["key"]: c for c in g_rust["keys"]}
+            for k in sorted(set(names_m) | set(names_r)):
+                if names_m.get(k) != names_r.get(k):
+                    rows.append("%s/%s py=%s rust=%s" % (g_mine["id"], k, names_m.get(k), names_r.get(k)))
+            break
+# Field order inside one cell: Python writes the reference's order, this port writes the
+# alphabetical one (its table is a `BTreeMap`). The deviation is recorded in
+# docs/Rust-Port-Design.md §8; this line is its witness — a deviation nobody measures
+# turns into "we thought it was ordered".
+rows.append(rows_note)
+py_order = list(mine["groups"][0]["keys"][0].keys())
+rust_order = list(rust["groups"][0]["keys"][0].keys())
+rows.append("PYORDER=" + ",".join(py_order))
+rows.append("RUSTORDER=" + ",".join(rust_order))
+print("\n".join(rows))
+PY
+)
+    MS_VERDICT=$(printf '%s' "$MS_CROSS" | head -1)
+    MS_PY_ORDER_LINE=$(printf '%s\n' "$MS_CROSS" | grep -a '^PYORDER=' | head -1)
+    MS_RUST_ORDER_LINE=$(printf '%s\n' "$MS_CROSS" | grep -a '^RUSTORDER=' | head -1)
+
+    if [ "$MS_VERDICT" = "EQUAL" ]; then
+        pass "the shipped module and this face produce the same document, cell by cell"
+    else
+        fail "the two implementations disagree: $(printf '%s\n' "$MS_CROSS" | tr '\n' ' ' | head -c 600)"
+    fi
+    # …and the field order the reference writes, asserted from the reference itself
+    # rather than from memory, then compared against this port's sorted one.
+    if [ "$MS_PY_ORDER_LINE" = "PYORDER=key,label,hint,present,value,type,editable" ]; then
+        pass "the reference's own cell order is the one the page was written against"
+    else
+        fail "unexpected reference cell order: ${MS_PY_ORDER_LINE:-none}"
+    fi
+    # …and **this port writes the same order**, because the workspace manifest turns on
+    # `serde_json`'s `preserve_order` (root `Cargo.toml`: it is there for
+    # `LIVE_LOAD_OPTIONS`, a Python dict whose order is a promise to mpv). The first
+    # version of this row asserted the cells came out alphabetically and went red on
+    # correct code — the deviation this section recorded in §8 is about the *settings
+    # table's* keys (`Setting`'s `BTreeMap`, which is what `launch-param` dumps), not
+    # about a document cell, and conflating the two maps produced a fake product finding.
+    # So this row now pins the thing that is actually true: the page reads a cell in the
+    # reference's field order, and if `preserve_order` ever goes away the row says so.
+    if [ "$MS_RUST_ORDER_LINE" = "RUSTORDER=key,label,hint,present,value,type,editable" ]; then
+        pass "and this port writes the same field order — preserve_order, so the page's row layout is not a coin flip"
+    else
+        fail "the port's cell order drifted from the reference's: ${MS_RUST_ORDER_LINE:-none}"
+    fi
+
+    # The gate, on the real face: a LAN caller with no token hears the management
+    # sentence and gets no table at all — the document holds every stored value, so this
+    # is not a cosmetic difference.
+    # The refusal is read the way §23 taught every read here: **parse, then compare**.
+    # The first version grepped the raw body for a number, and the body is pretty-printed
+    # with `ensure_ascii` escapes, so a line-wise `sed` picked the document's own
+    # `"code": 1` — which is the *correct* refusal (the reference's gate answers with
+    # `code: 1` and HTTP 403; the two are different layers, and an earlier draft of this
+    # row demanded 403 inside the body and went red on correct code).
+    api_probe "http://$LAN:$MS_PORT/api?query=module-settings"
+    [ "$API_STATUS" = "403" ] \
+        && pass "a LAN caller with no token gets HTTP 403 from the grouped table" \
+        || fail "a LAN caller got HTTP $API_STATUS from module-settings"
+    case "$API_MSG" in
+        *"$MANAGEMENT_MARK"*) pass "and hears the management sentence, as that is the gate that ran" ;;
+        *) fail "LAN refusal wording: $API_MSG" ;;
+    esac
+    [ "$(json_ask code)" = "1" ] \
+        && pass "the body's code is the reference's 1, not an HTTP status wearing a JSON field" \
+        || fail "the refusal's body code: $(json_ask code)"
+    if json_has groups; then
+        fail "the refusal still carried the grouped table"
+    else
+        pass "and it carries no table at all — not the labels, not the values, not the token"
+    fi
+
+    api_probe "http://$LAN:$MS_PORT/api?query=module-settings&token=$MS_TOKEN"
+    if json_has groups; then
+        pass "with the token the same caller is served — the door is the token, not the address"
+    else
+        fail "a tokened LAN caller was refused: HTTP $API_STATUS $API_MSG"
+    fi
+
+    # And the read left the file alone: 27 rows are built whether or not the table holds
+    # them, and a page that polls this query must not be the thing that writes them in.
+    MS_MD5_AFTER=$(md5 -q "$MS_SDIR/macast_setting.json")
+    [ "$MS_MD5_BEFORE" = "$MS_MD5_AFTER" ] \
+        && pass "polling the grouped read did not grow the settings file it reports" \
+        || fail "the read wrote the file ($MS_MD5_BEFORE -> $MS_MD5_AFTER)"
+
+    kill -9 "$MS_PID" 2>/dev/null
+    pkill -9 -f "$MS_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $MS_SDIR (rust.json, macast.log, macast_setting.json)"
+    else
+        rm -rf "$MS_SDIR"
+    fi
+fi
+
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

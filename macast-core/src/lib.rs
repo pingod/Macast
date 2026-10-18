@@ -12,6 +12,7 @@
 
 pub mod env;
 pub mod logging;
+pub mod module_settings;
 pub mod net;
 pub mod paths;
 pub mod setting;
