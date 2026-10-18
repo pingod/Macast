@@ -2096,6 +2096,24 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   本分支还没移植时诚实回「不认识的字段」，于是它一直走的是"读不到 ⇒ 用 Python 自己的 fallback"那一支；
   status 接上之后同一行读到了值，走的是另一支。**一个 fallback 分支在被它绕开的那个缺陷补齐之后必须
   回头看它还在测什么**，否则补齐本身就让一条用例静默换了对象。
+* **一条审计先被自己的变异体证伪过一次**：`query=subscribers` 接进来时配了一条文本审计
+  （窗口命令必须调共用建造者 `subscribers_document`，不许再自己写那些键），第一版 needle 是
+  `"pending_append":` 这种**带冒号的整键**，而变异体写的是 `doc["pending_append_total"] = json!(…)`
+  —— 往文档上**赋值**而不是重打一份 `json!` —— **0 红**。审计的形状与破坏的形状不是同一个；
+  加强成"开引号 + 键名"之后同一支变异体红 1 条。两个附带决定：`"title"` 不进针眼（窗口命令
+  合法地写自己的 `title`，把它列进去 = 审计在干净树上红 = 下一次被人删掉而不是修好）；
+  同轮那支把 gate 名从 management 改成 token 的变异体红 **4** 条。
+* **一份文档两个读者 = 一个建造者**：`query=subscribers` 的 HTTP 路由与 `subscriber_snapshot`
+  这条窗口命令过去各写一份 JSON，现在都调 `macast_upnp::http::subscribers_document`。
+  §4.8 那条「两处答案不一致比没有数字更糟」在结构上只有一种防法：**让"写这份文档"只有一個函数**，
+  再拿一条文本审计守住"第二个写点不要长出来"。那份文档比参考实现多两个键
+  （`pending_remove`：卡住的回收线程与卡住的追加线程是同一种故障；`children[].rows`：想知道
+  "哪个 SID 落在哪个回调口"的人不该被迫去 diff `query=status` 的 `clients`），
+  理由记在 `docs/Rust-Port-Design.md` §8 与 §16 第 16 条。
+* **脚本里那个 `$API_BODY` 是共享的**：§23 的 subscribers 一串检查跑完，文件里装的是
+  subscribers 那份文档，紧接着的 `history` 两条断言因此"读不到自己的键"而红 —— 产品没错。
+  三个读者先后覆盖一个临时文件，与 §4.2「计数器在 flush 之后才加」「夹具里那对括号是承重的」
+  同族：**下一个读者之前先重新问一次**（这条写在检查上方，不留在提交信息里）。
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、

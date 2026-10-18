@@ -2004,7 +2004,13 @@ pub fn lua_scripts(dir: &Path) -> Vec<String> {
 /// is a *title*, and `resolve_title()` is what tolerates the user's older or
 /// shorter spelling. Hard-coding one spelling in one place is how 「DLNA」 ends up
 /// silently dropping SSDP (the docstring at `macast.py:706-713` says as much).
-pub const DLNA_TITLE: &str = "DLNA Protocol";
+/// The one owner of this string is the crate that **is** that class:
+/// `macast_upnp::http::DLNA_PROTOCOL_TITLE`, which `query=subscribers` prints as the
+/// child's `title` (`format_class_name(DLNAProtocol())` in the reference). Re-typing
+/// it here would let the gate's vocabulary and the diagnostic document disagree about
+/// the same protocol's name — the §4.2 rule about never comparing hand-typed titles
+/// is exactly this alias's reason to exist.
+pub const DLNA_TITLE: &str = macast_upnp::http::DLNA_PROTOCOL_TITLE;
 pub const CAST_TITLE: &str = "Chromecast Protocol";
 pub const AIRPLAY_TITLE: &str = "AirPlay Protocol";
 

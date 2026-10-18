@@ -141,6 +141,25 @@ impl Subscriber {
     }
 }
 
+/// The GENA state machine's counters, as one snapshot —
+/// the read behind [`crate::http::Subscription::diagnostics`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Diagnostics {
+    /// We asked the event thread to run (`start()` set it, `stop()` clears it).
+    pub running: bool,
+    /// The thread is still running itself. Read **with** `running`, never instead.
+    pub event_thread_alive: bool,
+    /// Accepted subscriptions not yet in the published table. Non-zero after a
+    /// few seconds means the appender is stuck or gone.
+    pub pending_append: usize,
+    /// State changes waiting for the next broadcast tick.
+    pub pending_state: usize,
+    /// Removals queued and not yet published. **Not in the reference** — a stuck
+    /// reaper has the same shape as a stuck appender and would otherwise read as
+    /// "subscribers that never go away".
+    pub pending_remove: usize,
+}
+
 /// One row of the read-only subscriber view [`Eventing::subscribers`] returns.
 ///
 /// These are facts, not a page shape: the JSON the settings page reads is owned by
@@ -408,6 +427,28 @@ impl Eventing {
         self.append_queue.lock().unwrap().len()
     }
 
+    /// The machinery's four counters and two flags, as one read.
+    ///
+    /// One read because `query=subscribers` prints them **as a set**: the reference
+    /// takes each with a separate `getattr` on a live object and can therefore
+    /// report a half-changed picture, while here a diagnostic whose numbers come
+    /// from three moments is worth less than one that admits it is a snapshot. The
+    /// pair that matters is `running` against `event_thread_alive` — the useful
+    /// state is the disagreement, exactly as
+    /// [`Eventing::is_running`] says — and the third that matters is
+    /// `pending_append` staying non-zero, which is "the connection was accepted but
+    /// nobody is listed" rather than "nobody subscribed" (AGENTS.md §4.2's
+    /// subscriber-queue trap, the reason this query exists at all).
+    pub fn diagnostics(&self) -> Diagnostics {
+        Diagnostics {
+            running: self.is_running(),
+            event_thread_alive: self.event_thread_alive(),
+            pending_append: self.pending_append(),
+            pending_state: self.pending_state(),
+            pending_remove: self.pending_remove(),
+        }
+    }
+
     /// State changes waiting for the next tick's broadcast.
     pub fn pending_state(&self) -> usize {
         self.state_queue.lock().unwrap().len()
@@ -497,6 +538,12 @@ impl Subscription for Eventing {
     /// returns rows rather than a guard).
     fn rows(&self) -> Vec<SubscriberRow> {
         self.subscribers()
+    }
+
+    /// The inherent snapshot of the same name; `self.x()` binds to that, so this
+    /// is a forward and not the trait calling itself.
+    fn diagnostics(&self) -> Diagnostics {
+        Eventing::diagnostics(self)
     }
 }
 

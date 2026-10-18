@@ -420,6 +420,9 @@ enum Action {
     Status,
     /// `query=interfaces`: the three facts behind the network picker, on their own.
     Interfaces,
+    /// `query=subscribers`: who is subscribed to our events, and whether the
+    /// machinery that lists them is still draining.
+    Subscribers,
 }
 
 /// The seven answers this port implements out of the shipped management API's
@@ -441,7 +444,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 7] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 8] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -517,6 +520,16 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 7] = [
         // machine's interface table through the door nobody thought to close.
         gate: "management",
         action: Action::Interfaces,
+    },
+    GetRoute {
+        query: "subscribers",
+        // Management-gated like its neighbours. It is the *diagnostic* half of the
+        // same picture `query=status` prints: `status.clients` answers "who is
+        // listed" while this answers "where did each subscription actually land, and
+        // is the queue draining" — and AGENTS.md §4.2's subscriber-queue trap is
+        // exactly the failure that only the second question can see.
+        gate: "management",
+        action: Action::Subscribers,
     },
 ];
 
@@ -1020,6 +1033,11 @@ pub trait Subscription: Send + Sync {
     /// here too; `query=subscribers` is where `pending_append` lives, and the two
     /// documents answer different questions on purpose (§4.2's 「空结果要说清是哪一种空」).
     fn rows(&self) -> Vec<crate::eventing::SubscriberRow>;
+
+    /// The four counters and two flags `query=subscribers` prints next to the
+    /// rows — taken as **one** snapshot, for the reason at
+    /// [`crate::eventing::Eventing::diagnostics`].
+    fn diagnostics(&self) -> crate::eventing::Diagnostics;
 }
 
 /// One management answer, in the order the shipped handler builds it.
@@ -1509,6 +1527,7 @@ impl Face {
             Action::CastTargets => self.cast_targets_entry(req),
             Action::Status => self.status_entry(),
             Action::Interfaces => self.interfaces_entry(),
+            Action::Subscribers => self.subscribers_entry(),
         }
     }
 
@@ -1770,6 +1789,25 @@ impl Face {
     /// block calls it `interface` (`protocol.py:2016-2020` against `:2146-2151`).
     /// Both spellings are pinned by tests, because the obvious tidy move — making
     /// them agree — breaks whichever page reads the one that changed.
+    /// `query=subscribers` — the diagnostic document, built by the same function the
+    /// Tauri command calls (`subscribers_document`), so the window and a `curl` can
+    /// never be shown two shapes of one table.
+    fn subscribers_entry(&self) -> Response {
+        json_value_response(&self.subscribers_document_for_this_face())
+    }
+
+    /// The one child this port has, read through the doors this crate owns.
+    pub(crate) fn subscribers_document_for_this_face(&self) -> Value {
+        subscribers_document(
+            &ChildDiagnostics {
+                title: DLNA_PROTOCOL_TITLE,
+                type_name: DLNA_PROTOCOL_TYPE,
+                stats: self.subscription.diagnostics(),
+            },
+            &self.subscription.rows(),
+        )
+    }
+
     fn interfaces_entry(&self) -> Response {
         let (current, advertised, interfaces) = self.network_facts();
         json_value_response(&object(&[
@@ -2573,6 +2611,93 @@ fn json_answer(status: u16, code: i64, message: &str) -> Response {
         JSON_CONTENT_TYPE,
         py_json_dumps_indented(code, message).into_bytes(),
     )
+}
+
+/// The one protocol this shell's DLNA face *is* — `format_class_name(DLNAProtocol())`
+/// in the reference, which is what `query=subscribers` prints as a child's `title`,
+/// and which AGENTS.md §4.2 refuses to compare by hand-typed title: it is derived
+/// from the class name. Owned here because this crate **is** that class; the gate in
+/// `src-tauri/src/host.rs` reads the same constant instead of re-typing the string.
+pub const DLNA_PROTOCOL_TITLE: &str = "DLNA Protocol";
+/// The `type` key of the same child row — the reference writes `type(child).__name__`.
+pub const DLNA_PROTOCOL_TYPE: &str = "DLNAProtocol";
+
+/// One child of the protocol group, as the diagnostic document needs it.
+///
+/// The reference loops `protocol._children`; this port has exactly one member until
+/// the renderer/protocol-toggle routes land, and the shape is a struct rather than a
+/// hardcoded object so a second child costs one push.
+pub struct ChildDiagnostics<'a> {
+    pub title: &'a str,
+    pub type_name: &'a str,
+    pub stats: crate::eventing::Diagnostics,
+}
+
+/// `query=subscribers` (`protocol.py:2202-2238`) — the diagnostic view of the GENA
+/// table: who is listed, and whether the machinery that lists them is draining.
+///
+/// **One builder, two readers.** The HTTP face calls it for a `curl` or a web page
+/// and `src-tauri`'s `subscriber_snapshot` command calls it for the window. Before
+/// this function the two wrote the document separately, which is the
+/// 「两处答案不一致比没有数字更糟」 shape AGENTS.md §4.8 refuses: one question answered
+/// in two shapes from one object, with only a page that polls both noticing.
+///
+/// `aggregated` and `subscribed` are the same sorted list twice because the reference
+/// computes it twice — once off the group's merged table, once off the child's own.
+/// With one child the two agree by construction rather than by luck; a second child
+/// is what makes the pair mean something.
+///
+/// `pending_remove` and `rows` are **not in the reference**. The first: a stuck
+/// reaper is the same shape of failure as a stuck appender and would otherwise read
+/// as "subscribers that never go away". The second: a caller who wants to know
+/// *which* SID landed at which callback should not have to read `query=status`'s
+/// `clients` and diff it against a list of names. Both are documented here because a
+/// reader comparing our answer to Python's will otherwise call them a bug.
+pub fn subscribers_document(
+    child: &ChildDiagnostics,
+    rows: &[crate::eventing::SubscriberRow],
+) -> Value {
+    let mut sids: Vec<String> = rows.iter().map(|row| row.sid.clone()).collect();
+    sids.sort();
+    let subscribed = Value::Array(sids.iter().cloned().map(Value::String).collect());
+    let row_objects = Value::Array(
+        rows
+            .iter()
+            .map(|row| {
+                object(&[
+                    ("sid", Value::String(row.sid.clone())),
+                    ("service", Value::String(row.service.clone())),
+                    ("url", Value::String(row.url.clone())),
+                    ("host", Value::String(row.host.clone())),
+                    ("path", Value::String(row.path.clone())),
+                    ("timeout", Value::from(row.timeout)),
+                    ("seq", Value::from(row.seq as i64)),
+                    ("errors", Value::from(row.errors as i64)),
+                    ("timed_out", Value::Bool(row.timed_out)),
+                ])
+            })
+            .collect(),
+    );
+    object(&[
+        (
+            "aggregated",
+            Value::Array(sids.into_iter().map(Value::String).collect()),
+        ),
+        (
+            "children",
+            Value::Array(vec![object(&[
+                ("title", Value::String(child.title.to_string())),
+                ("type", Value::String(child.type_name.to_string())),
+                ("running", Value::Bool(child.stats.running)),
+                ("event_thread_alive", Value::Bool(child.stats.event_thread_alive)),
+                ("subscribed", subscribed),
+                ("pending_append", Value::from(child.stats.pending_append as i64)),
+                ("pending_state", Value::from(child.stats.pending_state as i64)),
+                ("pending_remove", Value::from(child.stats.pending_remove as i64)),
+                ("rows", row_objects),
+            ])]),
+        ),
+    ])
 }
 
 /// The state variables `query=status` reads into its `media` block, in the order
@@ -3687,6 +3812,10 @@ mod tests {
         /// test — and a test that wants the other half sets a row rather than
         /// trusting an empty list to have proved something.
         rows: Mutex<Vec<crate::eventing::SubscriberRow>>,
+        /// The counters `query=subscribers` prints beside the rows. Defaulted to
+        /// "everything is running and nothing is queued", which is the state a face
+        /// in a unit test is in; the tests that want a stuck queue **set** it.
+        stats: Mutex<crate::eventing::Diagnostics>,
     }
 
     impl FakeSubscription {
@@ -3697,7 +3826,18 @@ mod tests {
                 add_reply: Mutex::new(("GENA-sid-1".to_string(), "Second-900".to_string())),
                 events: Mutex::new(Vec::new()),
                 rows: Mutex::new(Vec::new()),
+                stats: Mutex::new(crate::eventing::Diagnostics {
+                    running: true,
+                    event_thread_alive: true,
+                    pending_append: 0,
+                    pending_state: 0,
+                    pending_remove: 0,
+                }),
             }
+        }
+
+        fn set_diagnostics(&self, stats: crate::eventing::Diagnostics) {
+            *self.stats.lock().expect("stats") = stats;
         }
 
         /// A published subscriber, shaped the way `eventing` shapes one: host and
@@ -3743,6 +3883,10 @@ mod tests {
 
         fn rows(&self) -> Vec<crate::eventing::SubscriberRow> {
             self.rows.lock().expect("rows").clone()
+        }
+
+        fn diagnostics(&self) -> crate::eventing::Diagnostics {
+            *self.stats.lock().expect("stats")
         }
     }
 
@@ -5406,7 +5550,7 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 7);
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 8);
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -5428,6 +5572,7 @@ mod tests {
             Action::CastTargets,
             Action::Status,
             Action::Interfaces,
+            Action::Subscribers,
         ] {
             assert_eq!(
                 GET_MANAGEMENT_ROUTES
@@ -6775,6 +6920,171 @@ mod tests {
             "the picker's own reader stopped creating its key — if that changed on \
              purpose, this route's claim above about who creates what needs re-reading"
         );
+    }
+
+    #[test]
+    fn subscribers_answers_the_reference_document_with_one_child() {
+        crate::pin_test_dir();
+        let (face, _, subscription) = harness_status("subscribers-shape");
+        subscription.push_row(row("uuid:zz", "10.0.0.9:8080", "/a", 300));
+        subscription.push_row(row("uuid:aa", "10.0.0.8:8080", "/b", 900));
+        let response = face.answer(&get_api("/api?query=subscribers", LOCAL));
+        assert_eq!(response.status, 200);
+        let doc: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("a document");
+        let keys: Vec<&str> = doc.as_object().expect("object").keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["aggregated", "children"], "no wrapper, two sections");
+        let child = &doc["children"].as_array().expect("children")[0];
+        let child_keys: Vec<&str> = child
+            .as_object()
+            .expect("a child")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            child_keys,
+            [
+                "title",
+                "type",
+                "running",
+                "event_thread_alive",
+                "subscribed",
+                "pending_append",
+                "pending_state",
+                // **Not in the reference**, and both readers print them: see the
+                // `subscribers_document` doc for the two reasons.
+                "pending_remove",
+                "rows"
+            ]
+        );
+        assert_eq!(child["title"], json!(DLNA_PROTOCOL_TITLE));
+        assert_eq!(child["type"], json!(DLNA_PROTOCOL_TYPE));
+        // Sorted by SID, because the reference prints `sorted(...)` and a page that
+        // diffs two polls would otherwise see a shuffle.
+        assert_eq!(doc["aggregated"], json!(["uuid:aa", "uuid:zz"]));
+        assert_eq!(child["subscribed"], json!(["uuid:aa", "uuid:zz"]));
+    }
+
+    #[test]
+    fn subscribers_prints_the_disagreement_it_exists_to_catch() {
+        crate::pin_test_dir();
+        let (face, _, subscription) = harness_status("subscribers-stuck");
+        // The failure AGENTS.md §4.2 records: a subscriber was accepted by a worker
+        // thread and the event thread never promoted it, so the page lists nobody
+        // while the socket is open. The two numbers that say so are `running` and
+        // `event_thread_alive` together, plus a `pending_append` that will not fall.
+        subscription.set_diagnostics(crate::eventing::Diagnostics {
+            running: true,
+            event_thread_alive: false,
+            pending_append: 3,
+            pending_state: 0,
+            pending_remove: 0,
+        });
+        let doc: serde_json::Value = serde_json::from_slice(
+            &face.answer(&get_api("/api?query=subscribers", LOCAL)).body,
+        )
+        .expect("a document");
+        let child = &doc["children"][0];
+        assert_eq!(child["running"], json!(true));
+        assert_eq!(child["event_thread_alive"], json!(false));
+        assert_eq!(child["pending_append"], json!(3));
+        assert_eq!(
+            doc["aggregated"],
+            json!([]),
+            "three queued and none listed is the picture this document is for"
+        );
+    }
+
+    #[test]
+    fn subscribers_and_status_answer_one_table_in_two_shapes() {
+        crate::pin_test_dir();
+        let (face, _, subscription) = harness_status("subscribers-vs-status");
+        subscription.push_row(row("uuid:1", "192.168.1.9:8080", "/cb", 1800));
+        let subs: serde_json::Value = serde_json::from_slice(
+            &face.answer(&get_api("/api?query=subscribers", LOCAL)).body,
+        )
+        .expect("subscribers");
+        let status = status_value(&face);
+        // Same rows, two key sets: `status.clients` is the reference's six, this
+        // document's `rows` are the nine this port keeps. The SIDs have to agree —
+        // two reads of one table that disagree is the §4.8 failure this pair exists
+        // to make impossible.
+        assert_eq!(subs["children"][0]["rows"][0]["sid"], status["clients"][0]["sid"]);
+        assert_eq!(subs["aggregated"][0], status["clients"][0]["sid"]);
+        assert_eq!(subs["children"][0]["rows"][0]["host"], status["clients"][0]["host"]);
+        assert_eq!(
+            subs["children"][0]["subscribed"],
+            Value::Array(
+                status["clients"]
+                    .as_array()
+                    .expect("clients")
+                    .iter()
+                    .map(|c| c["sid"].clone())
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn subscribers_is_management_gated_like_its_neighbours() {
+        crate::pin_test_dir();
+        let (face, _, subscription) = harness_status("subscribers-gate");
+        subscription.push_row(row("uuid:secret", "192.168.1.42:8080", "/cb", 1800));
+        let refused = face.answer(&get_api("/api?query=subscribers", LAN));
+        assert_eq!(refused.status, 403);
+        let body: serde_json::Value =
+            serde_json::from_slice(&refused.body).expect("a refusal is JSON");
+        assert_eq!(body["message"].as_str(), Some(MANAGEMENT_REFUSAL));
+        assert!(
+            !text(&refused.body).contains("uuid:secret"),
+            "the refusal leaked who is subscribed"
+        );
+        assert_eq!(
+            face.answer(&get_api("/api?query=subscribers", LOCAL)).status,
+            200
+        );
+    }
+
+    #[test]
+    fn the_window_command_builds_its_subscriber_document_from_the_same_function() {
+        crate::pin_test_dir();
+        // The structural half of 「两处答案不一致比没有数字更糟」: `src-tauri`'s
+        // `subscriber_snapshot` used to write its own `json!({...})` for this
+        // document. A test that only checks today's answer cannot stop the next
+        // person from re-inlining it, so the audit is on the text: the command calls
+        // the shared builder, and the keys must not appear as literals in that file.
+        let main = include_str!("../../src-tauri/src/main.rs");
+        assert_eq!(
+            main.matches("subscribers_document(").count(),
+            1,
+            "the shell should call the shared builder exactly once"
+        );
+        // **Every key of that document**, not three of them and not with a colon.
+        // The first version of this audit looked for `"pending_append":` — colon and
+        // all — and a mutant that wrote `doc["pending_append_total"] = json!(…)` past
+        // it: 0 red. An assignment into the document is exactly the shape the audit
+        // exists to refuse, so the needles are the bare key names with their opening
+        // quote, which catches both `"key": value` in a `json!` and `doc["key"]`.
+        for literal in [
+            "\"aggregated",
+            "\"children",
+            // `"title"` is **not** on this list: `player_snapshot` legitimately writes
+            // a title, and so does a play-history row. A needle that matches another
+            // document's honest key would make the audit red on a clean tree — which
+            // is how an audit gets deleted rather than fixed.
+            "\"subscribed",
+            "\"pending_append",
+            "\"pending_state",
+            "\"pending_remove",
+            "\"event_thread_alive",
+            "\"rows",
+            "\"timed_out",
+        ] {
+            assert!(
+                !main.contains(literal),
+                "main.rs is writing subscriber-document keys again: {literal}"
+            );
+        }
     }
 
     #[test]

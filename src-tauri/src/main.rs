@@ -603,42 +603,20 @@ fn log_modules() -> Value {
 /// not draining — either it is gone, or it never ran.
 #[tauri::command]
 fn subscriber_snapshot(runtime: State<'_, Runtime>) -> Value {
-    let rows = runtime.eventing.subscribers();
-    let mut sids: Vec<String> = rows.iter().map(|r| r.sid.clone()).collect();
-    sids.sort();
-
-    json!({
-        "aggregated": sids,
-        "children": [{
-            "title": "DLNA Protocol",
-            "type": "DLNAProtocol",
-            "running": runtime.eventing.is_running(),
-            // Read together with `running`, never instead of it: the useful
-            // state is the disagreement between the two.
-            "event_thread_alive": runtime.eventing.event_thread_alive(),
-            "subscribed": sids,
-            "pending_append": runtime.eventing.pending_append(),
-            "pending_state": runtime.eventing.pending_state(),
-            // Not in the reference. A stuck reaper is the same shape of failure
-            // as a stuck appender, and without this number "subscribers that
-            // never go away" has no witness.
-            "pending_remove": runtime.eventing.pending_remove(),
-            "rows": rows
-                .into_iter()
-                .map(|row| {
-                    json!({
-                        "sid": row.sid,
-                        "service": row.service,
-                        "url": row.url,
-                        "timeout": row.timeout,
-                        "seq": row.seq,
-                        "errors": row.errors,
-                        "timed_out": row.timed_out,
-                    })
-                })
-                .collect::<Vec<_>>(),
-        }],
-    })
+    // Built by the same function that answers `GET /api?query=subscribers`
+    // (`macast_upnp::http::subscribers_document`), so the window and a `curl` cannot
+    // be shown two shapes of one table — AGENTS.md §4.8's
+    // 「两处答案不一致比没有数字更糟」, refused structurally rather than by memory.
+    // The keys, the two `not in the reference` additions, and why `aggregated` and
+    // `subscribed` are the same list while there is one child, are all documented at
+    // that function.
+    let child = macast_upnp::http::ChildDiagnostics {
+        title: host::DLNA_TITLE,
+        type_name: macast_upnp::http::DLNA_PROTOCOL_TYPE,
+        // One snapshot for the five numbers, not five reads of a live queue.
+        stats: runtime.eventing.diagnostics(),
+    };
+    macast_upnp::http::subscribers_document(&child, &runtime.eventing.subscribers())
 }
 
 /// A file's mtime as whole seconds, `0` when the platform will not say. The

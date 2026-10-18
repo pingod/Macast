@@ -2366,6 +2366,56 @@ PY
             && pass "host and path are split off the callback the way the reference splits them" \
             || fail "client host/path: '$(json_ask clients.0.host)' '$(json_ask clients.0.path)'"
     fi
+    # ---- the same table, asked as a diagnostic ------------------------------------
+    # `query=subscribers` is the reference's other read of this table, and the one
+    # that answers the question AGENTS.md §4.2 records: "the connection was accepted
+    # but no client is listed" is *not* the same failure as "nobody subscribed", and
+    # only these counters tell them apart. Asking it while our own SID is live is the
+    # only moment on this machine where both halves of that sentence have evidence.
+    api_probe "$BASE/api?query=subscribers"
+    [ "$API_STATUS" = "200" ] \
+        && pass "subscribers answers this machine" \
+        || fail "subscribers answered HTTP $API_STATUS code '$API_CODE'"
+    [ "$(json_keys .)" = "aggregated,children" ] \
+        && pass "its document is the reference's two sections, in order" \
+        || fail "subscribers keys: '$(json_keys .)'"
+    [ "$(json_ask children.0.title)" = "DLNA Protocol" ] \
+        && [ "$(json_ask children.0.type)" = "DLNAProtocol" ] \
+        && pass "the child is named the way the reference names it (class-derived, not typed by hand)" \
+        || fail "child title/type: '$(json_ask children.0.title)' / '$(json_ask children.0.type)'"
+    SUB_AGG=$(json_join aggregated)
+    case ",$SUB_AGG," in
+        *",$SID,"*) pass "our own subscription is listed by the SID the SUBSCRIBE returned" ;;
+        *) fail "aggregated '$SUB_AGG' does not contain our SID '$SID'" ;;
+    esac
+    # Drain check, **waited for** rather than grabbed: a subscription lands in the
+    # published table on the event thread's own schedule, so a non-zero
+    # `pending_append` read immediately after a SUBSCRIBE says nothing about the
+    # product (AGENTS.md §4.2's 「判据坐在别人的账本上，就要等那个账本」).
+    ok=""
+    for _ in $(seq 1 20); do
+        api_probe "$BASE/api?query=subscribers"
+        [ "$(json_ask children.0.pending_append)" = "0" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "the append queue drains back to zero — the event thread is the one listing clients" \
+        || fail "pending_append stuck at $(json_ask children.0.pending_append)"
+    [ "$(json_ask children.0.running)" = "true" ] \
+        && [ "$(json_ask children.0.event_thread_alive)" = "true" ] \
+        && pass "and both liveness answers agree, which is the boring state worth pinning" \
+        || fail "running/event_thread_alive: '$(json_ask children.0.running)' / '$(json_ask children.0.event_thread_alive)'"
+    CROSS=$(python3 - "$API_BODY" <<'CROSSPY'
+import json, sys
+with open(sys.argv[1], "rb") as fh:
+    subs = json.loads(fh.read().decode("utf-8", "replace"))
+print(",".join(sorted(r["sid"] for r in subs["children"][0]["rows"])))
+CROSSPY
+)
+    CROSS_AGG=$(printf '%s' "$SUB_AGG" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+    [ "$CROSS" = "$CROSS_AGG" ] \
+        && pass "subscribers' own rows and its aggregated list are the same set of SIDs" \
+        || fail "rows '$CROSS' vs aggregated '$CROSS_AGG'"
     curl -s -m 5 -o /dev/null -X UNSUBSCRIBE "$BASE/AVTransport/event" -H "SID: $SID"
     ok=""
     for _ in $(seq 1 20); do
@@ -2376,8 +2426,19 @@ PY
     [ -n "$ok" ] \
         && pass "after UNSUBSCRIBE the list empties — the document reads the live table" \
         || fail "clients still holds $(json_len clients) row(s) after unsubscribing '$SID'"
+    api_probe "$BASE/api?query=subscribers"
+    [ "$(json_len aggregated)" = "0" ] \
+        && pass "and the diagnostic read empties with it, not a moment later off a different table" \
+        || fail "subscribers still aggregates $(json_len aggregated) after unsubscribing"
 
     # ---- history ------------------------------------------------------------------
+    # **Re-probe first.** The diagnostic block above left `$API_BODY` holding the
+    # *subscribers* document, and `json_len history` over it answers "no such key" —
+    # which reads as `''`, and a check written as `>= 1` turns that into "history is
+    # empty after a cast". The first run of this section red exactly that way, and the
+    # product was fine: one shared file, three readers, order matters (§4.2's
+    # 「夹具脚本里的那对括号是承重的」 family — the harness's own state is a fixture).
+    api_probe "$BASE/api?query=status"
     [ "$(json_len history)" -ge 1 ] \
         && pass "the cast left a play-history row the page can offer back" \
         || fail "history is empty after a cast: '$(json_ask history)'"
@@ -2439,6 +2500,10 @@ PY
         [ "$API_STATUS" = "403" ] \
             && pass "and the picker's query is behind the same door, not a second opinion" \
             || fail "a LAN caller got HTTP $API_STATUS from interfaces"
+        api_probe "http://$LAN:$PORT/api?query=subscribers"
+        [ "$API_STATUS" = "403" ] \
+            && pass "and so is the diagnostic read — it names who is watching, which is not LAN weather" \
+            || fail "a LAN caller got HTTP $API_STATUS from subscribers"
     else
         skip "no reachable non-loopback address to ask from (section 23's LAN half)"
     fi
