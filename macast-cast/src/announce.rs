@@ -63,19 +63,54 @@
 //!
 //! ## Deliberate divergences (each is also a row in `docs/Rust-Port-Design.md` §8)
 //!
-//! * **One socket, not one per interface, and it does not join the group.** The
-//!   reference binds a sender per IPv4 address *and* joins each to the group, so
-//!   every burst goes out six times and every one of those sockets is read by
-//!   zeroconf's engine. Our browser ([`crate::mdns`]) already holds a joined
-//!   socket while it browses, and on macOS/Linux `SO_REUSEPORT` **distributes**
-//!   each incoming datagram to one of the bound sockets — so a second joined
-//!   socket here would silently take away part of what the device dropdown hears.
-//!   A sender that never reads must therefore never join: we send to the group
-//!   from an unjoined socket, which reaches the LAN exactly as well and steals
-//!   nothing. Consequence, stated where it can be read: answering other people's
-//!   queries (the responder) needs a joined socket, and when that lands these two
-//!   sockets have to become one reader. Registered as the remaining half of §15's
-//!   row.
+//! * **One socket, not one per interface, and — today — not joined and not read.**
+//!   The reference binds a sender per IPv4 address *and* joins each to the group,
+//!   so every burst goes out six times and every one of those sockets is read by
+//!   zeroconf's engine. Ours sends from a single socket that never reads.
+//!
+//!   **The reason this socket does not join was a guess, and it has now been
+//!   measured** (`scripts/mdns_reuseport_probe.py`; 2026-10-18 on this Mac and on
+//!   the CachyOS box; egress pinned to `lo0` with `IP_MULTICAST_IF=127.0.0.1` +
+//!   TTL 1 so no byte reaches the LAN; twelve and then eight datagrams per case,
+//!   each with a **distinct transaction id** so "every socket got every datagram"
+//!   is a per-datagram reading rather than two equal counts, and each socket's
+//!   queue is filtered to *our* ids because a live mDNS stack puts other
+//!   people's traffic in there too — the first Linux run read `14 of 12`, which
+//!   is noise, not a finding). What the two machines say, and what it costs this
+//!   file:
+//!
+//!   - **Multicast is duplicated.** Two joined sockets on macOS: `[12, 12, 0]`.
+//!     Three: `[12, 12, 12]`. On Linux the same three rows read `[8, 8, 8]` —
+//!     including the **unjoined** socket, which on Linux is a multicast receiver
+//!     whether or not it joined. So a second joined reader does **not** cost the
+//!     browser anything a phone sends (a query and an announcement are both
+//!     multicast to `224.0.0.251`), and the sentence this bullet used to carry —
+//!     "`SO_REUSEPORT` distributes each incoming datagram to one of the bound
+//!     sockets, so a second joined socket takes away part of what the device
+//!     dropdown hears" — **is not what either kernel does**.
+//!   - **Unicast is handed to exactly one socket, and which one is not stable in
+//!     the way the old sentence guessed.** Linux, three passes in one process:
+//!     `[8, 0, 0]` every time. Different process, different ephemeral source
+//!     port: `[0, 0, 12]` and `[0, 8, 0]` in the two earlier runs — so the pick
+//!     is per-flow, not per-bind-order, and a run cannot be quoted as the rule.
+//!     macOS: a wildcard-bound socket gets **nothing** even with no competition
+//!     in the probe (the OS responder is the likely holder; an unprivileged
+//!     `lsof` cannot name it), while a socket bound to the exact destination
+//!     address takes the whole stream away from a wildcard one (`[12, 0]`, stable
+//!     across passes).
+//!
+//!   The plan changes shape accordingly, and the conclusion is **not** what the
+//!   guess reached: the merge is real, but it is about **unicast**, not about
+//!   multicast, and it has to happen on the **long-lived** socket rather than the
+//!   transient browse. Today this socket is a competitor for unicast it never
+//!   reads, and on Linux it is also a receiver of every multicast datagram whose
+//!   queue nobody drains. When the responder lands (§15's remaining row) it joins
+//!   and **reads** — answers the queries, and feeds what it hears to the device
+//!   ledger — so the one socket that is always on the port is a socket somebody
+//!   is actually reading. `mdns.rs::open`'s claim that unicast replies to our own
+//!   queries "still reach us" is therefore conditional in a way its comment did
+//!   not say: they reach **a** socket bound to 5353, and only count when the one
+//!   that reads them is ours.
 //! * **A too-long TXT property costs the property, not the receiver.** Ours
 //!   truncates at the wire limit — on a character boundary, `fn` first, and the
 //!   warning says the field name, the byte count and the limit — and announces.
@@ -860,9 +895,11 @@ impl Announcer {
     }
 }
 
-/// One socket, bound to 5353 with the reuse options, **not joined** to the
-/// group. See the module header's first divergence for why joining it here would
-/// take datagrams away from [`crate::mdns`]'s browser.
+/// One socket, bound to 5353 with the reuse options, **not joined** and **never
+/// read**. The module header's first divergence carries what that costs on each
+/// kernel (multicast: duplicated to every joined socket on macOS, and on Linux
+/// this unjoined one receives it anyway; unicast: one socket wins the whole
+/// stream), and why the responder must land on this socket rather than beside it.
 fn bind_sender(log: &Logger) -> io::Result<UdpSocket> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     crate::mdns::set_reuse_for_mdns(&sock, log);

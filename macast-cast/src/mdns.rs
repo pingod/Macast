@@ -1528,12 +1528,18 @@ fn open(setting: &Arc<Setting>, log: &Logger) -> Option<Multicast> {
         ));
     }
     // And still bind, still browse: `joined == 0` is not a refusal. The socket
-    // is bound to 0.0.0.0:5353, so **replies to the queries we send** still
-    // reach us as unicast to our source address, and on a machine whose only
-    // interfaces refused the join that is strictly more than the empty list
-    // this function could return instead. The browse is therefore run, and an
-    // empty answer is reported by [`super::targets`] as "no devices found",
-    // which is the honest shape of "we could listen but not on the group".
+    // is bound to 0.0.0.0:5353, so *some* socket bound there still hears the
+    // replies to the queries we send — which is weaker than it sounds, and now
+    // measured (`scripts/mdns_reuseport_probe.py`, and `announce.rs`'s header
+    // carries the numbers): a **unicast** datagram to port 5353 goes to exactly
+    // one socket in the reuse group, and which one is per-flow, not per-us
+    // (Linux handed the same stream to the unjoined announcer socket in one
+    // process and to a joined one in another; on macOS a wildcard bind got
+    // nothing even with no competitor in the probe, because the OS responder is
+    // holding the port). So this branch buys "we may still hear answers", not
+    // "we will". The browse is run either way, and an empty answer is reported
+    // by [`super::targets`] as "no devices found", which is the honest shape of
+    // "we could listen but not on the group".
     let sock: UdpSocket = sock.into();
     if let Err(e) = sock.set_read_timeout(Some(POLL_INTERVAL)) {
         log.error(&format!("mDNS cannot set a read timeout: {}", e));
