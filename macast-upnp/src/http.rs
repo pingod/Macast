@@ -2060,17 +2060,23 @@ impl Face {
         // `history` is the table's rows, printed under the reference's three keys
         // (`protocol.py:1211-1215` writes `uri`, `title`, `time`).
         //
-        // **This is a divergence, and §23 of the acceptance script is what found
-        // it.** The reference reads `Setting.get(Play_History, [])` — its history
-        // lives in the settings file, so it survives a restart. This shell's rows
-        // live in the state table (see `StateTable::add_history` in
-        // `src-tauri/src/host.rs`), and printing the settings key here would have
-        // answered `[]` about a machine that had just cast something: an empty list
-        // with two causes, and the page cannot tell them apart (§4.14's
-        // 「空结果要说清是哪一种空」, this time in the document the page reads).
-        // Rendering what the shell actually remembers is the honest half; making it
-        // survive a restart is the other half, and it is a decision with a test on
-        // it rather than a line in this function.
+        // **How this line got here is §23's first red.** The reference reads
+        // `Setting.get(Play_History, [])`, so its history survives a restart; when
+        // this face was first wired, the rows lived only in the state table, and
+        // printing the settings key answered `[]` about a machine that had just
+        // cast something — an empty list with two causes, indistinguishable to the
+        // page (§4.14's 「空结果要说清是哪一种空」, this time in the document the
+        // page reads). Printing what the shell actually remembered was the honest
+        // half; the other half was persistence, and it was made 2026-10-18 with a
+        // restart on a test on both sides of it: `StateTable::with_setting` reads
+        // `Play_History` back at boot (`host.rs`), and
+        // `verify_rust_receiver.sh` §27 kills the instance, starts a second process
+        // over the same settings dir, and asks the card again.
+        //
+        // What is still **not** this function's job: the read is `store.play_history()`,
+        // not a fresh read of the settings file. The table is the single owner of the
+        // rows after boot — a second reader would be a second answer if a cast lands
+        // between the two reads.
         let history = Value::Array(
             self.store
                 .play_history()

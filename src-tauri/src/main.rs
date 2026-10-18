@@ -862,8 +862,24 @@ pub fn run() {
             // rows out of the shared macast.log — the same split the Python app
             // makes (macast/logsplit.py), and the reason `Host::log` exists.
             let log_path = log.claim();
+            // The state table speaks through its **own** module log, not the
+            // player's: `protocol.py:30` is `logging.getLogger("Protocol")` and
+            // `logsplit` gives it `logs/Protocol.log`. Handing the table the `MPV`
+            // logger — which is what this line used to do — put `setState: …` and
+            // the whole play-history story next to the renderer's events, where a
+            // reader chasing "the card emptied itself on restart" would never look.
+            let protocol_log = Logger::named(host::PROTOCOL_LOG);
+            let _protocol_log_path = protocol_log.claim();
             let setting = Arc::new(Setting::load_default());
-            let table = Arc::new(StateTable::new(log.clone()));
+            // The table reads the persisted 播放历史 **before** any face exists, so a
+            // sender that casts within the first milliseconds finds yesterday's rows
+            // already on the card. Order is the whole point: built the other way round
+            // the page would show an empty list until the next cast rewrote the file,
+            // and the empty would be indistinguishable from "this machine has never
+            // been used" (§23's first delivery was exactly that `[]` with two causes).
+            let table = Arc::new(
+                StateTable::new(protocol_log).with_setting(Arc::clone(&setting)),
+            );
             let service_stopped = Arc::new(AtomicBool::new(false));
 
             let config = config_from_settings(&setting, &log);

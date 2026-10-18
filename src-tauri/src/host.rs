@@ -158,18 +158,43 @@ const DECLARED: [(&str, char); 48] = [
     ("CurrentConnectionIDs", 's'),
 ];
 
+/// Where this table's sentences go: `protocol.py:30` is
+/// `logging.getLogger("Protocol")`, and `logsplit.claim_from_module` gives every
+/// module-level logger in `macast/*.py` its own `logs/<Name>.log`. So the state
+/// table's `setState: …` lines and the whole play-history story belong to
+/// `logs/Protocol.log`, not to `macast.log` and not to the renderer's file.
+pub const PROTOCOL_LOG: &str = "Protocol";
+
 /// The state table one DLNA receiver owns — `DLNAProtocol.state_list`, minus the
 /// XML machinery: values are what a client would read back, and the playlist is
 /// the list `cast_uri` appends to.
+///
+/// `log` is **this table's own destination**, not the logger the app happens to
+/// carry. Until 2026-10-18 `main.rs` handed it the `MPV` logger (the player's), so
+/// a reader chasing "why did the 播放历史 card empty itself" was sent to the file
+/// full of mpv events — the lines were there, in the wrong place, which is the
+/// §4.3 shape of a log that points at the wrong suspect. No unit test can pin
+/// `main.rs`'s choice — it is the caller that names the logger — so the witness is
+/// `verify_rust_receiver.sh` §27, which greps the read-back sentence **in
+/// `logs/Protocol.log` by name** instead of anywhere.
 pub struct StateTable {
     values: Mutex<BTreeMap<String, Value>>,
     playlist: Mutex<Vec<String>>,
     log: Arc<Logger>,
     playlist_index: Mutex<i64>,
     /// `(title, uri, time)` rows, newest first — the reference's three fields
-    /// (`protocol.py:1211-1215`), kept in memory rather than in the settings file
-    /// for the reason recorded at [`StateTable::add_history`].
+    /// (`protocol.py:1211-1215`), and since 2026-10-18 **also in the settings
+    /// file**, because that is where the reference keeps them and a restart that
+    /// empties the 播放历史 card is a divergence the user can see. See
+    /// [`StateTable::with_setting`] for the read half and
+    /// [`StateTable::persist_history`] for the write half.
     history: Mutex<Vec<(String, String, i64)>>,
+    /// The settings file these rows are mirrored into, or `None` for a table
+    /// built without an app around it (a test, or the boot order in `main.rs`
+    /// before the setting exists). `None` is not "memory is authoritative": it
+    /// is "nothing to persist to", and [`StateTable::with_setting`] says so in
+    /// the log rather than letting the rows live only in RAM silently.
+    history_store: Mutex<Option<Arc<Setting>>>,
     /// Who hears about a changed state variable. `None` until `main.rs` has
     /// built the eventing service; the boot writes never broadcast anyway.
     broadcaster: Mutex<Option<SharedBroadcast>>,
@@ -215,6 +240,7 @@ impl StateTable {
             // `-1`, not `0`, which would read as "the first item is loaded".
             playlist_index: Mutex::new(-1),
             history: Mutex::new(Vec::new()),
+            history_store: Mutex::new(None),
             broadcaster: Mutex::new(None),
         };
         // `init_state()`, in the reference's own order. The debug lines are the
@@ -364,22 +390,25 @@ impl StateTable {
     /// title stores the URI, because the history's job is to be recognisable
     /// later and a blank row is not.
     ///
-    /// **The reference writes this list into `Play_History` in the user's settings
-    /// file; this shell keeps it in memory**, so a restart empties it while the
-    /// Python app's 播放历史 card still shows yesterday's casts. That is a divergence,
-    /// not a fix: the comment here used to cite AGENTS.md §10 ("don't write the user's
-    /// configuration") in its defence, and §10 is about *verification paths* — the
-    /// app persisting its own history is what the user's file is for. Closing the gap
-    /// is a decision with a restart-survival test on it, tracked in
-    /// `docs/Rust-Port-Design.md`, and `query=status` prints these rows while it waits.
+    /// **The list goes into `Play_History` in the user's settings file, as it
+    /// does in the reference.** Until 2026-10-18 this shell kept the rows in
+    /// memory only, and the comment here defended that with AGENTS.md §10
+    /// ("don't write the user's configuration") — §10 is about *verification
+    /// paths*, and an app persisting its own history is exactly what the user's
+    /// file is for. The gap was closed with a restart-survival test on both
+    /// layers (`host::tests::a_history_row_survives_a_second_setting_instance`
+    /// and `verify_rust_receiver.sh` §27), not with a line in this comment.
     pub fn add_history(&self, title: &str, uri: &str) {
-        let mut history = lock(&self.history);
-        history.retain(|(_, item, _)| item != uri);
-        let name = if title.is_empty() { uri } else { title };
-        history.insert(0, (name.to_string(), uri.to_string(), now_secs() as i64));
-        if history.len() > 50 {
-            history.truncate(50);
+        {
+            let mut history = lock(&self.history);
+            history.retain(|(_, item, _)| item != uri);
+            let name = if title.is_empty() { uri } else { title };
+            history.insert(0, (name.to_string(), uri.to_string(), now_secs() as i64));
+            if history.len() > 50 {
+                history.truncate(50);
+            }
         }
+        self.persist_history();
     }
 
     pub fn play_history(&self) -> Vec<(String, String, i64)> {
@@ -388,7 +417,122 @@ impl StateTable {
 
     pub fn clear_history(&self) {
         lock(&self.history).clear();
+        self.persist_history();
     }
+
+    /// Attach the settings file the history is mirrored into, and read the rows
+    /// that are already there. Consumed at boot by `main.rs`, once, before any
+    /// face can cast.
+    ///
+    /// The read is [`Setting::peek`], never `get`: `get` takes its default into
+    /// the table (§4.2's first trap, and this port reproduces the side effect),
+    /// so asking "is there a history?" with a default of `[]` would **create the
+    /// key on every clean install** and turn "a first run" into "a cleared list"
+    /// in the user's own file.
+    ///
+    /// What is said depends on which of the three readings it is: rows restored
+    /// (INFO — the page can offer yesterday's casts again, and that is news),
+    /// unreadable entries dropped (WARNING — someone edited the file or an older
+    /// build wrote it), and both kinds of empty (DEBUG — there is nothing to
+    /// report, but the two are still told apart, because §23 delivered this
+    /// table's first red as `[]` with two causes).
+    pub fn with_setting(self, setting: Arc<Setting>) -> Self {
+        let stored = setting.peek(Key::PlayHistory);
+        let (rows, dropped) = match &stored {
+            Some(value) => parse_history(value),
+            None => (Vec::new(), 0),
+        };
+        if dropped > 0 {
+            self.log.warning(&format!(
+                "play history: {} of {} entr{} in {} could not be read as a row \
+                 (an entry needs a non-empty `uri`); it is dropped here, and the \
+                 next cast rewrites the list without it",
+                dropped,
+                stored.as_ref().map(Value::as_array).flatten().map_or(0, Vec::len),
+                if dropped == 1 { "y" } else { "ies" },
+                Key::PlayHistory.name()
+            ));
+        }
+        match (&stored, rows.is_empty()) {
+            (Some(_), false) => self.log.info(&format!(
+                "play history: {} row(s) read back from {} — the page offers them again",
+                rows.len(),
+                Key::PlayHistory.name()
+            )),
+            (Some(_), true) => self.log.debug(
+                "play history starts empty because the key is there and holds nothing a cast left behind",
+            ),
+            (None, _) => self.log.debug(
+                "play history starts empty because this settings file has no Play_History key yet (a first run, not a cleared one)",
+            ),
+        }
+        *lock(&self.history) = rows;
+        *lock(&self.history_store) = Some(setting);
+        self
+    }
+
+    /// Mirror [`StateTable::play_history`] into the settings file, the way
+    /// `Setting.set(SettingProperty.Play_History, history)` does at
+    /// `protocol.py:1216`. `Setting::save` already says what happened when a
+    /// write fails, so nothing is logged here beyond the one case that is this
+    /// table's own fact: no file attached, so the rows cannot outlive the run.
+    fn persist_history(&self) {
+        let rows = self.play_history();
+        let setting = lock(&self.history_store).clone();
+        let Some(setting) = setting else {
+            self.log.debug(
+                "play history changed, but this table was built without a settings file: \
+                 these rows end with the process",
+            );
+            return;
+        };
+        setting.set(Key::PlayHistory, history_document(&rows));
+    }
+}
+
+/// The rows as the reference writes them: an array of objects carrying exactly
+/// `uri`, `title` and `time` (`protocol.py:1211-1215`).
+///
+/// Key **order inside each object** follows this port's settings table, which is
+/// a `BTreeMap` — alphabetical (`time`, `title`, `uri`) rather than the
+/// reference's insertion order. Same recorded deviation as the top-level table,
+/// and the only readers are the page and the 高级设置 JSON editor, both of which
+/// address the keys by name.
+fn history_document(rows: &[(String, String, i64)]) -> Value {
+    Value::Array(
+        rows.iter()
+            .map(|(title, uri, at)| json!({ "uri": uri, "title": title, "time": at }))
+            .collect(),
+    )
+}
+
+/// The `Play_History` list read back: the rows this table can use, and how many
+/// entries it could not.
+///
+/// Pure over the JSON value on purpose — the three shapes of "empty" (no key, an
+/// empty list, a list of things that are not rows) have to be testable without a
+/// settings file, and §4.14's 「空结果要说清是哪一种空」 is the reason the caller
+/// gets a count rather than one `Vec`.
+///
+/// Dropping an unreadable entry **is a divergence**: the reference filters junk
+/// only on its next write (`protocol.py:1208-1210`) and `query=status` echoes
+/// whatever the file holds, so a hand-edited entry survives there and not here.
+/// The count is what makes that drop an announced fact instead of a silent one,
+/// and §8 carries the row.
+fn parse_history(value: &Value) -> (Vec<(String, String, i64)>, usize) {
+    let mut rows = Vec::new();
+    let mut dropped = 0usize;
+    for entry in value.as_array().map(|items| items.as_slice()).unwrap_or(&[]) {
+        let uri = entry.get("uri").and_then(Value::as_str).unwrap_or("");
+        if uri.is_empty() {
+            dropped += 1;
+            continue;
+        }
+        let title = entry.get("title").and_then(Value::as_str).unwrap_or(uri);
+        let at = entry.get("time").and_then(Value::as_i64).unwrap_or(0);
+        rows.push((title.to_string(), uri.to_string(), at));
+    }
+    (rows, dropped)
 }
 
 /// The `StateStore` seam `macast-upnp` reads and writes through.
@@ -2267,6 +2411,43 @@ mod tests {
         Logger::named("Macast")
     }
 
+    /// The table's **own** destination, claimed, with the file it writes to: the
+    /// history sentences belong to `logs/Protocol.log` (see [`PROTOCOL_LOG`]), and a
+    /// test that read `macast.log` instead would be asserting against a file the
+    /// product never writes them to — the exact mistake `main.rs` made until this
+    /// round, when it handed the table the player's logger.
+    fn claimed_protocol_logger() -> (Arc<Logger>, std::path::PathBuf) {
+        let log = Logger::named(PROTOCOL_LOG);
+        let path = log.claim();
+        (log, path)
+    }
+
+    static DEBUG_GATE: Mutex<()> = Mutex::new(());
+
+    /// The same guard `macast-cast`'s `DebugWindow` is, copied rather than shared
+    /// because that one is a `pub(crate)` item of a different crate. The threshold
+    /// is one process-wide atomic: a test that raises it must put it back, and the
+    /// restore must not happen while another window is still open.
+    struct DebugWindow {
+        // Dropped *after* the `Drop` body below, which is the ordering the restore
+        // depends on: set INFO back, then let the next waiter in.
+        _gate: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DebugWindow {
+        fn armed() -> DebugWindow {
+            let gate = DEBUG_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            macast_core::logging::set_threshold(macast_core::logging::Level::Debug);
+            DebugWindow { _gate: gate }
+        }
+    }
+
+    impl Drop for DebugWindow {
+        fn drop(&mut self) {
+            macast_core::logging::set_threshold(macast_core::logging::Level::Info);
+        }
+    }
+
     #[test]
     fn a_fresh_install_gets_every_face() {
         pin_test_dir();
@@ -2645,6 +2826,185 @@ mod tests {
             scanned >= 10,
             "only {} tests scanned in this crate — an empty scan is not a pass",
             scanned
+        );
+    }
+
+    // ── the play history, persisted ──────────────────────────────────
+
+    /// The rows, read from the settings file the way a restarted app reads it:
+    /// a **second** `Setting` instance over the same path. Nothing in this file
+    /// can fake that with one instance, which is the whole point — the divergence
+    /// this closes was "the table remembers, the file does not", and a test that
+    /// asked the same in-memory table twice would be true of the old code too.
+    #[test]
+    fn a_history_row_survives_a_second_setting_instance() {
+        pin_test_dir();
+        let (log, path) = claimed_protocol_logger();
+        let file = macast_core::paths::setting_dir().join("hist-restart.json");
+        let first = StateTable::new(log.clone()).with_setting(Arc::new(Setting::new(file.clone())));
+        first.add_history("Rick Astley", "http://192.168.1.5:58999/relay/abc/media");
+        assert_eq!(first.play_history().len(), 1, "and the live table shows it");
+        drop(first);
+
+        let again = StateTable::new(log).with_setting(Arc::new(Setting::new(file)));
+        let rows = again.play_history();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a restart emptied the card, which is the divergence this row exists to catch"
+        );
+        assert_eq!(rows[0].0, "Rick Astley", "the title comes back with the row");
+        assert_eq!(rows[0].1, "http://192.168.1.5:58999/relay/abc/media");
+        // The line the acceptance script greps for (§27), and the only sentence in
+        // this feature that says which kind of empty it was *not*.
+        let text = macast_core::logging::read_tail(&path, 200).text;
+        assert!(
+            text.contains("play history: 1 row(s) read back"),
+            "the restart restored a row and said nothing about it: {text}"
+        );
+    }
+
+    #[test]
+    fn the_persisted_rows_carry_the_reference_s_three_keys() {
+        pin_test_dir();
+        let path = macast_core::paths::setting_dir().join("hist-keys.json");
+        let table = StateTable::new(logger()).with_setting(Arc::new(Setting::new(path.clone())));
+        table.add_history("clip", "file:///tmp/clip.mp4");
+        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| format!("no file: {e}"));
+        let doc: Value = serde_json::from_str(&text).expect("the settings file is JSON");
+        let rows = doc
+            .get(Key::PlayHistory.name())
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("no {} list in the file: {text}", Key::PlayHistory.name()))
+            .clone();
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_object().expect("a history row is an object");
+        let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["time", "title", "uri"],
+            "the reference writes exactly these three (`protocol.py:1211-1215`); a fourth \
+             name or a missing one is a second spelling for one fact"
+        );
+        assert_eq!(row["uri"], json!("file:///tmp/clip.mp4"));
+        assert_eq!(row["title"], json!("clip"));
+        assert!(
+            !text.contains("\"url\":"),
+            "the window command used to say `url`; nothing may write that key into the \
+             user's file again: {text}"
+        );
+    }
+
+    /// An unreadable entry is dropped **and counted**. The reference filters junk
+    /// only on its next write and `query=status` echoes whatever is in the file,
+    /// so this is a recorded divergence — the count is what keeps it from being a
+    /// silent one (§4.14's 「空结果要说清是哪一种空」).
+    #[test]
+    fn junk_in_the_history_list_is_dropped_and_said() {
+        pin_test_dir();
+        let (log, path) = claimed_protocol_logger();
+        let file = macast_core::paths::setting_dir().join("hist-junk.json");
+        std::fs::write(
+            &file,
+            r#"{"Play_History": [{"title": "no uri at all"}, 7, {"uri": "http://ok/a.mp4", "title": "ok"}]}"#,
+        )
+        .expect("write the fixture");
+        let table = StateTable::new(log).with_setting(Arc::new(Setting::new(file)));
+        let rows = table.play_history();
+        assert_eq!(rows.len(), 1, "only the entry with a URI is a row: {rows:?}");
+        assert_eq!(rows[0].2, 0, "a row with no `time` reads as 0, not as a dropped row");
+        let text = macast_core::logging::read_tail(&path, 200).text;
+        assert!(
+            text.contains("could not be read as a row"),
+            "two entries were thrown away and the log says nothing about it: {text}"
+        );
+    }
+
+    /// The read must not **create** the key. `Setting::get` takes its default into
+    /// the table — §4.2's oldest trap, and this is the same shape the protocol gate
+    /// was caught on: a cold start would otherwise write `Play_History: []` into a
+    /// settings file that never had one.
+    #[test]
+    fn reading_the_history_leaves_the_key_absent_on_a_first_run() {
+        pin_test_dir();
+        let setting = Arc::new(Setting::new(
+            macast_core::paths::setting_dir().join("hist-first-run.json"),
+        ));
+        assert!(!setting.has(Key::PlayHistory), "the fixture starts without it");
+        let table = StateTable::new(logger()).with_setting(Arc::clone(&setting));
+        assert_eq!(table.play_history(), Vec::<(String, String, i64)>::new());
+        assert!(
+            !setting.has(Key::PlayHistory),
+            "a boot read fabricated the key — the user's file now says \"cleared\" about \
+             a machine that has never cast anything"
+        );
+    }
+
+    /// 「清空」 has to reach the file too, and it has to land as an **empty list**,
+    /// not as a missing key: the two are the same to the page and different to the
+    /// next boot's log line.
+    #[test]
+    fn a_cleared_history_writes_an_empty_list_rather_than_erasing_the_key() {
+        pin_test_dir();
+        let path = macast_core::paths::setting_dir().join("hist-clear.json");
+        let setting = Arc::new(Setting::new(path.clone()));
+        let table = StateTable::new(logger()).with_setting(Arc::clone(&setting));
+        table.add_history("one", "http://a/1.mp4");
+        table.clear_history();
+        assert!(setting.has(Key::PlayHistory), "the key stays");
+        assert_eq!(
+            setting.peek(Key::PlayHistory),
+            Some(Value::Array(Vec::new())),
+            "and it says \"cleared\", which is not the same fact as \"absent\""
+        );
+        let again = StateTable::new(logger()).with_setting(Arc::new(Setting::new(path)));
+        assert!(again.play_history().is_empty(), "the restart agrees it is empty");
+    }
+
+    /// The 50-row cap is a promise **about the file** (`protocol.py:1215` says the
+    /// cap exists so the settings file stays small), so the count is taken off the
+    /// disk rather than off the table that just wrote it.
+    #[test]
+    fn the_cap_is_honoured_in_the_file_not_only_in_memory() {
+        pin_test_dir();
+        let path = macast_core::paths::setting_dir().join("hist-cap.json");
+        let table = StateTable::new(logger()).with_setting(Arc::new(Setting::new(path.clone())));
+        for n in 0..55 {
+            table.add_history("", &format!("http://a/{n}.mp4"));
+        }
+        let text = std::fs::read_to_string(&path).expect("the file exists");
+        let doc: Value = serde_json::from_str(&text).unwrap();
+        let rows = doc[Key::PlayHistory.name()].as_array().unwrap();
+        assert_eq!(rows.len(), 50, "the file grew past the cap the reference caps it at");
+        assert_eq!(
+            table.play_history().len(),
+            50,
+            "the table and the file must not disagree about how many rows there are"
+        );
+    }
+
+    /// A table built without a settings file — the shape every pre-`with_setting`
+    /// caller in this crate uses — says so instead of letting the rows quietly
+    /// stop outliving the process.
+    #[test]
+    fn a_table_without_a_settings_file_says_the_rows_end_with_it() {
+        pin_test_dir();
+        let (log, path) = claimed_protocol_logger();
+        {
+            // The window is what makes this a question at all: at the default
+            // threshold an empty file proves only that INFO filtered the line, and
+            // reading that as "the sentence was never written" would put the change
+            // in the wrong place (§14's 「一个空的见证文件证明的是被过滤了」).
+            let _debug = DebugWindow::armed();
+            let table = StateTable::new(log);
+            table.add_history("lost", "http://a/lost.mp4");
+            assert_eq!(table.play_history().len(), 1, "memory still works");
+        }
+        let text = macast_core::logging::read_tail(&path, 200).text;
+        assert!(
+            text.contains("without a settings file"),
+            "the degradation is real, so it must be readable: {text}"
         );
     }
 }

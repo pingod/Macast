@@ -69,46 +69,94 @@ skip() { printf '  [SKIP] %s\n' "$1"; FAILED=$((FAILED + 1)); }
 
 listener_pid() { lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | head -1; }
 
-# ---- harness self-audit ------------------------------------------------------
-# This script's verdicts are only as good as the strings it greps for, and a
-# needle can be wrong in a way that never shows up as an error: in bash, a
-# backslash before a single quote **inside double quotes** stays a backslash, so
-# a needle written that way searches for text no log file has ever contained.
-# That is how §26 reported "mpv never reported file-loaded" about a run whose
-# MPV.log had printed it — the same family as the backtick-in-double-quotes bug
-# that made this script print PASS with an empty message (AGENTS.md §4.13).
-#
-# The audit says: no *code* line of this file may contain that two-character
-# sequence. Comment lines are exempt because the lesson has to be written down
-# somewhere, and a scanner that flags its own documentation gets deleted rather
-# than fixed. The pattern is assembled from pieces so this line is not itself a
-# hit — and the backslash arrives as an octal escape rather than as a quoted
-# backslash, because a backslash sitting next to a quote is the thing being
-# scanned for.
+# ---- harness self-audits -----------------------------------------------------
+# Two shapes of bug that make this script's verdicts lie, and both were measured
+# happening here rather than theorised:
+#   * a backslash immediately before a single quote inside a **double-quoted** bash
+#     string stays a literal backslash, so a grep needle written that way searches
+#     for text no log file ever contained. That is how section 26 reported
+#     "mpv never reported file-loaded" about a run whose MPV.log had printed it,
+#     and the failure text (a tail of three lines) read exactly like a load that
+#     had been interrupted.
+#   * a backtick inside a double-quoted message is a **command substitution**: bash
+#     runs it, prints whatever it printed (usually nothing) and records the PASS
+#     with a hole where the sentence was (AGENTS.md 4.13's fourth telling). An
+#     ESCAPED backtick is two literal characters and is legitimate prose, so the
+#     audit below counts only the live ones: a pattern that flagged both once cried
+#     wolf at a properly escaped line while a real hit could hide in the same count.
+# Comment lines are exempt from the first audit, because the lesson has to live
+# somewhere and a scanner that flags its own documentation gets deleted rather than
+# fixed. Both audits carry a planted control: a zero that cannot be told apart from
+# "the scanner is broken" is not a pass (Part 50's family).
 BSL=$(printf '\134')
+BTX=$(printf '\140')
 SQ="'"
 QUOTE_PATTERN="$BSL$SQ"
 quote_audit() {
-    grep -Fna "$QUOTE_PATTERN" "$1" | grep -vc '^[0-9]*:[[:space:]]*#'
+    grep -Fna "$QUOTE_PATTERN" "$1" | grep -vc "^[0-9]*:[[:space:]]*#"
 }
 QUOTE_HITS=$(quote_audit "$0")
 if [ "$QUOTE_HITS" != "0" ]; then
-    echo "  [FAIL] $QUOTE_HITS code line(s) of this script hold the ${QUOTE_PATTERN} quoting bug: $(grep -Fan "$QUOTE_PATTERN" "$0" | grep -v '^[0-9]*:[[:space:]]*#' | head -3 | tr '\n' ' ')"
+    echo "  [FAIL] $QUOTE_HITS code line(s) of this script hold the ${QUOTE_PATTERN} quoting bug"
+    grep -Fan "$QUOTE_PATTERN" "$0" | grep -v "^[0-9]*:[[:space:]]*#" | head -2
     FAILED=$((FAILED + 1))
 fi
-# Positive control: the audit must find the bug when the bug is present, or the
-# zero above is the same kind of zero as a scanner over an empty directory.
+# The control is assembled from the two characters being scanned for, so this file
+# never contains the sequence it hunts while still being able to plant it.
 QUOTE_CONTROL=$(mktemp /tmp/macast-quote-control.XXXXXX.sh)
 printf 'needle=$(grep "%s")\n' "${QUOTE_PATTERN}event${QUOTE_PATTERN}" > "$QUOTE_CONTROL"
-if [ "$(quote_audit "$QUOTE_CONTROL")" = "1" ]; then
-    if [ "$QUOTE_HITS" = "0" ]; then
-        echo "  [PASS] harness audits itself: the ${QUOTE_PATTERN} quoting scan finds a planted bug and reports this file clean"
-    fi
-else
-    echo "  [FAIL] the quoting audit did not find the bug in a file written to contain exactly one"
+QUOTE_OK=1
+[ "$(quote_audit "$QUOTE_CONTROL")" = "1" ] || QUOTE_OK=0
+rm -f "$QUOTE_CONTROL"
+
+# The backtick scan walks each message line with escapes consumed first, so what is
+# left is what bash would actually print. grep on macOS cannot express "preceded by
+# an even number of backslashes", which is the whole distinction, and the words it
+# looks for are passed in as variables so the scanner does not match its own source.
+bt_audit() {
+    awk -v p1='pass ' -v p2='fail ' '
+        /^[[:space:]]*#/ { next }
+        index($0, p1) == 0 && index($0, p2) == 0 { next }
+        {
+            live = 0
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c == "\\") { i++; continue }
+                if (c == "`") { live = 1 }
+            }
+            if (live) hits++
+        }
+        END { print hits + 0 }' "$1"
+}
+BT_HITS=$(bt_audit "$0")
+if [ "$BT_HITS" != "0" ]; then
+    echo "  [FAIL] $BT_HITS message line(s) of this script still carry a live backtick, so bash runs them"
     FAILED=$((FAILED + 1))
 fi
-rm -f "$QUOTE_CONTROL"
+BT_CONTROL=$(mktemp /tmp/macast-backtick-control.XXXXXX.sh)
+# Two lines that must NOT be counted (the backticks are escaped) and one that must
+# be (a live substitution, assembled from a variable so this source line stays
+# clean). A scanner that reads zero on this file has not been asked anything.
+printf '%s\n' 'pass "the field \`name\` is escaped prose"' > "$BT_CONTROL"
+printf '%s\n' 'fail "and so is \`this\`"' >> "$BT_CONTROL"
+printf '%s\n' "fail \"and this one runs: ${BTX}date -u${BTX}\"" >> "$BT_CONTROL"
+BT_OK=1
+[ "$(bt_audit "$BT_CONTROL")" = "1" ] || BT_OK=0
+rm -f "$BT_CONTROL"
+
+if [ "$QUOTE_OK" = "1" ] && [ "$BT_OK" = "1" ] \
+    && [ "$QUOTE_HITS" = "0" ] && [ "$BT_HITS" = "0" ]; then
+    echo "  [PASS] harness audits itself: both quoting bugs absent here, both found in a planted file"
+else
+    if [ "$QUOTE_OK" != "1" ]; then
+        echo "  [FAIL] the ${QUOTE_PATTERN} quoting audit did not find the bug it was handed — its zero means nothing"
+        FAILED=$((FAILED + 1))
+    fi
+    if [ "$BT_OK" != "1" ]; then
+        echo "  [FAIL] the backtick audit failed its planted control"
+        FAILED=$((FAILED + 1))
+    fi
+fi
 # -----------------------------------------------------------------------------
 
 # The two refusal sentences, by the shortest prefix that identifies which gate
@@ -3487,6 +3535,133 @@ PINGMPV
         rm -rf "$AP_SDIR"
     fi
     rm -f "$RTSP_PY" "$RTSP_OUT"
+fi
+
+echo "== 27: a cast made before the restart is still on the card after it =="
+# §23 is the section that found this gap: it delivered `history: []` as its first
+# red on a machine that had just cast something, because the reference keeps the
+# rows in `Setting[Play_History]` (so a restart shows yesterday's casts) while this
+# shell kept them in the state table (so a restart showed nothing). An empty list
+# with two causes is the §4.14 sentence, and the only witness that separates them
+# is a **restart**. Memory-only assertions could never have caught this, which is
+# why this section starts a second process rather than asking the first one twice.
+#
+# A fourth instance on purpose, with `Macast_Protocols: ["DLNA Protocol"]`: the
+# main one is still holding 8009/8008, and a section that "failed to bind the Cast
+# faces" would read as a gate bug rather than as the port it is.
+H_SDIR=$(mktemp -d /tmp/macast-rust-history.XXXXXX)
+H_PORT=$((PORT + 7))
+H_SOCK="$H_SDIR/mpvsocket"
+H_BASE="http://127.0.0.1:$H_PORT"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust History", "Macast_Protocols": ["DLNA Protocol"]}' "$H_PORT" \
+    > "$H_SDIR/macast_setting.json"
+
+h_start() {
+    # One launcher for both processes in this section, so "which pid is ours" is
+    # decided in one place. `MACAST_MPV_SOCKET` stays inside the temp dir: the
+    # teardown can then reap exactly this run's player and nobody else's.
+    env MACAST_SETTING_DIR="$H_SDIR" MACAST_MPV_SOCKET="$H_SOCK" \
+        MACAST_RESOURCE_DIR="$REPO/macast" \
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+        "$BIN" > "$H_SDIR/stdout.log" 2>&1 &
+    H_PID=$!
+    disown "$H_PID" 2>/dev/null || true
+    H_UP=""
+    for _ in $(seq 1 40); do
+        [ "$(lsof -nP -iTCP:"$H_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$H_PID" ] \
+            && { H_UP=1; break; }
+        sleep 0.25
+    done
+}
+
+h_stop() {
+    kill -9 "$H_PID" 2>/dev/null
+    pkill -9 -f "$H_SOCK" 2>/dev/null
+}
+
+if [ -z "$MEDIA_URL" ]; then
+    skip "no media address to cast, so there is no row to bring back"
+else
+    h_start
+    if [ -z "$H_UP" ]; then
+        skip "the history instance never became the listener on $H_PORT (someone else holds it: $(lsof -nP -iTCP:$H_PORT -sTCP:LISTEN -t 2>/dev/null | head -1))"
+    else
+        pass "a DLNA-only instance is up on $H_PORT while the main one keeps 8009"
+        # The token is this instance's own: it mints one into ITS settings file,
+        # and reading the main instance's would test a secret this run never wrote.
+        api_probe "$H_BASE/api?query=cast-info"
+        H_TOKEN=$(printf '%s' "$API_MSG" | sed -nE 's/.*token=([0-9a-f]{32}).*/\1/p')
+        if [ -z "$H_TOKEN" ]; then
+            fail "cast-info gave this instance no token to cast with: $API_MSG"
+        else
+            TITLE_H="Rust-History-Row"
+            api_probe "$H_BASE/api?query=cast&url=$MEDIA_URL&title=$TITLE_H&token=$H_TOKEN"
+            [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "0" ] \
+                && pass "the cast was accepted by this instance" \
+                || fail "the cast answered HTTP $API_STATUS: $API_MSG"
+            api_probe "$H_BASE/api?query=status"
+            [ "$(json_len history)" = "1" ] \
+                && pass "one row on the card after one cast" \
+                || fail "history has $(json_len history) rows after one cast"
+            [ "$(json_ask history.0.uri)" = "$MEDIA_URL" ] \
+                && pass "and the row names the address this instance was handed" \
+                || fail "the row says '$(json_ask history.0.uri)', not $MEDIA_URL"
+            # The three keys are the reference's (`protocol.py:1211-1215`). The
+            # window command used to spell the address `url`; a fourth spelling
+            # in the user's file is exactly what this row refuses.
+            KEYS_H=$(json_keys history.0 | tr ',' '\n' | sort | tr '\n' ',')
+            [ "$KEYS_H" = "time,title,uri," ] \
+                && pass "the row carries exactly the reference's three keys" \
+                || fail "the row's keys are '$KEYS_H', not time,title,uri"
+            if grep -q '"Play_History"' "$H_SDIR/macast_setting.json" 2>/dev/null \
+                && grep -a '"uri"' "$H_SDIR/macast_setting.json" >/dev/null 2>&1; then
+                pass "and it is in the settings file, not only in this process"
+            else
+                fail "the cast left no Play_History in $H_SDIR/macast_setting.json — a restart would empty the card"
+            fi
+            h_stop
+            h_start
+            if [ -z "$H_UP" ]; then
+                fail "the restarted instance never came back on $H_PORT, so nothing below was read"
+            else
+                # Re-probe: `$API_BODY` is one shared file and the last reader in
+                # this section was not `query=status` (§23 learned that the hard
+                # way — the next reader re-asks before it answers).
+                api_probe "$H_BASE/api?query=status"
+                [ "$(json_len history)" = "1" ] \
+                    && pass "after a kill and a fresh process, the row is still there" \
+                    || fail "the restart emptied the card: $(json_len history) row(s)"
+                [ "$(json_ask history.0.title)" = "$TITLE_H" ] \
+                    && pass "with its title intact: $(json_ask history.0.title)" \
+                    || fail "the restored row is titled '$(json_ask history.0.title)'"
+                # The file is named, not "somewhere in the logs": the state table
+                # speaks through `logs/Protocol.log` (`protocol.py:30` is
+                # `getLogger("Protocol")`, and `logsplit` claims it). Until this round
+                # `main.rs` handed the table the *player's* logger, so the history
+                # sentences sat in `logs/MPV.log` next to the renderer's events — a
+                # check that grepped every file would have passed against that wrong
+                # destination (§4.3's "a log that points at the wrong suspect", one
+                # layer up: here it points at the wrong _file_).
+                grep -aqF 'play history: 1 row(s) read back' "$H_SDIR/logs/Protocol.log" \
+                    && pass "and the boot says where they came from, in the protocol's own log" \
+                    || fail "logs/Protocol.log does not claim the read-back: $(grep -rahF 'play history' "$H_SDIR"/logs/*.log "$H_SDIR/macast.log" 2>/dev/null | tail -2)"
+                # The restored rows are the same table the writers use, not a copy
+                # for display: casting the same address again must still be one row
+                # (the reference's dedupe is by URI, `protocol.py:1208-1210`).
+                api_probe "$H_BASE/api?query=cast&url=$MEDIA_URL&title=$TITLE_H&token=$H_TOKEN"
+                api_probe "$H_BASE/api?query=status"
+                [ "$(json_len history)" = "1" ] \
+                    && pass "a second cast of the same address dedupes against the restored row" \
+                    || fail "the restored row is display-only: history grew to $(json_len history) rows"
+                h_stop
+            fi
+        fi
+    fi
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $H_SDIR (macast.log, logs/MPV.log, stdout.log, macast_setting.json)"
+    else
+        rm -rf "$H_SDIR"
+    fi
 fi
 
 echo

@@ -333,7 +333,7 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `status`（四个键用 `peek` 读） | 参考实现的文档是 `Setting.get(key, default)` 拼出来的，而**那一次读会把默认值写进表里**，下一次 `save` 就落盘（`AGENTS.md` §4.2 的第一条陷阱）。本脸对 `Macast_Protocols` / `Macast_Protocol` / `Macast_Renderer` / `Play_History` 改用 `peek`，答案逐字相同、磁盘上不多一个键 | 边界要写清，因为它**不是**"本端口再也不写设置"：`ApplicationPort`、`Https_enabled`、`Https_Port` 与网卡钉 (`Network_Interface`) 仍然走共享读接口（前两者是壳自己启动时就在用的值，后者是 `macast_core::net::network_interfaces` 内部读的，改它要一起动 SSDP/广播/中转三张脸）。判据 `the_status_read_creates_no_key_that_was_not_there` 钉的就是这条边界，并且它**断言 `Network_Interface` 确实被创建** —— 一个把"什么都没写"当成整体主张的测试，会在下一次"顺手改成 peek"时红得说不清是谁的锅 |
 | `launch-param`（键的顺序） | 参考实现交回 `Setting.setting` —— 那个 dict 保的是**文件里的插入顺序**；本端口这张表是 `BTreeMap`，于是键按名字排序 | 页面的「高级设置」是一个 JSON 编辑器，本机没有任何读者按顺序读它（量过：这条路上唯一的读者还没写）。真要保序，改的是那张表而不是在这条路由上再排一次 —— 那会是第二个主人。**同一张路由携带 `Api_Token`**：这条不是偏离而是决定，写在路由的行注释里，并由 `the_face_never_answers_a_cors_question` 与 `launch_param_answers_the_whole_table…` 两条一起守（前者守"为什么可以带"，后者守"它确实带"） |
 | `subscribers`（文档比参考实现多两个键） | 参考实现的 `query=subscribers` 交回 `{aggregated, children[{title, type, running, event_thread_alive, subscribed, pending_append, pending_state}]}`；本端口那份**多** `pending_remove` 与 `children[].rows` | `pending_remove`：一个卡住的回收线程与一个卡住的追加线程是**同一种故障形状**，而少了这个数字，"订阅者永远不走"就没有见证者。`rows`：想知道"哪个 SID 落在哪个回调口"的调用方不该被迫去读 `query=status` 的 `clients` 再自己 diff 一份名单。**两个读者共用一个建造者**（`subscribers_document` —— HTTP 路由与窗口命令各调一次），所以"多出来的键"只可能长在一处而不是两份文档各长各的；审计与它的 0 红教训见 §16 第 16 条 |
-| `status`（`history` 住在内存，不住在设置文件） | 参考实现的播放历史是 `Setting[Play_History]`，**重启之后还在**；本壳的行住在 `StateTable` 的内存里，重启即空，而 `query=status` 打印的是内存那份 | 打印设置文件里那份会算什么？算"这台机器从没投过任何片子" —— 一个空列表在两个原因之间**不可分辨**（§4.14「空结果要说清是哪一种空」在文档层的新形状）。发现方式是本节的 §23 真机一节：投完之后 `history` 仍然是 `[]`，两条红。补成持久化是一次有"重启后还在"这条断言的决定，不是这一轮顺手做掉的一行 |
+| `status`（`history` 现在写在设置文件里） | **偏离已经关掉**（2026-10-18）：`StateTable::add_history` / `clear_history` 之后把整份行写进 `Play_History`，启动时 `with_setting` 读回来 —— 参考实现一直是 `Setting[Play_History]`，重启之后还在，而这一版曾经住在内存里，重启即空 | 发现方式是 §23 真机一节：投完之后 `history` 仍然是 `[]`，两条红。补它的判据必须问**第二次进程**：单元层用同一路径上的第二个 `Setting` 实例（`a_history_row_survives_a_second_setting_instance`），真机层杀进程再起来读 `query=status`（§27）。读侧一律 `peek` 而不是 `get` —— `get` 的默认值副作用会把 `Play_History: []` 造进一份从来没有过它的文件里，于是"第一次运行"在磁盘上变成"用户清空过"（§4.2 第一条陷阱，`reading_the_history_leaves_the_key_absent_on_a_first_run` 钉住）。**还剩两处小偏离，都在这同一行里记账**：① 文件里读不懂的条目本端口**在读取时就丢掉并数出来**（WARNING），而参考实现只在下一次写入时过滤、`query=status` 原样回显 —— 差别是"一份坏文件在两边页面上长得不一样"，而计数让这件事不再是静默的；② 每行对象里的键按 `BTreeMap` 排（`time`、`title`、`uri`），参考实现是插入顺序 —— 与顶层表同一条记账理由，读者都按名字取值 |
 | `channel`（读的方式） | Python 在**裸 socket** 上阻塞读、读期间不持任何锁；本端口**每条连接一把锁**，所以读改成 `READ_POLL`（200 ms）轮询，**锁在两批字节之间放开** | 这是"参考实现做不到"的那一类，不是风格：rustls 的一次 `read` 会动会话状态，必须串行化，而把锁跨在一次无限阻塞读上会让**同一根 socket 上的所有推送饿死** —— `_watch_playback` 与状态变化都排在那把锁后面，发送端 LOAD 之后只拿到那一次请求驱动的答复、此后一句话都没有，直到它自己断开（2026-10-18 接进壳之后由 §21 量出，见 §16 第 11 条）。Python 那边根本没有这一层，所以这一格**不可能**由"照抄它的写法"得到正确答案 |
 | `macast-mpv`（`set_observe` 之后才交出去的默认音量） | **不是偏离，是一格量到的同形缺陷**：链接一赋值就可写，而八条 `observe_property` 与那条**默认音量**是在这之后才写的 —— 落在同一个几毫秒窗口里的 `SET_PARAMETER` 会被 100 盖掉 | 2026-10-18 实测：全新实例的第一个会话，四条同形状跑（`PLAY` 之后 0 毫秒就发音量）**三次丢、一次没丢**（这正是"窗口"而不是"规则"的样子），同一实例后来的会话 4/4 落地。参考实现同形：`macast_renderer/mpv.py:404-414` 先 `self.ipc_sock = …` 再 `self.set_observe()`，`send_command` 每次单独拿 `command_lock` —— 所以这里**不单边修**（修它就是把自己的行为挪出参考实现，那需要自己的判据）。`verify_rust_receiver.sh` §26 因此隔 0.4 秒再发动作（真手机音量滑块不会在按播放的同一毫秒动），并把判据换成两条持久的：我们那句"两个数字都说"的 INFO + 从 mpv **读回来**的那个值。要动这一格的人先读 `set_observe` 的 docstring，读数就写在那里 |
 | `airplay`（谁写播放状态） | AirPlay 的投屏**不写 DLNA 状态表、不写播放列表、不写历史** | `protocol_airplay.py:251-280` 调的是 `self.renderer.…`，那里 renderer 是**渲染器实例本身**而不是 `PlaybackGuard`。移植照抄这个形状：壳给的是 `ShellRenderer` 上的 `airplay::RendererCallback`，五个方法都是直通。后果要说明白：用手机投完一段之后，设置页那张卡继续显示**上一次 DLNA/Cast 交接**的内容 —— **这不是 AirPlay 坏了**，是把主人留在发送端该在的那一层；谁要在 Rust 侧"改进"成也写状态，要先改的是 §15 与 `AGENTS.md` §4.2 那句"只有一个主人"的归属，而不是悄悄加一次 `set_state` |
@@ -446,6 +446,28 @@ utf-8 仍走 `std::str::from_utf8`；单字节标签是手抄表，理由是
 `TailRead::empty()`**（文件不存在不是错误）。
 
 于是"这条日志有没有写"是一个**可以断言的事实**，前提是它写到了我们能读走的地方。
+
+### 12.1b 名字就是目的地，所以目的地是一处决定
+
+`Logger::named` 按名字记忆、`claim()` 第一个赢家定死文件，于是"这句话写在哪个文件里"
+由**谁先拿到那个名字**决定 —— 这不是一句风格提醒，是被两个真 bug 换来的：
+
+* **产品侧**：`main.rs` 当年把播放器的 `MPV` logger 交给了 DLNA 状态表，所以
+  `setState: …` 与整段播放历史的故事写进 `logs/MPV.log`，而 `protocol.py:30` 用的是
+  `getLogger("Protocol")`、`logsplit` 给它 `logs/Protocol.log`。修法是表的构造点自己
+  claim 一个名字（`host::PROTOCOL_LOG`），而**判据按文件名 grep**（§27 读
+  `logs/Protocol.log`）：一个"在所有日志里找那句话"的检查会对着错误的目的地照样绿。
+* **测试侧**：`Logger::named("Macast")` 被任何一个用例 `claim()` 之后，全进程读到的
+  都是那个文件 —— 于是"这条句子没写在 macast.log"这类**否定断言**的成败取决于
+  **哪个测试先跑**。工具是分名的：`macast-cast` 的 e9 用 `Discovery-Echo` /
+  `Discovery-Heard` / `Discovery-OtherType` / `Discovery-Capped` 四个名字，因为它五半
+  判据里有两半问的是"这里应当没有"（环回不算、上限之外不再写）。反过来，只问"这句话在不在"的用例可以共用产品自己的那个名字 ——
+  `src-tauri` 这一轮的几条历史用例就是这样（都 claim `Protocol`，都问正向句子），
+  而**这不是一个可以照抄的决定**：往同一段里加一条否定断言的那一刻，就该分名。
+  这是 §4.2「并行跑的用例共享夹具路径，单跑绿、整组红」在日志上的形状。
+
+推论，写给下一个加句子的人：**先决定这句话属于哪个模块，再决定它说什么**。
+说对了内容、写错了文件，等价于没写 —— 用户 `grep` 的那一下不会替他换文件。
 
 ### 12.2 隔离（`pin_test_dir`）
 
@@ -894,7 +916,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
-| 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 在内存不在设置文件）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
+| 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
 | AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**20 条**）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**这一行仍然欠的那半句**：`_airplay._tcp` 的广播没接 —— 所以"iPhone 的屏幕镜像/音频列表里看得到这台 Mac"今天说不出口，只有**知道端口**的发送端（手动填地址、将来的测试）走得进来。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
@@ -1279,6 +1301,47 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *引号审计*（§26 那节顶部，每次跑脚本都执行）：本脚本的**代码行**里不许出现
     反斜杠紧跟单引号那一对字符（注释豁免，因为教训总要写在某处，而会冤枉文档的扫描器活不过下一次），
     并配一条**栽赃正控**：现造一个含一个 bug 的临时文件，扫描必须报 1。干净树报 0（本轮量过）。
+27. **播放历史写进设置文件了，而"写在哪个文件"这一问也是这一轮才问出来的**（2026-10-18，
+    `src-tauri/src/host.rs` 的 `with_setting` / `persist_history` + 真机 §27 的 **10 条**）。
+    *为什么这一格值一节脚本*：§23 交付的第一条红就是它 —— 投完之后 `history` 是 `[]`，
+    而参考实现把行写在 `Setting[Play_History]`（重启还在）。那一轮补的是"打印内存那份"
+    （诚实的一半），持久化是另一半，它需要一条**重启之后还在**的断言才算数：
+    单元层用同一路径上的第二个 `Setting` 实例（`a_history_row_survives_a_second_setting_instance`），
+    真机层杀进程再起来读 `query=status`（§27）。内存断言永远问不到这件事，
+    所以这不是"补一行写文件"，是把判据搬到只有操作系统能回答的那一层。
+    *三条各自独立的判据形状*：① 读侧走 `peek` 不走 `get` —— `get` 的默认值副作用会把
+    `Play_History: []` 造进一份从来没有过它的文件，于是"第一次运行"在磁盘上变成"用户清空过"
+    （§4.2 第一条陷阱在启动路径上的再现，`reading_the_history_leaves_the_key_absent_on_a_first_run`
+    断的是调用之后 `has()` **仍然为假**）；② 50 行上限是**关于文件**的承诺
+    （`protocol.py:1215` 那句注释说的是"让设置文件保持小"），所以计数从磁盘上取而不是从刚写它的表里取；
+    ③ 清空写的是**空列表**而不是删键 —— 对页面两者一样，对下一次启动的那句日志不是。
+    *一处顺带修对的归属*：这张状态表的话一直写在 **`logs/MPV.log`** 里，因为 `main.rs` 当年把
+    播放器的 logger 交给了它。`protocol.py:30` 是 `getLogger("Protocol")`、`logsplit` 给它
+    `logs/Protocol.log`，所以 `setState: …` 与整段播放历史的故事本来就属于那个文件 ——
+    一个追着"卡片为什么自己空了"的读者会被送去满是 mpv 事件的日志里，这是 §4.3
+    "日志指错嫌疑人"的上一档：**指错文件**。修法在 `main.rs`（表拿自己的 logger 并 claim），
+    而**没有**改成"脚本去所有日志里找"：§27 现在按**文件名**grep，
+    所以这一格再被写回 MPV.log 就会红。单元用例同理各自 claim 一个独占名字的 logger ——
+    `Logger::named` 按名字记忆，共享的 `"Macast"` 一旦被哪个用例 claim，别人的断言
+    就读到那份文件去了（§4.2 并行夹具那一族）。
+    *六支定点变异，各红 1/4 条*（一支一条命令，`/tmp` 备份 + EXIT trap 还原 + md5 回到
+    `92ac018baf4b57cf6c25cc27216f3727`）：`add_history` 不再持久化 → 单元 **4** 红
+    （重启、三键、上限、以及那句"没有设置文件"的自白），真机 §27 **4** 红
+    （文件里没有 `Play_History`、重启后 0 行、标题为空、Protocol.log 没有读回那一句）；
+    `peek` 换成 `get(..., [])` → 1 红；`clear` 不再持久化 → 1 红；垃圾条目不再被丢 → 1 红；
+    丢掉那条 WARNING → 1 红；丢掉 INFO 那句"read back" → 1 红。**没有一支 0 红**。
+    **两条读数要分开说**：① §27 最后那条"同一地址第二次投屏仍然是 1 行"在那支持久化变异体下
+    **照旧绿** —— 它问的不是持久化，是"读回来的行与写入的行是不是同一张表"（display-copy 形状），
+    写在用例旁边免得下一个人把它当持久化的第二个见证者；② 本机 `history` 的**顺序**与
+    每行对象里键的顺序仍是记账的偏离（`BTreeMap` 排序），§8 那一行里带着。
+    *验收脚本自己多了两道闸*（见第 26 条末与脚本顶部）：`\'` 引号形状与**未转义**反引号，
+    两道各自配一条栽赃正控，任何一道在正控上失灵就整趟计败 —— 一个不会被栽赃骗到的 0
+    不是"干净"，是"没在跑"。
+    *计数（两台仪器一致）*：`macast-cast` **695**、`macast-core` 90、`macast-mpv` 149、
+    `macast-upnp` 347、`macast-tauri` **18**（这一轮 +7）。真机
+    **281 PASS / 1 SKIP / 0 FAIL、退出码 1**（那一条 SKIP 仍是第 22/26 条的送达那一格）。
+    **以及本分支从未推送 ⇒ 这一轮的用例与那 281 条读数没有任何 CI 见证过。**
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1344,14 +1407,18 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **29**（§26 是最后一节，
-#   iPhone 的 RTSP 问答；§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **30**（§27 是最后一节，
+#   重启之后重投历史还在；§26 是 iPhone 的 RTSP 问答，§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
 #   门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
 #   编号变了而判据没变）
 grep -c 'a query that is not ours' macast-cast/src/announce.rs        # 期望 **1**（DEBUG 那半句也只有一处；
 #   两级句子是 §16 第 26 条那一格：INFO 只报问我们的，预算才不会被本机自己的查询淹死）
 grep -c 'fn concerns' macast-cast/src/respond.rs                       # 期望 **1**（复用出答案的那个匹配器，不是第二份名字规则）
 grep -c 'AirPlay SET_PARAMETER' macast-cast/src/airplay.rs             # 期望 **2**（"两个数字都说" 与 "读不懂也要说"）
+grep -c 'self.persist_history();' src-tauri/src/host.rs                 # 期望 **2**（投完一条、清空一次 —— 写盘只有这一处）
+grep -c 'PROTOCOL_LOG' src-tauri/src/host.rs src-tauri/src/main.rs       # 期望 **3 + 1**（名字的主人与唯一的 claim 点；
+#   §12.1b 那一格说的是"目的地是一处决定"，而这一行是它的外部对应物 —— 谁在别处再 claim 一次，
+#   `claim()` 的先到先得就会让句子的目的地变成一次赛跑）
 grep -c 'AirPlayReceiver::new' src-tauri/src/main.rs                   # 期望 **1**（AirPlay 那张脸的构造点恰好一个）
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
@@ -1376,7 +1443,7 @@ grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::faces_enabled(' src-tauri/src/main.rs                          # 期望 **1**（一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
-grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **3**（launch 那台 + §24 门那台 + §26 AirPlay 那台），且下面这条 **0**：
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **4**（launch 那台 + §24 门那台 + §26 AirPlay 那台 + §27 历史那台），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
 #   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
