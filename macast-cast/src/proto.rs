@@ -406,16 +406,21 @@ mod tests {
     /// one thing the number is here to catch. **A new module with tests moves
     /// this number.**
     ///
-    /// 656 is what both instruments say right now: `cargo test -p macast-cast
-    /// --lib -- --list` prints 656, and the scanner below counts 656 `#[test]`
+    /// 672 is what both instruments say right now: `cargo test -p macast-cast
+    /// --lib -- --list` prints 672, and the scanner below counts 671 `#[test]`
     /// attributes over `src/*.rs` — the two agree, and the per-file sum is the
+    /// **replica of the scanner**, not a `grep -c '#\[test\]'`, which on this
+    /// crate reads **678**: seven of those hits are the word inside doc prose and
+    /// needles (this doc comment among them). Same lesson as `push_tests` carrying
+    /// 610 against 603 — an instrument that counts strings is not a census.
     /// check that neither is reading a stale file (it is deliberately
     /// non-recursive, so the `#[path]`-included `*_tests.rs` files still land in
     /// the scan because they sit in `src/` itself). The largest contributors are
     /// `job_tests` 162, `targets_tests` 75, `mdns_tests` 66, `relay_tests` 63,
     /// `airplay_tests` 60, `push_tests` 46, `channel_tests` 40, `resolve` 39,
-    /// `setup_tests` 30, this file 19, `announce_tests` 19, `engine_tests` 17 and
-    /// `cert` 12. The previous values, 603, 633, 637 and 655, were carried by the
+    /// `setup_tests` 30, this file 19, `announce_tests` 19, `engine_tests` 17,
+    /// `respond_tests` 16 and `cert` 12. The previous values, 603, 633, 637, 655
+    /// and 656, were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
@@ -441,7 +446,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 656;
+    const TESTS_IN_THIS_CRATE: usize = 672;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

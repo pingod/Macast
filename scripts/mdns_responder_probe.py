@@ -309,6 +309,11 @@ def cases_for(info, server):
         {"label": "srv-known-ptr", "name": info.name, "type": const._TYPE_SRV, "src": 5353,
          "known": [("ptr", 4500, None)],
          "why": "is suppression per record or per question: the asker knows the PTR but asked for the SRV"},
+        {"label": "ptr-known-srv", "name": info.type, "type": const._TYPE_PTR, "src": 5353,
+         "known": [("srv", 120, None)],
+         "why": "does suppression reach the RIDING records? the asker knows the SRV but not the PTR, "
+                "and the SRV would normally come along as an additional. Nobody asked this until a "
+                "mutant that suppresses additionals too went 0-red — this row is that hole closed"},
         {"label": "other-service", "name": "_airplay._tcp.local.", "type": const._TYPE_PTR, "src": 5353,
          "why": "a type we do not run: silence, and no error"},
         {"label": "any", "name": info.name, "type": const._TYPE_ANY, "src": 5353,

@@ -90,6 +90,7 @@ pub mod proto;
 pub mod push;
 pub mod resolve;
 pub mod relay;
+pub mod respond;
 pub mod setup;
 pub mod targets;
 

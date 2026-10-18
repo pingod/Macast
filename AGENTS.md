@@ -2202,6 +2202,21 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   只有 `A/NSEC` 一对不确定所以冻两行够用，这里不行。**延迟记着但不作判据**（`delays_ms`，
   实测 0.3–110.4 ms，模型是 `{SRV,A,AAAA,NSEC}` 立即、其余进 `U(20,120)` ms 的聚合队列）——
   断言毫秒数就是断言这台机器的计时器。
+* **判决层落地：`macast-cast/src/respond.rs`（`pub fn respond` 恰好一个入口）+ 16 条用例逐行对拍
+  17 行语料**。十支定点变异的读数：**M1 `>` 改成 `>=` → 2 红 / M2 抑制不看 alias → 2 /
+  M3 干脆不抑制 → 2 / M4 共享的 PTR 自称 cache-flush → 6 / M5 单播那一份保留 flush 位 → 2 /
+  M6 ANY 多答一条 PTR → 2 / M7 `AAAA` 改成交回沉默 → 2 / M8 TXT 那道题拖上 host pair → 2 /
+  M9 无视 `has_v4` → 1**（每支一条命令、`/tmp` 备份 + EXIT trap 还原 + md5 回到当轮基线）。
+* **M10 是这一轮唯一"0 红变成判据"的一格，也是 §13.4 那条纪律第三次在 Rust 侧现形**：
+  一支把抑制**也应用到附带段**的变异体，在第一版 16 行语料上 **0 红** —— 也就是说
+  "asker 已经知道 SRV、问的是 PTR 时，那条搭车的 SRV 还发不发"这件事**从未被问过**，
+  两种实现都绿。闭洞的方式是**去问参考实现**而不是放宽断言：探针加 `ptr-known-srv` 一行，
+  量到参考实现**照发五条**，`respond.rs` 的"只抑制这道题挣来的那条答案"于是有了见证者，
+  同一支变异体今红 **2** 条。语料因此是 17 行，附录 B 的计数与两侧散文一起改。
+* **计数用两台仪器，不用裸 grep**：`--list` 与审计扫描器都给 **672**；
+  `grep -c '#\[test\]'` 给 **679** —— 多出来的 7 条是文档与 needle 里的字面量，
+  与 `push_tests` 那回 610 对 603 是同一族（POSIX 括号类那次是另一种骗法，这次是纯字面匹配
+  数到了散文）。地板 `TESTS_IN_THIS_CRATE` 656 → 671 → 672 是量出来的两步。
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
