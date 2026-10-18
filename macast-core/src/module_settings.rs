@@ -30,6 +30,7 @@
 //! dicts stay read-only here — they are structure, and 高级设置's JSON editor remains the
 //! place to change them (`_item`'s rule, `module_settings.py:189-204`).
 
+use crate::setting::Setting;
 use serde_json::{Map, Value, json};
 
 /// Group ids that are not plugins.
@@ -144,6 +145,66 @@ pub fn is_owned(key: &str, stored: &Map<String, Value>) -> bool {
 /// Whether one of the two tables claims this name.
 fn is_claimed(name: &str) -> bool {
     CORE.iter().any(|e| e.name == name) || PLAYER.iter().any(|e| e.name == name)
+}
+
+/// Build an object with its fields in the order written. `serde_json::Map` preserves
+/// insertion order here (the workspace turns on `preserve_order`), and these documents'
+/// field order is what the page renders, so the order is a wire property rather than
+/// cosmetics — the same reason `groups()` builds its cells in the reference's order.
+fn object(fields: &[(&str, Value)]) -> Value {
+    let mut map = Map::new();
+    for (name, value) in fields {
+        map.insert((*name).to_string(), value.clone());
+    }
+    Value::Object(map)
+}
+
+/// The five answers `set_value` can give (`module_settings.py:312-343`). They are
+/// written here in the reference's dict order, and the branch wording is what a user
+/// reads, so it is copied rather than paraphrased.
+pub fn set_value(setting: &Setting, key: Option<&str>, raw_value: &str, remove: bool) -> Value {
+    // `str(key or '').strip()` — a missing key and an empty one are the same answer.
+    let name = key.unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return object(&[("code", json!(1)), ("message", json!("缺少设置项名称"))]);
+    }
+    let stored = setting.snapshot();
+    if !is_owned(&name, &stored) {
+        // The name is read back to the caller: a page that posts a typo needs to see
+        // which word the machine did not know, and 「未知设置项」 without the name is the
+        // kind of sentence that costs an hour (§4.2's 「空结果要说清是哪一种空」 again).
+        return object(&[
+            ("code", json!(1)),
+            ("message", json!(format!("未知设置项：{name}"))),
+        ]);
+    }
+    if remove {
+        let was_present = setting.remove_name(&name);
+        return object(&[
+            ("code", json!(0)),
+            (
+                "message",
+                json!(if was_present { "已删除" } else { "本就未设置" }),
+            ),
+            ("removed", json!(was_present)),
+        ]);
+    }
+    // `json.loads(raw_value)` falling back to the raw text: the page posts JSON scalars
+    // (`58880`, `true`, `"en0"`), and anything that is not JSON is a **string** — which
+    // is how a plain-text setting stays writable without the page having to quote it.
+    let value = serde_json::from_str::<Value>(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_string()));
+    if value.is_array() || value.is_object() {
+        return object(&[
+            ("code", json!(1)),
+            ("message", json!("列表/对象值请在「高级设置」JSON 里编辑")),
+        ]);
+    }
+    setting.set_name(&name, value.clone());
+    object(&[
+        ("code", json!(0)),
+        ("message", json!("已保存")),
+        ("value", value),
+    ])
 }
 
 /// `type(value).__name__` for the seven shapes a JSON file can hold, and `''` for a
@@ -268,7 +329,9 @@ pub fn payload(stored: &Map<String, Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setting::{Key, Setting};
+    // `Setting` arrives through `super::*` (the module owns it for `set_value`); importing it
+    // again here would be a second name for one type, which rustc refuses.
+    use crate::setting::Key;
     use serde_json::json;
 
     fn stored(pairs: Vec<(&str, Value)>) -> Map<String, Value> {
@@ -588,4 +651,213 @@ mod tests {
         assert_eq!(CORE.len(), 22);
         assert_eq!(PLAYER.len(), 5);
     }
+
+    // ---------------------------------------------------------------- write path
+
+    /// A scratch settings file, with a Drop that removes it. Mirrors `setting.rs`'s own
+    /// test helper: a name unique to the test and the process, and **no** user directory
+    /// anywhere near it (AGENTS.md §10's first rule).
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "macast-core-module-write-{}-{}-{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_micros())
+                    .unwrap_or(0)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        fn path(&self) -> std::path::PathBuf {
+            self.0.join(crate::paths::SETTING_FILE_NAME)
+        }
+        fn setting(&self) -> Setting {
+            let setting = Setting::new(self.path());
+            setting.load();
+            setting
+        }
+        fn bytes(&self) -> Option<Vec<u8>> {
+            std::fs::read(self.path()).ok()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_scalar_write_lands_in_the_file_and_in_the_next_grouped_read() {
+        let scratch = Scratch::new("scalar");
+        let setting = scratch.setting();
+        let answer = set_value(&setting, Some("ApplicationPort"), "59001", false);
+        assert_eq!(answer["code"], json!(0));
+        assert_eq!(answer["message"], json!("已保存"));
+        assert_eq!(answer["value"], json!(59001));
+        // The bytes are the proof, not the in-memory table: 模块设置's whole promise is
+        // that what the page writes is what the next process reads.
+        let on_disk = String::from_utf8(scratch.bytes().expect("the file was written")).expect("utf-8");
+        assert!(on_disk.contains("\"ApplicationPort\": 59001"), "file: {on_disk}");
+        // …and the grouped read sees it, because both go through one table.
+        let doc = payload(&setting.snapshot());
+        let cell = doc["groups"][0]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["key"] == json!("ApplicationPort"))
+            .expect("the row exists");
+        assert_eq!(cell["present"], json!(true));
+        assert_eq!(cell["value"], json!(59001));
+        assert_eq!(cell["type"], json!("int"));
+    }
+
+    /// The two refusals that must **not** touch the file: an unowned name, and a
+    /// container value. Asserted against the bytes rather than the in-memory table,
+    /// because "the answer was no" and "nothing was written" are two different claims and
+    /// the settings file has been destroyed by a code path that only meant to answer.
+    #[test]
+    fn a_refused_write_refuses_the_disk_too() {
+        let scratch = Scratch::new("refused");
+        let setting = scratch.setting();
+        setting.set(Key::ApplicationPort, json!(58880));
+        let before = scratch.bytes().expect("the file exists after a real write");
+
+        let unknown = set_value(&setting, Some("no_such_key"), "1", false);
+        assert_eq!(unknown["code"], json!(1));
+        assert_eq!(unknown["message"], json!("未知设置项：no_such_key"));
+
+        let padded = set_value(&setting, Some("   "), "1", false);
+        assert_eq!(padded["message"], json!("缺少设置项名称"));
+        let missing = set_value(&setting, None, "1", false);
+        assert_eq!(missing["message"], json!("缺少设置项名称"));
+
+        let container = set_value(&setting, Some("Play_History"), "[{\"uri\": \"x\"}]", false);
+        assert_eq!(container["code"], json!(1));
+        assert_eq!(
+            container["message"],
+            json!("列表/对象值请在「高级设置」JSON 里编辑"),
+            "a structure has to be named as structure, or the user reads it as a save failure"
+        );
+        let object_value = set_value(&setting, Some("Macast_Protocols"), "{\"a\":1}", false);
+        assert_eq!(object_value["code"], json!(1));
+
+        assert_eq!(
+            scratch.bytes().expect("the file is still there"),
+            before,
+            "a refused write rewrote the settings file"
+        );
+        assert!(!setting.has(Key::PlayHistory), "the refused container still landed in the table");
+    }
+
+    /// `json.loads` falling back to the raw text: the page posts JSON scalars, and
+    /// anything that is not JSON is **a string** — which is how `en0` is written without
+    /// the caller having to quote it. The four shapes are pinned because the value's
+    /// *type* is what the next read reports as `type` and `editable`.
+    #[test]
+    fn a_value_that_is_not_json_is_stored_as_a_string() {
+        let scratch = Scratch::new("shapes");
+        let setting = scratch.setting();
+        for (raw, want) in [
+            ("en0", json!("en0")),
+            ("58880", json!(58880)),
+            ("true", json!(true)),
+            ("null", Value::Null),
+            ("42.5", json!(42.5)),
+            ("\"en0\"", json!("en0")),
+        ] {
+            let answer = set_value(&setting, Some("Network_Interface"), raw, false);
+            assert_eq!(answer["code"], json!(0), "{raw} was refused: {answer}");
+            assert_eq!(answer["value"], want, "raw {raw} stored as something else");
+            assert_eq!(setting.peek(Key::NetworkInterface).unwrap_or(Value::Null), want, "raw {raw}");
+        }
+        // `NaN` and `Infinity` are JSON extensions Python's parser accepts **and** serde
+        // accepts, so they land as numbers here too — but they are not something the page
+        // posts, and a NaN in a settings file is a number no reader agrees about. Pinned
+        // so nobody "fixes" one side of this without noticing the other moved.
+        let nan = set_value(&setting, Some("Https_Port"), "NaN", false);
+        assert!(nan["value"].is_number() || nan["value"].is_string(), "NaN: {nan}");
+    }
+
+    /// Remove answers two different sentences, and the second one must not rewrite the
+    /// file. `was_present` is in the document because the page shows "已删除" only when
+    /// something was deleted — 「本就未设置」 with a `removed: true` would be the same kind
+    /// of lie the log panel's key-count bug was.
+    #[test]
+    fn remove_names_which_of_two_things_happened() {
+        let scratch = Scratch::new("remove");
+        let setting = scratch.setting();
+        set_value(&setting, Some("Network_Interface"), "en0", false);
+        let before = scratch.bytes().expect("written");
+
+        let gone = set_value(&setting, Some("Network_Interface"), "", true);
+        assert_eq!(gone["code"], json!(0));
+        assert_eq!(gone["message"], json!("已删除"));
+        assert_eq!(gone["removed"], json!(true));
+        assert!(!setting.has(Key::NetworkInterface), "the key is still in the table");
+        let after_delete = scratch.bytes().expect("still a file");
+        assert_ne!(after_delete, before, "the delete was memory-only");
+
+        // An owned key that is simply absent: refused? no — answered, and the file is
+        // left exactly as it was.
+        let never = set_value(&setting, Some("Github_CN_Mirror"), "", true);
+        assert_eq!(never["message"], json!("本就未设置"));
+        assert_eq!(never["removed"], json!(false));
+        assert_eq!(scratch.bytes().expect("still a file"), after_delete);
+
+        // An unowned name is refused *before* the remove branch, so no delete can wipe a
+        // key the read side would then have to explain.
+        let foreign = set_value(&setting, Some("no_such_key"), "", true);
+        assert_eq!(foreign["code"], json!(1));
+        assert_eq!(scratch.bytes().expect("still a file"), after_delete);
+    }
+
+    /// `remove` is read with the reference's truthiness list, and the field arrives as
+    /// text: `('1','true','yes','on')` lower-cased (`protocol.py:3103-3104`). `0` and the
+    /// empty string are **not** removals — a page that posts `remove=0` next to a value
+    /// means to write it.
+    #[test]
+    fn the_remove_flag_is_the_reference_s_truthiness() {
+        let truthy = ["1", "true", "TRUE", "Yes", "on", "  ON "];
+        for text in truthy {
+            assert!(
+                remove_flag_is_true(text),
+                "{text:?} must mean remove — the reference lower-cases and tests membership"
+            );
+        }
+        for text in ["", "0", "false", "no", "off", "1x", "remove"] {
+            assert!(!remove_flag_is_true(text), "{text:?} must not mean remove");
+        }
+    }
+
+    /// The branch **field order**, pinned as a list: `code,message,value` on a save and
+    /// `code,message,removed` on a delete are the reference's dict literals, and the two
+    /// shapes differ in their third key — so a page that reads "the third field" is
+    /// already wrong in one direction, and this row is the record of what is really there.
+    #[test]
+    fn each_branch_has_the_reference_s_field_order_and_key_set() {
+        let scratch = Scratch::new("order");
+        let setting = scratch.setting();
+        let saved = set_value(&setting, Some("Network_Interface"), "en0", false);
+        let keys: Vec<&String> = saved.as_object().expect("object").keys().collect();
+        assert_eq!(keys, vec!["code", "message", "value"]);
+        let removed = set_value(&setting, Some("Network_Interface"), "", true);
+        let keys: Vec<&String> = removed.as_object().expect("object").keys().collect();
+        assert_eq!(keys, vec!["code", "message", "removed"]);
+        let refused = set_value(&setting, Some("nope"), "1", false);
+        let keys: Vec<&String> = refused.as_object().expect("object").keys().collect();
+        assert_eq!(keys, vec!["code", "message"]);
+    }
+}
+
+/// `str(remove).lower() in ('1','true','yes','on')` — the reference's read of the field
+/// the page posts, kept as a function so the truthiness has one owner and one test.
+pub fn remove_flag_is_true(raw: &str) -> bool {
+    matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
 }

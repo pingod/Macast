@@ -445,6 +445,39 @@ impl Setting {
         }
     }
 
+    /// `stored[name] = value` plus a write, for a name that may **not** be a member of
+    /// [`Key`]. This is the shape the 模块设置 write path needs
+    /// (`module_settings::set_value`): a key the user stored by hand, or one a future
+    /// plugin owns, is still a key of this file. `set(Key, …)` cannot express it, and
+    /// inventing a `Key` variant per plugin would make the enum a second owner of what
+    /// the file already says.
+    ///
+    /// The name is stored **verbatim**: the caller trims and validates it, because the
+    /// reference's rule is "whatever the page posted, minus surrounding spaces"
+    /// (`module_settings.py:321`), and a silent lower-case here would make
+    /// `My_Key` and `my_key` the same setting for the page and different ones on disk.
+    pub fn set_name(&self, name: &str, value: Value) {
+        self.table().insert(name.to_string(), value);
+        self.save();
+    }
+
+    /// `del stored[name]` plus a write; the answer is whether the key was there, which
+    /// is the difference between 「已删除」 and 「本就未设置」 on the page.
+    ///
+    /// Like [`Setting::unset`], nothing is written when the name was absent — a delete
+    /// that cannot find the key must not rewrite the file (and must not create a missing
+    /// one either).
+    pub fn remove_name(&self, name: &str) -> bool {
+        if self.table().is_empty() {
+            self.load();
+        }
+        if self.table().remove(name).is_some() {
+            self.save();
+            return true;
+        }
+        false
+    }
+
     /// Replace the whole table from a parsed object (the 高级设置 save path),
     /// then write it.
     pub fn replace_all(&self, map: serde_json::Map<String, Value>) {

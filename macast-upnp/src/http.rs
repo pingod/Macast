@@ -178,6 +178,13 @@ enum PostAction {
     ClearCookies,
     /// `resolve-cookie-browser=<spec>`: set or clear the browser reading.
     SetCookieBrowser,
+    /// `set-module-setting` with `key=<name> value=<json-or-text> [remove=1]`: the 模块设置
+    /// write path. `GATE_CODE`, and the reason is AGENTS.md §4.11's own words — the
+    /// 自动化钩子 keys live in this table, and their values go into
+    /// `subprocess(shell=True)` the next time anything is cast. So writing one **is**
+    /// running one, given a cast the same drive-by page can also trigger, which is exactly
+    /// the reasoning that makes loopback insufficient here.
+    SetModuleSetting,
     /// `clear-log=<anything>`: empty one log file and its rotated backups. The
     /// field's **value is not the module** — Python reads
     /// `kwargs.get('module')` (a helper field, `protocol.py:2343`), so the page
@@ -220,6 +227,11 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // would be triggerable by any page's `<img src=…&clear-log=1>`, which is
     // AGENTS.md §4.10's explicit red line for this endpoint ("清空走 POST").
     PostRoute { field: "clear-log", gate: "management", action: PostAction::ClearLog },
+    // Last in the reference's table (`protocol.py:2330`), and the first row on this face
+    // whose gate is `code-execution`. Precedence matters the same way it does for every
+    // other row: a request carrying both `clear-log` and `set-module-setting` runs the
+    // earlier one and never reaches this one.
+    PostRoute { field: "set-module-setting", gate: "code-execution", action: PostAction::SetModuleSetting },
 ];
 
 /// `site_of()` (`protocol.py:1491`): `(host, port)` out of a URL or `Host`
@@ -651,6 +663,12 @@ const MANAGEMENT_REFUSAL: &str =
 const TOKEN_REFUSAL: &str =
     "这个查询必须带 token=<管理令牌>，本机也不例外：任何网页都能向 127.0.0.1 发一个 GET。\
      令牌在设置页「状态 → 网页投屏入口」。";
+/// `GATE_REFUSALS[GATE_CODE]` (`protocol.py:1576-1577`), verbatim including the English
+/// lead-in: this is the sentence a user reads when a drive-by page tried to make the
+/// machine run something, and the reference's wording is what every existing screenshot,
+/// doc and support thread quotes.
+const CODE_REFUSAL: &str =
+    "Forbidden: installing code requires the api token (设置页「状态 → 网页投屏入口」)";
 
 /// The `GET /` answer.
 ///
@@ -1390,6 +1408,11 @@ enum Gate {
     Management,
     /// The management check **and** the token.
     Token,
+    /// The management check, **and the token even from this machine** — AGENTS.md §4.7b.
+    /// The name in the table is `code-execution`, matching the reference's own gate
+    /// constant, because the distinction the table has to keep showing is "this field can
+    /// make the machine run something", not "this field is sensitive".
+    Code,
 }
 
 impl Gate {
@@ -1402,6 +1425,7 @@ impl Gate {
         match name {
             "management" => Some(Gate::Management),
             "token" => Some(Gate::Token),
+            "code-execution" => Some(Gate::Code),
             _ => None,
         }
     }
@@ -1668,6 +1692,12 @@ impl Face {
         let token_ok = self.token_ok(req);
         if !is_loopback(&req.remote_ip) && !token_ok {
             return Some(MANAGEMENT_REFUSAL);
+        }
+        // The reference checks `GATE_CODE` before `GATE_TOKEN` (`protocol.py:2604-2607`);
+        // the two are mutually exclusive per row today, so the order only records that
+        // "runs code" is the louder of the two sentences.
+        if matches!(parsed, Gate::Code) && !token_ok {
+            return Some(CODE_REFUSAL);
         }
         if matches!(parsed, Gate::Token) && !token_ok {
             return Some(TOKEN_REFUSAL);
@@ -2011,6 +2041,24 @@ impl Face {
     }
 
     /// `POST clear-log=<anything>&module=<name>` — empty one log and its backups.
+    /// `set-module-setting` — the 模块设置 tab's only write, and the reason the ownership
+    /// table has **one** owner: the read side (`query=module-settings`) and this write side
+    /// both ask [`macast_core::module_settings`] which group a name belongs to. Two lists
+    /// that can disagree is how a page ends up showing a row as editable and a backend that
+    /// refuses it — §4.7c's table lesson in the other direction.
+    fn set_module_setting_answer(&self, req: &Request) -> Response {
+        let remove = param_value(req, "remove")
+            .as_deref()
+            .map(macast_core::module_settings::remove_flag_is_true)
+            .unwrap_or(false);
+        json_value_response(&macast_core::module_settings::set_value(
+            &self.setting,
+            param_value(req, "key").as_deref(),
+            &param_value(req, "value").unwrap_or_default(),
+            remove,
+        ))
+    }
+
     fn clear_log_answer(&self, req: &Request) -> Response {
         let module = param_value(req, "module");
         json_value_response(&macast_core::logging::clear_log_document(
@@ -2412,6 +2460,7 @@ impl Face {
                 // "which files went" is a fact about the log directory and this face
                 // must not answer it differently from the app's own panel.
                 PostAction::ClearLog => self.clear_log_answer(req),
+                PostAction::SetModuleSetting => self.set_module_setting_answer(req),
             });
         }
         None
@@ -5839,7 +5888,23 @@ mod tests {
         // agree with anything. Same two questions, same reason: unique field names
         // (a duplicate would shadow the later one forever) and a gate every row can
         // actually be parsed to.
-        assert!(POST_MANAGEMENT_ROUTES.len() >= 7);
+        // **8, not \">= 7"** — the same correction the GET table got in the previous
+        // round: a floor that trails the size by one row cannot see a row being deleted,
+        // and the row that would be cheapest to lose here is the one nobody polls
+        // (`set-module-setting` answers nothing until the page posts it). The number is a
+        // count, taken from the table, not from a plan.
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 8, "the POST table changed size");
+        // …and **which** rows carry which gate, because the security distinction this port
+        // keeps making is "can this field make the machine run something". Exactly one
+        // row is code-gated today; a second one appearing is fine **only** if this count is
+        // moved on purpose, and a code-gated row silently downgraded to `management`
+        // (loopback-trusted) is the shape AGENTS.md §4.7b was written to prevent.
+        let code_gated: Vec<&str> = POST_MANAGEMENT_ROUTES
+            .iter()
+            .filter(|r| r.gate == "code-execution")
+            .map(|r| r.field)
+            .collect();
+        assert_eq!(code_gated, vec!["set-module-setting"], "gate column drifted: {code_gated:?}");
         let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
         fields.sort_unstable();
         fields.dedup();
@@ -7971,6 +8036,145 @@ mod tests {
             json!(SECRET),
             "the grouped read hides the token the dump hands over — two answers, one file"
         );
+    }
+
+
+    /// AGENTS.md §4.7b, asked of this port's own table: **loopback is not enough** for the
+    /// field that writes the 自动化钩子 keys. The page posts `set-module-setting` with the
+    /// management token in its body (`require_management_token`), and a form POST from a
+    /// drive-by page arrives from loopback with no token and no `Origin` it can forge its
+    /// way past — so the only thing between that request and a `subprocess(shell=True)`
+    /// command on the next cast is this refusal.
+    #[test]
+    fn set_module_setting_needs_the_token_even_from_this_machine() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("set-module-setting-code-gate");
+        store_token(&face.setting, Some(SECRET));
+        let refused = face.answer(&post_form(
+            "/api",
+            "set-module-setting=1&key=Hook_On_Cast&value=touch%20%2Ftmp%2Fpwned",
+            LOCAL,
+            &[],
+        ));
+        // **403 inside a 200**, which is the reference's POST envelope
+        // (`Answer::denied`, `_body` never sets a status) and the other half of the layer
+        // distinction this section keeps re-learning: GET refusals go out as HTTP 403 with
+        // `code: 1`, POST refusals as HTTP 200 with `code: 403`.
+        assert_eq!(refused.body, json_body(403, CODE_REFUSAL), "loopback let a code write through");
+        assert!(
+            !text(&refused.body).contains(MANAGEMENT_REFUSAL),
+            "the code gate answered with the management sentence, which tells the user nothing              about the token"
+        );
+        assert!(
+            face.setting.peek(Key::NetworkInterface).is_none()
+                && !crate_string(face.setting.snapshot(), "Hook_On_Cast"),
+            "the refused request still wrote the key"
+        );
+
+        let served = face.answer(&post_form(
+            "/api",
+            &format!("set-module-setting=1&key=Network_Interface&value=en0&token={SECRET}"),
+            LOCAL,
+            &[],
+        ));
+        // Parsed, not byte-compared: the envelope is Python-shaped (`ensure_ascii`
+        // escapes plus the four-space indent), and the claim here is about the **answer**,
+        // not about the serialiser. This is the third time this branch has had to choose
+        // between a literal body and a parsed one — the two refusals above compare
+        // literally because they compare against `json_body`, which builds the same shape.
+        let saved: serde_json::Value = serde_json::from_slice(&served.body).expect("json");
+        assert_eq!(saved["code"], json!(0), "a tokened write was refused: {saved}");
+        assert_eq!(saved["message"], json!("已保存"));
+        assert_eq!(saved["value"], json!("en0"));
+        assert_eq!(
+            face.setting.peek(Key::NetworkInterface),
+            Some(serde_json::json!("en0")),
+            "the answer said 已保存 and the table says otherwise"
+        );
+    }
+
+    fn crate_string(snapshot: serde_json::Map<String, serde_json::Value>, name: &str) -> bool {
+        snapshot.get(name).is_some()
+    }
+
+    /// The gate walk is **cumulative and ordered**, so a LAN caller with no token hears the
+    /// management sentence even on the code-gated route (`protocol.py:2600-2607`): the same
+    /// request shape, the second door, the first thing that failed. Answering the louder
+    /// sentence here would advertise "this field runs code" to a caller who cannot get past
+    /// "this field is private" — and it is the wording a user reads, so §4.7c's
+    /// 「措辞逐字一致」 applies to the order too.
+    #[test]
+    fn a_lan_caller_on_the_code_route_hears_the_management_sentence_first() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("set-module-setting-lan-order");
+        let refused = face.answer(&post_form(
+            "/api",
+            "set-module-setting=1&key=Network_Interface&value=en0",
+            LAN,
+            &[],
+        ));
+        assert_eq!(refused.body, json_body(403, MANAGEMENT_REFUSAL));
+        assert!(
+            !text(&refused.body).contains("installing code"),
+            "the LAN refusal named the code gate: {}",
+            text(&refused.body)
+        );
+    }
+
+    /// The read side and the write side ask **one** ownership table. This is the reason
+    /// `set_value` lives in `macast-core::module_settings` rather than in the HTTP layer:
+    /// a page that renders a row as editable while the backend refuses it is the same
+    /// defect §4.8 calls 「两处答案不一致比没有数字更糟」, and it is invisible in either
+    /// document alone.
+    #[test]
+    fn the_write_and_the_grouped_read_agree_about_every_name() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("set-module-setting-one-owner");
+        store_token(&face.setting, Some(SECRET));
+        let cases = [
+            ("ApplicationPort", true),
+            ("PlayerDefaultVolume", true),
+            ("Timeout", true),
+            ("Never_Heard_Of_It", false),
+            ("", false),
+        ];
+        for (name, owned) in cases {
+            let answer = face.answer(&post_form(
+                "/api",
+                &format!("set-module-setting=1&key={name}&value=7&token={SECRET}"),
+                LOCAL,
+                &[],
+            ));
+            let body: serde_json::Value = serde_json::from_slice(&answer.body).expect("json");
+            if owned {
+                assert_eq!(body["code"], json!(0), "{name} is in the table and was refused: {body}");
+            } else {
+                assert_eq!(body["code"], json!(1), "{name} is not owned and was written: {body}");
+            }
+            // The grouped read's verdict on the same name: an owned row exists in some
+            // group, an unowned one exists nowhere.
+            let doc = face.answer(&get_api(
+                &format!("/api?query=module-settings&token={SECRET}"),
+                LOCAL,
+            ));
+            let listed: Vec<String> = serde_json::from_slice::<serde_json::Value>(&doc.body)
+                .expect("json")
+                .get("groups")
+                .and_then(|g| g.as_array())
+                .map(|groups| {
+                    groups
+                        .iter()
+                        .flat_map(|g| g["keys"].as_array().cloned().unwrap_or_default())
+                        .filter_map(|c| c["key"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert_eq!(
+                listed.iter().any(|k| k == name),
+                owned,
+                "the read and the write disagree about {name}"
+            );
+        }
     }
 
     #[test]

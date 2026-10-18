@@ -4197,6 +4197,75 @@ PY
         && pass "polling the grouped read did not grow the settings file it reports" \
         || fail "the read wrote the file ($MS_MD5_BEFORE -> $MS_MD5_AFTER)"
 
+    # ---- the write path, on the same instance
+    #
+    # `set-module-setting` is the first row on this face whose gate is
+    # `code-execution`, and the claim that makes it interesting is AGENTS.md §4.7b's:
+    # **loopback is not enough**. A drive-by form POST arrives from 127.0.0.1 with no
+    # `Origin` that proves the caller is our own page, and the 自动化钩子 keys live in
+    # this very table — their values go to `subprocess(shell=True)` on the next cast. So
+    # writing one *is* running one, and the only thing between the two is a token a
+    # cross-origin reader cannot see (this port never sends a CORS header — §23's scan).
+    #
+    # These rows go over the real socket on purpose. The unit tests build `Request`
+    # objects; what a form POST actually looks like after urlencoding, Content-Length and
+    # the dispatcher's field scan is the half that §4.2's "the stub is also an
+    # implementation" is about.
+    MS_MSGBASE="http://127.0.0.1:$MS_PORT/api"
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Network_Interface" "value=en0"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "403" ] \
+        && pass "from this machine with no token, the write is refused outright" \
+        || fail "loopback wrote without a token: HTTP $API_STATUS code '$API_CODE'"
+    case "$API_MSG" in
+        *"installing code"*) pass "and the refusal names the code gate, not a generic permission" ;;
+        *) fail "code-gate wording: $API_MSG" ;;
+    esac
+
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Network_Interface" "value=en0" "token=$MS_TOKEN"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "已保存" ] && [ "$(json_ask value)" = "en0" ] \
+        && pass "with the token the same write goes through, and answers with what it stored" \
+        || fail "a tokened write answered HTTP $API_STATUS code '$API_MSG'"
+    grep -q '"Network_Interface": "en0"' "$MS_SDIR/macast_setting.json" \
+        && pass "and it is on disk — the answer and the file are one claim, not two" \
+        || fail "the save answered 已保存 and the file says otherwise: $(grep -c Network_Interface "$MS_SDIR/macast_setting.json")"
+
+    api_probe "$MS_MSGBASE?query=module-settings&token=$MS_TOKEN"
+    ROW=$(env -u PYTHONPATH "$CAST_PY" - "$API_BODY" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+cell = [c for g in doc["groups"] for c in g["keys"] if c["key"] == "Network_Interface"][0]
+print("%s|%s|%s" % (cell["present"], cell["type"], cell["value"]))
+PY
+)
+    [ "$ROW" = "True|str|en0" ] \
+        && pass "the grouped read shows the key the write path just stored — one table, both doors" \
+        || fail "read-after-write through the other door: $ROW"
+
+    MS_MD5_STABLE=$(md5 -q "$MS_SDIR/macast_setting.json")
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Play_History" "value=[1, 2]" "token=$MS_TOKEN"
+    [ "$API_CODE" = "1" ] && [ "$API_MSG" = "列表/对象值请在「高级设置」JSON 里编辑" ] \
+        && pass "a structure is refused as a structure, in the sentence that says where to edit it" \
+        || fail "a container value was accepted or mis-worded: '$API_CODE' '$API_MSG'"
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Never_Stored_Key" "value=1" "token=$MS_TOKEN"
+    [ "$API_CODE" = "1" ] && [ "$API_MSG" = "未知设置项：Never_Stored_Key" ] \
+        && pass "an invented name is refused and read back, not silently created" \
+        || fail "an unowned key was written or answered vaguely: '$API_CODE' '$API_MSG'"
+    [ "$(md5 -q "$MS_SDIR/macast_setting.json")" = "$MS_MD5_STABLE" ] \
+        && pass "and both refusals left the settings file byte-identical" \
+        || fail "a refused write rewrote the user's settings file"
+
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Network_Interface" "remove=1" "token=$MS_TOKEN"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "已删除" ] && [ "$(json_ask removed)" = "true" ] \
+        && pass "the delete says which of the two things happened, and says it with both fields" \
+        || fail "the delete answered '$API_CODE' '$API_MSG' removed='$(json_ask removed)'"
+    api_post "$MS_MSGBASE" "set-module-setting=1" "key=Network_Interface" "remove=1" "token=$MS_TOKEN"
+    [ "$API_CODE" = "0" ] && [ "$API_MSG" = "本就未设置" ] && [ "$(json_ask removed)" = "false" ] \
+        && pass "the second delete of the same key is a different sentence, and a different removed flag" \
+        || fail "the absent-key delete lied: '$API_MSG' removed='$(json_ask removed)'"
+    grep -q '"Network_Interface"' "$MS_SDIR/macast_setting.json" \
+        && fail "the key is still in the file after 「已删除」" \
+        || pass "and the key really is gone from the file, not nulled out"
+
     kill -9 "$MS_PID" 2>/dev/null
     pkill -9 -f "$MS_SOCK" 2>/dev/null
     if [ -n "$KEEP" ]; then

@@ -2426,6 +2426,15 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
 * **GET 表的地板换成等式**：`the_get_route_table_is_well_formed` 里 `>= 12` 改 `== 13` —— **低一行的地板拦不住删掉一行**，而"这张表还在不在"正是它存在的理由（附录 B 那一行同步）。
 * **计数与边界**：`macast-core` **101**（两台仪器一致：`--lib` 与 `--list`）、`macast-upnp` **350**、`macast-cast` 699、`macast-mpv` 149、`macast-tauri` 18。没验的三件：写侧未移植；**没有任何浏览器读过这份文档**（`frontend/index.html` 还是占位页），所以"页面按这个形状渲染得出来"是文本契约不是截图；`plugin-info` / `mirror-state` / `mirror-snapshot` 仍未移植。**以及本分支从未推送 ⇒ 这一轮的 101 + 3 条与那 304 条读数没有任何 CI 见证过。**
 
+**Rust 侧把 `set-module-setting` 接上（本壳第一行 `code-execution` 门）时量到的事**（2026-10-19，`macast-core/src/module_settings.rs` 的 `set_value` / `remove_flag_is_true` + `setting.rs` 的 `set_name` / `remove_name` + `macast-upnp/src/http.rs` 的 `Gate::Code` 与 POST 表第 8 行；`macast-core` 101 → **107**、`macast-upnp` 350 → **353**、真机 §28 写路径 **+11 条**（该节 16 → **27**），整跑 **315 PASS / 0 FAIL / 1 SKIP，退出码 1**）：
+
+* **为什么这一行值得单独一种门**：这张表里住着 自动化钩子 的键，值下一次投屏就进 `subprocess(shell=True)` —— **写它等于运行它**，而 DNS 重绑定之下"本机"毫无信息量（§4.7b）。所以 `set-module-setting=1` 从 127.0.0.1 来、没带令牌，也必须被拒；门仍是**累积且有序**的，局域网无令牌听到的还是管理那句（把"这字段能跑代码"先说给一个连它私有都不该知道的人，是泄露而不是提醒）。
+* **一处主人，两种读法**：`set_value` 住在 core，读侧（`query=module-settings`）与写侧问**同一张**归属表 —— 否则页面把某格渲染成可编辑而后端拒收（§4.8「两处答案不一致比没有数字更糟」的第三种形状）。判据里有一条专门对六个名字逐项比"写侧收不收"与"读侧这一格在不在表里"，包括 `Timeout` 和一个根本不存在的名字。
+* **`Setting` 多了两个按名字的写入口**（`set_name` / `remove_name`）：`set(Key, …)` 表达不了用户手写的键或将来插件的键，而给每个插件键加一个 `Key` 变体等于让枚举成为"文件里有什么"的第二份主人。`remove_name` 回**在场与否**，因为页面要说「已删除」还是「本就未设置」，而**不在场时一个字都不写**（`if was_present: del; save()` 就是那个形状）。
+* **六支定点变异，没有一支 0 红**：门降级成 management **2**（安全那条 + 表里"码门恰好一行"那条新计数）/ `is_owned` 被绕开 **3** / 容器值不再被拒 **1** / `remove` 真值表恒假 **1** / `set_name` 不落盘 **2**（磁盘那条 + 删除那条，"删了但文件没变"正是它抓的形状）/ 拒绝句不再把名字念回 **1**。
+* **补判据时现形的两条形状，都不是产品**：① 写侧拒绝是 **HTTP 200 + 正文 `code: 403`**，GET 侧本壳是 **HTTP 403 + 正文 `code: 1`** —— 参考实现本来分两层（`Answer::denied` 从不设状态码），我拿 GET 的形状断言 POST，于是对着正确的机器变红；② 手抄的正文串差在 `ensure_ascii` 的 `\uXXXX` 与四空格缩进 —— **能比语义就别比字节**，这条纪律在 §4.14 写过一次，这次是它自己复发的形状。另外脚本自审（未转义反引号那道闸）在正式跑之前又拦下一条会被印成空串的 pass 文案：同一族第六次，第二次由闸拦住。
+* **诚实边界**：钩子的**执行**侧还没移植，所以今天写一个钩子键在这台机器上还不会真的跑命令 —— **这句不是"安全已完备"，是"攻击面还没接上"**：门已经按参考实现摆好，移植那一步不必重新决定门。`install-plugin` / `save-launch-param` / `install-webrtc-extras` / `plugin-file` 四条码门仍属参考实现独有（本壳没有插件子系统）。**本分支从未推送 ⇒ 这 107 + 3 条与那 315 条读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——
