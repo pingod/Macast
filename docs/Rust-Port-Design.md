@@ -572,7 +572,7 @@ glob 本 crate `src/` 下每个 `.rs`，对每一行 `#[test]` 找到函数体�
 | 引擎判定（MR*） | 601 行 | 提交 `db53144` 的交付 |
 | 字符表 | 32,386 格 × 家族；505,120 条有词行 | `charmap.rs` 直接把真值文件对到自己的答案上 |
 | `pyjson` | CPython JSON 扫描器重放 | `macast-mpv/src/pyjson.rs` |
-| mDNS 广播报文 | **4 行**（announce ×2、goodbye ×2，加一行 probe）| `macast-cast/tests/golden/mdns_announce.hex`，由 `scripts/mdns_announce_probe.py --fixture --dump-hex` 产出 |
+| mDNS 广播报文 | **每个服务 5 行**（announce ×2、goodbye ×2、probe ×1），两份语料 | `macast-cast/tests/golden/mdns_announce.hex`（`--fixture --dump-hex`，`_googlecast._tcp`）与 `mdns_airplay.hex`（`--protocol airplay --fixture --dump-hex`，`_airplay._tcp`，2026-10-18 冻的，**还没有消费者**：它是下一轮那个 builder 的输入，见 §16 第 28 条）。两份都是跑两遍逐字节一致才算冻住 |
 | mDNS 名字规则 | **26 例**（友好名 → instance → SRV 目标）| `macast-cast/tests/golden/mdns_names.jsonl`，同一支探针的 `--dump-names` |
 | mDNS **答复**规则 | **17 例**（一道查询形状一行：哪些记录、哪个段、TTL、flush、目的、抑制结果）| `macast-cast/tests/golden/mdns_responder.jsonl`，由 `scripts/mdns_responder_probe.py --dump-corpus` 产出。**冻解码表不冻字节**，理由见 §14.6 |
 
@@ -918,7 +918,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
-| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**20 条**）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**这一行仍然欠的那半句**：`_airplay._tcp` 的广播没接 —— 所以"iPhone 的屏幕镜像/音频列表里看得到这台 Mac"今天说不出口，只有**知道端口**的发送端（手动填地址、将来的测试）走得进来。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
+| AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**20 条**）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**这一行仍然欠的那半句**：`_airplay._tcp` 的广播没接 —— 所以"iPhone 的屏幕镜像/音频列表里看得到这台 Mac"今天说不出口，只有**知道端口**的发送端（手动填地址、将来的测试）走得进来。**取证已完成**（同日，`macast-cast/tests/golden/mdns_airplay.hex`）：形状与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
 ---
@@ -1342,6 +1342,33 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     **281 PASS / 1 SKIP / 0 FAIL、退出码 1**（那一条 SKIP 仍是第 22/26 条的送达那一格）。
     **以及本分支从未推送 ⇒ 这一轮的用例与那 281 条读数没有任何 CI 见证过。**
 
+28. **`_airplay._tcp` 先取证再写包：一条语料、两个不能只冻一行的理由**（2026-10-18，
+    `scripts/mdns_announce_probe.py --protocol airplay` + `macast-cast/tests/golden/mdns_airplay.hex`；
+    **产品代码一个字节没改**，这一条是下一轮那个 builder 的输入）。
+    *怎么问的*：`airplay_properties()` 用录下器把 `AirPlayProtocol._advertise` **叫一遍**，
+    所以那九条 TXT 是产品交出来的表而不是从 `protocol_airplay.py` 里用眼睛抄的 ——
+    `features=0x3B` 是 `"0x%X" % FEATURES` 的**格式化结果**，`deviceid` 在源码里根本不是字面量，
+    文本扫描读不到这两件事。探针照旧只替换 `zeroconf._core.async_send_with_transport`
+    （全包唯一一处 `transport.sendto`），所以一个字节都没上局域网 —— 真广播会在跑的这一段时间里
+    让本机多出一台 AirPlay 接收端。
+    *量到的形状*（与 Chromecast 那一串逐条同构，所以 `announce.rs` 只需要一个字段而不是第二份实现）：
+    五条 PTR/SRV/TXT/NSEC/A；TTL 4500/120/4500/120/120；除 PTR 外全带 cache-flush；`flags=0x8400`；
+    goodbye 是同样五条记录把 TTL 写成 0（不是空报文）；广播 345 字节（fixture 下 638 个十六进制字符）；
+    probe 是 `qd=1 ns=1`、问 `_airplay._tcp.local.` PTR class `0x8001` QU 位**开着**。
+    *两条"不能只冻一行"*：① 与广播语料同一条理由 —— `A/NSEC` 那一对来自 `set`，顺序随哈希种子变，
+    所以 announce 与 goodbye 各两行（`-nsec-first` / `-a-first`），只冻一行就是钉一个 `PYTHONHASHSEED`；
+    ② fixture 必须把**这台机器的身份**一起钉掉：第一版只钉了 `deviceid` 与端口，于是语料的实例名是
+    `Macast-Fixture-1` 而 TXT 里那条 `name=` 仍然是 `Macast(Pavia-MacBookPro-1859.local)` ——
+    一份"没法从自己的表头重建"的语料就是截图，不是格式。补上 `name` 的钉法之后表头与字节自洽。
+    *一条关于行为而不是形状的量到事实*：`_random_mac()` 在**每次进程启动**重新抽
+    （`protocol_airplay.py:99-103`，`_device_id` 不持久化）。所以手机在两次启动之间看到的是
+    两台"不同"的接收端 —— 这是参考实现的行为，Rust 侧照抄（要改它要先改参考实现，
+    而不是在这一层悄悄把 deviceid 存进设置文件）。
+    *下一轮的接缝已经量好了*：`Service::datagram` 里 `let service_type = SERVICE_TYPE;` 是唯一一处
+    写死的类型（其余全从 `instance` / `server` / `txt` / `port` 派生），所以广播侧加的是**一个字段 +
+    一份九键 TXT 表**；responder 那侧仍只认 `_googlecast._tcp`，这一格要如实写进 §16 与 §15，
+    别让"会广播"被读成"会答问"。
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1472,9 +1499,11 @@ grep -rc 'subscribers_document(' macast-upnp/src/http.rs src-tauri/src/main.rs
 #    那些键"钉成文本审计 —— 第一版审计漏了一支"往文档上赋值"的形状，见 §16 第 16 条）
 grep -c 'STATUS_MEDIA_NAMES' macast-upnp/src/http.rs            # 期望 **4**（定义、文档块、用例两处）——
 #   那张 16 行的表是 `protocol.py:2033-2043` 的**超集**，砍成"我们广播的那 8 个"红 1 条（§16 第 15 条）
-ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl
-#   两份 mDNS 语料都在，且产生器在仓库里：
-#   scripts/mdns_announce_probe.py --fixture --dump-hex <前者> / --dump-names <后者>
+ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl macast-cast/tests/golden/mdns_airplay.hex
+#   三份 mDNS 语料都在，且产生器在仓库里（同一条命令的三种旗标）：
+#   scripts/mdns_announce_probe.py --fixture --dump-hex <announce 那份>
+#                                  --protocol airplay --fixture --dump-hex <airplay 那份>
+#                                  --dump-names <names 那份>
 wc -l macast-cast/tests/golden/mdns_responder.jsonl # 17 行，一行一道查询形状（§14.6）
 grep -c '"case"' macast-cast/tests/golden/mdns_responder.jsonl
 #   期望 **17**。它与 `respond.rs` 的关系是"规则 → 判据"：`every_corpus_row_is_answered_exactly_as_

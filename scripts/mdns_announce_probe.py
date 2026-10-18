@@ -77,6 +77,12 @@ except Exception as e:  # pragma: no cover - environment
     raise SystemExit(2)
 
 CAST_SERVICE = "_googlecast._tcp.local."
+# The second protocol this probe can be pointed at. Not "the same file with a
+# different string": the AirPlay table is a different question (nine TXT
+# properties instead of ~20, a per-process random `deviceid` instead of a
+# stored USN, an instance name that is already sanitized by the caller), so
+# the fixture overrides and the honesty checks differ — see --protocol.
+AIRPLAY_SERVICE = "_airplay._tcp.local."
 DNS_TYPE = {1: "A", 6: "SOA", 12: "PTR", 16: "TXT", 33: "SRV", 47: "NSEC"}
 
 
@@ -126,6 +132,55 @@ def cast_properties():
     return service_type, name, port, props
 
 
+def airplay_properties():
+    """Ask `AirPlayProtocol._advertise` what it hands the advertiser.
+
+    Same discipline as `cast_properties`: the table is **produced** by the product
+    with `MDNSAdvertiser` replaced by a recorder, not copied out of
+    `protocol_airplay.py` by eye. Two reasons this matters more here than for
+    Chromecast: `deviceid` is not a literal anywhere (it is `_random_mac()`, drawn
+    per process — see the note in the fixture block), and `features` is
+    `"0x%X" % FEATURES`, i.e. the wire text is a formatting of an integer the
+    module builds itself.
+
+    The stub carries the two attributes `_advertise` reads: `rtsp_port` (the port
+    actually bound, which is what the reference advertises after its fallback loop)
+    and `_device_id`.
+    """
+    from macast import protocol_airplay
+
+    calls = []
+
+    class _Recorder:
+        def __init__(self, *a, **kw):
+            pass
+
+        def advertise(self, service_type, name, port, properties, server=None):
+            calls.append((service_type, name, port, dict(properties), server))
+            return True
+
+        def close(self):
+            pass
+
+        def unadvertise(self, *a, **kw):
+            pass
+
+    original = protocol_airplay.MDNSAdvertiser
+    protocol_airplay.MDNSAdvertiser = _Recorder
+    try:
+        class _Stub:
+            rtsp_port = protocol_airplay.AIRPLAY_PORT
+            _device_id = protocol_airplay._random_mac()
+
+        protocol_airplay.AirPlayProtocol._advertise(_Stub())
+    finally:
+        protocol_airplay.MDNSAdvertiser = original
+    if not calls:
+        raise SystemExit("AirPlayProtocol._advertise never reached MDNSAdvertiser.advertise")
+    service_type, name, port, props, server = calls[0]
+    return service_type, name, port, props
+
+
 # Deterministic inputs for the frozen corpus. Every one of these is a choice the
 # *live* product would not make the same way twice — the USN is random per
 # install, the friendly name is this machine's, and the address list is this
@@ -139,23 +194,39 @@ FIXTURE = {
     "fn": "Macast(Fixture-1.local)",
     "address": "192.0.2.7",
     "port": 8009,
+    "airplay_port": 7000,
+    "deviceid": "02:00:00:00:00:07",
 }
 
 
-def build_info(port, name, props, fixture=False):
+def build_info(port, name, props, fixture=False, service_type=CAST_SERVICE):
     from macast import discovery
 
     if fixture:
         addresses = [socket.inet_aton(FIXTURE["address"])]
-        props = dict(props, id=FIXTURE["id"], fn=FIXTURE["fn"])
+        # Two different "what would drift" lists. Chromecast pins `id` (a USN
+        # random per install) and `fn`; AirPlay pins `deviceid`, which the
+        # reference draws from `random` **every process start** — so a phone that
+        # sees this Mac twice in two launches is talking to two "different"
+        # receivers. That is the reference's behaviour, and the corpus has to say
+        # so with a fixed value rather than inherit one machine's draw.
+        if service_type == AIRPLAY_SERVICE:
+            # `name` is the same friendly name the instance is built from, so it
+            # has to be pinned with the fixture name or the corpus would carry this
+            # machine's identity in one record and the fixture's in another — and a
+            # corpus that cannot be rebuilt from its own header is a screenshot.
+            props = dict(props, deviceid=FIXTURE["deviceid"], name=FIXTURE["fn"])
+            port = FIXTURE["airplay_port"]
+        else:
+            props = dict(props, id=FIXTURE["id"], fn=FIXTURE["fn"])
+            port = FIXTURE["port"]
         name = FIXTURE["name"]
-        port = FIXTURE["port"]
     else:
         addresses = discovery._local_addresses()
-    safe = discovery.sanitize_instance_name(name, CAST_SERVICE)
+    safe = discovery.sanitize_instance_name(name, service_type)
     server = discovery._normalize_server(safe.split(".")[0])
     info = _z.ServiceInfo(
-        CAST_SERVICE,
+        service_type,
         safe,
         addresses=addresses,
         port=port,
@@ -492,6 +563,10 @@ def main():
                     help="write the fixture's announce/goodbye/probe bytes as one hex line "
                          "per shape, with the inputs in the header — the Rust writer is "
                          "compared against this file byte for byte")
+    ap.add_argument("--protocol", choices=("cast", "airplay"), default="cast",
+                    help="which receiver's announcement to measure; it changes the "
+                         "service type, the property table the fixture pins, and the "
+                         "port the corpus is written for")
     ap.add_argument("--dump-names", default=None,
                     help="write the friendly-name -> instance-name -> SRV-target table "
                          "the product's own two helpers produce, one JSON line per case")
@@ -512,9 +587,17 @@ def main():
         print("wrote %d name cases to %s" % (len(NAME_CASES), args.dump_names))
         return 0
 
-    service_type, product_name, product_port, props = cast_properties()
-    if service_type != CAST_SERVICE:
-        print("the product advertises %r, this probe is about %r" % (service_type, CAST_SERVICE),
+    if args.protocol == "airplay":
+        want = AIRPLAY_SERVICE
+        service_type, product_name, product_port, props = airplay_properties()
+    else:
+        want = CAST_SERVICE
+        service_type, product_name, product_port, props = cast_properties()
+    if service_type != want:
+        # The product's own answer, not this file's constant, is what decides the
+        # shape being measured: if `protocol_airplay.py` renames its service type,
+        # a probe that kept going would freeze a corpus under a header that lies.
+        print("the product advertises %r, this probe was asked about %r" % (service_type, want),
               file=sys.stderr)
         return 1
 
@@ -523,9 +606,9 @@ def main():
     if args.fixture:
         args.no_register = True
     info, safe, server, addresses, effective = build_info(
-        port, name, props, fixture=args.fixture)
+        port, name, props, fixture=args.fixture, service_type=service_type)
 
-    out = {"service": CAST_SERVICE, "instance": safe, "srv_target": server,
+    out = {"service": service_type, "instance": safe, "srv_target": server,
            "addresses": [socket.inet_ntoa(a) for a in addresses],
            "txt": effective, "packets": []}
 
@@ -613,9 +696,10 @@ def main():
             fh.write("# frozen from the reference: zeroconf %s, CPython %s\n"
                      % (_z.__version__, sys.version.split()[0]))
             fh.write("# regenerate: env -u PYTHONPATH .venv/bin/python \\\n")
-            fh.write("#   scripts/mdns_announce_probe.py --fixture --dump-hex <this file>\n")
+            fh.write("#   scripts/mdns_announce_probe.py --protocol %s --fixture --dump-hex <this file>\n"
+                     % args.protocol)
             fh.write("# inputs: service=%s instance=%s server=%s port=%d address=%s\n"
-                     % (CAST_SERVICE, safe, server, FIXTURE["port"], FIXTURE["address"]))
+                     % (service_type, safe, server, info.port, FIXTURE["address"]))
             fh.write("# txt (order as written on the wire): %s\n"
                      % ";".join("%s=%s" % kv for kv in out["txt"].items()))
             fh.write("#\n")

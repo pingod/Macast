@@ -1,6 +1,6 @@
 # frozen from the reference: zeroconf 0.151.3, CPython 3.12.15
 # regenerate: env -u PYTHONPATH .venv/bin/python \
-#   scripts/mdns_announce_probe.py --fixture --dump-hex <this file>
+#   scripts/mdns_announce_probe.py --protocol cast --fixture --dump-hex <this file>
 # inputs: service=_googlecast._tcp.local. instance=Macast-Fixture-1._googlecast._tcp.local. server=Macast-Fixture-1.local. port=8009 address=192.0.2.7
 # txt (order as written on the wire): id=00000000-0000-4000-8000-000000000007;fn=Macast(Fixture-1.local);ca=5;st=0;bs=FA8B;ic=/setup/icon.png;ve=05;md=Macast;rm=Macast;rs=Macast Receiver
 #
