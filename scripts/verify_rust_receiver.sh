@@ -384,7 +384,7 @@ cleanup() {
     [ -n "${MEDIA_PID:-}" ] && kill -9 "$MEDIA_PID" 2>/dev/null
     app=$(pgrep -f "target/debug/macast-tauri" 2>/dev/null)
     [ -n "$app" ] && kill -9 $app 2>/dev/null
-    # The gated instance from section 23 has a socket of its own; reaping only
+    # The gated instance from section 24 has a socket of its own; reaping only
     # `$SDIR` would leave its mpv behind as a `ppid=1` orphan — the exact
     # accumulation AGENTS.md §4.2 records for the Python app.
     for probe_dir in "${SDIR:-}" "${GATE_SDIR:-}"; do
@@ -444,7 +444,7 @@ SOCK="$SDIR/mpvsocket"
 # DlnaFriendlyName` maps to (`macast-core/src/setting.rs:94`), and the reference
 # spells it the same way. The first version of this line wrote `FriendlyName`, which
 # is a key nothing reads — so the label this run intended never reached the wire.
-# Cost measured on 2026-10-18: §23's browse answered "no announcement" about a run
+# Cost measured on 2026-10-18: §24's browse answered "no announcement" about a run
 # that *was* announcing, because the announcer had published the fallback name
 # (`Macast-Pavia-MacBookPro-…`) instead of the `Macast-Gate-Off` the check matched.
 # A harness that writes into a key no reader owns is the same failure §4.2 calls
@@ -2216,7 +2216,235 @@ PY
 fi
 
 
-echo "== 23: switching Chromecast off closes all three faces =="
+echo "== 23: the status face answers the page, and its numbers agree with the wire =="
+# `query=status` is the document the settings page reads every few seconds, and it
+# is built from four facts this script has *separate* witnesses for: what the player
+# is doing (SOAP and mpv both answer that), which addresses are published (SSDP's
+# LOCATION and the mDNS A records), who is subscribed (GENA's own table), and which
+# protocols the user ticked (the file §24 reads as a door). So the checks below are
+# mostly **cross-readers**: the same number asked of two faces must be the same
+# number, because a status document that quietly reads a different helper is exactly
+# how AGENTS.md §4.1's first row — an address that prints but does not open — comes
+# back after nobody changed the address code.
+if [ -z "$CLIP_BYTES" ]; then
+    skip "no clip, so nothing can be played and read back through the status page"
+else
+    # A subscriber of our own, so `clients` has a row to print. The collector is a
+    # second copy of §6's on a different port rather than a reuse: §6's window closed
+    # minutes ago and its SID is gone, and a check that reads an empty table because
+    # the fixture expired is the 「不提问的检查」 again.
+    CB2=$((PORT + 3))
+    python3 - "$CB2" <<'PY' > /tmp/verify_rust_receiver_status_notify.txt 2>&1 &
+import socket, sys, time
+port = int(sys.argv[1]); end = time.time() + 40
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port)); s.listen(5); s.settimeout(0.5)
+while time.time() < end:
+    try:
+        c, _ = s.accept()
+    except socket.timeout:
+        continue
+    try:
+        c.recv(65536)
+    finally:
+        c.close()
+PY
+    sleep 0.5
+    HEADERS=$(curl -s -m 5 -D - -o /dev/null -X SUBSCRIBE "$BASE/AVTransport/event" \
+        -H "CALLBACK: <http://127.0.0.1:$CB2/notif>" -H "TIMEOUT: Second-300")
+    SID=$(printf '%s' "$HEADERS" | tr -d '\r' | sed -nE 's/^[Ss][Ii][Dd]: *//p' | head -1)
+    [ -n "$SID" ] \
+        && pass "a fresh SUBSCRIBE handed back a SID to look for in the status document" \
+        || fail "SUBSCRIBE returned no SID: $(printf '%s' "$HEADERS" | tr -d '\r' | tr '\n' ' ')"
+    api_probe "$BASE/api?query=cast&url=$MEDIA_URL&title=Rust-Status-Witness&token=$EXTRACTED"
+    ok=""
+    for _ in $(seq 1 40); do
+        api_probe "$BASE/api?query=status"
+        [ "$(json_ask media.TransportState)" = "PLAYING" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "the page's own read says PLAYING after a cast (polled, not grabbed)" \
+        || fail "status never reported PLAYING: '$(json_ask media.TransportState)'"
+
+    # ---- the document's own shape -------------------------------------------------
+    [ "$(json_keys .)" = "server,media,clients,history,network" ] \
+        && pass "five sections in the reference's order, and **no code/message wrapper**" \
+        || fail "status keys: '$(json_keys .)'"
+    [ "$(json_keys server)" = "running,port,version,friendly_name,renderer,protocol,platform,system,system_version,ip,https_enabled,https_port" ] \
+        && pass "the server block carries the twelve keys the page reads, in order" \
+        || fail "server keys: '$(json_keys server)'"
+    [ "$(json_ask server.port)" = "$PORT" ] \
+        && [ "$(json_ask server.running)" = "true" ] \
+        && pass "the port it prints is the port this script is talking to" \
+        || fail "server.port='$(json_ask server.port)' running='$(json_ask server.running)', expected $PORT/true"
+
+    # `platform` is CPython's spelling, not Rust's. Asked of the interpreter that
+    # owns the reference rather than asserted from a table, because the whole point
+    # of the key is that a page prints it next to `system` for a human to read.
+    if [ -x "$CAST_PY" ]; then
+        SYSPLAT=$(env -u PYTHONPATH "$CAST_PY" -c 'import sys; print(sys.platform)' 2>/dev/null)
+        [ -n "$SYSPLAT" ] && [ "$(json_ask server.platform)" = "$SYSPLAT" ] \
+            && pass "server.platform is \`sys.platform\` as the reference's own interpreter spells it ($SYSPLAT)" \
+            || fail "server.platform='$(json_ask server.platform)' but sys.platform='$SYSPLAT'"
+    else
+        skip "no .venv python to ask what sys.platform says"
+    fi
+
+    # ---- one fact, three readers --------------------------------------------------
+    URI_IN_STATUS=$(json_ask media.CurrentTrackURI)
+    [ "$URI_IN_STATUS" = "$MEDIA_URL" ] \
+        && pass "status reads the address the player was handed" \
+        || fail "media.CurrentTrackURI='$URI_IN_STATUS' expected '$MEDIA_URL'"
+    URI_IN_SOAP=$(track_uri)
+    [ "$URI_IN_SOAP" = "$URI_IN_STATUS" ] \
+        && pass "SOAP's GetPositionInfo and the status page read one table, not two" \
+        || fail "two readers disagree: SOAP '$URI_IN_SOAP' vs status '$URI_IN_STATUS'"
+    # `CurrentURI` stays `null` because the reference never writes that name — the
+    # three call sites all write `CurrentTrackURI` (`soap.rs:1057-1064` says why).
+    # Asserting the null is asserting the *name*, which is what a page reads.
+    [ "$(json_ask media.CurrentURI)" = "null" ] \
+        && pass "and the name nobody writes prints null instead of a copy of its neighbour" \
+        || fail "media.CurrentURI printed '$(json_ask media.CurrentURI)'"
+
+    # The two shapes of one fact, compared **inside one parse**. The first version
+    # of this check ran `tr '、' '/'` on `json_join`'s output — and `、` is three
+    # bytes, which `tr` (a byte tool) does not translate. It passed on a machine with
+    # one advertised address because there was no separator to mangle, and went red
+    # the moment the address list grew to four. A check whose correctness depends on
+    # how many network interfaces the runner has is the 「假命令行工具的输出」 family,
+    # so the comparison is done by the parser that already understands the document.
+    IP_AGREES=$(python3 - "$API_BODY" <<'PY'
+import json, sys
+with open(sys.argv[1], "rb") as fh:
+    doc = json.loads(fh.read().decode("utf-8", "replace"))
+ip = doc["server"]["ip"].split("/")
+adv = doc["network"]["advertised"]
+print("same" if ip == adv else "diff %r %r" % (ip, adv))
+PY
+)
+    [ "$IP_AGREES" = "same" ] \
+        && pass "server.ip is the same list the picker gets, /-joined, in the same order" \
+        || fail "server.ip vs network.advertised: $IP_AGREES"
+    MDNS_PUBLISHED=$(log_grep 'mDNS: announcing ' | tail -1 \
+        | sed -nE 's/.*over \[([^]]*)\].*/\1/p')
+    if [ -n "$MDNS_PUBLISHED" ]; then
+        WIRE_AGREES=$(python3 - "$API_BODY" "$MDNS_PUBLISHED" <<'PY'
+import json, sys
+with open(sys.argv[1], "rb") as fh:
+    doc = json.loads(fh.read().decode("utf-8", "replace"))
+published = [p for p in sys.argv[2].split(",") if p]
+adv = doc["network"]["advertised"]
+print("same" if adv == published else "diff page=%r announcer=%r" % (adv, published))
+PY
+)
+        [ "$WIRE_AGREES" = "same" ] \
+            && pass "and it is exactly the set the announcer put in the A records (§22 read that set off the wire)" \
+            || fail "the page and the wire disagree: $WIRE_AGREES"
+    else
+        skip "no announcement line to cross-read (this run announced nothing, and §22 says so)"
+    fi
+
+    # ---- clients ------------------------------------------------------------------
+    ok=""
+    for _ in $(seq 1 20); do
+        api_probe "$BASE/api?query=status"
+        [ "$(json_len clients)" -ge 1 ] && { ok=1; break; }
+        sleep 0.25
+    done
+    if [ -z "$ok" ]; then
+        fail "our own subscription never appeared in status.clients (SID $SID)"
+    else
+        [ "$(json_keys clients.0)" = "host,url,service,sid,path,timeout" ] \
+            && pass "a client row is the reference's six keys, in its order" \
+            || fail "client keys: '$(json_keys clients.0)'"
+        [ "$(json_ask clients.0.sid)" = "$SID" ] \
+            && pass "and it is *this* subscription, not a leftover" \
+            || fail "clients.0.sid='$(json_ask clients.0.sid)' expected '$SID'"
+        [ "$(json_ask clients.0.host)" = "127.0.0.1:$CB2" ] \
+            && [ "$(json_ask clients.0.path)" = "/notif" ] \
+            && pass "host and path are split off the callback the way the reference splits them" \
+            || fail "client host/path: '$(json_ask clients.0.host)' '$(json_ask clients.0.path)'"
+    fi
+    curl -s -m 5 -o /dev/null -X UNSUBSCRIBE "$BASE/AVTransport/event" -H "SID: $SID"
+    ok=""
+    for _ in $(seq 1 20); do
+        api_probe "$BASE/api?query=status"
+        [ "$(json_len clients)" = "0" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    [ -n "$ok" ] \
+        && pass "after UNSUBSCRIBE the list empties — the document reads the live table" \
+        || fail "clients still holds $(json_len clients) row(s) after unsubscribing '$SID'"
+
+    # ---- history ------------------------------------------------------------------
+    [ "$(json_len history)" -ge 1 ] \
+        && pass "the cast left a play-history row the page can offer back" \
+        || fail "history is empty after a cast: '$(json_ask history)'"
+    [ "$(json_ask history.0.uri)" = "$MEDIA_URL" ] \
+        && pass "newest first, as `_add_history` writes it" \
+        || fail "history.0.uri='$(json_ask history.0.uri)' expected '$MEDIA_URL'"
+
+    # ---- interfaces ---------------------------------------------------------------
+    # Snapshot the status document first: `$API_BODY` is one file and the next probe
+    # overwrites it, so a comparison written against "what status said" has to name
+    # the moment it was said (§4.2's 「计数器在 flush 之后才加」, same shape).
+    api_probe "$BASE/api?query=status"
+    cp "$API_BODY" /tmp/verify_rust_receiver_status.json
+    api_probe "$BASE/api?query=interfaces"
+    [ "$(json_keys .)" = "current,advertised,interfaces" ] \
+        && pass "the picker's own query answers its three facts, and calls the pin \`current\`" \
+        || fail "interfaces keys: '$(json_keys .)'"
+    ADV_AGREE=$(python3 - /tmp/verify_rust_receiver_status.json "$API_BODY" <<'PY'
+import json, sys
+with open(sys.argv[1], "rb") as fh:
+    status = json.loads(fh.read().decode("utf-8", "replace"))
+with open(sys.argv[2], "rb") as fh:
+    interfaces = json.loads(fh.read().decode("utf-8", "replace"))
+a = status["network"]["advertised"]
+b = interfaces["advertised"]
+print("same" if a == b else "diff status=%r interfaces=%r" % (a, b))
+PY
+)
+    [ "$ADV_AGREE" = "same" ] \
+        && pass "and the same advertised set status printed, row for row" \
+        || fail "the two doors read different address lists: $ADV_AGREE"
+    if [ "$(json_len interfaces)" -ge 1 ]; then
+        [ "$(json_keys interfaces.0)" = "name,ip,netmask,default,usable,reason,selected" ] \
+            && pass "each picker row carries the seven keys the page sorts and colours by" \
+            || fail "interface row keys: '$(json_keys interfaces.0)'"
+    else
+        skip "this machine contributed no IPv4 interface to the picker"
+    fi
+
+    # ---- the gate -----------------------------------------------------------------
+    api_probe "$BASE/api?query=status"
+    [ "$API_STATUS" = "200" ] && [ -z "$API_CODE" ] \
+        && pass "loopback reads it with no token at all, and the body has no code field" \
+        || fail "loopback status answered HTTP $API_STATUS code '$API_CODE'"
+    if [ -n "$LAN" ]; then
+        api_probe "http://$LAN:$PORT/api?query=status"
+        [ "$API_STATUS" = "403" ] \
+            && pass "a LAN caller is refused the status document" \
+            || fail "a LAN caller got HTTP $API_STATUS from status"
+        case "$API_MSG" in
+            *"$MANAGEMENT_MARK"*) pass "and hears the management sentence, as that is the gate that ran" ;;
+            *) fail "LAN status refusal wording: $API_MSG" ;;
+        esac
+        api_probe "http://$LAN:$PORT/api?query=status&token=$EXTRACTED"
+        [ "$API_STATUS" = "200" ] \
+            && pass "the same caller from the same address is served once it brings the token" \
+            || fail "tokened LAN status answered HTTP $API_STATUS"
+        api_probe "http://$LAN:$PORT/api?query=interfaces"
+        [ "$API_STATUS" = "403" ] \
+            && pass "and the picker's query is behind the same door, not a second opinion" \
+            || fail "a LAN caller got HTTP $API_STATUS from interfaces"
+    else
+        skip "no reachable non-loopback address to ask from (section 23's LAN half)"
+    fi
+fi
+
+echo "== 24: switching Chromecast off closes all three faces =="
 # `host::tests` proves the predicate reads the enable list the way the reference
 # does — coercion of a stored string, the legacy key appended, unknown titles
 # skipped with a sentence, and a fresh install meaning "everything". None of that
@@ -2298,7 +2526,7 @@ disown "$GATE_BROWSE_PID" 2>/dev/null || true
 # shellcheck disable=SC2016
 # The key is `DLNA_FriendlyName` for the reason recorded at the launch block above,
 # and here it is load-bearing twice: the sanitiser turns "Macast Gate Off" into the
-# DNS-SD label §23 matches on the wire.
+# DNS-SD label §24 matches on the wire.
 printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Gate Off", "Macast_Protocols": ["DLNA Protocol"]}' \
     "$PORT" > "$GATE_SDIR/macast_setting.json"
 env MACAST_SETTING_DIR="$GATE_SDIR" MACAST_MPV_SOCKET="$GATE_SOCK" \

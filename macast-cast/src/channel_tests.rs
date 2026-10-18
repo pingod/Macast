@@ -53,6 +53,9 @@ impl StateStore for RecordingStore {
     }
     fn set_playlist_index(&self, _index: i64) {}
     fn add_history(&self, _title: &str, _uri: &str) {}
+    fn play_history(&self) -> Vec<(String, String, i64)> {
+        Vec::new()
+    }
 }
 
 struct RecordingRenderer {

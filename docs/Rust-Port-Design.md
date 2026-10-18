@@ -329,6 +329,8 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `announce`（属性过长时） | 参考实现**整条起不来**：`ServiceInfo(...)` 打包 TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而这一句不在 `advertise()` 那两个 `try` 里（本机实测：200 字节过、300 字节抛），于是异常一路冲出 `ChromecastProtocol.start()` —— 用户改一个长设备名，买到的是 Chromecast 接收端没了 | 本端口砍属性、不砍接收端：按字符边界截到 255 字节，WARNING 里点名字段、原长度与上限，然后照常广播。方向与 §4.8「越界夹住而不是拒绝」、`vt_level` 的"少钉一个 level 只是不明确，钉错是每一帧都没了"是同一条。**Python 那一侧今天仍然如此**，这句话不是说它修好了 —— 记在这里是因为它是一条会被下一次"照抄参考实现"重新引进来的行为 |
 | `announce`（没有监听就不广播） | 参考实现里 `_advertise()` 在 `_start_tls_server()` 之后无条件跑，而 `cast_port` 绑定失败时保持默认值 —— 于是它广播一个**没人听的端口** | 本端口只在 8009 真的在听时广播（`main.rs` 里那一格是 `match cast_channel.as_ref()`）。一台出现在菜单里却投不上的设备，正是 `AGENTS.md` §4.1 第一行的症状，不是它的小版本 |
 | `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
+| `status`（四个键用 `peek` 读） | 参考实现的文档是 `Setting.get(key, default)` 拼出来的，而**那一次读会把默认值写进表里**，下一次 `save` 就落盘（`AGENTS.md` §4.2 的第一条陷阱）。本脸对 `Macast_Protocols` / `Macast_Protocol` / `Macast_Renderer` / `Play_History` 改用 `peek`，答案逐字相同、磁盘上不多一个键 | 边界要写清，因为它**不是**"本端口再也不写设置"：`ApplicationPort`、`Https_enabled`、`Https_Port` 与网卡钉 (`Network_Interface`) 仍然走共享读接口（前两者是壳自己启动时就在用的值，后者是 `macast_core::net::network_interfaces` 内部读的，改它要一起动 SSDP/广播/中转三张脸）。判据 `the_status_read_creates_no_key_that_was_not_there` 钉的就是这条边界，并且它**断言 `Network_Interface` 确实被创建** —— 一个把"什么都没写"当成整体主张的测试，会在下一次"顺手改成 peek"时红得说不清是谁的锅 |
+| `status`（`history` 住在内存，不住在设置文件） | 参考实现的播放历史是 `Setting[Play_History]`，**重启之后还在**；本壳的行住在 `StateTable` 的内存里，重启即空，而 `query=status` 打印的是内存那份 | 打印设置文件里那份会算什么？算"这台机器从没投过任何片子" —— 一个空列表在两个原因之间**不可分辨**（§4.14「空结果要说清是哪一种空」在文档层的新形状）。发现方式是本节的 §23 真机一节：投完之后 `history` 仍然是 `[]`，两条红。补成持久化是一次有"重启后还在"这条断言的决定，不是这一轮顺手做掉的一行 |
 | `channel`（读的方式） | Python 在**裸 socket** 上阻塞读、读期间不持任何锁；本端口**每条连接一把锁**，所以读改成 `READ_POLL`（200 ms）轮询，**锁在两批字节之间放开** | 这是"参考实现做不到"的那一类，不是风格：rustls 的一次 `read` 会动会话状态，必须串行化，而把锁跨在一次无限阻塞读上会让**同一根 socket 上的所有推送饿死** —— `_watch_playback` 与状态变化都排在那把锁后面，发送端 LOAD 之后只拿到那一次请求驱动的答复、此后一句话都没有，直到它自己断开（2026-10-18 接进壳之后由 §21 量出，见 §16 第 11 条）。Python 那边根本没有这一层，所以这一格**不可能**由"照抄它的写法"得到正确答案 |
 | `channel`（`MAX_FRAME_BYTES`） | 帧头声称的长度 > 8 MiB 时**先拒再分配**（`InvalidData`，不 `vec![0u8; length]`）；参考实现没有这个上限，它 `_recv_exact(sock, length)` 一路累积 | 那 4 字节是**对端给的**，`>I` 能声称 4 GiB。Python 的累积读至少不会一次性申请，而我们的实现一旦先申请就给了"一个谎长度打爆接收端"的形状。代价要写清：一台**真的**发 >8 MiB 帧的发送端在这里会被断开而不是收下。**8 MiB 是我们选的数，不是从设备上量出来的上限**（本局域网没有真 Chromecast，§16 第 1 条），它的依据只有两条：正文是 JSON 与 protobuf 控制消息，而 `>I` 那个字段可以对端随口写。**这一句只到"会话结束"，不到"用户看得见"**：`client_loop` 的错误统一走那句 `Cast client disconnected: {e}`，而它是 **DEBUG** 级（与对端正常断开同一句，`channel.rs` 的 `handle_connection` 尾部），所以默认阈值下这条拒绝**不进日志**。这是今天的形状，不是已验证的决定 —— 要把安全侧的那一格抬到 INFO，改的是这一句分级，不是上限 |
 
@@ -542,7 +544,10 @@ reaches the mpv this page drives.'"*
 - **`api_post` 故意不带令牌**：loopback **就是**这些路由的管理门准入（§4.7），
   段 15–16 有意义的断言是**门文案缺席**，不是秘密的存在。
 - **段 22 是这一份脚本里唯一一段**用**别人家的栈**当判据的**：`.venv` 里的 zeroconf 冷启动当监听者（它的 `ServiceBrowser` 只登记名字，完整性由 `load_from_cache` 逐条问 PTR/SRV/TXT/A），所以"我们的写包器和我们的读包器互相认同"这种自证在这一段不成立。两个坑记在这里：① 0.151.3 的 `ServiceBrowser` 第三个位置参数是 handlers 不是 timeout，写错之后一段变 7 条红；② `IPVersion` 的成员叫 `V4Only` 不叫 `V4`，写错之后 traceback 打进本该放数据的那个文件，后面 5 条检查全读成 `none`。**两次都是仪器先坏，产品没事** —— 判据（§4.2）在这里的形状是"先去看那条已经 PASS 的解析检查"。另外这一段的等待时长本身是读数：跑在第一串广播之后好几分钟，能解析就等于 60 秒重播活着。
-- **段 23 先杀掉第一段的那个实例，这不是收尾是判据的一部分**：8009 与 8008 是发送端钉死的两个口，第一台还活着的时候，第二台"没起来"和"起来了但抢不到口"在外部**长得一模一样** —— 而 §20 那条"8008 不回落"的决定之所以成立，正是为了不让这两种状态混起来。所以这一段的顺序是：确认监听者就是我们自己那个 pid → 杀掉 → 等端口真的空了 → 再起第二台。第二台的临时目录写进 `.socket`，`cleanup` 按套接字路径收掉它的 mpv —— `AGENTS.md` §4.2「被反复重启的 Macast 会攒播放器」那一格，在这份脚本里同样要还。
+- **段 24 先杀掉第一段的那个实例，这不是收尾是判据的一部分**：8009 与 8008 是发送端钉死的两个口，第一台还活着的时候，第二台"没起来"和"起来了但抢不到口"在外部**长得一模一样** —— 而 §20 那条"8008 不回落"的决定之所以成立，正是为了不让这两种状态混起来。所以这一段的顺序是：确认监听者就是我们自己那个 pid → 杀掉 → 等端口真的空了 → 再起第二台。第二台的临时目录写进 `.socket`，`cleanup` 按套接字路径收掉它的 mpv —— `AGENTS.md` §4.2「被反复重启的 Macast 会攒播放器」那一格，在这份脚本里同样要还。
+  这一段的**浏览必须排在第二台启动之前**（2026-10-18 同一轮改的）：广播的节奏是"3 包 / 225 ms，然后 60 秒静默"，而它原来是在实例起来之后再听 8 秒 —— 一台**确实在广播**的机器因此可以被答成"线上什么都没有"。这不是推测：把证书那道门删掉当变异体时这一段红了 5 条，而**这一条照旧绿**。挪到启动之前、窗口 30 秒之后，同一支变异体红 6 条，多的那条点名 `Macast-Gate-Off._googlecast._tcp.local.`。同一格还连带抓出一个**没有读者拥有的设置键**：两段 seed JSON 都写 `FriendlyName`，而真名是 `DLNA_FriendlyName`（`setting.rs:94`），于是被门住的那台用回退默认名广播，按名字匹配的这一问自然看不见它 —— 详见 §16 第 12 条 ②。
+- **段 23 是"一份文档，三个读者"的检查**（2026-10-18 交付）：`query=status` 与 `query=interfaces` 的每一个键都由**别人**回答一遍 —— 播放状态对 SOAP 的 `GetPositionInfo`、发布的地址对 §22 从线上读回来的 A 记录集合、订阅者对我们自己刚发的 `SUBSCRIBE` 拿到的 SID、`server.platform` 对 `.venv` 那个解释器的 `sys.platform`。这一段的形状是"**先设事实再问文档**"：状态表与订阅表在单元层是桩（`TestStore` / `FakeSubscription`），只有这里走的是真 mpv、真 GENA 套接字。**它交付的第一条不是绿，是一条红**：投完之后 `history` 仍然是 `[]` —— 参考实现的历史在设置文件里、这一版在内存里，而打印设置文件会答出"这台机器什么都没投过"。那一格变成 §8 的一行偏离账与 §16 的一条待决，而不是被改成"断言它是空的"。
+  另一条只有仪器变坏才能学到的：`json_join` 交回的是 `、`-连接的串，而第一版用 `tr '、' '/'` 去比 `server.ip` 的 `/`-连接 —— **`、` 是三个字节，`tr` 是逐字节的**。只有一条地址时没有分隔符可拆，所以它绿；场上一多地址（M9 那支变异体把宽集合喂进来）它红了**两次**，其中一次根本不是产品的错。判据换成"在同一份解析里比两个列表"，而这条教训与 §4.2「夹具脚本里的那对括号是承重的」同族：**测试自己的实现也是实现**，而它只在机器恰好给出多个值时才现形。
 - **正文解析而非 grep**（§9.3 那个转义后果）。`--noproxy`：一个游离的 `http_proxy`
   会把回环请求送去代理，产出一个看起来像"端口死了"的 `000`。
   `-m 40`：`cast-resolved` 会同步跑源站探测（`probe_proxy`，转封装那一路最长
@@ -736,6 +741,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 | mDNS **responder**（回答别人的查询） | **尚未** | 我们只发 unsolicited 广播，不答查询。后果是可行动的那句：**只听的发送端**（libvlc 的 microdns，`discovery.py:230-237` 自己写的）第一串广播就看得见我们；**问了才看的**（Cast app、`dns-sd -B`、冷缓存的浏览器）要等下一次重播，也就是最多 60 秒。修法不是"再加一个 socket"：`SO_REUSEPORT` 会把进来的数据报只交给一个读者，所以 responder 落地时必须与 `announce` 的发送 socket 合成一个读者（§8 的「`announce`（一个发送 socket，且不加入组）」那一行写着这个代价） |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
+| 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23 的 **25 条**。**两条偏离记在 §8**（四个键用 `peek`；`history` 在内存不在设置文件）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
@@ -865,23 +871,23 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     判据两层：`host::tests` 问**读法**（存的字符串要当成一条记录、legacy 键是追加不是优先、
     不认识的标题跳过并说一句、空表 = 全开、`ChromecastProtocol` 这种紧凑拼写在**两边都**解不出——
     参考实现的 `canonical_title` 只去 `" protocol"` 带空格那一截），
-    §23 问**关上的门**（第二个实例只开 DLNA：8009/8008 必须拒连、日志必须说出是谁关的、
+    §24 问**关上的门**（第二个实例只开 DLNA：8009/8008 必须拒连、日志必须说出是谁关的、
     浏览器必须看不见它、证书文件必须不存在）。
     **剩下那一半不是遗漏**：DLNA 的 HTTP 脸在这份壳里同时承载设置页与管理 API，
     把它一起门住 = 用户关掉 DLNA 就没有页面可改回来。参考实现里 DLNA 关闭时页面还在不在，
     本机**没有量过**（`build_protocol_group` 只在分组为空时兜底加回 DLNA，正好说明它考虑过
     "一个都不剩"的情形，但没考虑"只剩 Chromecast"时页面归属谁）。那一格要先量再改，
     所以它记在这里而不是顺手做掉。§20/§21/§22 的真机读数也因此都来自"全开"的那台。
-    **§23 的两条仪器错，是变异体把它们逼出来的**（同日，`host.rs` 9 支 + `main.rs` 2 支）：
+    **§24 的两条仪器错，是变异体把它们逼出来的**（同日，`host.rs` 9 支 + `main.rs` 2 支）：
     ① 广播那一问原来是"实例起来之后再浏览 8 秒"，而发送端的节奏是 3 包 / 225 ms、之后
     `REANNOUNCE` 静默 60 秒 —— 删掉证书的门当变异体时（gated 实例真的建了 announcer、真的绑了
-    8009、日志里真的写了 `mDNS: announcing`），§23 红 5 条而**这一条照旧绿**：它答的是"我这个窗口
+    8009、日志里真的写了 `mDNS: announcing`），§24 红 5 条而**这一条照旧绿**：它答的是"我这个窗口
     没赶上突发"，不是"这台没广播"。修法是浏览**排在实例启动之前**，窗口 30 秒横跨初始突发
     （§22 的 75 秒窗口负责 keepalive 那一次，两个窗口问的是两段）。重测同一支变异体：红 **6** 条，
     多出的那条点名 `Macast-Gate-Off._googlecast._tcp.local.`。清洁跑不变，仍 **190 条 / 0 失败**。
     ② 两段 seed JSON 写的键是 `FriendlyName`，而真正的键名是 `DLNA_FriendlyName`
     （`macast-core/src/setting.rs:94`）—— 一个没有读者拥有的键，于是①里那台广播的是回退默认名，
-    §23 按名字匹配自然看不见。今天 §22 印的是 `Macast-Rust-Verify`，那是键真的生效的证据。
+    §24 按名字匹配自然看不见。今天 §22 印的是 `Macast-Rust-Verify`，那是键真的生效的证据。
     ③ 电池里最有用的是两支 **0 红**：`canonical_title` 的 `trim()` 与末尾 `strip()` 各自删掉都
     不响（折叠空白之后两者都不可能留下边界空格），而删折叠 1 红、删大小写 4 红。docstring 原来
     写"每一步都承重"，现在写的是**两颗牙 + 两个保险**，并且写明"删掉保险听不到声音"这件事 ——
@@ -889,7 +895,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     ④ 那条审计现在按**三问**问 `main.rs` 这段文本：门读在每张脸**之前**、整份运行**只读一次**、
     每张脸的构造点**恰好一个**（针眼带 `(`，注释里提类型名不算）。后两问各有自己的变异体
     （第二次读门 1 红 / 第二处构造 announcer 1 红）；第一问**没有可编译的同型变异体** —— 挪读取
-    必须同时删掉它前面的两个用户，那是重写不是替换。它的见证是 §23 那 6 条一起红。这句局限写在
+    必须同时删掉它前面的两个用户，那是重写不是替换。它的见证是 §24 那 6 条一起红。这句局限写在
     测试的注释里，不当成覆盖。
     ⑤ 一支方法学的读数：第二处构造那支的第一版**是编译错误**（`setup::SetupServer::start` 把
     `setup_config` 移走了），`cargo test` 于是既不打印 `test result` 也不打印红 —— 只看退出码会把它
@@ -918,6 +924,24 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     因为"本机只有一块可用网口"的那一天，前半条会静默变成空话。变异体（换回宽集合）红 1 条。
     **教训的形状**：`§22` 之所以值得写，正是因为它用**另一个实现**读我们发出去的东西。
     自己的解析器读自己的写包器，四个地址里三个是虚拟网段这件事**一条都不会红**。
+15. **status 这一张文档第一次给出"单元 0 红 / 真机红"的读数**（2026-10-18，同一轮 9 支定点变异）：
+    媒体表砍成"只广播的那 8 个名字"红 1；文档把存量值解析成标题（门的读法）红 1；
+    `history` 改读设置文件红 1；两种拼法统一成一种红 1；客户端行里的 `host` 抹掉红 1；
+    `status` 那行的门名从 management 改成 token 红 **11**（每一份读文档的用例都先撞这道门）；
+    `py_truthy` 把数字 0 当真理红 2；内存历史不再按地址去重红 1（`src-tauri` 自己那条）；
+    而**把宽地址集合喂给 `network_facts` 那一支，328 条单元用例全绿**，真机 §23 红一条。
+    原因写在上面那一行里：一次调用同时产出 `server.ip` 与 `network.advertised`，
+    所以"两个键互等"这条单元断言对任何集合都成立 —— **它是设计上恒真**，
+    不是漏测；真正问这一问的是"页面给的集合 == 广播发出去的集合"那条跨读数者的比对
+    （§22 从线上读回来的那一串）。这一格与 §16 第 14 条是同一枚硬币的两面：
+    第 14 条是"广播侧读错集合，别人家栈看得见"，第 15 条是"页面侧读错集合，只有别人家栈看得见"。
+    两条仪器错也记在这里，因为它们都是**这一轮的判据先坏后修**：
+    ① `tr '、' '/'` 逐字节切一个三字节分隔符 —— 只有一条地址时没有分隔符可切，所以它绿；
+    ② `MANAGEMENT_REFUSAL` 用 `text(body).contains(...)` 比对，而正文是 `ensure_ascii` 的
+    `\uXXXX`，**永远不命中**（同 §9.3），改成解析之后再比 `message` 字段。
+    还有一条方法学的：M2 的第一版交回的是**编译错误**（`json!` 不在非测试作用域里），
+    当天第二次踩同一个形状（`main.rs` 那支 M10 的第一版因为移走 `setup_config` 也是编译错误）——
+    只看退出码时"编译不过"和"这一格没人问"完全同形，**同型替换要连能编译一起满足**。
 
 ---
 
@@ -967,7 +991,12 @@ grep -n "TESTS_IN_THIS_CRATE" macast-cast/src/proto.rs          # 期望 **656**
 grep -n "impl Host for TauriHost" src-tauri/src/host.rs         # 期望 1 行
 grep -c "has not been written yet" macast-mpv/src/lib.rs        # 期望 **0**（本轮改的注释）
 grep -rn "targets::" src-tauri/src/                             # 期望 ≥2 行（§15）
-grep -rn "CastChannel" src-tauri/src/                           # 期望 **6** 行（`host.rs` 4 + `main.rs` 2，§15）
+grep -c 'CastChannel::new(' src-tauri/src/main.rs                # 期望 **1**（8009 那张脸的构造点恰好一个；
+#   这一条由 `every_cast_face_is_behind_the_gate` 的"每张脸只构造一次"断言在管，这里是它的文档对应物）
+grep -rn "CastChannel" src-tauri/src/ | wc -l                    # 今天 **8**（`host.rs` 6 + `main.rs` 2）。
+#   §15 那一行当年记的是"从 0 行变成 **6** 行"——那个数**按散文数**，会随解释性注释涨（门审计的针眼
+#   与它的新注释就各涨了一行）。所以这里钉的是**构造点**而不是提及数：一个会随写解释而腐烂的计数
+#   不是判据（本节开头那条「按名字问，不按行号问」的教训，落在它自己写的这一行上）。
 grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**（§8 与 §16 第 11 条那一格：
 #   一次跨阻塞读的无限超时就是那次推送饿死；这一行是那条修复的**反向**哨兵，
 #   谁把它改回 `None`，§21 与 `a_quiet_sender_still_hears_about_playback` 会红，
@@ -975,7 +1004,9 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **26**（§23 是最后一节）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **27**（§24 是最后一节；
+#   §23 是 2026-10-18 的 status 一节，门那一节因此从 §23 挪到 §24 —— 本文、脚本注释与
+#   `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，编号变了而判据没变）
 grep -c 'pub fn announcement\|pub fn goodbye' macast-cast/src/announce.rs  # 期望 **4**（两种顺序 × 两种报文）
 grep -c 'net::advertised_addresses(' macast-cast/src/announce.rs            # 期望 **1**，且下面这条 **0**：
 grep -c 'net::advertised_hosts(' macast-cast/src/announce.rs                # 宽集合回到 A 记录就是 §4.1 第一行
@@ -986,8 +1017,20 @@ grep -c 'host::cast_enabled(' src-tauri/src/main.rs                          # �
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
 grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **2**（两个 seed 各一），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
-#   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §23 的
+#   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
+grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **7**（GET 表：cast/cast-info/
+#   resolve-status/resolve-cookies/cast-targets/status/interfaces —— 参考实现十五个里的七个）
+grep -c 'pub fn sys_platform' macast-core/src/paths.rs          # 期望 **1**（`sys.platform` 的拼法只有一个主人；
+#   谁把它换回 `std::env::consts::OS`，§23 那条对问解释器要答案的用例会红）
+grep -c 'fn play_history' macast-upnp/src/store.rs              # 期望 **1**（接缝在这里），且下面这条 **6 个文件**：
+grep -rl 'fn play_history' macast-upnp/src macast-cast/src src-tauri/src | wc -l
+#   （声明者 1 + 实现者 5：`store.rs` / `http.rs` 的 TestStore / `soap.rs` 的 MapStore /
+#    `eventing.rs` 的 FakeStore / `channel_tests.rs` 的 RecordingStore / `src-tauri/host.rs`
+#    —— 按**文件**数而不是按出现次数，因为 host.rs 里天生有两条同名方法：表自己的读与
+#    `StateStore` 的转发。数目涨了 = 有人加了第二个读历史的门，那要先说清为什么）
+grep -c 'STATUS_MEDIA_NAMES' macast-upnp/src/http.rs            # 期望 **4**（定义、文档块、用例两处）——
+#   那张 16 行的表是 `protocol.py:2033-2043` 的**超集**，砍成"我们广播的那 8 个"红 1 条（§16 第 15 条）
 ls macast-cast/tests/golden/mdns_announce.hex macast-cast/tests/golden/mdns_names.jsonl
 #   两份 mDNS 语料都在，且产生器在仓库里：
 #   scripts/mdns_announce_probe.py --fixture --dump-hex <前者> / --dump-names <后者>

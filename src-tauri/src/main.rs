@@ -309,11 +309,19 @@ fn player_snapshot(runtime: State<'_, Runtime>) -> Value {
         // page or from a `SetAVTransportURI`. Each row is what a re-cast sends:
         // the name that was handed over with it (or the one the fallback derived),
         // so a history click re-plays under the same window title.
+        //
+        // The keys are the **reference's** (`uri`, `title`, `time`, from
+        // `protocol.py:1211-1215`), which is also what `query=status` prints for
+        // the same rows. The command used to say `url` while the HTTP face said
+        // `uri` — two spellings for one fact, with the only reader still a stub
+        // (`frontend/index.html`), so the cost of aligning them today is nothing
+        // and the cost of not aligning them is a frontend written against one of
+        // them. `time` was missing entirely, which the 「播放历史」 card sorts by.
         "history": runtime
             .table
             .play_history()
             .iter()
-            .map(|(title, uri)| json!({ "title": title, "url": uri }))
+            .map(|(title, uri, at)| json!({ "uri": uri, "title": title, "time": at }))
             .collect::<Vec<_>>(),
         "states": states,
     })
@@ -1047,6 +1055,12 @@ pub fn run() {
                     targets: device_table,
                 }) as Arc<dyn macast_upnp::http::Management>,
                 setting.clone(),
+                // The same table SOAP writes and GENA reads — `query=status`'s
+                // `media` block reads it through this face, so the page and a control
+                // point asking `GetTransportInfo` at the same second see one moment,
+                // not two. A second `StateTable` here would be the §4.2
+                // 「两处答案不一致比没有数字更糟」 shape, one layer over.
+                table.clone() as SharedStore,
             )?;
             let http = HttpServer::new(Arc::new(face));
             // `host.clone()` rather than `host`: the last one moves into `Runtime`

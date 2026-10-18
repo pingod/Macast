@@ -147,6 +147,23 @@ pub trait StateStore: Send + Sync {
     /// raise. A play-history write is a convenience and must not be able to
     /// fail a cast.
     fn add_history(&self, title: &str, uri: &str);
+
+    /// The rows [`StateStore::add_history`] wrote, newest first — the read
+    /// `query=status` prints as its `history` list.
+    ///
+    /// A tuple of `(title, uri, time)` rather than a type invented here, because
+    /// the shape belongs to whoever keeps the rows; the three names are the
+    /// reference's (`protocol.py:1211-1215` writes `uri`, `title`, `time`), and
+    /// `time` is the epoch second the row was pushed, which the 「播放历史」 card
+    /// sorts and prints.
+    ///
+    /// An empty list has **two causes** in this port and one in the reference: the
+    /// rows live in memory here, so a restart empties them while the Python app's
+    /// list survives in `Play_History`. `query=status` therefore cannot tell "nobody
+    /// has cast anything" from "the casts were forgotten on relaunch" — the divergence
+    /// is recorded in `docs/Rust-Port-Design.md` rather than papered over by reading
+    /// a settings key this shell never writes.
+    fn play_history(&self) -> Vec<(String, String, i64)>;
 }
 
 /// The thing that actually plays. Implemented over `src-tauri`'s `Player`.

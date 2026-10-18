@@ -67,6 +67,8 @@ use macast_core::token;
 // first is whether `%2B` is a `+` or a space.
 use macast_core::url::{parse_query, split_once_ascii};
 
+use crate::store::SharedStore;
+
 /// The refusal pages. CherryPy's own four bodies (1983, 1274, 1737, 1739 bytes
 /// in the witness set) are a traceback-shaped HTML with a `<pre>` of the
 /// exception; reproducing their prose would mean reproducing cherrypy's error
@@ -413,9 +415,14 @@ enum Action {
     ResolveCookies,
     /// `query=cast-targets&refresh=`: the 网页地址投屏 card's device list.
     CastTargets,
+    /// `query=status`: the settings page's whole status document — server identity,
+    /// network picker facts, playback state, event clients, play history.
+    Status,
+    /// `query=interfaces`: the three facts behind the network picker, on their own.
+    Interfaces,
 }
 
-/// The five answers this port implements out of the shipped management API's
+/// The seven answers this port implements out of the shipped management API's
 /// fifteen GET queries. Each is a **cumulative** check, not a choice: see
 /// [`Face::gate_refusal`].
 ///
@@ -434,7 +441,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 5] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 7] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -488,6 +495,28 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 5] = [
         // was written to close.
         gate: "management",
         action: Action::CastTargets,
+    },
+    GetRoute {
+        query: "status",
+        // Management-gated in the reference, and it is the *most* informative
+        // document this face writes: it prints the friendly name, every address
+        // this machine publishes, which interface is pinned, the raw stored
+        // protocol list, what is playing, and who is subscribed to our events.
+        // None of those is a secret this port hands out on purpose — and one of
+        // them is a live credential path: the `history` rows are the addresses the
+        // user has cast, which for a signed site link is exactly the thing
+        // `resolve-status` is gated over (see the comment on that row).
+        gate: "management",
+        action: Action::Status,
+    },
+    GetRoute {
+        query: "interfaces",
+        // Same facts as `status`'s `network` block, and the same gate — in Python
+        // they are gated by the same membership test (`protocol.py:2080-2088`), so
+        // a port that made this one public while `status` stays gated would leak the
+        // machine's interface table through the door nobody thought to close.
+        gate: "management",
+        action: Action::Interfaces,
     },
 ];
 
@@ -980,6 +1009,17 @@ pub trait Subscription: Send + Sync {
 
     /// `remove_subscribe(SID)` — 200 in Python, whatever the table thinks.
     fn remove(&self, sid: &str) -> u16;
+
+    /// The published subscriber table, as rows — the read `query=status` builds
+    /// its `clients` list from.
+    ///
+    /// It is a **read of the table's own snapshot**, not a re-derivation: the
+    /// owner (`crate::eventing`) decides what a row is and takes each lease exactly
+    /// once, and this file decides which of the row's fields the page sees and under
+    /// what names. Queued-but-unpublished subscriptions are deliberately absent
+    /// here too; `query=subscribers` is where `pending_append` lives, and the two
+    /// documents answer different questions on purpose (§4.2's 「空结果要说清是哪一种空」).
+    fn rows(&self) -> Vec<crate::eventing::SubscriberRow>;
 }
 
 /// One management answer, in the order the shipped handler builds it.
@@ -1305,6 +1345,12 @@ pub struct Face {
     /// handler calls.
     management: Arc<dyn Management>,
     setting: Arc<Setting>,
+    /// Where DLNA playback state lives — the door `query=status` reads its `media`
+    /// block through, and the counterpart of Python's `self.protocol.get_state(name)`
+    /// (`protocol.py:2034-2043`). Read-only here: the face that *writes* state is
+    /// SOAP, and a second writer in the HTTP layer would be the same shape of mistake
+    /// §5's ownership rule exists to prevent.
+    store: SharedStore,
     /// Built **once**, at startup. See [`Face::new`] for what a failure here
     /// means.
     description: Vec<u8>,
@@ -1325,6 +1371,7 @@ impl Face {
         subscription: Arc<dyn Subscription>,
         management: Arc<dyn Management>,
         setting: Arc<Setting>,
+        store: SharedStore,
     ) -> Result<Face, String> {
         let description = crate::description::build_for(&setting)?;
         Ok(Face {
@@ -1336,6 +1383,7 @@ impl Face {
             subscription,
             management,
             setting,
+            store,
             description,
             mtime: Arc::new(disk_mtime),
         })
@@ -1459,6 +1507,8 @@ impl Face {
             Action::ResolveStatus => self.resolve_status_entry(req),
             Action::ResolveCookies => self.cookie_state_entry(),
             Action::CastTargets => self.cast_targets_entry(req),
+            Action::Status => self.status_entry(),
+            Action::Interfaces => self.interfaces_entry(),
         }
     }
 
@@ -1699,6 +1749,192 @@ impl Face {
             200,
             &self.management.cast_targets(query_flag(req, "refresh")),
         )
+    }
+
+    /// `query=status` — the settings page's whole status document.
+    ///
+    /// **No `code`/`message`**, which is the reference's shape and not an
+    /// oversight: `GET` hands `self.get_status()` straight to `json.dumps`
+    /// (`protocol.py:2200-2201`), so the body starts at `{"server": …}`. Every
+    /// other answer on this face wraps, which is why this route cannot go through
+    /// [`Answer`] — an `Answer` always writes `code` first, and a page that reads
+    /// `status.server.port` would find the document one key shifted.
+    fn status_entry(&self) -> Response {
+        json_value_response(&self.status_document())
+    }
+
+    /// `query=interfaces` — the network picker's three facts on their own.
+    ///
+    /// Same facts as `status`'s `network` block, **different key names**: the
+    /// standalone document calls the pinned interface `current` while the status
+    /// block calls it `interface` (`protocol.py:2016-2020` against `:2146-2151`).
+    /// Both spellings are pinned by tests, because the obvious tidy move — making
+    /// them agree — breaks whichever page reads the one that changed.
+    fn interfaces_entry(&self) -> Response {
+        let (current, advertised, interfaces) = self.network_facts();
+        json_value_response(&object(&[
+            ("current", Value::String(current)),
+            ("advertised", strings(advertised)),
+            ("interfaces", interfaces),
+        ]))
+    }
+
+    /// The `status` document, built in the reference's order: `server`, `media`,
+    /// `clients`, `history`, `network` — and inside `server`, the twelve keys in
+    /// the order its dict literal is written (`protocol.py:2002-2024`).
+    ///
+    /// Three readings are worth naming, because each is a place a "tidier" port
+    /// changes the answer:
+    ///
+    /// * **`protocol` is the stored value, not the resolved one.** The page has to
+    ///   show which boxes the user ticked, so a list of `["DLNA"]` prints as
+    ///   `["DLNA"]` even though the run started `DLNA Protocol`. The gate built this
+    ///   round resolves titles; this document deliberately does not, and `query=cast`
+    ///   and the face-opening decision read the resolved one. Two answers to two
+    ///   questions — see `status_protocol_reports_the_stored_value_not_the_resolved_one`.
+    /// * **`ip` is `/`-joined while `network.advertised` is the list** — same
+    ///   source, two shapes (`:2021` against `:2018`), both pinned.
+    /// * **`running` is `true` because this route answered.** Python asks
+    ///   `Setting.is_service_running()`, but `GET` raises 503 before reaching here
+    ///   when the service is down (`protocol.py:2066-2067`), so a body that got as
+    ///   far as building this document has already proved the thing the key reports.
+    ///   A port that wired a real flag here could print `running: false` from a live
+    ///   socket — which is the §4.2 rule about not treating a listening port as
+    ///   evidence, read in the other direction.
+    fn status_document(&self) -> Value {
+        let (system, release) = paths::system_version();
+        let (current, advertised, interfaces) = self.network_facts();
+        let https_on = setting::https_enabled(&self.setting);
+        let server = object(&[
+            ("running", Value::Bool(true)),
+            ("port", Value::from(setting::application_port(&self.setting))),
+            ("version", Value::String(paths::version())),
+            ("friendly_name", Value::String(self.setting.friendly_name())),
+            ("renderer", self.stored(Key::MacastRenderer, Value::String(String::new()))),
+            ("protocol", self.stored_protocols()),
+            ("platform", Value::String(paths::sys_platform())),
+            ("system", Value::String(system)),
+            ("system_version", Value::String(release)),
+            ("ip", Value::String(advertised.join("/"))),
+            ("https_enabled", Value::Bool(https_on)),
+            (
+                "https_port",
+                if https_on {
+                    Value::from(setting::https_port(&self.setting))
+                } else {
+                    Value::Null
+                },
+            ),
+        ]);
+        let media = object(
+            &STATUS_MEDIA_NAMES
+                .iter()
+                .map(|name| (*name, self.store.read(name).unwrap_or(Value::Null)))
+                .collect::<Vec<(&str, Value)>>(),
+        );
+        let clients = Value::Array(
+            self.subscription
+                .rows()
+                .iter()
+                .map(|row| {
+                    object(&[
+                        ("host", Value::String(row.host.clone())),
+                        ("url", Value::String(row.url.clone())),
+                        ("service", Value::String(row.service.clone())),
+                        ("sid", Value::String(row.sid.clone())),
+                        ("path", Value::String(row.path.clone())),
+                        ("timeout", Value::from(row.timeout)),
+                    ])
+                })
+                .collect(),
+        );
+        // `history` is the table's rows, printed under the reference's three keys
+        // (`protocol.py:1211-1215` writes `uri`, `title`, `time`).
+        //
+        // **This is a divergence, and §23 of the acceptance script is what found
+        // it.** The reference reads `Setting.get(Play_History, [])` — its history
+        // lives in the settings file, so it survives a restart. This shell's rows
+        // live in the state table (see `StateTable::add_history` in
+        // `src-tauri/src/host.rs`), and printing the settings key here would have
+        // answered `[]` about a machine that had just cast something: an empty list
+        // with two causes, and the page cannot tell them apart (§4.14's
+        // 「空结果要说清是哪一种空」, this time in the document the page reads).
+        // Rendering what the shell actually remembers is the honest half; making it
+        // survive a restart is the other half, and it is a decision with a test on
+        // it rather than a line in this function.
+        let history = Value::Array(
+            self.store
+                .play_history()
+                .into_iter()
+                .map(|(title, uri, at)| {
+                    object(&[
+                        ("uri", Value::String(uri)),
+                        ("title", Value::String(title)),
+                        ("time", Value::from(at)),
+                    ])
+                })
+                .collect(),
+        );
+        let network = object(&[
+            ("interface", Value::String(current)),
+            ("advertised", strings(advertised)),
+            ("interfaces", interfaces),
+        ]);
+        object(&[
+            ("server", server),
+            ("media", media),
+            ("clients", clients),
+            ("history", history),
+            ("network", network),
+        ])
+    }
+
+    /// The three facts the network picker reads, in the order the two documents
+    /// want them: the pinned interface, the advertised addresses, the annotated
+    /// table.
+    ///
+    /// One reader of the machine for both routes, because `query=status` and
+    /// `query=interfaces` are polled by the same page seconds apart and the answer
+    /// must not depend on which one asked first.
+    fn network_facts(&self) -> (String, Vec<String>, Value) {
+        let rows = macast_core::net::network_interfaces(&self.setting);
+        let advertised = macast_core::net::advertised_addresses(&self.setting);
+        let current = match self.setting.peek(Key::NetworkInterface) {
+            Some(Value::String(text)) => text,
+            Some(other) => other.to_string(),
+            None => String::new(),
+        };
+        let table = serde_json::to_value(&rows).unwrap_or(Value::Null);
+        (current, advertised, table)
+    }
+
+    /// `Setting.get(key, default)` **without the write**, for the keys this route owns
+    /// its answer about. The shared reader takes its default into the table for the
+    /// next `save` to persist (AGENTS.md §4.2), and a page polls `query=status` every
+    /// few seconds — so a `get` here would turn "the user never chose a renderer" into
+    /// "the user chose the empty renderer". The keys the picker and the port come from
+    /// other helpers, and those keep Python's behaviour; the split is pinned by
+    /// `the_status_read_creates_no_key_that_was_not_there`.
+    fn stored(&self, key: Key, default: Value) -> Value {
+        self.setting.peek(key).unwrap_or(default)
+    }
+
+    /// `Setting.get(Macast_Protocols, []) or ([Setting.get(Macast_Protocol, '')] if
+    /// Setting.has(Macast_Protocol) else [])` (`protocol.py:2009-2012`).
+    ///
+    /// The legacy branch keeps Python's **nesting**: if the old key somehow holds a
+    /// list, the answer is a list containing a list. That is what the reference
+    /// prints, and a page that renders it does the same for both ports. Flattening
+    /// here would be this port disagreeing about a stored value the gate also reads.
+    fn stored_protocols(&self) -> Value {
+        let stored = self.stored(Key::MacastProtocols, Value::Array(Vec::new()));
+        if py_truthy(&stored) {
+            return stored;
+        }
+        match self.setting.peek(Key::MacastProtocol) {
+            Some(legacy) => Value::Array(vec![legacy]),
+            None => Value::Array(Vec::new()),
+        }
     }
 
     /// `/dlna/<Service>.xml` — the SCPD documents.
@@ -2337,6 +2573,90 @@ fn json_answer(status: u16, code: i64, message: &str) -> Response {
         JSON_CONTENT_TYPE,
         py_json_dumps_indented(code, message).into_bytes(),
     )
+}
+
+/// The state variables `query=status` reads into its `media` block, in the order
+/// Python's loop writes them (`protocol.py:2033-2043`).
+///
+/// The list is the reference's **superset**, not this port's: it asks for
+/// `AbsoluteTimePosition`, `CurrentPlayMode` and `DisplayCurrentSubtitle` even where
+/// nothing here has a value for them, and an absent variable prints as `null` —
+/// which is Python's `except Exception: media[name] = None` reading, not an error.
+/// Trimming the list to "names we happen to write" would move a key off the page
+/// rather than leave it blank, and the page reads by name.
+pub const STATUS_MEDIA_NAMES: [&str; 16] = [
+    "CurrentURI",
+    "CurrentTrackURI",
+    "CurrentTrackTitle",
+    "CurrentTrackDuration",
+    "CurrentMediaDuration",
+    "AbsoluteTimePosition",
+    "RelativeTimePosition",
+    "TransportState",
+    "TransportStatus",
+    "TransportPlaySpeed",
+    "CurrentPlayMode",
+    "Volume",
+    "Mute",
+    "NumberOfTracks",
+    "CurrentTrack",
+    "DisplayCurrentSubtitle",
+];
+
+/// A `200` whose body is a document this face wrote itself, with no `{code,
+/// message}` wrapper — the shape `query=status` and `query=interfaces` answer in,
+/// because the shipped handler passes those two dicts straight to `json.dumps`
+/// while every other route builds `{'code': …, 'message': …}` first.
+fn json_value_response(document: &Value) -> Response {
+    Response::new(
+        200,
+        JSON_CONTENT_TYPE,
+        py_json_dumps(document).into_bytes(),
+    )
+}
+
+/// A JSON object with its keys **in the order given**.
+///
+/// `serde_json::Map` is a `BTreeMap` unless the `preserve_order` feature is on, and
+/// this workspace turns it on precisely for this kind of document: Python's dicts
+/// remember insertion order, `json.dumps` prints that order, and the status page's
+/// rows are the twelve keys of `server` in the order `protocol.py` writes them. A
+/// `(key, value)` slice keeps that order in the code instead of in a feature flag,
+/// which is why [`Answer`] holds a `Vec` for the same reason.
+fn object(rows: &[(&str, Value)]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (name, value) in rows {
+        map.insert((*name).to_string(), value.clone());
+    }
+    Value::Object(map)
+}
+
+/// A list of strings as a `Value`.
+fn strings(items: Vec<String>) -> Value {
+    Value::Array(items.into_iter().map(Value::String).collect())
+}
+
+/// Python's truthiness for a JSON value — the rule behind `x or y`.
+///
+/// Four of these decide a printed answer rather than an internal branch, so the
+/// spellings are worth naming: `0` and `0.0` are **false** (a stored
+/// `ApplicationPort: 0` is not what makes this fire — it is a stored
+/// `Macast_Protocols: 0`, which prints the legacy key's list instead), `""` and
+/// `[]` and `{}` and `null` are false, `"0"` is **true** (a string holding a zero
+/// is a real value to `or`), and so is a list holding one empty string — `[""]` is
+/// a non-empty list.
+fn py_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number
+            .as_f64()
+            .map(|value| value != 0.0)
+            .unwrap_or(true),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+    }
 }
 
 /// [`json_answer`] for the routes whose dict carries more than two keys.
@@ -3006,6 +3326,7 @@ impl HttpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -3029,6 +3350,80 @@ mod tests {
         Arc::new(Setting::new(path))
     }
 
+    /// DLNA playback state as a settable map — the door `query=status` reads its
+    /// `media` block through.
+    ///
+    /// A test that wants a value **sets** it; nothing here defaults to a plausible
+    /// answer, because "the page shows `PLAYING`" has to be the result of a write
+    /// someone made, not of the fixture's kindliness. The playlist methods are inert
+    /// for the same reason: no route in this file reaches them, and an answer that
+    /// is never asked must not be able to drift.
+    #[derive(Default)]
+    struct TestStore {
+        state: Mutex<serde_json::Map<String, Value>>,
+        history: Mutex<Vec<(String, String, i64)>>,
+    }
+
+    impl TestStore {
+        fn new() -> Arc<TestStore> {
+            Arc::new(TestStore {
+                state: Mutex::new(serde_json::Map::new()),
+                history: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn put(&self, name: &str, value: Value) {
+            self.state
+                .lock()
+                .expect("state")
+                .insert(name.to_string(), value);
+        }
+
+        /// A cast this table remembers. `(title, uri, time)` in the trait's order —
+        /// the reference's own row order, which `add_history` keeps newest-first.
+        fn push_history(&self, title: &str, uri: &str, time: i64) {
+            self.history
+                .lock()
+                .expect("history")
+                .push((title.to_string(), uri.to_string(), time));
+        }
+    }
+
+    impl crate::store::StateStore for TestStore {
+        fn read(&self, name: &str) -> Option<Value> {
+            self.state.lock().expect("state").get(name).cloned()
+        }
+
+        fn write(&self, name: &str, value: Value) -> bool {
+            let mut table = self.state.lock().expect("state");
+            let changed = table.get(name) != Some(&value);
+            if changed {
+                table.insert(name.to_string(), value);
+            }
+            changed
+        }
+
+        fn playlist_push(&self, uri: &str) -> (i64, i64) {
+            (1, i64::from(!uri.is_empty()))
+        }
+
+        fn playlist(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn playlist_index(&self) -> i64 {
+            -1
+        }
+
+        fn set_playlist_index(&self, _index: i64) {}
+
+        fn add_history(&self, _title: &str, _uri: &str) {}
+
+        fn play_history(&self) -> Vec<(String, String, i64)> {
+            self.history.lock().expect("history").clone()
+        }
+    }
+
     /// Every face this module builds gets its own recording management seam, so a
     /// test that does not care about `query=cast` never has to think about it and
     /// a test that does cares about **this** instance's call log.
@@ -3038,9 +3433,15 @@ mod tests {
         subscription: Arc<dyn Subscription>,
         management: Arc<FakeManagement>,
     ) -> Arc<Face> {
-        Face::new(control, subscription, management as Arc<dyn Management>, setting)
-            .expect("face builds")
-            .into()
+        Face::new(
+            control,
+            subscription,
+            management as Arc<dyn Management>,
+            setting,
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into()
     }
 
     fn face_for(
@@ -3087,10 +3488,31 @@ mod tests {
             Arc::new(FakeSubscription::new()),
             Arc::new(FakeManagement::new()) as Arc<dyn Management>,
             fresh_setting(name),
+            TestStore::new() as SharedStore,
         )
         .expect("face builds")
         .with_mtime_probe(probe)
         .into()
+    }
+
+    /// A face over a **settable** state table and a settable subscriber table —
+    /// the two doors `query=status` reads but does not own. A test that wants the
+    /// page to read `PLAYING` writes `PLAYING`; a test that wants a client listed
+    /// pushes a row. Neither fixture starts with either, so a green can only come
+    /// from the route's reading, never from a friendly default.
+    fn harness_status(name: &str) -> (Arc<Face>, Arc<TestStore>, Arc<FakeSubscription>) {
+        let store = TestStore::new();
+        let subscription = Arc::new(FakeSubscription::new());
+        let face = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            subscription.clone() as Arc<dyn Subscription>,
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            fresh_setting(name),
+            store.clone() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        (face, store, subscription)
     }
 
     /// `ApplicationPort` is the key `cast-info` puts into the address it hands
@@ -3260,6 +3682,11 @@ mod tests {
         remove_status: AtomicU16,
         add_reply: Mutex<(String, String)>,
         events: Mutex<Vec<String>>,
+        /// What `query=status`'s `clients` list is built from. Empty by default,
+        /// because "nobody subscribed" is the ordinary state of a face in a unit
+        /// test — and a test that wants the other half sets a row rather than
+        /// trusting an empty list to have proved something.
+        rows: Mutex<Vec<crate::eventing::SubscriberRow>>,
     }
 
     impl FakeSubscription {
@@ -3269,7 +3696,14 @@ mod tests {
                 remove_status: AtomicU16::new(200),
                 add_reply: Mutex::new(("GENA-sid-1".to_string(), "Second-900".to_string())),
                 events: Mutex::new(Vec::new()),
+                rows: Mutex::new(Vec::new()),
             }
+        }
+
+        /// A published subscriber, shaped the way `eventing` shapes one: host and
+        /// path already split out of the callback URL by its owner.
+        fn push_row(&self, row: crate::eventing::SubscriberRow) {
+            self.rows.lock().expect("rows").push(row);
         }
 
         fn set_renew_status(&self, status: u16) {
@@ -3305,6 +3739,10 @@ mod tests {
         fn remove(&self, sid: &str) -> u16 {
             self.events.lock().expect("events").push(format!("remove {sid}"));
             self.remove_status.load(Ordering::SeqCst)
+        }
+
+        fn rows(&self) -> Vec<crate::eventing::SubscriberRow> {
+            self.rows.lock().expect("rows").clone()
         }
     }
 
@@ -4968,7 +5406,7 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 5);
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 7);
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -4988,6 +5426,8 @@ mod tests {
             Action::ResolveStatus,
             Action::ResolveCookies,
             Action::CastTargets,
+            Action::Status,
+            Action::Interfaces,
         ] {
             assert_eq!(
                 GET_MANAGEMENT_ROUTES
@@ -5830,5 +6270,533 @@ mod tests {
         assert_eq!(response.content_type, crate::soap::SOAP_CONTENT_TYPE);
         assert_eq!(control.calls(), 1);
         assert!(management.calls().is_empty());
+    }
+
+    // ---- `query=status` and `query=interfaces` ----------------------------------
+    //
+    // Both documents are read-only views of facts this file does not own, so every
+    // test below sets the fact through its owner (`TestStore`, `FakeSubscription`,
+    // the `Setting`) and then asks the route what it printed. Nothing is asserted
+    // against a fixture's own kindness: an empty `clients` list and a `null` media
+    // variable are the answers *because* nothing was written, and that is worth a
+    // sentence precisely because a friendly default would make five of these tests
+    // pass while asking nothing (§4.2's 「不提问的检查等于通过的检查」).
+
+    /// The status document, parsed the way the page reads it.
+    fn status_value(face: &Arc<Face>) -> serde_json::Value {
+        let response = face.answer(&get_api("/api?query=status", LOCAL));
+        assert_eq!(response.status, 200);
+        serde_json::from_slice(&response.body).expect("status answers a JSON document")
+    }
+
+    fn row(sid: &str, host: &str, path: &str, timeout: i64) -> crate::eventing::SubscriberRow {
+        crate::eventing::SubscriberRow {
+            sid: sid.to_string(),
+            service: "AVTransport".to_string(),
+            url: format!("http://{host}{path}"),
+            host: host.to_string(),
+            path: path.to_string(),
+            timeout,
+            seq: 3,
+            errors: 0,
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn status_answers_one_document_with_the_reference_s_five_sections() {
+        crate::pin_test_dir();
+        let (face, _, _) = harness_status("status-shape");
+        let doc = status_value(&face);
+        // **No `code`, no `message`** — the reference hands `get_status()` straight
+        // to `json.dumps` (`protocol.py:2200-2201`), so a wrapper here would shift
+        // every key the page reads. This is the one answer on this face that must
+        // not go through `Answer`, and the assertion is the difference.
+        assert!(doc.get("code").is_none(), "status wrapped itself: {doc}");
+        assert!(doc.get("message").is_none());
+        let keys: Vec<&str> = doc
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(keys, ["server", "media", "clients", "history", "network"]);
+        assert!(doc["server"]["running"].as_bool().unwrap());
+        assert!(
+            text(&face.answer(&get_api("/api?query=status", LOCAL)).body).starts_with("{\n    \"server\""),
+            "the writer's four-space indent and first key are what the page sees"
+        );
+    }
+
+    #[test]
+    fn status_server_block_writes_the_twelve_keys_in_order() {
+        crate::pin_test_dir();
+        let setting = fresh_setting("status-server");
+        setting.set(Key::ApplicationPort, Value::from(58993i64));
+        setting.set(Key::DlnaFriendlyName, Value::String("客厅的电视".into()));
+        setting.set(Key::MacastRenderer, Value::String("MPV Renderer".into()));
+        let store = TestStore::new();
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting.clone(),
+            store as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        let server = status_value(&face)["server"].as_object().expect("server").clone();
+        let keys: Vec<&str> = server.keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "running",
+                "port",
+                "version",
+                "friendly_name",
+                "renderer",
+                "protocol",
+                "platform",
+                "system",
+                "system_version",
+                "ip",
+                "https_enabled",
+                "https_port"
+            ]
+        );
+        assert_eq!(server["port"], Value::from(58993i64));
+        assert_eq!(server["friendly_name"], Value::String("客厅的电视".into()));
+        assert_eq!(server["renderer"], Value::String("MPV Renderer".into()));
+        assert_eq!(server["version"], Value::String(paths::version()));
+        // The CPython spelling, not Rust's — a page that prints
+        // `{{ system }} ({{ platform }})` next to every older install would show
+        // "Darwin (macos)" if this read `std::env::consts::OS`.
+        assert_eq!(server["platform"], Value::String(paths::sys_platform()));
+        let (system, release) = paths::system_version();
+        assert_eq!(server["system"], Value::String(system));
+        assert_eq!(server["system_version"], Value::String(release));
+        // HTTPS is off, so the port prints as `null` rather than as a number the
+        // page would then offer as a link that does not listen.
+        assert_eq!(server["https_enabled"], Value::Bool(false));
+        assert_eq!(server["https_port"], Value::Null);
+    }
+
+    #[test]
+    fn status_https_port_appears_only_when_the_switch_is_on() {
+        crate::pin_test_dir();
+        let setting = fresh_setting("status-https");
+        setting.set(Key::HttpsEnabled, Value::Bool(true));
+        setting.set(Key::HttpsPort, Value::from(9443i64));
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting,
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        let server = &status_value(&face)["server"];
+        assert_eq!(server["https_enabled"], Value::Bool(true));
+        assert_eq!(server["https_port"], Value::from(9443i64));
+    }
+
+    #[test]
+    fn status_media_reads_the_table_and_nulls_what_was_never_written() {
+        crate::pin_test_dir();
+        let (face, store, _) = harness_status("status-media");
+        let doc = status_value(&face);
+        let media = doc["media"].as_object().expect("media");
+        // The list is the reference's superset, in its order — including the three
+        // this port has no value for, which print `null` rather than disappearing.
+        let keys: Vec<&str> = media.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, STATUS_MEDIA_NAMES.to_vec());
+        for name in STATUS_MEDIA_NAMES {
+            assert_eq!(
+                media[name],
+                Value::Null,
+                "{name} was never written and must not be invented"
+            );
+        }
+        store.put("TransportState", Value::String("PLAYING".into()));
+        store.put("Volume", Value::from(37i64));
+        let after = status_value(&face)["media"].clone();
+        assert_eq!(after["TransportState"], Value::String("PLAYING".into()));
+        assert_eq!(after["Volume"], Value::from(37i64));
+        // Reading two names must not answer for the rest.
+        assert_eq!(after["CurrentURI"], Value::Null);
+    }
+
+    #[test]
+    fn status_protocol_reports_the_stored_value_not_the_resolved_one() {
+        crate::pin_test_dir();
+        // The page has to show which boxes the user ticked, so this prints what is
+        // on disk: `["DLNA"]` stays `["DLNA"]` even though the run opened
+        // `DLNA Protocol`. The gate built the same way *resolves*, and the two
+        // documents answering differently is the point, not an accident.
+        let cases: Vec<(Value, Value)> = vec![
+            // Truthy stored list: echoed whole.
+            (json!(["DLNA"]), json!(["DLNA"])),
+            (json!(["DLNA Protocol", "Chromecast"]), json!(["DLNA Protocol", "Chromecast"])),
+            // A **string** where a list belongs is echoed as the string — Python's
+            // `or` sees a non-empty string as truthy and prints it whole, while the
+            // gate reads the same value as one entry (AGENTS.md §4.2's coercion
+            // rule lives on the gate side only).
+            (json!("DLNA"), json!("DLNA")),
+            // `[""]` is a non-empty list ⇒ truthy ⇒ echoed, legacy key never asked.
+            (json!([""]), json!([""])),
+            // Falsy forms fall through to the legacy key or to `[]`.
+            (json!([]), json!([])),
+            (json!(""), json!([])),
+            (json!(0), json!([])),
+            (Value::Null, json!([])),
+        ];
+        for (stored, want) in cases {
+            let setting = fresh_setting("status-protocol");
+            if stored.is_null() {
+                // Leave the key absent — `null` written and `null` never stored
+                // must answer the same way for this route.
+            } else {
+                setting.set(Key::MacastProtocols, stored.clone());
+            }
+            let face: Arc<Face> = Face::new(
+                Arc::new(FakeControl::soap_ok()),
+                Arc::new(FakeSubscription::new()),
+                Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+                setting.clone(),
+                TestStore::new() as SharedStore,
+            )
+            .expect("face builds")
+            .into();
+            assert_eq!(
+                status_value(&face)["server"]["protocol"],
+                want,
+                "stored {stored} answered wrong"
+            );
+            assert!(
+                setting.peek(Key::MacastProtocol).is_none(),
+                "the fallback read created the legacy key in {stored:?}"
+            );
+        }
+        // With the legacy key present and the list empty, Python wraps it in a
+        // **list of one** — and keeps the nesting if the old key holds something
+        // odd, because that is what it prints.
+        let both = fresh_setting("status-legacy");
+        both.set(Key::MacastProtocols, json!([]));
+        both.set(Key::MacastProtocol, json!("DLNA"));
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            both,
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        assert_eq!(
+            status_value(&face)["server"]["protocol"],
+            json!(["DLNA"]),
+            "the legacy branch answers a list of one"
+        );
+    }
+
+    #[test]
+    fn status_clients_lists_published_rows_under_the_six_reference_keys() {
+        crate::pin_test_dir();
+        let (face, _, subscription) = harness_status("status-clients");
+        // Nobody subscribed: the answer is an empty list, and this route says so by
+        // being empty — which is a **different** answer from `query=subscribers`,
+        // where `pending_append` is how you tell "accepted but never published" from
+        // "nobody at all". Keeping the two documents apart is deliberate.
+        assert_eq!(status_value(&face)["clients"], json!([]));
+        subscription.push_row(row("uuid:1", "192.168.1.9:8080", "/cb", 1800));
+        subscription.push_row(row("uuid:2", "", "example.com/cb", 900));
+        let clients = status_value(&face)["clients"].clone();
+        let list = clients.as_array().expect("a list of clients");
+        assert_eq!(list.len(), 2);
+        let first = list[0].as_object().expect("a client row");
+        let keys: Vec<&str> = first.keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["host", "url", "service", "sid", "path", "timeout"]);
+        assert_eq!(first["host"], json!("192.168.1.9:8080"));
+        assert_eq!(first["path"], json!("/cb"));
+        assert_eq!(first["url"], json!("http://192.168.1.9:8080/cb"));
+        assert_eq!(first["timeout"], json!(1800));
+        // The second row is the reference's odd case, not a mistake of ours: its
+        // regex `//([0-9:.]*)` matches the **empty** string before a host with
+        // letters, so `host` is `''` and everything else lands in `path`. Reproduced
+        // because `eventing::split_callback` reads it that way and one owner decides.
+        assert_eq!(list[1]["host"], json!(""));
+        assert_eq!(list[1]["path"], json!("example.com/cb"));
+        // A row's fields come from one snapshot: no seq/errors/timed_out leaks into
+        // this document, because `get_status` never wrote them.
+        assert!(first.get("seq").is_none() && first.get("errors").is_none());
+    }
+
+    #[test]
+    fn status_history_prints_the_rows_the_table_remembers() {
+        crate::pin_test_dir();
+        // An empty history is printed as `[]` — the reference's `[] or []` answer
+        // for a page that iterates the key without checking — and it is the *same*
+        // `[]` the shell prints after a restart, which is the divergence this route
+        // inherited rather than invented. See `store::StateStore::play_history` for
+        // why the two causes cannot be told apart from here.
+        let (face, store, _) = harness_status("status-history-empty");
+        assert_eq!(status_value(&face)["history"], json!([]));
+        store.push_history("Rick Astley", "http://h/a.mp4", 1_730_000_000);
+        store.push_history("", "http://h/b.ts", 1_730_000_001);
+        let rows = status_value(&face)["history"].clone();
+        let list = rows.as_array().expect("a list");
+        assert_eq!(list.len(), 2);
+        assert_eq!(
+            list[0].as_object().expect("a row").keys().collect::<Vec<_>>(),
+            ["uri", "title", "time"],
+            "the reference's three keys, in its order (`protocol.py:1211-1215`)"
+        );
+        assert_eq!(list[0]["uri"], json!("http://h/a.mp4"));
+        assert_eq!(list[0]["title"], json!("Rick Astley"));
+        assert_eq!(list[0]["time"], json!(1_730_000_000i64));
+        // The route does not apply the title fallback: an empty title reaching here
+        // would mean the *owner* forgot it, and printing the URI instead would hide
+        // that in the document instead of in the log.
+        assert_eq!(list[1]["title"], json!(""));
+        // And the settings file's `Play_History` is **not** consulted, which is the
+        // half a reader of this test would otherwise assume: a stored list that the
+        // shell never wrote would print as rows, and a cast the shell made would
+        // vanish if the file were the source. Pinning which one is read is what
+        // keeps the next person from wiring both.
+        let setting = fresh_setting("status-history-file");
+        setting.set(Key::PlayHistory, json!([{"uri": "http://from/the/file"}]));
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting.clone(),
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        assert_eq!(
+            status_value(&face)["history"],
+            json!([]),
+            "the document must not read a list this shell never writes"
+        );
+    }
+
+    #[test]
+    fn status_ip_is_the_joined_list_and_agrees_with_the_announcer_s_source() {
+        crate::pin_test_dir();
+        let (face, _, _) = harness_status("status-ip");
+        let doc = status_value(&face);
+        let advertised = doc["network"]["advertised"].as_array().expect("a list");
+        let joined = doc["server"]["ip"].as_str().expect("a string");
+        // Two shapes, one fact: `'/'.join(advertisable_addresses())` for the page's
+        // cast-entry row, the list for the picker. A port that read a *different*
+        // address helper for one of them would print an address the television
+        // cannot open — AGENTS.md §4.1's first row, one layer over.
+        let parts: Vec<&str> = joined.split('/').filter(|p| !p.is_empty()).collect();
+        assert_eq!(
+            parts,
+            advertised.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>()
+        );
+        for address in advertised.iter() {
+            let text = address.as_str().expect("an address string");
+            assert!(
+                text.parse::<std::net::Ipv4Addr>().is_ok(),
+                "the picker offered something that is not an IPv4 address: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn interfaces_uses_current_where_status_uses_interface() {
+        crate::pin_test_dir();
+        let setting = fresh_setting("status-vs-interfaces");
+        setting.set(Key::NetworkInterface, Value::String("en0".into()));
+        let build = |store: Arc<TestStore>| -> Arc<Face> {
+            Face::new(
+                Arc::new(FakeControl::soap_ok()),
+                Arc::new(FakeSubscription::new()),
+                Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+                setting.clone(),
+                store as SharedStore,
+            )
+            .expect("face builds")
+            .into()
+        };
+        let face = build(TestStore::new());
+        let standalone = face.answer(&get_api("/api?query=interfaces", LOCAL));
+        assert_eq!(standalone.status, 200);
+        let doc: serde_json::Value =
+            serde_json::from_slice(&standalone.body).expect("a document");
+        let keys: Vec<&str> = doc.as_object().expect("object").keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["current", "advertised", "interfaces"]);
+        assert_eq!(doc["current"], json!("en0"));
+        let status = status_value(&face);
+        assert_eq!(status["network"]["interface"], json!("en0"));
+        // Same facts, first key spelled differently — the reference writes both this
+        // way (`:2016-2020` against `:2146-2151`) and a page reads each. Making them
+        // agree is the tidy change that breaks one of them.
+        assert!(status["network"].get("current").is_none());
+        assert!(doc.get("interface").is_none());
+        assert_eq!(
+            status["network"]["advertised"],
+            doc["advertised"],
+            "the two documents must not read different address sets"
+        );
+        assert_eq!(
+            status["network"]["interfaces"],
+            doc["interfaces"],
+            "nor different picker tables"
+        );
+        // The picker's rows carry the seven keys the page sorts and colours by, in
+        // the reference's order — asserted on whatever this machine contributes, so
+        // the claim does not depend on how many interfaces the runner has.
+        let rows = doc["interfaces"].as_array().expect("a table");
+        for r in rows {
+            let keys: Vec<&str> = r
+                .as_object()
+                .expect("a row")
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            assert_eq!(
+                keys,
+                ["name", "ip", "netmask", "default", "usable", "reason", "selected"]
+            );
+        }
+        assert_eq!(
+            rows.len(),
+            macast_core::net::network_interfaces(&setting).len(),
+            "the route filtered the table it was handed"
+        );
+    }
+
+    #[test]
+    fn status_and_interfaces_refuse_a_lan_caller_that_brings_no_token() {
+        crate::pin_test_dir();
+        let (face, store, subscription) = harness_status("status-gate");
+        // The token has to exist before a caller can bring it: `SECRET` is only a
+        // credential once it is the one this machine compares against, and a test
+        // that handed a token nobody had minted would be asserting that the gate
+        // accepts *any* value.
+        store_token(&face.setting, Some(SECRET));
+        store.put("TransportState", Value::String("PLAYING".into()));
+        subscription.push_row(row("uuid:leak", "192.168.1.9:8080", "/cb", 1800));
+        for query in ["status", "interfaces"] {
+            let refused = face.answer(&get_api(&format!("/api?query={query}"), LAN));
+            assert_eq!(refused.status, 403, "{query} answered a LAN caller");
+            let body: serde_json::Value =
+                serde_json::from_slice(&refused.body).expect("a refusal is still JSON");
+            assert_eq!(
+                body["message"].as_str(),
+                Some(MANAGEMENT_REFUSAL),
+                // Compared as a **parsed field**, not as a substring: the writer is
+                // `ensure_ascii`, so the bytes on the wire are `\u7ba1\u7406…` and a
+                // `contains` over the raw sentence could never match. A first version
+                // of this assertion grepped the body and went red on a correct refusal.
+                "{query} refused in the wrong sentence: {body}"
+            );
+            assert_eq!(body["code"], json!(1));
+            // The whole document stays shut, not just the flag: what a passer-by
+            // must not read here is the interface table, what is playing, who is
+            // subscribed, and every address in the play history.
+            assert!(body.get("server").is_none() && body.get("media").is_none());
+            assert!(
+                !text(&refused.body).contains("PLAYING"),
+                "the refusal leaked the state table"
+            );
+            assert!(
+                !text(&refused.body).contains("192.168.1.9"),
+                "the refusal leaked a subscriber address"
+            );
+            // Same caller, same address, with the token: served.
+            let with_token = face.answer(&get_api(
+                &format!("/api?query={query}&token={SECRET}"),
+                LAN,
+            ));
+            assert_eq!(with_token.status, 200, "{query} refused a tokened caller");
+        }
+        let local = face.answer(&get_api("/api?query=status", LOCAL));
+        assert_eq!(local.status, 200);
+    }
+
+    #[test]
+    fn the_status_read_creates_no_key_that_was_not_there() {
+        crate::pin_test_dir();
+        // The reference builds this document with `Setting.get(key, default)` in five
+        // places, and every one of those takes the default **into the table** for the
+        // next `save` to persist (AGENTS.md §4.2's first trap). This route reads the
+        // four keys it owns through `peek` instead, so a user who never opened the
+        // 插件 or 网页地址投屏 card does not find `Macast_Renderer` in his file
+        // because a page polled it. The boundary is not the whole table, and the
+        // `Network_Interface` case below is where the boundary is.
+        // The boundary is deliberate and narrow: `ApplicationPort`, `Https_enabled`
+        // and `Https_Port` still go through the shared readers, because those three
+        // are facts the *shell* owns and wrote at startup — pinning the five below
+        // is the cost of not silently extending the rule to the whole table.
+        let setting = fresh_setting("status-no-write");
+        let face: Arc<Face> = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting.clone(),
+            TestStore::new() as SharedStore,
+        )
+        .expect("face builds")
+        .into();
+        for _ in 0..2 {
+            status_value(&face);
+            face.answer(&get_api("/api?query=interfaces", LOCAL));
+        }
+        for key in [
+            Key::MacastProtocols,
+            Key::MacastProtocol,
+            Key::MacastRenderer,
+            Key::PlayHistory,
+        ] {
+            assert!(
+                setting.peek(key).is_none(),
+                "the status read created {} in a settings file that had no such key",
+                key.name()
+            );
+        }
+        // `Network_Interface` is deliberately **not** in that list, and the reason is
+        // worth keeping because it is the boundary of this claim rather than an
+        // oversight: the picker's table comes from
+        // `macast_core::net::network_interfaces`, which reads the pin through the
+        // shared reader — so after one status read the key exists, exactly as it does
+        // in Python (`Setting.get_network_interface()` is `get(..., '')`). The four
+        // keys above are the ones this route reads for itself; extending the rule to
+        // the whole table would be a change to SSDP, the announcer and the relay in
+        // the middle of a status-port round, and it is #14's successor's decision, not
+        // this test's.
+        assert!(
+            setting.peek(Key::NetworkInterface).is_some(),
+            "the picker's own reader stopped creating its key — if that changed on \
+             purpose, this route's claim above about who creates what needs re-reading"
+        );
+    }
+
+    #[test]
+    fn py_truthy_is_the_rule_behind_or_not_a_guess_about_it() {
+        crate::pin_test_dir();
+        for (value, want) in [
+            (json!(null), false),
+            (json!(false), false),
+            (json!(0), false),
+            (json!(0.0), false),
+            (json!(""), false),
+            (json!([]), false),
+            (json!({}), false),
+            (json!(true), true),
+            (json!(1), true),
+            (json!("-1"), true),
+            (json!("0"), true),
+            (json!([""]), true),
+            (json!([0]), true),
+            (json!({"a": 0}), true),
+        ] {
+            assert_eq!(py_truthy(&value), want, "{value} truthiness");
+        }
     }
 }

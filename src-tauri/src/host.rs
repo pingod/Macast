@@ -166,7 +166,10 @@ pub struct StateTable {
     playlist: Mutex<Vec<String>>,
     log: Arc<Logger>,
     playlist_index: Mutex<i64>,
-    history: Mutex<Vec<(String, String)>>,
+    /// `(title, uri, time)` rows, newest first — the reference's three fields
+    /// (`protocol.py:1211-1215`), kept in memory rather than in the settings file
+    /// for the reason recorded at [`StateTable::add_history`].
+    history: Mutex<Vec<(String, String, i64)>>,
     /// Who hears about a changed state variable. `None` until `main.rs` has
     /// built the eventing service; the boot writes never broadcast anyway.
     broadcaster: Mutex<Option<SharedBroadcast>>,
@@ -360,17 +363,26 @@ impl StateTable {
     /// deduped by URI, capped at 50 so the settings file stays small. An empty
     /// title stores the URI, because the history's job is to be recognisable
     /// later and a blank row is not.
+    ///
+    /// **The reference writes this list into `Play_History` in the user's settings
+    /// file; this shell keeps it in memory**, so a restart empties it while the
+    /// Python app's 播放历史 card still shows yesterday's casts. That is a divergence,
+    /// not a fix: the comment here used to cite AGENTS.md §10 ("don't write the user's
+    /// configuration") in its defence, and §10 is about *verification paths* — the
+    /// app persisting its own history is what the user's file is for. Closing the gap
+    /// is a decision with a restart-survival test on it, tracked in
+    /// `docs/Rust-Port-Design.md`, and `query=status` prints these rows while it waits.
     pub fn add_history(&self, title: &str, uri: &str) {
         let mut history = lock(&self.history);
-        history.retain(|(_, item)| item != uri);
+        history.retain(|(_, item, _)| item != uri);
         let name = if title.is_empty() { uri } else { title };
-        history.insert(0, (name.to_string(), uri.to_string()));
+        history.insert(0, (name.to_string(), uri.to_string(), now_secs() as i64));
         if history.len() > 50 {
             history.truncate(50);
         }
     }
 
-    pub fn play_history(&self) -> Vec<(String, String)> {
+    pub fn play_history(&self) -> Vec<(String, String, i64)> {
         lock(&self.history).clone()
     }
 
@@ -419,6 +431,12 @@ impl macast_upnp::StateStore for StateTable {
 
     fn add_history(&self, title: &str, uri: &str) {
         self.add_history(title, uri);
+    }
+
+    fn play_history(&self) -> Vec<(String, String, i64)> {
+        // Delegates to the inherent read of the same name; `self.x()` resolves to
+        // the inherent method, so this is a forward, not the trait calling itself.
+        StateTable::play_history(self)
     }
 }
 
@@ -2380,7 +2398,7 @@ mod tests {
     ///   `CastChannel::new` means deleting the two users that come before it (the
     ///   refusal sentence and the certificate's `if`), and that is a rewrite, not a
     ///   substitution — its red would say as much about the rewrite as about the
-    ///   rule. What really witnesses position is §23 of
+    ///   rule. What really witnesses position is §24 of
     ///   `scripts/verify_rust_receiver.sh`: delete the certificate's gate and the
     ///   socket, the announcement on the wire, and the key material all go red
     ///   together — 6 checks, measured 2026-10-18.
@@ -2421,6 +2439,54 @@ mod tests {
             1,
             "the gate is read more than once, so the three faces can disagree"
         );
+    }
+
+    /// The play history is what `query=status` prints and what the 播放历史 card
+    /// offers back, so the four rules the reference applies at write time live
+    /// here — the document's reader is tested in `macast-upnp`, and this is the
+    /// owner of the rows.
+    #[test]
+    fn the_play_history_follows_the_reference_s_write_rules() {
+        pin_test_dir();
+        let table = StateTable::new(logger());
+        // Newest first.
+        table.add_history("第一部", "http://h/a.mp4");
+        table.add_history("第二部", "http://h/b.mp4");
+        assert_eq!(
+            table
+                .play_history()
+                .iter()
+                .map(|(title, _, _)| title.as_str())
+                .collect::<Vec<_>>(),
+            ["第二部", "第一部"]
+        );
+        // Re-casting something already in the list **moves** it to the front rather
+        // than growing a second row — `protocol.py:1207-1208` filters by `uri` first.
+        table.add_history("第一部again", "http://h/a.mp4");
+        let rows = table.play_history();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, "http://h/a.mp4");
+        assert_eq!(rows[0].0, "第一部again");
+        // An empty title stores the URI, because a blank row is not recognisable
+        // later (`'title': title or uri`).
+        table.add_history("", "http://h/nameless.mkv");
+        assert_eq!(table.play_history()[0].0, "http://h/nameless.mkv");
+        // The third field is a wall-clock second, not a counter: the page prints it.
+        let stamped = table.play_history()[0].2;
+        assert!(
+            stamped > 1_700_000_000,
+            "the row carries no real time: {stamped}"
+        );
+        // Capped at 50 so the list the page renders cannot grow without bound.
+        for n in 0..60 {
+            table.add_history("t", &format!("http://h/{n}.mp4"));
+        }
+        assert_eq!(table.play_history().len(), 50);
+        assert_eq!(table.play_history()[0].1, "http://h/59.mp4");
+        // And clearing is the reference's `clear_play_history`: the rows go, the
+        // list stays a list.
+        table.clear_history();
+        assert!(table.play_history().is_empty());
     }
 
     /// Same discipline as the library crates: a test added without the pin would
@@ -2475,7 +2541,7 @@ mod tests {
             }
         }
         assert!(
-            scanned >= 9,
+            scanned >= 10,
             "only {} tests scanned in this crate — an empty scan is not a pass",
             scanned
         );

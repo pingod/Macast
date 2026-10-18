@@ -143,16 +143,30 @@ impl Subscriber {
 
 /// One row of the read-only subscriber view [`Eventing::subscribers`] returns.
 ///
-/// These are facts, not a page shape: `serde` is not a dependency of this crate,
-/// and the JSON the settings page reads is owned by whoever serves it
-/// (`src-tauri/src/main.rs` reproduces the reference's `query=subscribers`
-/// keys). Every lease-backed field of one row comes out of **one** lock
-/// acquisition, so a row is a point-in-time snapshot: it can be a moment behind
-/// the event thread, never a mix of two moments.
+/// These are facts, not a page shape: the JSON the settings page reads is owned by
+/// whoever serves it — `src-tauri/src/main.rs` for the reference's
+/// `query=subscribers` keys, `crate::http`'s `query=status` for the six keys
+/// `get_status` writes (`host, url, service, sid, path, timeout`). A row is
+/// therefore read by two documents and shaped by neither. Every lease-backed field
+/// of one row comes out of **one** lock acquisition, so a row is a point-in-time
+/// snapshot: it can be a moment behind the event thread, never a mix of two moments.
+#[derive(Clone, Debug)]
 pub struct SubscriberRow {
     pub sid: String,
     pub service: String,
     pub url: String,
+    /// The callback's host part, read the way `ObserveClient.__init__` reads it
+    /// (`protocol.py:452-453`): the run of digits, colons and dots right after the
+    /// `//`, which is empty for anything else — a hostname with letters contributes
+    /// `''` there and *everything* to `path`. Both are here because the status
+    /// document's `clients` rows carry them, and the page's 客户端信息 card answers
+    /// "who is watching" from `host`: recomputing the split a second time in the
+    /// HTTP face would be a second owner of a rule that has one measured reading
+    /// (`split_callback`, including the `[::1]` case where Python's regex matches
+    /// the empty string and the brackets fall into `path`).
+    pub host: String,
+    /// The callback's path part — the rest of the URL after [`SubscriberRow::host`].
+    pub path: String,
     /// The timeout this subscription was last granted, in seconds.
     pub timeout: i64,
     /// `NTSEQ` of the next event this subscriber would receive.
@@ -378,6 +392,8 @@ impl Eventing {
                     sid: client.sid.clone(),
                     service: client.service.clone(),
                     url: client.url.clone(),
+                    host: client.host.clone(),
+                    path: client.path.clone(),
                     timeout: lease.timeout,
                     seq: lease.seq,
                     errors: lease.error,
@@ -471,6 +487,16 @@ impl Subscription for Eventing {
 
     fn remove(&self, sid: &str) -> u16 {
         self.remove_subscribe(sid)
+    }
+
+    /// The same snapshot [`Eventing::subscribers`] takes, handed to the HTTP face
+    /// for `query=status`'s `clients` list. It is not a second read of the table:
+    /// one `published()` binding, one lease per row — a face that walked the live
+    /// map instead would be iterating a structure the event thread is republishing
+    /// (the failure Python's Part 49 was written about, and the reason this door
+    /// returns rows rather than a guard).
+    fn rows(&self) -> Vec<SubscriberRow> {
+        self.subscribers()
     }
 }
 
@@ -722,6 +748,10 @@ mod tests {
         fn set_playlist_index(&self, _index: i64) {}
 
         fn add_history(&self, _title: &str, _uri: &str) {}
+
+        fn play_history(&self) -> Vec<(String, String, i64)> {
+            Vec::new()
+        }
     }
 
     struct Collector {

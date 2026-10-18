@@ -237,6 +237,36 @@ pub fn version() -> String {
     .clone()
 }
 
+/// `sys.platform` — the spelling the reference reports in its own status document,
+/// and the one the plugin page compares a `<macast.platform>` list against
+/// (`setting.html:3470` takes `plugin-info`'s `platform` and `indexOf`s it, `:1111`
+/// prints `{{ status.server.system }} ({{ status.server.platform }})`).
+///
+/// This is **not** [`std::env::consts::OS`], and the difference is user-visible:
+/// Rust says `macos` and `windows` where CPython says `darwin` and `win32`, so the
+/// 平台 row would read "Darwin (macos)" next to every older Macast install that
+/// printed "Darwin (darwin)", and a plugin list written as `win32` would match
+/// nothing on a Windows machine — the silent kind, which is §4.2's whole family.
+/// `win32` on a 64-bit build is not a typo either; that is what `sys.platform`
+/// says there.
+///
+/// The three names are pinned by the `sys_platform_names_match_cpython` test, whose
+/// macOS reading was taken from this machine's own interpreter
+/// (`sys.platform == 'darwin'`, `platform.system() == 'Darwin'`,
+/// `platform.release() == uname -r`) on 2026-10-18. Anything else falls back to the
+/// Rust name rather than inventing a fourth CPython spelling we have not measured.
+pub fn sys_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "darwin".to_string()
+    } else if cfg!(target_os = "windows") {
+        "win32".to_string()
+    } else if cfg!(target_os = "linux") {
+        "linux".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
 /// The `User-Agent`/`SERVER` string UPnP discovery answers with
 /// (`Setting.get_server_info()`): `'{system}/{release} UPnP/1.0 Macast/{version}'`.
 pub fn server_info() -> String {
@@ -352,6 +382,32 @@ mod tests {
         let _ = std::fs::create_dir_all(&target).unwrap();
         assert!(target.join("macast.key").parent().unwrap().exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sys_platform_names_match_cpython() {
+        // The two spellings that differ from `std::env::consts::OS` are the whole
+        // reason this function exists, so the test asks for them by name rather
+        // than checking that "something plausible" came back. `darwin` was read off
+        // this machine's own interpreter on 2026-10-18:
+        // `python -c "import sys; print(sys.platform)"` → `'darwin'`, next to
+        // `platform.system()` → `'Darwin'`. A page that prints
+        // `{{ system }} ({{ platform }})` shows the user "Darwin (darwin)" today and
+        // "Darwin (macos)" the day someone replaces this with `consts::OS`, and a
+        // plugin list keyed `win32` stops matching on Windows — both silently.
+        let name = sys_platform();
+        if cfg!(target_os = "macos") {
+            assert_eq!(name, "darwin");
+            assert_ne!(name, std::env::consts::OS, "macos is CPython's `darwin`");
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(name, "win32");
+            assert_ne!(name, std::env::consts::OS, "windows is CPython's `win32`");
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(name, "linux");
+            assert_eq!(name, std::env::consts::OS, "here the two agree");
+        } else {
+            assert_eq!(name, std::env::consts::OS, "unknown target: no invented name");
+        }
     }
 
     #[test]

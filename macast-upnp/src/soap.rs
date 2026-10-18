@@ -1569,6 +1569,20 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push((title.to_string(), uri.to_string()));
         }
+
+        /// The trait's three-field row, derived from the pairs this double keeps.
+        /// SOAP-side tests assert on [`MapStore::history`] (the two-field inherent
+        /// read) because what they ask is "which title and address reached the
+        /// seam"; the timestamp belongs to whoever owns the table, and `MapStore`
+        /// is not that owner — `src-tauri`'s `StateTable` stamps it (`host.rs`).
+        fn play_history(&self) -> Vec<(String, String, i64)> {
+            self.history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(title, uri)| (title.clone(), uri.clone(), 0))
+                .collect()
+        }
     }
 
     #[derive(Default)]
