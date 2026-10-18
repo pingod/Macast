@@ -88,6 +88,13 @@ const SCPD_CONTENT_TYPE: &str = "application/xml";
 /// has been reading whenever it POSTs somewhere that is not an action route.
 /// Kept verbatim: a header a sender already tolerates is not ours to repair.
 const JSON_CONTENT_TYPE: &str = "application/json;charset:utf-8";
+/// The `query=log-download` content type, spelled **exactly** as the reference
+/// spells it (`protocol.py:2141-2142`, with the space) — the other two content
+/// types on this face are cherrypy's own defaults, so they carry its spelling
+/// (`text/html;charset=utf-8`, no space; `application/json;charset:utf-8`, note the
+/// transposed `utf-8`), and a header that a browser or a `curl -OJ` parses is not
+/// the place to normalise someone else's typo.
+const LOG_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// A request head is refused at this size. Ours — the shipped receiver inherits
 /// cherrypy's default `max_request_header_size` of 200 KiB only when it is
@@ -171,6 +178,11 @@ enum PostAction {
     ClearCookies,
     /// `resolve-cookie-browser=<spec>`: set or clear the browser reading.
     SetCookieBrowser,
+    /// `clear-log=<anything>`: empty one log file and its rotated backups. The
+    /// field's **value is not the module** — Python reads
+    /// `kwargs.get('module')` (a helper field, `protocol.py:2343`), so the page
+    /// posts `clear-log=1&module=MPV` and a bare `clear-log=1` means the main log.
+    ClearLog,
 }
 
 struct PostRoute {
@@ -204,6 +216,10 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     PostRoute { field: "resolve-cookies",       gate: "management", action: PostAction::SaveCookies },
     PostRoute { field: "resolve-cookies-clear", gate: "management", action: PostAction::ClearCookies },
     PostRoute { field: "resolve-cookie-browser", gate: "management", action: PostAction::SetCookieBrowser },
+    // `clear-log` is a POST in the reference and must stay one: the GET flavour
+    // would be triggerable by any page's `<img src=…&clear-log=1>`, which is
+    // AGENTS.md §4.10's explicit red line for this endpoint ("清空走 POST").
+    PostRoute { field: "clear-log", gate: "management", action: PostAction::ClearLog },
 ];
 
 /// `site_of()` (`protocol.py:1491`): `(host, port)` out of a URL or `Host`
@@ -423,11 +439,26 @@ enum Action {
     /// `query=subscribers`: who is subscribed to our events, and whether the
     /// machinery that lists them is still draining.
     Subscribers,
+    /// `query=log`: the 「日志」 panel's tail of one log file.
+    Log,
+    /// `query=log-modules`: the panel's selector — main file plus one row per log
+    /// file on disk, rotated siblings included.
+    LogModules,
+    /// `query=log-download`: the whole file as an attachment.
+    LogDownload,
 }
 
-/// The seven answers this port implements out of the shipped management API's
+/// The eleven answers this port implements out of the shipped management API's
 /// fifteen GET queries. Each is a **cumulative** check, not a choice: see
 /// [`Face::gate_refusal`].
+///
+/// The four that are still missing are `plugin-info`, `module-settings`,
+/// `launch-param` and the two `mirror-state`/`mirror-snapshot` reads. The first
+/// three belong to plugin and module subsystems this shell has not ported at all,
+/// so there is nothing to answer yet; `launch-param` is a different case — the
+/// reference hands back the **whole settings table**, `Api_Token` included, so it
+/// waits for its own decision about who may read it rather than being wired to the
+/// same management gate on the theory that the gate is enough.
 ///
 /// **Two deviations from Python's *structure*, both recorded rather than copied
 /// silently** (`protocol.py:2066-2120`). First, Python asks the cast question
@@ -444,7 +475,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 8] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 11] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -530,6 +561,30 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 8] = [
         // exactly the failure that only the second question can see.
         gate: "management",
         action: Action::Subscribers,
+    },
+    GetRoute {
+        query: "log",
+        // Management-gated like every other member of the reference's list. The
+        // reason is AGENTS.md §4.10's whole point: a log line carries **sender
+        // provided** text (a DIDL `dc:title`, a URL), and a LAN body that echoes
+        // them is a harvesting surface, not a status light.
+        gate: "management",
+        action: Action::Log,
+    },
+    GetRoute {
+        query: "log-modules",
+        gate: "management",
+        action: Action::LogModules,
+    },
+    GetRoute {
+        query: "log-download",
+        // The same door as `log`, and a stricter consequence: this one hands over
+        // the **whole** file. Which is why it stays a separate endpoint rather than
+        // an `all=1` the page might default to — the reference's own comment
+        // (`protocol.py:2130-2134`) says the pull is "an explicit click (or a bug
+        // report)".
+        gate: "management",
+        action: Action::LogDownload,
     },
 ];
 
@@ -1528,6 +1583,9 @@ impl Face {
             Action::Status => self.status_entry(),
             Action::Interfaces => self.interfaces_entry(),
             Action::Subscribers => self.subscribers_entry(),
+            Action::Log => self.log_entry(req),
+            Action::LogModules => self.log_modules_entry(),
+            Action::LogDownload => self.log_download_entry(req),
         }
     }
 
@@ -1806,6 +1864,83 @@ impl Face {
             },
             &self.subscription.rows(),
         )
+    }
+
+    /// `query=log` — the panel's tail of one log file.
+    ///
+    /// **`?tail=` that is not a number falls back to the default instead of
+    /// failing.** The reference passes `kwargs.get('tail', LOG_TAIL_LINES)`
+    /// straight into `read_log_tail`, so `?tail=abc` raises there and the caller
+    /// gets a 500 with no body. Ours answers the default tail: this route takes no
+    /// action, it reads a file, and a typo in a query parameter on a read-only
+    /// surface should not be the machine's fault — the same reasoning, and the same
+    /// "document the deviation rather than silently differ" rule, as
+    /// `macast_core::url`'s lossy percent-decoding.
+    fn log_entry(&self, req: &Request) -> Response {
+        let module = query_value(req, "module");
+        let lines = query_value(req, "tail")
+            .as_deref()
+            .and_then(|text| text.trim().parse::<usize>().ok())
+            .unwrap_or(macast_core::logging::DEFAULT_TAIL_LINES);
+        let all = query_flag(req, "all");
+        json_value_response(&macast_core::logging::log_view_document(
+            module.as_deref(),
+            lines,
+            all,
+        ))
+    }
+
+    /// `query=log-modules` — the panel's selector.
+    fn log_modules_entry(&self) -> Response {
+        json_value_response(&macast_core::logging::log_modules_document())
+    }
+
+    /// `query=log-download` — one whole log file as an attachment.
+    ///
+    /// Two answers, both the reference's: a name nobody has written a log under is
+    /// **200 with an empty body** (it returns `b''` before setting any of the
+    /// download headers — `protocol.py:2135-2138`; our port keeps one content type
+    /// for both, because a response always needs one and the empty case is read by
+    /// no renderer), and a file that cannot be opened is empty too rather than a
+    /// 404 — the difference between "no such module" and "no such bytes" is not a
+    /// thing the page can act on.
+    ///
+    /// The read here is **unbounded on purpose**: the reference does
+    /// `open(path,'rb').read()`, and the bound that matters is the writer's
+    /// (`LOG_MAX_BYTES` × backups), not this route's. Adding a cap here would
+    /// answer "download everything" with a truncated file that says nothing —
+    /// the `?all=1` flavour in [`Face::log_entry`] is the bounded one, and that
+    /// asymmetry is the reference's too.
+    fn log_download_entry(&self, req: &Request) -> Response {
+        let module = query_value(req, "module");
+        let (path, _) = macast_core::logging::log_target(module.as_deref());
+        let Some(path) = path else {
+            return Response::new(200, LOG_CONTENT_TYPE, Vec::new());
+        };
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("macast.log")
+            .to_string();
+        let body = std::fs::read(&path).unwrap_or_default();
+        Response {
+            status: 200,
+            content_type: LOG_CONTENT_TYPE,
+            variant: vec![(
+                "Content-Disposition".to_string(),
+                format!("attachment; filename=\"{name}\""),
+            )],
+            body,
+            omit_body: false,
+        }
+    }
+
+    /// `POST clear-log=<anything>&module=<name>` — empty one log and its backups.
+    fn clear_log_answer(&self, req: &Request) -> Response {
+        let module = param_value(req, "module");
+        json_value_response(&macast_core::logging::clear_log_document(
+            module.as_deref(),
+        ))
     }
 
     fn interfaces_entry(&self) -> Response {
@@ -2191,6 +2326,11 @@ impl Face {
                         &param_value(req, "resolve-cookie-browser").unwrap_or_default(),
                     ),
                 ),
+                // The document comes from `macast_core::logging`, which is also what
+                // the window's own `clear_log` command calls — one builder, because
+                // "which files went" is a fact about the log directory and this face
+                // must not answer it differently from the app's own panel.
+                PostAction::ClearLog => self.clear_log_answer(req),
             });
         }
         None
@@ -5550,7 +5690,7 @@ mod tests {
         crate::pin_test_dir();
         // The gate is a **string** in the table on purpose, so the table itself
         // needs asking: an empty scan is a scan that agrees with anything.
-        assert!(GET_MANAGEMENT_ROUTES.len() >= 8);
+        assert!(GET_MANAGEMENT_ROUTES.len() >= 11);
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -5573,6 +5713,9 @@ mod tests {
             Action::Status,
             Action::Interfaces,
             Action::Subscribers,
+            Action::Log,
+            Action::LogModules,
+            Action::LogDownload,
         ] {
             assert_eq!(
                 GET_MANAGEMENT_ROUTES
@@ -5607,7 +5750,7 @@ mod tests {
         // agree with anything. Same two questions, same reason: unique field names
         // (a duplicate would shadow the later one forever) and a gate every row can
         // actually be parsed to.
-        assert!(POST_MANAGEMENT_ROUTES.len() >= 6);
+        assert!(POST_MANAGEMENT_ROUTES.len() >= 7);
         let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
         fields.sort_unstable();
         fields.dedup();
@@ -5628,6 +5771,7 @@ mod tests {
             PostAction::SaveCookies,
             PostAction::ClearCookies,
             PostAction::SetCookieBrowser,
+            PostAction::ClearLog,
         ] {
             assert_eq!(
                 POST_MANAGEMENT_ROUTES
@@ -7085,6 +7229,327 @@ mod tests {
                 "main.rs is writing subscriber-document keys again: {literal}"
             );
         }
+    }
+
+    // ---- the log panel's three reads and one write --------------------------------
+    //
+    // Every test below writes into **its own** module log (`log_fixture("name")`),
+    // because the log directory is one per process and these tests run in parallel:
+    // a test that asserted "the module list is exactly my one row" would be a race
+    // with the rest of the suite, and one that cleared the main log would empty
+    // another test's witness file mid-read (§4.2's 「并行跑的用例共享夹具路径」, in the
+    // one fixture this crate cannot pin per-test).
+
+    /// A claimed module logger with one line in it, plus the path its file lives at.
+    fn log_fixture(name: &str) -> std::path::PathBuf {
+        let logger = Logger::named(name);
+        let path = logger.claim();
+        logger.info(&format!("marker line for {name}"));
+        path
+    }
+
+    fn log_document(body: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(body).expect("a log answer is JSON")
+    }
+
+    #[test]
+    fn log_view_answers_the_reference_document_without_a_message_key() {
+        crate::pin_test_dir();
+        let module = "LogPanelTail";
+        let path = log_fixture(module);
+        let (face, _, _) = harness_status("log-view-tail");
+        let response = face.answer(&get_api(&format!("/api?query=log&module={module}"), LOCAL));
+        assert_eq!(response.status, 200);
+        let doc = log_document(&response.body);
+        let keys: Vec<&str> = doc.as_object().expect("object").keys().map(|k| k.as_str()).collect();
+        // **No `message` on the success path** — `protocol.py:2044-2046` writes
+        // `{code, logs, truncated, lines, size, module}`, and the unknown-module
+        // branch below writes seven keys with `message` in second place. Two shapes,
+        // one reader: a page that decides "did it work" by looking for `message` is
+        // wrong in both directions.
+        assert_eq!(keys, ["code", "logs", "truncated", "lines", "size", "module"]);
+        assert_eq!(doc["code"], json!(0));
+        assert_eq!(doc["module"], json!(module));
+        assert_eq!(doc["truncated"], json!(false));
+        assert_eq!(doc["lines"], json!(1));
+        assert_eq!(doc["size"], json!(std::fs::metadata(&path).expect("stat").len()));
+        assert!(
+            doc["logs"].as_str().unwrap().contains("marker line for LogPanelTail"),
+            "the tail is the file's own bytes: {}",
+            doc["logs"]
+        );
+    }
+
+    #[test]
+    fn log_view_tail_that_is_not_a_number_answers_the_default_not_a_failure() {
+        crate::pin_test_dir();
+        let module = "LogPanelBadTail";
+        log_fixture(module);
+        let (face, _, _) = harness_status("log-view-badtail");
+        let response = face.answer(&get_api(
+            &format!("/api?query=log&module={module}&tail=abc"),
+            LOCAL,
+        ));
+        let doc = log_document(&response.body);
+        // The reference raises here (`int('abc')` inside `read_log_tail`) and the
+        // caller gets a bodyless 500. Ours answers the default tail: a typo in a
+        // query parameter on a read-only surface is not the machine's fault. The
+        // deviation is the answer, so the answer has to say so — `code: 0`, the
+        // lines it actually read.
+        assert_eq!(response.status, 200);
+        assert_eq!(doc["code"], json!(0));
+        assert_eq!(doc["module"], json!(module));
+        assert!(doc["lines"].as_u64().expect("a count") >= 1);
+    }
+
+    #[test]
+    fn log_view_unknown_module_is_its_own_answer_not_the_whole_list() {
+        crate::pin_test_dir();
+        let (face, _, _) = harness_status("log-view-unknown");
+        let response = face.answer(&get_api("/api?query=log&module=NoSuchModule", LOCAL));
+        assert_eq!(response.status, 200);
+        let doc = log_document(&response.body);
+        let keys: Vec<&str> = doc.as_object().expect("object").keys().map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "code",
+                "message",
+                "logs",
+                "truncated",
+                "lines",
+                "size",
+                "module"
+            ]
+        );
+        assert_eq!(doc["code"], json!(1));
+        assert_eq!(doc["message"], json!("unknown log module"));
+        // The asked-for name is echoed back so the panel can say which of its
+        // dropdown entries went stale, and the payload keys stay present so the page
+        // renders an empty box instead of tripping over a missing field.
+        assert_eq!(doc["module"], json!("NoSuchModule"));
+        assert_eq!(doc["logs"], json!(""));
+        assert_eq!(doc["size"], json!(0));
+    }
+
+    #[test]
+    fn log_modules_lists_the_rotated_files_by_their_real_names() {
+        crate::pin_test_dir();
+        let module = "LogPanelSelector";
+        let current = log_fixture(module);
+        let backup = current.with_file_name(format!("{module}.log.1"));
+        std::fs::write(&backup, b"an older generation\n").expect("write backup");
+        let (face, _, _) = harness_status("log-view-selector");
+        let doc = log_document(
+            &face.answer(&get_api("/api?query=log-modules", LOCAL))
+                .body,
+        );
+        assert!(doc["main"]["size"].as_u64().expect("a size") > 0);
+        let rows = doc["modules"].as_array().expect("rows");
+        let mine: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| r["name"] == json!(module))
+            .collect();
+        // Two rows, one per **file** — the point of listing the backups is that the
+        // panel can say what `clear` is about to take, and the page cannot re-derive
+        // `file` from `name` without lying about the rotated one.
+        assert_eq!(mine.len(), 2, "expected the current file and its backup");
+        let files: Vec<&str> = mine
+            .iter()
+            .map(|r| r["file"].as_str().expect("a file name"))
+            .collect();
+        assert_eq!(files, [format!("{module}.log").as_str(), format!("{module}.log.1").as_str()]);
+        assert!(mine[1]["size"].as_u64().expect("a size") > 0);
+        assert!(mine[0]["mtime"].as_i64().is_some());
+    }
+
+    #[test]
+    fn log_download_serves_the_file_and_names_it() {
+        crate::pin_test_dir();
+        let module = "LogPanelDownload";
+        let path = log_fixture(module);
+        let (face, _, _) = harness_status("log-view-download");
+        let response = face.answer(&get_api(&format!("/api?query=log-download&module={module}"), LOCAL));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, LOG_CONTENT_TYPE);
+        // The reference's exact spelling, space included (`protocol.py:2141-2142`).
+        assert_eq!(
+            response.variant,
+            vec![(
+                "Content-Disposition".to_string(),
+                format!("attachment; filename=\"{module}.log\"")
+            )],
+            "a browser saving this file reads the name out of the header"
+        );
+        let body = String::from_utf8(response.body).expect("utf-8 log");
+        assert!(body.contains(&format!("marker line for {module}")));
+        assert_eq!(body.len() as u64, std::fs::metadata(&path).expect("stat").len());
+    }
+
+    #[test]
+    fn log_download_of_an_unknown_module_is_an_empty_two_hundred() {
+        crate::pin_test_dir();
+        let (face, _, _) = harness_status("log-view-download-unknown");
+        let response = face.answer(&get_api("/api?query=log-download&module=Nope", LOCAL));
+        // `return b''` before any download header is set — no `Content-Disposition`,
+        // because nothing is being attached.
+        assert_eq!(response.status, 200);
+        assert!(response.body.is_empty(), "a leak of some other file: {response:?}");
+        assert!(
+            !response
+                .variant
+                .iter()
+                .any(|(name, _)| name == "Content-Disposition"),
+            "an empty body must not arrive wearing an attachment name: {:?}",
+            response.variant
+        );
+    }
+
+    #[test]
+    fn clear_log_post_empties_the_module_and_counts_the_backups() {
+        crate::pin_test_dir();
+        let module = "LogPanelClear";
+        let current = log_fixture(module);
+        let backup = current.with_file_name(format!("{module}.log.1"));
+        std::fs::write(&backup, b"old bytes\n").expect("write backup");
+        let (face, _, _) = harness_status("log-view-clear");
+        let response = face.answer(&post_form("/api", "clear-log=1&module=LogPanelClear", LOCAL, &[]));
+        assert_eq!(response.status, 200);
+        let doc = log_document(&response.body);
+        assert_eq!(doc["code"], json!(0));
+        assert_eq!(doc["message"], json!("success"));
+        // The reference counts the file **and** the generations it takes with it
+        // (`logsplit.clear` returns `removed`), which is the number that explains to
+        // a user why three entries left the panel when they pressed one button.
+        assert!(
+            doc["removed"].as_u64().expect("a count") >= 2,
+            "clear said it took: {}",
+            doc["removed"]
+        );
+        assert_eq!(std::fs::metadata(&current).expect("stat").len(), 0);
+        assert!(
+            !backup.exists(),
+            "the rotated backup is what the user was out of space because of"
+        );
+    }
+
+    #[test]
+    fn a_get_can_never_clear_a_log() {
+        crate::pin_test_dir();
+        let module = "LogPanelCsrf";
+        let path = log_fixture(module);
+        let before = std::fs::metadata(&path).expect("stat").len();
+        let (face, _, _) = harness_status("log-view-csrf");
+        // Any page can fire this one: `<img src="http://127.0.0.1:58880/api?query=log
+        // &clear-log=1">`. The field names a **POST route**, so on a GET it is part
+        // of the query string and nothing at all — which is AGENTS.md §4.10's red
+        // line ("清空走 POST") and the same structural answer as §4.7c's route table:
+        // the verb decides, not the parameter's name.
+        let response = face.answer(&get_api(
+            &format!("/api?query=log&module={module}&clear-log=1"),
+            LOCAL,
+        ));
+        assert_eq!(response.status, 200);
+        let doc = log_document(&response.body);
+        assert_eq!(doc["code"], json!(0));
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            before,
+            "a GET cleared a log"
+        );
+        // And the same field as the only thing in a GET names no query at all.
+        let stray = face.answer(&get_api("/api?query=clear-log", LOCAL));
+        assert_eq!(stray.status, 200);
+        let doc = log_document(&stray.body);
+        // **Parsed, not grepped**: the writer is `ensure_ascii`, so the sentence is
+        // `\uXXXX` on the wire and a `contains` over the raw text can never match —
+        // the third time this round that a comparison had to go through the parser
+        // (§9.3's consequence, and §16 第 15 条 ②).
+        assert_eq!(doc["code"], json!(1));
+        assert!(
+            doc["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("不是这个接口认识的查询"),
+            "the GET named something else: {}",
+            doc["message"]
+        );
+    }
+
+    #[test]
+    fn the_log_documents_have_one_builder_for_both_doors() {
+        crate::pin_test_dir();
+        // Same audit shape as the subscriber document: the window's commands and the
+        // HTTP routes print three documents that the reference wrote once each, so
+        // the second copy is the bug. `macast-core` owns the builders; neither reader
+        // is allowed to spell the keys.
+        let main = include_str!("../../src-tauri/src/main.rs");
+        for call in [
+            "logging::log_view_document(",
+            "logging::log_modules_document()",
+            "logging::clear_log_document(",
+        ] {
+            assert!(main.contains(call), "main.rs stopped using {call}");
+        }
+        for literal in ["\"truncated\"", "\"removed\"", "\"unknown log module\"", "\"mtime\""] {
+            assert!(
+                !main.contains(literal),
+                "main.rs is writing log-document keys again: {literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_three_are_behind_the_management_door() {
+        crate::pin_test_dir();
+        let module = "LogPanelGate";
+        log_fixture(module);
+        let (face, _) = harness_management("log-view-gate");
+        for query in ["log", "log-modules", "log-download"] {
+            let refused = face.answer(&get_api(&format!("/api?query={query}&module={module}"), LAN));
+            assert_eq!(refused.status, 403, "{query} answered a LAN caller");
+            let body: serde_json::Value =
+                serde_json::from_slice(&refused.body).expect("a refusal is JSON");
+            assert_eq!(body["message"].as_str(), Some(MANAGEMENT_REFUSAL));
+            assert!(
+                !text(&refused.body).contains("marker line"),
+                "{query} leaked a log line to a LAN caller"
+            );
+            assert_eq!(
+                face.answer(&get_api(&format!("/api?query={query}&module={module}"), LOCAL))
+                    .status,
+                200,
+                "{query} refused this machine"
+            );
+        }
+        // A LAN caller must not be able to empty a log. `harness_management` never
+        // stores a token, so this is the shape the whole table exists to close.
+        //
+        // **The answer is HTTP 200 with `code: 403` in the body, not a 403 status** —
+        // that is `Answer::denied`'s documented envelope for POST (the shipped
+        // `_body(...)` never sets a status), while the GET refusals above answer 403
+        // in the status line, which is this port's own deviation. The first version
+        // of this check asserted `status == 403` and was wrong about the shape, not
+        // about the gate; the fixture bug that hid it was a hand-written
+        // `Content-Length` that did not match its body, so the dispatcher never saw
+        // the field at all and answered the fall-through — which is *also* a 200, so
+        // both errors cancelled into a passing-looking failure. `post_form` computes
+        // the length; the body's `code` is the assertion.
+        let cleared = face.answer(&post_form("/api", "clear-log=1&module=LogPanelGate", LAN, &[]));
+        let body = log_document(&cleared.body);
+        assert_eq!(
+            body["code"],
+            json!(403),
+            "a LAN caller cleared a log (body: {})",
+            body
+        );
+        assert_eq!(body["message"].as_str(), Some(MANAGEMENT_REFUSAL));
+        assert!(
+            std::fs::metadata(macast_core::logging::module_log_path("LogPanelGate"))
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "the refused call still emptied the file"
+        );
     }
 
     #[test]

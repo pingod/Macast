@@ -44,7 +44,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -503,27 +503,15 @@ fn set_network_interface(runtime: State<'_, Runtime>, name: String) -> Value {
 /// been unloaded all arrive here, and the page renders `logs` either way.
 #[tauri::command]
 fn log_view(module: Option<String>, tail: Option<usize>, all: Option<bool>) -> Value {
-    let want_all = all.unwrap_or(false);
-    let lines = tail.unwrap_or(logging::DEFAULT_TAIL_LINES);
-    match logging::read_log(module.as_deref(), lines, want_all) {
-        Ok(payload) => json!({
-            "code": 0,
-            "logs": payload.logs,
-            "truncated": payload.truncated,
-            "lines": payload.lines,
-            "size": payload.size,
-            "module": payload.module,
-        }),
-        Err(name) => json!({
-            "code": 1,
-            "message": "unknown log module",
-            "logs": "",
-            "truncated": false,
-            "lines": 0,
-            "size": 0,
-            "module": name,
-        }),
-    }
+    // The same builder `GET /api?query=log` calls (`macast_core::logging`). The key
+    // order, the missing `message` on the success branch and the `unknown log
+    // module` payload are all decided there, with the reasons; this is the window's
+    // door onto it, not a second copy of the document.
+    logging::log_view_document(
+        module.as_deref(),
+        tail.unwrap_or(logging::DEFAULT_TAIL_LINES),
+        all.unwrap_or(false),
+    )
 }
 
 /// Empty one log, module-aware, exactly like `POST clear-log`
@@ -537,17 +525,8 @@ fn log_view(module: Option<String>, tail: Option<usize>, all: Option<bool>) -> V
 /// the log surface exists to report.
 #[tauri::command]
 fn clear_log(module: Option<String>) -> Value {
-    let (path, _) = logging::log_target(module.as_deref());
-    let Some(path) = path else {
-        return json!({"code": 1, "message": "unknown log module"});
-    };
-    match logging::clear_log_file(&path) {
-        Ok(removed) => json!({"code": 0, "message": "success", "removed": removed}),
-        Err(e) => {
-            logging::root().error(&format!("clear log error: {e}"));
-            json!({"code": 1, "message": "clear failed"})
-        }
-    }
+    // Same single owner as `POST clear-log` on the DLNA port.
+    logging::clear_log_document(module.as_deref())
 }
 
 /// `query=log-modules` (`protocol.py:2116-2128`): the main log plus one row per
@@ -565,27 +544,7 @@ fn clear_log(module: Option<String>) -> Value {
 /// is not an error」.
 #[tauri::command]
 fn log_modules() -> Value {
-    let main = match fs::metadata(paths::log_file()) {
-        Ok(meta) => json!({"size": meta.len(), "mtime": mtime_secs(&meta)}),
-        Err(_) => json!({"size": 0, "mtime": 0}),
-    };
-    let modules: Vec<Value> = logging::module_logs()
-        .into_iter()
-        .map(|row| {
-            json!({
-                "name": row.name,
-                "file": format!("{}.log", row.name),
-                "size": row.bytes,
-                "mtime": row.modified,
-            })
-        })
-        .collect();
-    json!({
-        "main": main,
-        "modules": modules,
-        "claimed": logging::claimed_names(),
-        "known": logging::known_log_modules(),
-    })
+    logging::log_modules_document()
 }
 
 /// `query=subscribers` (`protocol.py:2202-2238`): who is subscribed to our
@@ -619,16 +578,6 @@ fn subscriber_snapshot(runtime: State<'_, Runtime>) -> Value {
     macast_upnp::http::subscribers_document(&child, &runtime.eventing.subscribers())
 }
 
-/// A file's mtime as whole seconds, `0` when the platform will not say. The
-/// reference's `os.stat(...).st_mtime` is a float; the page only ever shows it
-/// as a date, so the fraction is not worth a drift-prone `as` on the field.
-fn mtime_secs(meta: &fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// How long a control command waits for mpv to answer for itself before its ack
 /// admits it could not confirm anything, and how often it asks in that window.

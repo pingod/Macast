@@ -549,6 +549,7 @@ reaches the mpv this page drives.'"*
   这一段的**浏览必须排在第二台启动之前**（2026-10-18 同一轮改的）：广播的节奏是"3 包 / 225 ms，然后 60 秒静默"，而它原来是在实例起来之后再听 8 秒 —— 一台**确实在广播**的机器因此可以被答成"线上什么都没有"。这不是推测：把证书那道门删掉当变异体时这一段红了 5 条，而**这一条照旧绿**。挪到启动之前、窗口 30 秒之后，同一支变异体红 6 条，多的那条点名 `Macast-Gate-Off._googlecast._tcp.local.`。同一格还连带抓出一个**没有读者拥有的设置键**：两段 seed JSON 都写 `FriendlyName`，而真名是 `DLNA_FriendlyName`（`setting.rs:94`），于是被门住的那台用回退默认名广播，按名字匹配的这一问自然看不见它 —— 详见 §16 第 12 条 ②。
 - **段 23 是"一份文档，三个读者"的检查**（2026-10-18 交付）：`query=status` 与 `query=interfaces` 的每一个键都由**别人**回答一遍 —— 播放状态对 SOAP 的 `GetPositionInfo`、发布的地址对 §22 从线上读回来的 A 记录集合、订阅者对我们自己刚发的 `SUBSCRIBE` 拿到的 SID、`server.platform` 对 `.venv` 那个解释器的 `sys.platform`。这一段的形状是"**先设事实再问文档**"：状态表与订阅表在单元层是桩（`TestStore` / `FakeSubscription`），只有这里走的是真 mpv、真 GENA 套接字。**它交付的第一条不是绿，是一条红**：投完之后 `history` 仍然是 `[]` —— 参考实现的历史在设置文件里、这一版在内存里，而打印设置文件会答出"这台机器什么都没投过"。那一格变成 §8 的一行偏离账与 §16 的一条待决，而不是被改成"断言它是空的"。同一段后来把 `query=subscribers` 也接了进来（HTTP 路由与窗口命令**共用一个** `subscribers_document`，§8 记着那份文档比参考实现多的两个键）：检查的时机是"我们自己的 SID 还活着的那一刻"，于是 `aggregated` 必须含它、`pending_append` 必须**等**它归零（订阅落表排在事件线程那一步，判据坐在别人的账本上 —— §4.2 那条规矩在这份脚本里的第三次出现）、`rows` 与 `aggregated` 必须是同一组 SID、`UNSUBSCRIBE` 之后两份文档必须一起空。这一段也因此交回一条**脚本自己**的红：subscribers 那串检查跑完之后 `$API_BODY` 装的是 subscribers 那份文档，后面 `history` 的两条断言于是读不到自己的键 —— 产品没错，见 §16 第 17 条。
   另一条只有仪器变坏才能学到的：`json_join` 交回的是 `、`-连接的串，而第一版用 `tr '、' '/'` 去比 `server.ip` 的 `/`-连接 —— **`、` 是三个字节，`tr` 是逐字节的**。只有一条地址时没有分隔符可拆，所以它绿；场上一多地址（M9 那支变异体把宽集合喂进来）它红了**两次**，其中一次根本不是产品的错。判据换成"在同一份解析里比两个列表"，而这条教训与 §4.2「夹具脚本里的那对括号是承重的」同族：**测试自己的实现也是实现**，而它只在机器恰好给出多个值时才现形。
+  再后来同一段又接上日志面板那一族（`log` / `log-modules` / `log-download` / `POST clear-log`，文档由 `macast-core` 独自持有）：判据形状是"把这一次真跑出来的日志读回面板"——`log-modules` 每行的 `file` 与 `name` 必须自洽（不许从名字合成）、`Discovery.log` 里必须是 **announcer 自己写的那句**、不带 `module=` 的那次读的是 macast.log、`?tail=` 问的是"截断了自己说没说"而不是"历史在不在"，最后 POST 清空之后面板的下一次读必须是一个空盒子而不是报错。
 - **正文解析而非 grep**（§9.3 那个转义后果）。`--noproxy`：一个游离的 `http_proxy`
   会把回环请求送去代理，产出一个看起来像"端口死了"的 `000`。
   `-m 40`：`cast-resolved` 会同步跑源站探测（`probe_proxy`，转封装那一路最长
@@ -943,6 +944,26 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
     还有一条方法学的：M2 的第一版交回的是**编译错误**（`json!` 不在非测试作用域里），
     当天第二次踩同一个形状（`main.rs` 那支 M10 的第一版因为移走 `setup_config` 也是编译错误）——
     只看退出码时"编译不过"和"这一格没人问"完全同形，**同型替换要连能编译一起满足**。
+18. **日志面板那三份文档是"一个建造者、两扇门"的第三次应用**（2026-10-18，紧接第 16 条）：
+    `query=log` / `log-modules` / `log-download` 与 `POST clear-log` 的答案全部来自
+    `macast_core::logging` 的三个 `*_document`，而窗口那三条命令调的是**同一批函数**。
+    电池：加 `message` 让两个分支"统一"红 1；不再列旋转的 `.log.1` 红 1；让 GET 也能清
+    红 1；窗口重新自己写一个键红 1。**四条仪器错先于四条红**，都要记：
+    ① 手写 `Content-Length: 26` 与真实 32 字节的 body 不符 ⇒ 分发器没看见字段 ⇒
+       答复是 fall-through 的 200/`code:1`，读起来像"门开着"；用 `post_form`（它自己算长度，
+       其文档正解释 411 是**路由前**状态）之后才看到真正的 403-in-body；
+    ② 又一次拿原始字节 `contains` 中文句（§9.3 的 `ensure_ascii` 后果，本轮第三次）；
+    ③ 我在检查里断言 `Discovery.log` 含 `mDNS: announcing` —— 那句是**壳**写的，落在
+       `macast.log`；`Discovery` 那个 logger 写的是 `mDNS advertised …`。两条都改成
+       "各自文件里各自那句话"，并把谁写哪句写在检查上方；
+    ④ 我又在检查里断言主日志的尾部含启动期那行总结 —— 它确实在文件里，只是**在窗口外面**：
+       `?tail=` 的字节预算随行数缩放，`tail=20` 在 8.5 KB 的日志上就已经截断。
+       一条"尾部断言"如果测的是"历史在不在"，它就在测一个产品从不承诺的东西；判据因此换成
+       `truncated` / `size` / `lines` 三个数**互相自洽**（问超过行数 ⇒ 整份回来且说自己是整份）。
+    旋转文件的行现在带**真实 `file`**（`name.log.1` 就是 `name.log.1`），因为
+    `clear-log` 的 `removed` 数的是"文件 + 它带走的那几代"——面板若只列一代，那个数字
+    就在用户面前没有解释。
+
 16. **一条审计被自己的变异体证伪过一次**（2026-10-18，`query=subscribers` 那一轮）：
     新加的文本审计 `the_window_command_builds_its_subscriber_document_from_the_same_function`
     第一版找的是 `"pending_append":` 这种**带冒号的整键**，而变异体写的是
@@ -1036,8 +1057,14 @@ grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
 #   （`Key::DlnaFriendlyName` 映射到 `DLNA_FriendlyName`，`setting.rs` 那一行），2026-10-18 它让 §24 的
 #   "线上没有广播"这句答复来自一个拼写错误而不是门 —— §16 第 12 条 ②
-grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **8**（GET 表：cast/cast-info/
-#   resolve-status/resolve-cookies/cast-targets/status/interfaces/subscribers —— 参考实现十五个里的八个）
+grep -c '        query: "' macast-upnp/src/http.rs              # 期望 **11**（GET 表：cast/cast-info/
+#   resolve-status/resolve-cookies/cast-targets/status/interfaces/subscribers/log/log-modules/
+#   log-download —— 参考实现十五个里的十一个，剩下四个是 plugin-info / module-settings /
+#   launch-param / mirror-* 那批还没移植的）
+grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **7**（POST 表，含 `clear-log`）
+grep -c 'fn log_view_document\|fn log_modules_document\|fn clear_log_document' macast-core/src/logging.rs
+#   期望 **3**：日志面板那三份文档的唯一建造者（HTTP 脸与窗口命令都调它）。
+#   第二个写点由 `the_log_documents_have_one_builder_for_both_doors` 用文本审计钉住。
 grep -c 'pub fn sys_platform' macast-core/src/paths.rs          # 期望 **1**（`sys.platform` 的拼法只有一个主人；
 #   谁把它换回 `std::env::consts::OS`，§23 那条对问解释器要答案的用例会红）
 grep -c 'fn play_history' macast-upnp/src/store.rs              # 期望 **1**（接缝在这里），且下面这条 **6 个文件**：

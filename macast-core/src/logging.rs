@@ -286,26 +286,63 @@ pub fn remove_log_files(dir: &Path) -> usize {
 }
 
 /// One file's `log-modules` row.
+///
+/// `name` is the module (`Screen Mirror`), `file` is **what is on disk**
+/// (`Screen Mirror.log.1` for a rotated sibling). Both, because the reference's
+/// rows carry both (`logsplit.list_logs`), and the difference is the whole point:
+/// a page that offers "download this" needs the file, while a page that offers
+/// "read this module" needs the name. Synthesising `file` from `name` at the
+/// caller is what made rotated rows name a file that does not exist.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct LogFile {
     pub name: String,
+    pub file: String,
     pub bytes: u64,
     pub modified: i64,
 }
 
-/// Every per-module log, newest first, plus the sizes the page shows.
+/// The stem of a directory entry the reference's `list_logs` would keep:
+/// `name.log` or `name.log.<digits>`, and `None` for anything else.
+fn log_file_stem(file: &str) -> Option<String> {
+    let Some((stem, suffix)) = file.split_once(".log") else {
+        return None;
+    };
+    if suffix.is_empty() {
+        return Some(stem.to_string());
+    }
+    let rotated = suffix.strip_prefix('.')?;
+    if !rotated.is_empty() && rotated.chars().all(|c| c.is_ascii_digit()) {
+        Some(stem.to_string())
+    } else {
+        None
+    }
+}
+
+/// Every per-module log file on disk — **including the rotated backups**, one row
+/// each — sorted by name and then by file name.
+///
+/// The sort and the rotated rows are both the reference's (`logsplit.list_logs`:
+/// `sorted(os.listdir)`, a row per `name.log(.N)?`). The port used to skip
+/// `name.log.1` and sort newest-first, which quietly breaks two page promises at
+/// once: the 「日志」 panel's file count was lower than what the user is asking to
+/// clear (`clear-log` removes the backups and counts them), and a module that had
+/// rotated looked older than it was. `log-modules` is the owner of that list, so
+/// the HTTP route and the window command both read it — see
+/// `src-tauri/src/main.rs::log_modules`.
 pub fn module_logs() -> Vec<LogFile> {
     let dir = paths::logs_dir();
     let mut rows = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            let Some(file) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
-            }
-            let meta = match path.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
+            };
+            let Some(name) = log_file_stem(file) else {
+                continue;
+            };
+            let Ok(meta) = path.metadata() else {
+                continue;
             };
             let modified = meta
                 .modified()
@@ -314,19 +351,119 @@ pub fn module_logs() -> Vec<LogFile> {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
             rows.push(LogFile {
-                name: path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .trim_end_matches(".log")
-                    .to_string(),
+                name,
+                file: file.to_string(),
                 bytes: meta.len(),
                 modified,
             });
         }
     }
-    rows.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.name.cmp(&b.name)));
+    rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.file.cmp(&b.file)));
     rows
+}
+
+/// The 「日志」 panel's tail document — `query=log` and the window's `log_view`
+/// command, **one builder for both readers**.
+///
+/// Key order is the reference's and it differs between the two branches: success is
+/// `{code, logs, truncated, lines, size, module}` (`protocol.py:2044-2046`, **no
+/// `message`** on the happy path), while an unknown name answers
+/// `{code, message, logs, truncated, lines, size, module}` with the sentence in
+/// second place (`protocol.py:2036-2039`). A caller that renders "the panel or not"
+/// from the presence of `message` is wrong in both directions, so the shape is
+/// written once, here.
+pub fn log_view_document(module: Option<&str>, lines: usize, all: bool) -> serde_json::Value {
+    use serde_json::json;
+    match read_log(module, lines, all) {
+        Ok(payload) => json!({
+            "code": 0,
+            "logs": payload.logs,
+            "truncated": payload.truncated,
+            "lines": payload.lines,
+            "size": payload.size,
+            "module": payload.module,
+        }),
+        Err(name) => json!({
+            "code": 1,
+            "message": "unknown log module",
+            "logs": "",
+            "truncated": false,
+            "lines": 0,
+            "size": 0,
+            "module": name,
+        }),
+    }
+}
+
+/// `query=log-modules` (`protocol.py:2116-2128`): the main file's size and mtime
+/// plus one row per log file on disk — rotated siblings included, because they are
+/// what `clear-log` counts when it takes them away.
+///
+/// Rows carry **both** `name` and `file` (see [`LogFile`]) and come sorted by
+/// name, as the reference sorts them: a panel that wants "the module doing
+/// something on top" has `mtime` and may sort, while a panel that has to explain
+/// why three files disappeared on a clear cannot be shown a list of one.
+///
+/// `main` is `{size: 0, mtime: 0}` when the file cannot be read — the reference's
+/// `except OSError` branch, whose comment is worth keeping: *"No log yet (fresh
+/// install, or it was just cleared) is not an error: the page should show an empty
+/// box, not a red banner."*
+pub fn log_modules_document() -> serde_json::Value {
+    use serde_json::json;
+    let main = match std::fs::metadata(crate::paths::log_file()) {
+        Ok(meta) => json!({
+            "size": meta.len(),
+            "mtime": meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        }),
+        Err(_) => json!({"size": 0, "mtime": 0}),
+    };
+    let modules: Vec<serde_json::Value> = module_logs()
+        .into_iter()
+        .map(|row| {
+            json!({
+                "name": row.name,
+                "file": row.file,
+                "size": row.bytes,
+                "mtime": row.modified,
+            })
+        })
+        .collect();
+    json!({ "main": main, "modules": modules })
+}
+
+/// `POST clear-log` (`protocol.py:3091-3098` + `_clear_log`): empty one log and
+/// its rotated siblings, answering with how many files went.
+///
+/// The failure line is written to [`root()`] — the **main** log — because the
+/// per-module logger this shell uses for player traffic claims its own file, and
+/// 「clear log error」 hidden in the file that was just refused would be unreadable
+/// in exactly the moment someone needs it.
+pub fn clear_log_document(module: Option<&str>) -> serde_json::Value {
+    use serde_json::json;
+    let (path, _resolved) = log_target(module);
+    let Some(path) = path else {
+        return json!({"code": 1, "message": "unknown log module"});
+    };
+    match clear_log_file(&path) {
+        // `removed` on **both** branches: `_clear_log` (the main log) and
+        // `logsplit.clear` (a module) return the same three keys, and the number is
+        // the answer to "did it take the rotated backups too" — which is the whole
+        // reason the module list above shows them.
+        //
+        // The target is resolved, not echoed: `?module=main`, `?module=整体` and no
+        // `module` at all are the same call here, and the page must not need to know
+        // which spelling the user's button sent.
+        Ok(removed) => json!({"code": 0, "message": "success", "removed": removed}),
+        Err(e) => {
+            root().error(&format!("clear log error: {e}"));
+            json!({"code": 1, "message": "clear failed"})
+        }
+    }
 }
 
 /// Default tail for the settings page (`?tail=`, `LOG_TAIL_LINES` in Python).

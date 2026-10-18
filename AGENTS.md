@@ -2110,7 +2110,29 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
   （`pending_remove`：卡住的回收线程与卡住的追加线程是同一种故障；`children[].rows`：想知道
   "哪个 SID 落在哪个回调口"的人不该被迫去 diff `query=status` 的 `clients`），
   理由记在 `docs/Rust-Port-Design.md` §8 与 §16 第 16 条。
-* **脚本里那个 `$API_BODY` 是共享的**：§23 的 subscribers 一串检查跑完，文件里装的是
+* **日志面板那一族（`log` / `log-modules` / `log-download` / `POST clear-log`）把"一个建造者、
+  两扇门"用了第三次**：三份文档全部住在 `macast_core::logging`（`log_view_document` /
+  `log_modules_document` / `clear_log_document`），HTTP 脸与窗口那三条命令调的是同一批函数，
+  并由一条文本审计钉住"窗口不许再自己写那些键"。电池四支各红 1：给成功分支加 `message`
+  （参考实现的两个分支**键数不同**：`{code, logs, truncated, lines, size, module}` 与
+  `{code, message, …}` —— 一个"看有没有 message 判成败"的页面在两个方向上都是错的）；
+  不再列旋转的 `.log.1`；让 GET 也能清；窗口重写一个键。
+* **四条仪器错全在这一段**，最后两条是这一轮真正的新形状：① 手写 `Content-Length: 26`
+  配 32 字节的 body ⇒ 分发器没看见字段 ⇒ fall-through 的 200 读成"门开着"（`post_form`
+  自己算长度，它的注释正解释 411 是**路由前**状态）；② 又一次对原始字节 `contains` 中文句
+  （§9.3 的转义后果）；③ 断言 `Discovery.log` 含 `mDNS: announcing` —— 那句是**壳**写的，
+  在 `macast.log`，`Discovery` logger 写的是 `mDNS advertised …`：**"谁写哪句"要先问，不要猜**；
+  ④ 断言主日志**尾部**含启动期那行总结 —— 它在文件里，但**在窗口外**：`?tail=` 的字节预算随
+  行数缩放，`tail=20` 在 8.5 KB 的日志上就已经截断。**"尾部断言"如果测的其实是"历史在不在"，
+  它就在测产品从不承诺的东西**；判据因此换成 `truncated`/`size`/`lines` 三个数互相自洽
+  （问超过行数 ⇒ 整份回来并且承认自己是整份）。
+* **旋转文件现在带真实的 `file`**（`name.log.1` 那一行就写 `name.log.1`），因为
+  `clear-log` 返回的 `removed` 数的是"这个文件加上它带走的那几代"——面板只列一代的话，
+  用户按一次按钮、三条列表消失而数字说是 3，那句解释就没有依据了。`file` 也不许由 `name`
+  合成：那是第一轮就写进 `LogFile` 注释的同一个理由。
+* **`launch-param` 故意还没接**：参考实现那一条交回**整份设置表**，`Api_Token` 也在里面。
+  它不能"顺手挂在 management 门上就算完"，要先写下谁能读这一份（本机？带令牌的任何局域网
+  调用者？），所以它和 `plugin-info` / `module-settings` / `mirror-*` 一起留在 §15 的账上。* **脚本里那个 `$API_BODY` 是共享的**：§23 的 subscribers 一串检查跑完，文件里装的是
   subscribers 那份文档，紧接着的 `history` 两条断言因此"读不到自己的键"而红 —— 产品没错。
   三个读者先后覆盖一个临时文件，与 §4.2「计数器在 flush 之后才加」「夹具里那对括号是承重的」
   同族：**下一个读者之前先重新问一次**（这条写在检查上方，不留在提交信息里）。

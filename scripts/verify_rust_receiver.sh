@@ -2431,6 +2431,152 @@ CROSSPY
         && pass "and the diagnostic read empties with it, not a moment later off a different table" \
         || fail "subscribers still aggregates $(json_len aggregated) after unsubscribing"
 
+    # ---- the log panel's own reads -------------------------------------------------
+    # `query=log`, `log-modules`, `log-download` and `POST clear-log` are the 「日志」
+    # tab, and the witness they need is a log line that a *real* run wrote. This one
+    # has several: §22 proved the announcer broadcast, so `logs/Discovery.log` holds
+    # the `mDNS: announcing` line, and the same line is what §23 compared addresses
+    # against minutes ago. Reading it back through the HTTP face asks a different
+    # question than `gate_grep` did: not "did the app write it" but "can the panel
+    # that the user opens see it".
+    api_probe "$BASE/api?query=log-modules"
+    [ "$API_STATUS" = "200" ] \
+        && pass "log-modules answers this machine" \
+        || fail "log-modules answered HTTP $API_STATUS code '$API_CODE'"
+    [ "$(json_keys .)" = "main,modules" ] \
+        && pass "its document is the reference's two sections" \
+        || fail "log-modules keys: '$(json_keys .)'"
+    if [ "$(json_ask main.size)" -gt 0 ] && [ "$(json_len modules)" -ge 1 ]; then
+        pass "the main file has a size and at least one module row is listed"
+    else
+        fail "log listing is empty: main=$(json_ask main) rows=$(json_len modules)"
+    fi
+    # The rotated generations are listed as their own rows, with the **real** file
+    # name. This machine may or may not have rotated anything in this run's few
+    # minutes, so the assertion is about the row shape rather than the count: every
+    # row's `file` must end in `.log` or `.log.<digits>`, and its `name` must be that
+    # file with the suffix cut — a synthesised `name.log` for a `name.log.1` row is
+    # exactly the lie the shared builder in `macast-core` exists to prevent.
+    BADROW=$(python3 - "$API_BODY" <<'ROWPY'
+import json, re, sys
+with open(sys.argv[1], "rb") as fh:
+    rows = json.loads(fh.read().decode("utf-8", "replace"))["modules"]
+bad = [r for r in rows
+       if not re.search(r"\.log(\.\d+)?$", r.get("file", ""))
+       or r.get("name") != re.sub(r"\.log(\.\d+)?$", "", r.get("file", ""))]
+print(f"{len(rows)} rows, {len(bad)} malformed: {bad[:2]}")
+sys.exit(1 if bad else 0)
+ROWPY
+) || true
+    case "$BADROW" in
+        *"malformed: []"*) pass "every module row carries a real file name and its matching module name" ;;
+        *) fail "module rows: $BADROW" ;;
+    esac
+
+    api_probe "$BASE/api?query=log&module=Discovery"
+    [ "$(json_keys .)" = "code,logs,truncated,lines,size,module" ] \
+        && pass "query=log answers the six-key document, **no message on the happy path**" \
+        || fail "log keys: '$(json_keys .)'"
+    [ "$(json_ask code)" = "0" ] && [ "$(json_ask truncated)" = "false" ] \
+        && pass "the module tail is complete for a file this small" \
+        || fail "log payload: code=$(json_ask code) truncated=$(json_ask truncated)"
+    # What Discovery.log actually holds is the announcer's own sentence
+    # (`mDNS advertised …`, written by the `Discovery` logger); the
+    # `mDNS: announcing …` summary line is the **shell's**, so it lands in
+    # macast.log. The first version of this check grepped the module file for the
+    # summary line and went red on a correct answer — the useful kind of red: it
+    # says the check was written from a guess about who logs what.
+    case "$(json_ask logs)" in
+        *"mDNS advertised"*) pass "and it holds the announcer's own line, written by the Discovery logger" ;;
+        *) fail "Discovery.log tail has no announcement line: $(json_ask logs | head -c 160)" ;;
+    esac
+    # …and the same file **without** `module=` is the main log. What to assert there
+    # took two tries: the first version looked for the `mDNS: announcing` summary
+    # line, which the shell really wrote — at startup, four minutes and more than
+    # 2000 lines of SOAP and GENA chatter ago. A tail does not contain history, and
+    # a check that pretends otherwise is red on a correct answer.
+    #
+    # So the assertion is the one that is *about* being a tail: the panel's promise
+    # (`protocol.py:2016-2020`'s `truncated`/`size`) is "the last N lines of M
+    # bytes", so ask for 20 lines and require the count to respect it, the size to
+    # be the whole file, and `truncated` to be true exactly when the byte window had
+    # to start past the beginning (512 KB of window, `TAIL_BYTE_FLOOR`).
+    MAIN_BYTES=$(wc -c < "$SDIR/macast.log" | tr -d ' ')
+    api_probe "$BASE/api?query=log&tail=20"
+    TAIL_LINES=$(json_ask lines)
+    TAIL_SIZE=$(json_ask size)
+    TAIL_TRUNC=$(json_ask truncated)
+    [ "$TAIL_SIZE" = "$MAIN_BYTES" ] \
+        && pass "the main log's answer reports the file's real size, not the window's" \
+        || fail "log size says $TAIL_SIZE, the file is $MAIN_BYTES"
+    [ "$TAIL_LINES" -le 20 ] && [ "$TAIL_LINES" -ge 1 ] \
+        && pass "and it counted the lines it actually handed back ($TAIL_LINES of the 20 asked)" \
+        || fail "lines=$TAIL_LINES for tail=20"
+    # The *other* direction of the same promise, and the reason the check is written
+    # this way: `truncated` is true here because `?tail=20` asks for a byte budget
+    # that an 8.5 KB file does not fit into — the budget follows the line count
+    # (`tail_byte_budget`), which is the first version of this check getting wrong
+    # by assuming a fixed 512 KB floor. So ask for more lines than the file has
+    # lines: the whole thing must come back, `truncated` false, and the count must
+    # equal the file's own.
+    MAIN_LINES=$(wc -l < "$SDIR/macast.log" | tr -d ' ')
+    api_probe "$BASE/api?query=log&tail=50000"
+    [ "$(json_ask truncated)" = "false" ] \
+        && [ "$(json_ask lines)" = "$MAIN_LINES" ] \
+        && [ "$(json_ask size)" = "$MAIN_BYTES" ] \
+        && pass "asked past the end, the panel gets the whole file and says it is whole ($MAIN_LINES lines)" \
+        || fail "full read: truncated=$(json_ask truncated) lines=$(json_ask lines)/$MAIN_LINES size=$(json_ask size)/$MAIN_BYTES"
+
+    api_probe "$BASE/api?query=log&module=NoSuchModuleHere"
+    [ "$(json_ask code)" = "1" ] \
+        && [ "$(json_ask module)" = "NoSuchModuleHere" ] \
+        && pass "an unknown module is its own answer, with the name echoed back" \
+        || fail "unknown module answered: $(json_ask code) / $(json_ask module)"
+    # `?tail=abc` raises in the reference (an unparseable int straight into
+    # `read_log_tail`) and the caller gets a bodyless 500. This port answers the
+    # default tail — the deviation `log_view_tail_that_is_not_a_number…` pins in the
+    # crate, asserted here so the two halves cannot drift apart.
+    api_probe "$BASE/api?query=log&module=Discovery&tail=abc"
+    [ "$(json_ask code)" = "0" ] \
+        && pass "a typo in ?tail answers the default tail instead of failing" \
+        || fail "?tail=abc answered code $(json_ask code)"
+
+    DLHEAD=$(curl -s --noproxy '*' -m 10 -D - -o /tmp/verify_rust_receiver_log.txt \
+        "$BASE/api?query=log-download&module=Discovery" | tr -d '\r')
+    # Compared as the **whole header line**, not as a substring of the dump: the
+    # first version used a `case` pattern with escaped quotes and told us nothing
+    # about what actually arrived. Now the failure message carries the line it saw
+    # and the list it came out of.
+    DLDISP=$(printf '%s\n' "$DLHEAD" | grep -i '^content-disposition:' | head -1)
+    [ "$DLDISP" = 'Content-Disposition: attachment; filename="Discovery.log"' ] \
+        && pass "log-download names the file it is attaching, byte for byte in the reference's spelling" \
+        || fail "disposition was [$DLDISP] among: $(printf '%s' "$DLHEAD" | tr '\n' '|')"
+    [ -s /tmp/verify_rust_receiver_log.txt ] \
+        && pass "and it serves the whole file, not a tail" \
+        || fail "log-download returned an empty body"
+
+    # ---- CSRF: clearing is a POST, and only a POST ---------------------------------
+    # AGENTS.md §4.10's red line: a GET flavour would be triggerable by any page's
+    # `<img src="http://127.0.0.1:58880/api?query=log&clear-log=1">`. The field names
+    # a POST route, so on a GET it is just a query parameter and nothing reads it.
+    BEFORE_BYTES=$(wc -c < "$SDIR/logs/Discovery.log" 2>/dev/null | tr -d ' ')
+    api_probe "$BASE/api?query=log&module=Discovery&clear-log=1"
+    AFTER_BYTES=$(wc -c < "$SDIR/logs/Discovery.log" 2>/dev/null | tr -d ' ')
+    [ "$BEFORE_BYTES" = "$AFTER_BYTES" ] && [ -n "$BEFORE_BYTES" ] \
+        && pass "a GET carrying clear-log=1 leaves the file exactly as it was" \
+        || fail "a GET cleared the log ($BEFORE_BYTES -> $AFTER_BYTES bytes)"
+    api_post "$BASE/api" "clear-log=1" "module=Discovery"
+    [ "$(json_ask code)" = "0" ] \
+        && pass "the POST clears it instead, and says so" \
+        || fail "clear-log answered: $(json_ask code) $(json_ask message)"
+    [ "$(json_ask removed)" -ge 1 ] 2>/dev/null \
+        && pass "and it counts what it took, backups included" \
+        || fail "no removed count: $(json_ask removed)"
+    api_probe "$BASE/api?query=log&module=Discovery"
+    [ "$(json_ask size)" = "0" ] && [ "$(json_ask lines)" = "0" ] \
+        && pass "the panel's next read is an empty box, not an error" \
+        || fail "after clearing, size=$(json_ask size) lines=$(json_ask lines)"
+
     # ---- history ------------------------------------------------------------------
     # **Re-probe first.** The diagnostic block above left `$API_BODY` holding the
     # *subscribers* document, and `json_len history` over it answers "no such key" —
@@ -2504,6 +2650,30 @@ PY
         [ "$API_STATUS" = "403" ] \
             && pass "and so is the diagnostic read — it names who is watching, which is not LAN weather" \
             || fail "a LAN caller got HTTP $API_STATUS from subscribers"
+        for query in log log-modules log-download; do
+            api_probe "http://$LAN:$PORT/api?query=$query&module=MPV"
+            [ "$API_STATUS" = "403" ] \
+                && pass "a LAN caller is refused $query" \
+                || fail "a LAN caller got HTTP $API_STATUS from $query"
+            case "$API_MSG" in
+                *"$MANAGEMENT_MARK"*) : ;;
+                *) fail "$query refusal wording: $API_MSG" ;;
+            esac
+        done
+        # A LAN page posting the clear field hears the body-level 403 (POST keeps the
+        # reference's envelope: HTTP 200, `code` in the body) and the file stays.
+        LOGSIZE=$(wc -c < "$SDIR/logs/MPV.log" 2>/dev/null | tr -d ' ')
+        if [ -n "$LOGSIZE" ] && [ "$LOGSIZE" -gt 0 ]; then
+            api_post "http://$LAN:$PORT/api" "clear-log=1" "module=MPV"
+            [ "$API_CODE" = "403" ] \
+                && pass "a LAN POST clear-log is refused in the body's code, the reference's POST envelope" \
+                || fail "LAN clear answered code '$API_CODE': $API_MSG"
+            [ "$(wc -c < "$SDIR/logs/MPV.log" | tr -d ' ')" = "$LOGSIZE" ] \
+                && pass "and the refused call emptied nothing" \
+                || fail "a refused LAN clear still truncated MPV.log"
+        else
+            skip "no MPV.log bytes to protect from a LAN clear (nothing played this run)"
+        fi
     else
         skip "no reachable non-loopback address to ask from (section 23's LAN half)"
     fi
