@@ -2480,6 +2480,14 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
 * **电池 7 支，逐支读数**（`/tmp/bat30/` 备份 + 还原 + md5 回基线 + 先证明文件真的改了；N1/N2/N4 另在真机重测）：N1 清空只答成功 → 单元 1 / **真机 4**；N2 门改成 strip → 1 + 真机 1；N3 面自己写状态变量 → 1；N4 壳把布尔转发方向反了 → **单元 0 / 真机 4**；N5 表序换到 `cast-uri` 之后 → 2；N6 那行的门升成 code-execution → 2；N7 成功文档多长一个 `removed` → 1。**N4 那一格要读对**：`src-tauri` 那 19 条一条都不红，而它不是洞 —— 那一行唯一的主张是"布尔原样到播放器"，其两端（mpv 的 `yes/no`、真机上的回声）各有见证；看到"单元 0 红"就补一条断言，补出来的只会是把 `json!(show)` 再抄一遍。
 * **仍然欠的 12 行**：`set-renderer` / `toggle-protocol` / `plugin-*` / `install-*` / `plugin-file` 等插件子系统；`set-interface` 等"重新广播"那个口（写了键却不重新绑口 = 给页面一个调不动东西的控件）；`save-launch-param` 等重启语义；`app-action` 里 `quit` 可做而 `check-update` 在本壳没有对应物。**本分支从未推送 ⇒ 本轮 362 条单元与那 368 条真机读数没有任何 CI 见证过。**
 
+**Rust 侧给应答者的聚合队列取证时量到的事**（2026-10-20，`scripts/mdns_responder_probe.py` 加 4 个 `queue` 用例；**产品代码一个字节没改**，改的是"这一格该照谁做"）：
+
+* **为什么要量而不是读**：`respond::timing()` 已经冻过（"哪条记录属于哪一桶"），但本壳没有桶 —— `announce::serve` 拿到什么立刻发。要不要建队列，从 `_handlers/multicast_outgoing_queue.py` 读不出来：合并判据是 `send_after(新) <= send_after(最后一组)`，而两个值各自带一次 `randint(20, 120)` ⇒ **答案是概率性的**，而且那个模块恰好有 Cython 构建（§4.2 那句"包发的是编译产物，答案在字节里"在这里第二次成立）。
+* 四行读数（2026-10-20 本机，`--case` 逐条可复跑）：同一个聚合问题问两次隔 10 ms → **一个**数据报（第二个问题一个字节的线都没占到）；PTR+TXT 各问一次 → **一个**数据报，且偏移落在 **502 ms**（聚合上限的 `send_before` 顺延）而不是 20-120 ms；SRV 后接 TXT → **两个**（+0.7 与 +87.5 ms）⇒ 四个桶是真的；同一个 TXT 隔 1.25 s → **两个**，第二次落在 **+1339.6 ms**（`out_delay_queue` 的 `additional_delay=1000`）。
+* **奖品在最后一行**：第二问之所以进"最后一秒"那一桶，是因为 `_has_mcast_record_in_last_second` 查的是 **cache**，而 cache 里那条 TXT 是**应答者自己发出、被内核环回、又被自己收进来**的。所以参考实现的防洪不是"我记得我发过"，是"**我听见了自己**" —— 一个从不读自己答案的端口要复现这一行，只能另立一本"我刚多播过什么"的账。这与 §16 第 13 条（5353 上读者的合并、`Served::absorbed` 只数不存）是同一件事的两端：**听见自己不是卫生问题，是行为前提**。
+* **判据的纪律**：这四行**不进判决语料** —— `respond::respond` 无状态，答不了"几个数据报、在第几毫秒"；把它们冻进同一份 JSONL 等于给 Rust 的 diff 一行正确答案依赖队列的记录，而那件事失败的诚实形状是一次静默跳过。所以按名字排除且**数过**：`queue` 行不是恰好 4 条，探针退出 1。顺手改掉一处自己骗人的计数 —— 那行 `wrote 21 case row(s)` 数的是收集到的用例而不是写出的行（**一个把被排除的行也算进去的数字，会让下一个读者以为过滤器坏了**）；现在写的是 `wrote 17 corpus row(s) of 21 case(s)`。
+* 复跑核对过：17 行判决语料逐行不变（只 `delays_ms`/`dsts` 随机器动，那本来就不是判据），探针退出码 0，`grep -c '"queue": True' scripts/mdns_responder_probe.py` = 4。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

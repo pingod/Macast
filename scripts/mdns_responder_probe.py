@@ -324,6 +324,51 @@ def cases_for(info, server):
          "why": "RFC 6763's DQE star form — does the reference know it at all, or only the long name"},
         {"label": "aaaa", "name": server, "type": const._TYPE_AAAA, "src": 5353,
          "why": "v6 address while the listener is V4Only — the honest answer here is 'nothing'"},
+        # ---- the aggregation queue (`respond::timing`'s other half) ------------------
+        # These four rows exist because the port answers everything immediately: it
+        # reproduces *which* records are "immediate" (frozen in the 17-row corpus) but
+        # has no queue, so it cannot coalesce. Whether a queue is worth its complexity is
+        # not readable from `_handlers/multicast_outgoing_queue.py` — the merge test
+        # compares a `send_after` built from a fresh `randint(20, 120)`, so the answer is
+        # probabilistic, and the wheel ships Cython builds of these modules. So: ask the
+        # running engine how many **datagrams** come out and at which offsets.
+        {"label": "txt-twice", "name": info.name, "type": const._TYPE_TXT, "src": 5353,
+         "also": [(info.name, const._TYPE_TXT, False, 10)],
+         "queue": True,
+         "why": "the same aggregated question twice inside one window: one datagram (coalesced) "
+                "or two (each question answered on its own)? This is the thundering-herd case",
+         "answer": "measured 2026-10-20: ONE datagram, 212 bytes, at +104.1 ms — the second question "
+                   "added nothing to the wire. Two questions inside one window are one answer."},
+        {"label": "ptr-then-txt", "name": info.type, "type": const._TYPE_PTR, "src": 5353,
+         "also": [(info.name, const._TYPE_TXT, False, 10)],
+         "queue": True,
+         "why": "two different aggregated questions 10 ms apart: does the second answer ride in the "
+                "first group's packet, and does the PTR's riding SRV/A survive the merge?",
+         "answer": "measured 2026-10-20: ONE datagram at +502.3 ms carrying TXT + PTR + A + SRV + "
+                   "NSEC (296 bytes). The merge keeps the riding records, and the offset sitting at the "
+                   "500 ms aggregation ceiling rather than in the 20-120 ms band is the queue's own "
+                   "send_before deferral: a second group exists, so the first waits for its deadline "
+                   "instead of going out early (multicast_outgoing_queue.py:79-86)."},
+        {"label": "srv-then-txt", "name": info.name, "type": const._TYPE_SRV, "src": 5353,
+         "also": [(info.name, const._TYPE_TXT, False, 10)],
+         "queue": True,
+         "why": "an immediate question then an aggregated one: the split has to show as TWO datagrams "
+                "at different offsets — a port that queues both, or sends both now, is caught here",
+         "answer": "measured 2026-10-20: TWO datagrams — SRV+A+NSEC at +0.7 ms, TXT at +87.5 ms. The "
+                   "four buckets are real, and the 86.8 ms between them is randint(20, 120) doing its job."},
+        {"label": "txt-twice-1s", "name": info.name, "type": const._TYPE_TXT, "src": 5353,
+         "also": [(info.name, const._TYPE_TXT, False, 1250)],
+         "queue": True,
+         "why": "the same question again after the one-second window closes: the second answer must "
+                "come out again (this is what keeps a retrier from being starved), and the row "
+                "separates 'coalesce forever' from 'coalesce within one window'",
+         "answer": "measured 2026-10-20: TWO datagrams, +45.9 ms and +1339.6 ms. The second landing past "
+                   "a second is out_delay_queue (additional_delay=1000, query_handler.py:293) — and it "
+                   "reached that queue because _has_mcast_record_in_last_second consulted the CACHE, "
+                   "which had learned the TXT from the responder's OWN looped-back answer. So the "
+                   "reference's flood control is fed by hearing itself: a port that never reads its own "
+                   "answers cannot reach this row except by keeping its own ledger of what it just "
+                   "multicast — which is the same self-traffic §16 第 13 条 is about."},
     ]
 
 
@@ -397,6 +442,16 @@ def main() -> int:
                 # side cannot distinguish from the table above.
                 print("the %s query was not fully sent" % label, file=sys.stderr)
                 return 1
+            # The aggregation cases: follow-up questions, same label, each after its
+            # own gap. Sent through the same `send_query` (so the same source-port
+            # semantics) and recorded under the same label, because the question these
+            # rows answer is **how many datagrams come out for the pair**.
+            for name_, type_, unique_, gap_ms in case.get("also", []):
+                time.sleep(gap_ms / 1000.0)
+                extra = query_bytes(name_, type_, unique_)
+                if send_query(extra, case["src"]) != len(extra):
+                    print("the %s follow-up query was not fully sent" % label, file=sys.stderr)
+                    return 1
             deadline = time.monotonic() + args.settle
             while time.monotonic() < deadline:
                 time.sleep(0.02)
@@ -417,6 +472,8 @@ def main() -> int:
             answers = [row for row in decoded if row["qr"]]
             results.append({
                 "case": label, "question": case["name"],
+                "queue": bool(case.get("queue")),
+                "answer": case.get("answer", ""),
                 "type": DNS_TYPE.get(case["type"], str(case["type"])),
                 "unique": case.get("unique", False), "src_port": case["src"],
                 "known": case.get("known"), "why": case["why"],
@@ -441,8 +498,29 @@ def main() -> int:
 
     if args.dump_corpus:
         with open(args.dump_corpus, "w", encoding="utf-8") as handle:
-            for result in results:
+            # **The corpus is the stateless decision table, and only that.** The four
+            # `queue` rows ask "how many datagrams, at which offsets" — a question no call
+            # to `respond::respond` can answer, because it holds nothing between calls.
+            # Dumping them into the same file would hand the Rust diff a row whose honest
+            # answer is "not implemented yet", and the way that fails is a silent skip. So
+            # they are excluded **by name and counted**: move the count and this line goes
+            # red instead of quietly shrinking the corpus (§28's counted Timeout exclusion is
+            # the same rule — a comparison that allows an unbounded difference has stopped
+            # being a comparison).
+            queue_rows = [r for r in results if r.get("queue")]
+            if len(queue_rows) != 4:
+                print("expected 4 queue rows to be excluded from the decision corpus, found %d: %s"
+                      % (len(queue_rows), [r["case"] for r in queue_rows]), file=sys.stderr)
+                return 1
+            print("excluded %d queue row(s) from the corpus: %s"
+                  % (len(queue_rows), ", ".join(r["case"] for r in queue_rows)), file=sys.stderr)
+            for result in [r for r in results if not r.get("queue")]:
                 row = dict(result)
+                # The two keys added for the queue rows are prose and a filter, not part
+                # of the decision document: leaving them in would change all 17 frozen
+                # rows' key sets and the Rust diff would go red about bookkeeping.
+                row.pop("queue", None)
+                row.pop("answer", None)
                 # `t_ms` is a *scheduling* observation (which of the four answer
                 # buckets the reference chose: ~0-1 ms for mcast_now, 50-120 ms for
                 # the aggregated queue, and a unicast reply when the source port was
@@ -462,7 +540,12 @@ def main() -> int:
                 ]
                 row.pop("responses")
                 handle.write(json.dumps(row, sort_keys=True) + "\n")
-        print("wrote %d case row(s) to %s" % (len(results), args.dump_corpus), file=sys.stderr)
+        # The count is of what was **written**, not of what was collected: this line is
+        # the only place a reader learns the corpus is 17 rows while the probe ran 21
+        # cases, and a number that quietly includes the excluded rows is how a future
+        # reader decides the filter is broken when it is not.
+        print("wrote %d corpus row(s) of %d case(s) to %s"
+              % (len(results) - len(queue_rows), len(results), args.dump_corpus), file=sys.stderr)
 
     if args.json:
         print(json.dumps({"fixture": {"instance": instance, "server": server,
@@ -476,6 +559,10 @@ def main() -> int:
                   % (result["case"], result["type"], result["question"],
                      " QU" if result["unique"] else "", result["src_port"]))
             print("   asks: %s" % result["why"])
+            if result.get("answer"):
+                # Printed under the question it answers, and carried into --json, so the
+                # reading travels with the case instead of living only in this file's prose.
+                print("   answers: %s" % result["answer"])
             if result["known"]:
                 print("   known-answer section: %s" % result["known"])
             if not result["responses"]:
