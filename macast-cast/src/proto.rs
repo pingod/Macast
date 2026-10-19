@@ -511,13 +511,15 @@ mod tests {
     /// answer is queued, which is the only row that can see a queue that is drained on
     /// time only by accident.
     /// 728 → **730** on 2026-10-20 with the QU branch (three new routes above, and one
-    /// test replaced rather than added). The number went *down* to 725 first, and the only
+    /// test replaced rather than added), and **731** at the end of the same day with
+    /// `e11` — the fan-out witness, added because 网卡 pinning had become a document.
+    /// The number went *down* to 725 first, and the only
     /// reason that was noticed is this floor: an index-based splice of the test file had
     /// quietly eaten five rows on the way to rewriting a helper. `>=` cannot see a drift
     /// upward, which is the complaint recorded above; what it does see, and saw here, is a
     /// **deletion** — which is the failure this floor exists for, and the reason it is a
     /// floor of the measured number rather than a round one.
-    const TESTS_IN_THIS_CRATE: usize = 730;
+    const TESTS_IN_THIS_CRATE: usize = 731;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

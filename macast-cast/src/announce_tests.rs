@@ -2307,3 +2307,168 @@ fn the_airplay_service_is_announced_and_never_answered() {
         "it stayed quiet without saying why — that is the reading that costs an hour: {text}"
     );
 }
+
+/// The fan-out [`send_group`] promises, counted on a real socket instead of asserted
+/// in prose.
+///
+/// This is the half of 网卡 pinning that a document cannot show. Before it, the engine
+/// set no outgoing interface at all: `set-interface=bridge100` made the announcer log
+/// `joined 1 of 1 interface(s) [192.168.139.3]` and publish that address, while every
+/// datagram still left through the default route — measured here on 2026-10-20, where a
+/// listener joined on 192.168.139.3 counted **0** packets and the three-packet burst
+/// arrived on 192.168.1.5. A page that read 「已切换到 bridge100」 was reading a sentence
+/// about a document, not about a wire.
+///
+/// Loopback only, for two reasons. It keeps every byte of this test inside the machine
+/// (the same rule `§31`'s harness pins egress with `IP_MULTICAST_IF=127.0.0.1` + TTL 1
+/// for), and it does not ask which card a particular laptop happens to have — the
+/// judgment must not be decided by the machine that runs it (§4.8's Part 40 lesson).
+#[test]
+fn e11_the_announcement_copies_itself_onto_every_published_interface() {
+    crate::pin_test_dir();
+    let logger = Logger::named(LOGGER_NAME);
+    // The listener is the product's own engine socket, joined on loopback — which is
+    // also the fact that makes this readable: multicast is **duplicated** to every
+    // joined socket (measured on two kernels), so a second binder sees what a first one
+    // sends.
+    let listener = match bind_engine(&[V4::LOCALHOST], &logger) {
+        Ok(engine) => engine,
+        Err(e) => panic!("cannot bind the engine socket the product binds: {}", e),
+    };
+    assert_eq!(
+        listener.egress,
+        vec![V4::LOCALHOST],
+        "the send list is the interfaces whose join took, not the ones that were offered"
+    );
+    let group = SocketAddr::new(IpAddr::V4(V4::new(224, 0, 0, 251)), MDNS_PORT);
+    let sender = UdpSocket::bind("0.0.0.0:0").expect("an ephemeral sender binds");
+
+    let drain = |label: &str, want: usize| -> Vec<Vec<u8>> {
+        let mut buf = vec![0u8; crate::mdns::READ_MAX];
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while got.len() < want && std::time::Instant::now() < deadline {
+            listener
+                .sock
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("a read timeout sets");
+            match listener.sock.recv_from(&mut buf) {
+                Ok((length, _peer)) => got.push(buf[..length].to_vec()),
+                Err(_) => continue,
+            }
+        }
+        assert_eq!(
+            got.len(),
+            want,
+            "{label}: the listener counted {} copy(ies) of what the sender says it wrote",
+            got.len()
+        );
+        got
+    };
+
+    // Two published interfaces, two copies — the reference's shape, where zeroconf makes
+    // one socket per interface and each of them writes the same bytes (§22 measured six).
+    let (copies, refused) = send_group(
+        &sender,
+        group,
+        b"two-interface-burst",
+        &[V4::LOCALHOST, V4::LOCALHOST],
+    );
+    assert!(refused.is_empty(), "loopback must not be refused: {refused:?}");
+    assert_eq!(copies, 2, "one copy per published interface");
+    let seen = drain("the two-interface case", 2);
+    for bytes in &seen {
+        assert_eq!(bytes, b"two-interface-burst", "a copy arrived altered");
+    }
+
+    // One interface, one copy. Asked separately because the two cases above and below
+    // share a socket: a fan-out that always wrote twice would pass the first and fail
+    // here, and one that always wrote once would pass here and fail there.
+    let (copies, refused) = send_group(&sender, group, b"one-interface-burst", &[V4::LOCALHOST]);
+    assert!(refused.is_empty(), "loopback must not be refused: {refused:?}");
+    assert_eq!(copies, 1);
+    drain("the one-interface case", 1);
+
+    // **A card the kernel will not accept is skipped, not sent anyway.** 192.0.2.0/24 is
+    // TEST-NET-1 (RFC 5737): no machine has it, so `IP_MULTICAST_IF` must fail — and the
+    // copy that would otherwise leave through whatever the route picks is precisely the
+    // 「搜到但投不上」 shape, an announcement naming an address nobody can open.
+    let dead = V4::new(192, 0, 2, 1);
+    let (copies, refused) = send_group(&sender, group, b"dead-card-burst", &[V4::LOCALHOST, dead]);
+    assert_eq!(copies, 1, "the live card still announces: {refused:?}");
+    assert_eq!(refused.len(), 1, "exactly the dead card is refused: {refused:?}");
+    // Named **with the operating system's reason**, because that is what the caller's
+    // warning has to carry: 「cannot send through 192.0.2.1」 tells a reader the card is
+    // dead, and `Can't assign requested address` tells them it is not this machine's at
+    // all — the difference between a cable unplugged and a typo in the picker.
+    assert!(
+        refused[0].starts_with(&format!("{dead}: ")),
+        "the refusal must lead with the address it refused: {refused:?}"
+    );
+    assert!(
+        refused[0].len() > format!("{dead}: ").len(),
+        "a refusal with no reason behind it: {refused:?}"
+    );
+    drain("the mixed live-and-dead case", 1);
+
+    // **Pinned, or merely sent?** The two copy-count cases above cannot tell those
+    // apart: every address in them is loopback, so a `send_group` that never set
+    // `IP_MULTICAST_IF` would still deliver both copies to a listener joined on
+    // `127.0.0.1` and pass. The witness here is therefore the **option**, read back off
+    // the socket after the fan-out — a getter cannot be satisfied by a datagram that
+    // happened to arrive, and it does not depend on which of the kernel's loopback
+    // duplications a given join sees.
+    //
+    // (An earlier version of this block asserted "a listener joined on loopback receives
+    // exactly one of the two copies" when the egress list was `[127.0.0.1, <lan>]`. It
+    // passed here and went red under a mutation that changes **nothing** — a null
+    // mutation, `let _ = address;` after the push. So the reading was the kernel's mood
+    // about delivering a LAN-pinned copy to a loopback join, not a property of the code.
+    // That is §4.2's 「概率性断言不是判决」, and the real-machine half of the same claim —
+    // packets arriving on the pinned card and nowhere else — is `verify_rust_receiver.sh`
+    // §32, where a listener on the pinned segment is the thing being asked.)
+    //
+    // The LAN address is read from `advertised_addresses`, not typed: a test that pinned
+    // `192.168.1.5` would be a judgment decided by the machine that runs it (§4.8's
+    // Part 40 lesson).
+    let published: Vec<Ipv4Addr> = macast_core::net::advertised_addresses(&setting("e11"))
+        .into_iter()
+        .filter_map(|text| text.parse().ok())
+        .filter(|address: &Ipv4Addr| !address.is_loopback())
+        .collect();
+    let lan = *published.first().unwrap_or_else(|| {
+        panic!(
+            "this machine publishes no non-loopback address, so the pin cannot be told \
+             apart from no pin here — and that is a missing witness, not a pass"
+        )
+    });
+    let (copies, refused) = send_group(&sender, group, b"mixed-egress", &[V4::LOCALHOST, lan]);
+    assert!(
+        refused.is_empty(),
+        "this machine's own published address must be pinnable: {refused:?}"
+    );
+    assert_eq!(copies, 2, "one copy per interface, both accepted");
+    assert_eq!(
+        socket2::SockRef::from(&sender).multicast_if_v4().expect("read back"),
+        lan,
+        "the fan-out wrote copies without pinning the interface they left through"
+    );
+    // And the pin is **rotated**, not set once: the last entry of the list must be what
+    // the socket ends on, otherwise the second interface's copy leaves through the first
+    // one's card and the fan-out is a repeat rather than a fan.
+    let (_copies, _refused) = send_group(&sender, group, b"swapped", &[lan, V4::LOCALHOST]);
+    assert_eq!(
+        socket2::SockRef::from(&sender).multicast_if_v4().expect("read back"),
+        V4::LOCALHOST,
+        "the egress list was not walked in order"
+    );
+
+    // And the "announce anyway" rule [`bind_engine`] logs: no membership took, so there
+    // is nothing to pin, and one copy leaves on the kernel's own choice rather than none.
+    let (copies, refused) = send_group(&sender, group, b"no-egress-burst", &[]);
+    assert_eq!(
+        copies, 1,
+        "an empty join list must still send, and must not claim a refusal: {refused:?}"
+    );
+    assert!(refused.is_empty());
+}

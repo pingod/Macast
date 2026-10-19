@@ -4984,6 +4984,234 @@ else
     fi
 fi
 
+echo "== 32: set-interface moves the announcement, and a refusal leaves the disk alone =="
+# The management face's row 1 (`protocol.py:2288`) is the 网卡 picker. Two claims are
+# worth a section, because both were false in this shell until now:
+#
+#   * the switch **re-advertises**. The window command had that half since the morning
+#     round, and the POST row is the second door on the same function — a page that
+#     pinned a card while the announcer kept publishing the previous one's addresses is
+#     the 「控制项看起来能用」 shape this port keeps meeting, and the answer said
+#     「已切换到」 all along.
+#   * a refusal writes **nothing**. The reference rejects an unknown card before storing
+#     it (`protocol.py:1986-1990`), because a typo left in place makes
+#     `resolved_network_interface` fall back to automatic **silently**: the page would
+#     show the card the user typed while the wire carried whatever the default route
+#     picked. So the file's bytes are compared, not the in-memory table — reading the
+#     known-interface list goes through `Setting.get(key, default)`, which remembers its
+#     default (AGENTS.md §4.2's first trap, and Python has it identically), so a key
+#     being present in memory proves nothing about what reached the disk.
+#
+# The witness is the announcer's own summary line — `mDNS: announcing <instance> on port
+# <p> over [<addresses>]` — which §22 cross-checks against a second stack's reading of
+# the wire. Reading the *published set* is the claim here; whether the datagrams then
+# leave through that card is a separate question this section does not ask, and
+# `docs/Rust-Port-Design.md` §16 第 38 条 records what a probe measured about it.
+S32_SDIR=$(mktemp -d /tmp/macast-rust-iface.XXXXXX)
+S32_PORT=$((PORT + 12))
+S32_SOCK="$S32_SDIR/mpvsocket"
+S32_BASE="http://127.0.0.1:$S32_PORT/api"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Iface", "Api_Token": "0123456789abcdef0123456789abcdef", "Macast_Protocols": ["DLNA Protocol", "Chromecast Protocol"]}' \
+    "$S32_PORT" > "$S32_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S32_SDIR" MACAST_MPV_SOCKET="$S32_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S32_SDIR/stdout.log" 2>&1 &
+S32_PID=$!
+disown "$S32_PID" 2>/dev/null || true
+S32_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S32_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S32_PID" ]; then
+        S32_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S32_READY" ]; then
+    fail "the interface instance never became the listener on $S32_PORT"
+    kill -9 "$S32_PID" 2>/dev/null
+    rm -rf "$S32_SDIR"
+else
+    S32_DLOG="$S32_SDIR/logs/Discovery.log"
+    s32_dgrep() { grep -ahF "$1" "$S32_DLOG" 2>/dev/null; }
+    s32_announced() { grep -ahF 'mDNS: announcing ' "$S32_DLOG" 2>/dev/null; }
+    # The announcement is the precondition, and the *Cast* line is the one asked of: a
+    # second service type would make `tail -1` a choice by accident (§22's lesson), so
+    # the type filter is part of the reader, not decoration.
+    S32_LINE=""
+    for _ in $(seq 1 20); do
+        S32_LINE=$(s32_announced | grep -aF '_googlecast._tcp' | tail -1)
+        [ -n "$S32_LINE" ] && break
+        sleep 0.5
+    done
+    if [ -z "$S32_LINE" ]; then
+        fail "no Cast announcement line in $S32_DLOG, so the switch has nothing to move: $(s32_announced)"
+    else
+        S32_SET0=$(printf '%s' "$S32_LINE" | sed -n 's/.*over \[\([^]]*\)\].*/\1/p')
+        # This section's **own** instance name, read out of the line above rather than
+        # borrowed from §22: two announcers now write one line each per service type, and a
+        # needle taken from another instance's run would be a filter that can only ever
+        # return zero — which reads as "the packets did not move" about a run that moved
+        # them fine.
+        S32_INSTANCE=$(printf '%s' "$S32_LINE" | sed -n 's/.*announcing \([^ ]*\) on port .*/\1/p')
+        echo "  announcement before the switch: $S32_INSTANCE over [$S32_SET0]"
+
+        # ---- the refusal, asked first so nothing it could disturb has happened yet ----
+        S32_MD5=$(md5 -q "$S32_SDIR/macast_setting.json" 2>/dev/null)
+        api_post "$S32_BASE" "set-interface=nope9x"
+        S32_REJ=$API_MSG
+        [ "$API_CODE" = "1" ] \
+            && pass "an unknown card is refused with code 1, not stored ($API_CODE)" \
+            || fail "set-interface=nope9x answered code='$API_CODE' body='$API_BODY'"
+        case "$S32_REJ" in
+            *nope9x*) pass "the refusal names the typo the caller sent" ;;
+            *) fail "the refusal does not say which card it rejected: $S32_REJ" ;;
+        esac
+        case "$S32_REJ" in
+            *"当前可用"*) pass "…and lists what was available, so the reader can fix it" ;;
+            *) fail "the refusal gives no alternatives: $S32_REJ" ;;
+        esac
+        [ "$S32_MD5" = "$(md5 -q "$S32_SDIR/macast_setting.json" 2>/dev/null)" ] \
+            && pass "and the refusal left the settings file byte-for-byte alone" \
+            || fail "the refusal wrote the settings file — that is the silent fallback this row exists to prevent"
+        [ -z "$(s32_dgrep 'network interface changed')" ] \
+            && pass "the refused switch did not re-advertise either" \
+            || fail "a refused pin still cycled the announcement: $(s32_dgrep 'network interface changed' | head -1)"
+
+        # ---- pick a card the announcement is not already published over ----
+        api_probe "$S32_BASE?query=interfaces"
+        S32_ROWS=$(json_len interfaces)
+        S32_CARD=""; S32_CARD_IP=""
+        i=0
+        while [ "$i" -lt "$S32_ROWS" ]; do
+            S32_NAME=$(json_ask "interfaces.$i.name")
+            S32_IP=$(json_ask "interfaces.$i.ip")
+            S32_USABLE=$(json_ask "interfaces.$i.usable")
+            if [ "$S32_USABLE" = "true" ] && [ -n "$S32_IP" ] && [ ",$S32_SET0," != ",$S32_IP," ] \
+                && [ -z "$S32_CARD" ]; then
+                S32_CARD="$S32_NAME"; S32_CARD_IP="$S32_IP"
+            fi
+            i=$((i + 1))
+        done
+        if [ -z "$S32_CARD" ]; then
+            skip "this machine offers no second usable card (published set [$S32_SET0] out of $S32_ROWS rows), so a pin here cannot be told apart from no pin — the switch's document checks below are the ones that still mean something"
+        else
+            echo "  switching to: $S32_CARD ($S32_CARD_IP)"
+            # The listener binds **before** the POST. A switch's announcement is a
+            # three-packet burst 225 ms apart, so a listener that starts afterwards is
+            # measuring whether it joined in time rather than whether the datagrams moved
+            # (§4.2's 「等那个账本，不要抓客户端返回的那一瞬间」, this time on a sniffer).
+            # The needle is the instance's **wire label**, not a dotted name: `Macast-Rust-
+            # Iface` sits in the packet between two length bytes and the dots are gone
+            # (§25 measured a dotted filter reading a full group as `queries=0`).
+            S32_LBL=$(printf '%s' "$S32_INSTANCE" | sed -n 's/\._.*//p')
+            S32_HITS="$S32_SDIR/pinned-card.txt"
+            S32_LRES="$S32_SDIR/listener.out"
+            : > "$S32_HITS"
+            if [ ! -x "$CAST_PY" ] || [ -z "$S32_LBL" ]; then
+                skip "no .venv python or no instance label to listen with, so this run cannot show where the packets left"
+                S32_LPID=""
+            else
+                env -u PYTHONPATH "$CAST_PY" "$REPO/scripts/mdns_iface_listener.py" \
+                    --iface "$S32_CARD_IP" --seconds 12 --needle "$S32_LBL" --out "$S32_HITS" \
+                    > "$S32_LRES" 2>&1 &
+                S32_LPID=$!
+                sleep 1
+            fi
+            api_post "$S32_BASE" "set-interface=$S32_CARD"
+            [ "$API_CODE" = "0" ] \
+                && pass "a card off this machine's own table is accepted (code 0)" \
+                || fail "set-interface=$S32_CARD was refused: $API_BODY"
+            [ "$(json_ask interface)" = "$S32_CARD" ] \
+                && pass "and the answer names the card it switched to" \
+                || fail "the answer's interface key reads '$(json_ask interface)': $API_BODY"
+            [ "$(json_ask ssdp_reannounced)" = "true" ] \
+                && pass "SSDP was rebound — and that is the **result**, not the ask, because this instance had a listener to rebind" \
+                || fail "ssdp_reannounced reads '$(json_ask ssdp_reannounced)': $API_BODY"
+            [ "$(json_ask mdns_reannounced)" = "true" ] \
+                && pass "and the mDNS half came back up on the new addresses" \
+                || fail "mdns_reannounced reads '$(json_ask mdns_reannounced)': $API_BODY"
+
+            S32_LINE1=""
+            for _ in $(seq 1 20); do
+                S32_LINE1=$(s32_announced | grep -aF '_googlecast._tcp' | tail -1)
+                [ "$S32_LINE1" != "$S32_LINE" ] && [ -n "$S32_LINE1" ] && break
+                sleep 0.5
+            done
+            if [ "$S32_LINE1" = "$S32_LINE" ]; then
+                fail "the announcing line never changed after pinning $S32_CARD — the reply said re-announced while the publisher kept the old set: $S32_LINE1"
+            else
+                S32_SET1=$(printf '%s' "$S32_LINE1" | sed -n 's/.*over \[\([^]]*\)\].*/\1/p')
+                [ "$S32_SET1" = "$S32_CARD_IP" ] \
+                    && pass "the published set is now exactly the pinned card's address: [$S32_SET1]" \
+                    || fail "pinning $S32_CARD published [$S32_SET1], not [$S32_CARD_IP]"
+            fi
+            # The socket moved too, not just the document: the join line is what says a
+            # querier on that segment will be answered. §22's rule — the membership, not
+            # the bind — read on the switch's second engine.
+            S32_JOIN=$(s32_dgrep 'mDNS engine on ' | tail -1)
+            case "$S32_JOIN" in
+                *"[$S32_CARD_IP]"*) pass "and the new engine joined the pinned card: ${S32_JOIN#*] }" ;;
+                *) fail "the announcer after the pin did not join the pinned card: $S32_JOIN" ;;
+            esac
+            # **A live goodbye** — the one thing §22 recorded as unreachable from a
+            # script, because tearing an instance down with kill -9 never runs
+            # `stop_services`. A pin change stops the announcer while the process lives,
+            # so the goodbye is on the wire and in this log for real.
+            [ -n "$(s32_dgrep 'mDNS announcement stopped')" ] \
+                && pass "the old announcement said goodbye before the new one started (§22's unreachable-by-kill witness, reachable through the switch)" \
+                || fail "no 'mDNS announcement stopped' line: the switch started a second announcer without retiring the first"
+            # **Where the datagrams left.** The published set above is a document; this is
+            # the wire, and it is the half that was false until 2026-10-20: with no
+            # `IP_MULTICAST_IF` set, the kernel answered the route instead of the pin, the
+            # log said `over [192.168.139.3]`, and a listener joined on 192.168.139.3 saw
+            # nothing while the burst went on arriving on the default card. A picker whose
+            # only effect is on a document is what 「控制项看起来能用」 means.
+            if [ -n "$S32_LPID" ]; then
+                wait "$S32_LPID" 2>/dev/null
+                S32_N=$(grep -ac . "$S32_HITS" 2>/dev/null || echo 0)
+                case "$(cat "$S32_LRES" 2>/dev/null)" in
+                    LISTEN_FAILED*) skip "the pinned-card listener could not bind 5353: $(cat "$S32_LRES")" ;;
+                    *) [ "$S32_N" -ge 1 ] \
+                        && pass "and the announcement really left through the pinned card: $S32_N datagram(s) of $S32_LBL heard on $S32_CARD_IP" \
+                        || fail "nothing reached a listener joined on $S32_CARD_IP ($S32_CARD): the pin changed the published set but not the egress — $(cat "$S32_LRES" 2>/dev/null)" ;;
+                esac
+            fi
+            S32_CHG=$(s32_dgrep 'network interface changed' | tail -1)
+            case "$S32_CHG" in
+                *"-> $S32_CARD; mDNS re-announced"*) pass "and the change sentence says which card and that it came back: ${S32_CHG#*] }" ;;
+                *) fail "the change sentence does not name both halves: $S32_CHG" ;;
+            esac
+            grep -aqF "\"Network_Interface\": \"$S32_CARD\"" "$S32_SDIR/macast_setting.json" \
+                && pass "the pin is in the settings file, so it survives a restart (the §27 rule for anything the page writes)" \
+                || fail "the pin answered but was not persisted: $(cat "$S32_SDIR/macast_setting.json")"
+
+            # ---- clearing the pin is a request, not a missing argument ----
+            api_post "$S32_BASE" "set-interface="
+            [ "$API_MSG" = "已切换到 自动选择" ] \
+                && pass "an empty field restores automatic selection with the reference's own sentence" \
+                || fail "set-interface= answered '$API_MSG': $API_BODY"
+            S32_LINE2=""
+            for _ in $(seq 1 20); do
+                S32_LINE2=$(s32_announced | grep -aF '_googlecast._tcp' | tail -1)
+                [ "$S32_LINE2" != "$S32_LINE1" ] && [ -n "$S32_LINE2" ] && break
+                sleep 0.5
+            done
+            S32_SET2=$(printf '%s' "$S32_LINE2" | sed -n 's/.*over \[\([^]]*\)\].*/\1/p')
+            [ "$S32_SET2" = "$S32_SET0" ] \
+                && pass "and the published set came back to what it was before the pin: [$S32_SET2]" \
+                || fail "clearing the pin left the announcement on [$S32_SET2] instead of [$S32_SET0]"
+        fi
+    fi
+    kill -9 "$S32_PID" 2>/dev/null
+    pkill -9 -f "$S32_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S32_SDIR (macast.log, logs/Discovery.log, macast_setting.json)"
+    else
+        rm -rf "$S32_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

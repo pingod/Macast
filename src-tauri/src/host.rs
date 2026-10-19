@@ -1537,9 +1537,24 @@ pub struct ShellManagement {
     /// shared, and `Clone`-ing a handle at each use site would let a future reader
     /// believe they copied a ledger.
     pub targets: Arc<targets::Table>,
+    /// The handle `set-interface` needs: the pinned 网卡, the SSDP listener, and the
+    /// announcer that has to say goodbye and come back on the new addresses.
+    ///
+    /// `Arc`, and the **same** `Arc` `Runtime` holds, because the window's picker and
+    /// this face are two doors on one switch. A copy of the setting alone would let the
+    /// page answer 「已切换到 en0」 while the announcement kept the previous interface's
+    /// addresses for the rest of the session — which is the exact failure this row used
+    /// to have when only the window could switch at all.
+    pub discovery: Arc<crate::Discovery>,
 }
 
 impl macast_upnp::http::Management for ShellManagement {
+    /// `_set_network_interface` (`macast/protocol.py:1977-1995`), through the one handle
+    /// the window's picker also uses — see [`ShellManagement::discovery`].
+    fn set_interface(&self, name: &str) -> macast_upnp::http::Answer {
+        self.discovery.set_interface(name)
+    }
+
     /// `_cast_url` (`macast/protocol.py:1674-1695`).
     ///
     /// The `Err` half is deliberately not the reason: Python catches every
@@ -2405,6 +2420,13 @@ mod tests {
 
     use super::*;
     use macast_core::logging::Logger;
+    // `super` is this module, so the crate root — where `main.rs` keeps the shell's own
+    // boot helpers — is one level further up. These two are the first items from there
+    // that a test of this crate reaches for: the switch's handle and the four-word
+    // sentence it logs. `SharedHooks` comes from the crate `macast-upnp` re-exports it
+    // from, because `main.rs`'s own import is not visible down here.
+    use super::super::{announcement_change, Discovery};
+    use macast_upnp::store::SharedHooks;
 
     /// The same mechanism as `macast-cast`'s `pin_test_dir`, with this crate's
     /// directory name: `macast-core` compiles without the `cfg(test)` of a
@@ -2778,41 +2800,67 @@ mod tests {
         assert_eq!(macast_core::logging::root().name(), "Macast");
     }
 
+    /// "Chromecast is switched off" has to mean *nothing on 8009, nothing on 8008,
+    /// nothing on the wire*. Three structural facts keep that true, and each has its
+    /// own mutation body: the gate is read **before** every face `run()` opens, it is
+    /// read **exactly once** so two faces cannot disagree, and each face is
+    /// **constructed at exactly one place** so a fourth cannot appear behind a needle.
+    ///
+    /// The positional question is asked of `run()`'s body, not of the file. Since the
+    /// interface picker re-announces, the service table is built by a helper
+    /// (`discovery_services`) that both boot and `Runtime::readvertise` call, so a
+    /// needle's first occurrence in the file can now sit in a body that only ever runs
+    /// after the gate was read — `find` over the whole file would then compare a
+    /// helper's text against a call site and report an order the process never
+    /// executes. What has to be true is the order `run()` actually runs in.
     #[test]
     fn every_cast_face_is_behind_the_gate() {
         pin_test_dir();
         let main = include_str!("main.rs");
-        let gate = main
+        let body = &main[main.find("pub fn run()").expect("main.rs has run()")
+            ..main.find("\nfn main()").expect("main.rs has main()")];
+        let gate = body
             .find("host::faces_enabled(")
-            .expect("main.rs reads the gate");
+            .expect("run() reads the gate");
         for (needle, what) in [
             ("CastChannel::new", "the 8009 receiver"),
             ("setup::SetupServer::start", "the setup face"),
-            // The two announcements are audited by the **service** each one builds,
-            // not by `Announcer::new`: since 2026-10-18 there are two announcers (a
-            // Chromecast receiver and an AirPlay one), so the type's call site is no
-            // longer one-per-face — the *table* it announces is. Counting the service
-            // constructors keeps the same teeth: a duplicated Cast announcement, or a
-            // third announcer invented at a call site nobody gated, moves one of these
-            // counts. The announcer count is asserted separately below.
-            ("announce::Service::from_setting", "the Chromecast announcement"),
-            (
-                "announce::Service::airplay_from_setting",
-                "the AirPlay announcement",
-            ),
             ("airplay::AirPlayReceiver::new", "the AirPlay receiver"),
+            // The two halves of the announcement, audited as *calls*: run() must not
+            // build a service table or start a socket before it knows which doors are
+            // open. Their one-owner-ness is asserted separately below, which is the
+            // reason the audited needles are the calls rather than `Announcer::new` —
+            // a second announcer would have to come through this helper or invent its
+            // own construction site, and both are counted.
+            ("discovery.restart(", "the mDNS announcement"),
         ] {
-            let at = main.find(needle).unwrap_or_else(|| panic!("no {} in main.rs", what));
+            let at = body.find(needle).unwrap_or_else(|| panic!("no {} in run()", what));
             assert!(
                 gate < at,
                 "{} is opened before the gate is read",
                 what
             );
-            // **Exactly one call site per face.** `find` above only ever looks at
-            // the first, so a second `SetupServer::start(` written somewhere else
-            // in `main.rs` — the fourth face this audit exists to catch — would sit
-            // behind the needle and never be looked at. The `(` is part of the
-            // needle so a doc comment naming the type cannot count as a call.
+        }
+        // **Exactly one call site per face.** `find` above only ever looks at
+        // the first, so a second `SetupServer::start(` written somewhere else
+        // in `main.rs` — the fourth face this audit exists to catch — would sit
+        // behind the needle and never be looked at. The `(` is part of the
+        // needle so a doc comment naming the type cannot count as a call.
+        for (needle, what) in [
+            ("CastChannel::new", "the 8009 receiver"),
+            ("setup::SetupServer::start", "the setup face"),
+            ("airplay::AirPlayReceiver::new", "the AirPlay receiver"),
+            // Each door's service is built in one place, so a face cannot be
+            // announced by an inline table someone assembled at an ungated call
+            // site. Two announcers used to be one per door (2026-10-18); the
+            // socket merge made that wrong on two kernels, so the count that
+            // matters is now the *services* — one per door — plus one engine.
+            ("announce::Service::from_setting", "the Chromecast announcement"),
+            (
+                "announce::Service::airplay_from_setting",
+                "the AirPlay announcement",
+            ),
+        ] {
             let calls = main.matches(&format!("{needle}(")).count();
             assert_eq!(
                 calls, 1,
@@ -2820,26 +2868,33 @@ mod tests {
                  would be behind the gate only by accident"
             );
         }
-        // **One** announcer, because one socket announces every type (§16 第 32 条): the
-        // per-service shape cost unicast queriers a coin flip on which of two sockets
-        // received their query, measured on two kernels. The count that matters now is
-        // the other side of the same fact — the **service builders** are still one per
-        // door, so a face cannot be announced without its gate having produced a service:
+        // **One** announcer, because one socket owns every service type (§16 第 32 条):
+        // the per-service shape cost unicast queriers a coin flip on which socket
+        // received their query, measured on two kernels. And one owner of each half of
+        // the announcement, so the two paths that may re-advertise (boot and a pin
+        // change) cannot drift into two different tables or two different lifecycles:
         assert_eq!(
             main.matches("announce::Announcer::new(").count(),
             1,
-            "the announcer is constructed at {} sites; one socket owns every service",
-            main.matches("announce::Announcer::new(").count()
+            "the announcer is constructed at more than one site; one socket owns every service"
         );
         assert_eq!(
-            main.matches("announce::Service::from_setting(").count(),
+            main.matches("fn discovery_services(").count(),
             1,
-            "the Chromecast service is built more than once"
+            "the service table has more than one builder, so boot and the picker can disagree"
         );
         assert_eq!(
-            main.matches("announce::Service::airplay_from_setting(").count(),
+            main.matches("fn start_announcement(").count(),
             1,
-            "the AirPlay service is built more than once"
+            "the announcement has more than one starter, so only one of them can be gated"
+        );
+        // Two callers of one restart, and only two: boot's first start and the switch.
+        // A third is a face being announced by a path that never went through the door.
+        assert_eq!(
+            main.matches(".restart(").count(),
+            2,
+            "the announcer is restarted from {} sites; boot and the switch are the two              that may be, and a third would be gated only by accident",
+            main.matches(".restart(").count()
         );
         // Exactly one read, so no two faces can consult a *different* answer to the
         // same question — and so that a stale entry says 「Skipping unknown protocol」
@@ -2848,6 +2903,214 @@ mod tests {
             main.matches("host::faces_enabled(").count(),
             1,
             "the gate is read more than once, so the faces can disagree"
+        );
+        // The interface switch's two halves have one home each, for the same reason. The
+        // validation is the half a second copy would silently widen: a call site that
+        // stored a card without asking `net::pin_refusal` first is the typo-as-a-pin
+        // failure §32 measures from the other side, and it would not make any single test
+        // red — only the count would.
+        assert_eq!(
+            main.matches("net::pin_refusal(").count(),
+            1,
+            "the picker validates a card name in more than one place"
+        );
+        assert_eq!(
+            main.matches("set(Key::NetworkInterface").count(),
+            1,
+            "the pin is written from more than one place, so a refusal can be bypassed"
+        );
+    }
+
+    /// Which half of a re-advertisement moved is a four-state fact, and only this pair
+    /// can tell the states apart — the picker answers `code: 0` in all four.
+    ///
+    /// Asserted against **literals**: comparing the arms with each other (or with
+    /// `announcement_change`'s own constants) is a same-source equality that holds for
+    /// any wording, so a rewrite that made two states say the same thing would not move
+    /// a line (§13.4's rule, met again in my own test). The middle one is the row that
+    /// has to exist: **goodbye sent, nothing came back up** is otherwise read exactly
+    /// like "there was nothing to announce", and the first sends the reader to the bind
+    /// failure while the second sends them to 系统设置.
+    #[test]
+    fn announcement_change_names_which_half_of_the_switch_moved() {
+        pin_test_dir();
+        assert_eq!(announcement_change(true, true), "re-announced");
+        assert_eq!(announcement_change(false, true), "now announcing");
+        assert_eq!(
+            announcement_change(true, false),
+            "stopped announcing (see this file for why it could not start again)"
+        );
+        assert_eq!(
+            announcement_change(false, false),
+            "has nothing to announce (no receiver is listening)"
+        );
+    }
+
+    /// A `Hooks` that answers nothing, so a test can build an `SsdpPlugin` without a
+    /// running app. It exists for the same reason `macast-upnp`'s own null one does: an
+    /// accidental `stop_service()` from a bind failure should read as silence here, not
+    /// as a real service being torn down.
+    struct SilentHooks;
+
+    impl macast_upnp::store::Hooks for SilentHooks {
+        fn notify(&self, _title: &str, _text: &str) {}
+        fn stop_service(&self) {}
+    }
+
+    /// A plugin that never started: `SsdpPlugin::new` registers devices and logs, and
+    /// `ssdp().is_running()` stays `false` until `start()` — which is exactly the state
+    /// the switch's answer has to describe.
+    fn ssdp_never_started(setting: Arc<Setting>) -> Arc<macast_upnp::device::SsdpPlugin> {
+        macast_upnp::device::SsdpPlugin::new(Arc::new(SilentHooks) as SharedHooks, setting)
+    }
+
+    /// The reference's refusal (`protocol.py:1986-1990`), and the one thing that makes it
+    /// a refusal rather than a warning: **nothing is written**. A typo stored as a pin is
+    /// worse than no pin, because `resolved_network_interface` then falls back to
+    /// automatic selection *silently* — the settings page would say the card is pinned
+    /// while the announcer publishes whatever the default route picks. So the test asks
+    /// for the key to be absent afterwards, not merely for a `code: 1`.
+    #[test]
+    fn the_interface_switch_refuses_a_card_this_machine_does_not_have() {
+        pin_test_dir();
+        let setting = setting("iface-refusal");
+        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()));
+
+        let answer = discovery.set_interface("  nope9x  ");
+        assert_eq!(answer.code, 1, "an unknown card must not be stored");
+        assert!(
+            answer.message.contains("nope9x"),
+            "the refusal has to name the typo the user typed: {}",
+            answer.message
+        );
+        assert!(
+            answer.message.contains("当前可用"),
+            "…and say what was available, or the reader cannot fix it: {}",
+            answer.message
+        );
+        assert!(
+            answer.fields.is_empty(),
+            "a refusal is the reference's two-key dict, not a partial success document: {:?}",
+            answer.fields
+        );
+        // **Nothing reaches the disk.** The in-memory table is a different story and has
+        // to be told apart from it: reading the known-interface table above goes through
+        // `Setting::get_str(NetworkInterface, "")`, and `get` with a default *remembers*
+        // that default in the table — AGENTS.md §4.2's first trap, and the reference has
+        // it identically (`Setting.get(SettingProperty.Network_Interface, '')`). So the
+        // claim a refusal has to satisfy is that no `save()` ran: the file a user would
+        // copy into a bug report still has whatever it had before, which for a fresh
+        // settings path means "does not exist at all". Asserting `!has()` here would be
+        // asserting something the reference also fails, and would push the next person to
+        // route the read through `peek` — a divergence from Python made to please a test.
+        let path = macast_core::paths::setting_dir().join("iface-refusal.json");
+        assert!(
+            !path.exists(),
+            "the refusal wrote the settings file: {}",
+            std::fs::read_to_string(&path).unwrap_or_default()
+        );
+    }
+
+    /// The switch's own document, in the reference's key order, plus the two keys this
+    /// port adds because its call is direct. Asked on a machine where **nothing is
+    /// listening**: SSDP never started, and no receiver slot is filled, so both halves
+    /// answer `false` — and the sentence in `logs/Discovery.log` has to be the one that
+    /// means "there was nothing to say" rather than the one that means "a bind failed".
+    ///
+    /// The two `false`s are not decoration. A port that reported `mdns_reannounced: true`
+    /// because it called `start_announcement` and ignored the answer would be printing
+    /// the ask instead of the result — the shape AGENTS.md §4.2 keeps meeting ("别把端口在听
+    /// 当证据" is the same rule read from the other side).
+    #[test]
+    fn the_interface_switch_answers_which_halves_moved_when_nothing_is_listening() {
+        pin_test_dir();
+        let setting = setting("iface-answer");
+        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()));
+        let log = Logger::named(macast_cast::announce::LOGGER_NAME);
+        let path = log.claim();
+
+        // A name taken from **this machine's** table, not typed in: the row above proves
+        // the refusal path, and hard-coding "en0" here would make this test a red herring
+        // on every machine whose Wi-Fi card is numbered differently — this one answers
+        // `en7,bridge100,bridge101,bridge102,lo0,utun4`. Same rule as §4.8's Part 40: a
+        // judgment may not be decided by the machine that happens to run it.
+        let rows = net::network_interfaces(&setting);
+        assert!(
+            !rows.is_empty(),
+            "this machine reports no interfaces at all, so the switch has nothing to pin"
+        );
+        let card = rows[0].name.clone();
+
+        let pinned = discovery.set_interface(&card);
+        assert_eq!(pinned.code, 0, "a card off the machine's own table: {pinned:?}");
+        assert_eq!(
+            pinned.message,
+            format!("已切换到 {card}"),
+            "the reference's own sentence"
+        );
+        assert_eq!(
+            pinned
+                .fields
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["interface", "ssdp_reannounced", "mdns_reannounced"],
+            "the reference's three keys first, then the two this port adds — in that order"
+        );
+        assert_eq!(pinned.fields[0].1, json!(card));
+        assert_eq!(
+            pinned.fields[1].1,
+            json!(false),
+            "SSDP never started, so the switch did not rebind it"
+        );
+        assert_eq!(
+            pinned.fields[2].1,
+            json!(false),
+            "no receiver is listening, so there was nothing to announce"
+        );
+        assert_eq!(
+            setting.get_str(Key::NetworkInterface, ""),
+            card,
+            "a refused pin must not be stored — and an accepted one has to be"
+        );
+
+        // **Trimmed before the known-set lookup**, because that is the reference's order
+        // (`protocol.py:1985`, `name = (name or '').strip()` *then* the membership test):
+        // `" en0 "` is a pin there, and a port that trimmed only after validating would
+        // refuse a card the user can see in the picker. The stored value is the trimmed
+        // one, so the next reader does not have to strip to compare anything.
+        let padded = discovery.set_interface(&format!("  {card}  "));
+        assert_eq!(
+            padded.code,
+            0,
+            "a padded card name was refused; the reference strips before it looks up: {padded:?}"
+        );
+        assert_eq!(padded.fields[0].1, json!(card), "the stored pin kept the spaces");
+
+        // Clearing the pin is a request, not a missing argument: the reference stores
+        // the **empty string** (`utils.py:331-334`), it does not unset the key, and
+        // `get_network_interface` reads `''` as automatic.
+        let cleared = discovery.set_interface("");
+        assert_eq!(cleared.code, 0);
+        assert_eq!(cleared.message, "已切换到 自动选择");
+        assert_eq!(cleared.fields[0].1, json!(""));
+        assert_eq!(setting.get_str(Key::NetworkInterface, "?"), "");
+
+        // The two sentences, in the file a reader of 「为什么手机找不到这台 Mac」 opens.
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            text.contains(&format!(
+                "network interface changed -> {card}; mDNS has nothing to announce"
+            )),
+            "the pin change did not say which half moved: {text}"
+        );
+        assert!(
+            text.contains("network interface changed -> auto; mDNS has nothing to announce"),
+            "clearing the pin is not reported as a pin: {text}"
+        );
+        assert!(
+            !text.contains("stopped announcing"),
+            "nothing was announced, so a goodbye that never happened is being claimed: {text}"
         );
     }
 

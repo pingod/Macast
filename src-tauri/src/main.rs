@@ -112,43 +112,18 @@ struct Runtime {
     setting: Arc<Setting>,
     service_stopped: Arc<AtomicBool>,
     http: Arc<HttpServer>,
-    ssdp: Arc<SsdpPlugin>,
+    /// The two discovery faces a 网卡 switch re-touches (SSDP and the announcer), plus
+    /// the receivers the announcement is built from. Held as one handle because the
+    /// management HTTP face holds the **same** `Arc` and must not have a second copy of
+    /// "which interface is pinned, what is listening": see [`Discovery`].
+    discovery: Arc<Discovery>,
     eventing: Arc<Eventing>,
     relay: Arc<relay::RelayStore>,
-    /// The Chromecast receiver on 8009, when it started. `None` means there was
-    /// no certificate to serve, and the setup face said so on its own line.
-    cast: Option<Arc<macast_cast::CastChannel>>,
     /// The Chromecast setup face (8008, and 8443 when a certificate came up).
     /// `Option` because the plain listener may be refused (someone else holds
     /// 8008) and `SetupServer` itself already carries "is 8443 up" in
     /// `https_port`; the outer `Option` is only "did this run get a face at all".
     setup: Mutex<Option<setup::SetupServer>>,
-    /// The `_googlecast._tcp` announcement. `None` means 8009 never came up, so
-    /// there was no port worth announcing — not that announcing failed on a
-    /// listening receiver, which is the case whose reason went to
-    /// `logs/Discovery.log`.
-    announce: Option<Arc<announce::Announcer>>,
-    /// The AirPlay RTSP receiver, with the thread that serves it. `Mutex` +
-    /// `Option` for the same reason the setup face uses them: stopping means
-    /// **taking** the handle, and a `stop_services` that ran twice (a bind failure
-    /// on another thread followed by the window closing) must not join a thread
-    /// that another caller already joined.
-    ///
-    /// What is wired: the RTSP face, and since 2026-10-18 the `_airplay._tcp`
-    /// announcement next to it (the field below). What is **not**: answering a
-    /// query about that type, and any real iPhone in this LAN — so "手机里看得到这台
-    /// Mac" is still a sentence this machine cannot say, and the row in
-    /// `docs/Rust-Port-Design.md` §15 is where that is recorded. The RTSP face is
-    /// what §26 of the acceptance script drives.
-    airplay: Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>,
-    // (The `airplay_announce` field is gone with the merge: `announce` owns **one**
-    // socket for every service, so there is nothing left for a second field to stop.
-    // What survives of its doc is the part that is still a rule: a service type is
-    // **announced but not answered** when `Service::responder_answers()` says the
-    // decision table was not measured for it — and now that the two services share a
-    // socket, that predicate is asked per service inside the loop rather than per
-    // socket at bind time. `announce_tests::the_airplay_service_is_announced_and_never_answered`
-    // is still the witness that both halves — the decision and the obeying — are real.)
 }
 
 impl Runtime {
@@ -187,7 +162,7 @@ impl Runtime {
     /// closing, so no path here restarts it.
     fn stop_services(&self) {
         self.relay.clear();
-        self.ssdp.stop();
+        self.discovery.stop_ssdp();
         self.http.stop();
         // The Cast receiver stops with the other listeners, and its slot in the
         // host is emptied on the way: `stop()` wipes the ledger, so a `StateCall`
@@ -200,11 +175,12 @@ impl Runtime {
         // reasoning as the `byebye` above: a sender that never hears we are gone
         // keeps the PTR for [`announce::OTHER_TTL`], i.e. 75 minutes of a dead
         // device in a phone's list.
-        if let Some(announcer) = self.announce.as_ref() {
+        // `take`, not `as_ref`: the same handle may be stopped by a re-advertisement
+        // on another thread, and joining it twice would panic on the second caller.
+        if let Some(announcer) = self.discovery.take_announcer() {
             announcer.stop();
         }
-        if let Some(channel) = self.cast.as_ref() {
-            let owned = Arc::clone(channel);
+        if let Some(owned) = self.discovery.cast() {
             owned.stop();
             self.host.clear_cast();
             self.host
@@ -233,12 +209,7 @@ impl Runtime {
         // flag is lowered first, then the serving thread is joined, because
         // "switched off" has to mean **the port is free** — the accept loop polls,
         // so this is milliseconds rather than "whenever the next iPhone connects".
-        if let Some((receiver, handle)) = self
-            .airplay
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
+        if let Some((receiver, handle)) = self.discovery.take_airplay() {
             let port = receiver.port();
             receiver.stop();
             match handle.join() {
@@ -442,8 +413,8 @@ fn service_snapshot(runtime: State<'_, Runtime>) -> Value {
             "healthy": runtime.http.is_healthy(),
         },
         "ssdp": {
-            "running": runtime.ssdp.ssdp().is_running(),
-            "healthy": runtime.ssdp.ssdp().is_healthy(),
+            "running": runtime.discovery.ssdp_running(),
+            "healthy": runtime.discovery.ssdp_healthy(),
         },
         "eventing": {
             "running": runtime.eventing.is_running(),
@@ -485,54 +456,351 @@ fn set_friendly_name(runtime: State<'_, Runtime>, name: String) -> Value {
     })
 }
 
+/// What a re-advertisement did, in the three states only this pair can tell apart.
+///
+/// `stopping` is "there was an announcer to stop" and `up` is "there is one now". The
+/// middle case is the one a reader needs: **goodbye sent, nothing came back up** — a
+/// phone has just been told the device is gone and no log line except this one says
+/// whether it came back. Collapsing it into "not announcing" (which is also what the
+/// no-receiver case says) would send that reader to restart the app instead of to the
+/// bind failure that happened.
+fn announcement_change(stopping: bool, up: bool) -> &'static str {
+    match (stopping, up) {
+        (true, true) => "re-announced",
+        (false, true) => "now announcing",
+        (true, false) => "stopped announcing (see this file for why it could not start again)",
+        (false, false) => "has nothing to announce (no receiver is listening)",
+    }
+}
+
+/// The faces an interface switch has to re-touch, behind one handle with **two doors**.
+///
+/// Both doors ask the same question — "which ports are listening, and is the
+/// announcement back up after the pin changed" — so they get one implementation. Before
+/// this, the window's picker was the only thing that could re-advertise, and a
+/// `set-interface` POST would have answered 「已切换到 en0」 while the phone went on being
+/// told the addresses of the interface the user just replaced: the same `code: 0` that
+/// says nothing happened, reached from the other side of the house.
+///
+/// `cast` / `airplay` / `announce` are slots rather than fields because this handle is
+/// built **before** boot binds any of them (the HTTP face needs it to answer a POST, and
+/// a POST cannot arrive before the receivers exist). An empty slot is therefore a
+/// statement about construction order, not about a face being down — which is why the
+/// three readers below take/clone through methods instead of exposing `Option` fields a
+/// caller would have to guess the meaning of. `ssdp` is a plain field: `SsdpPlugin::new`
+/// registers devices without touching a socket, so it exists before this handle does.
+pub struct Discovery {
+    setting: Arc<Setting>,
+    ssdp: Arc<SsdpPlugin>,
+    cast: Arc<Mutex<Option<Arc<macast_cast::CastChannel>>>>,
+    airplay: Arc<Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>>,
+    announce: Arc<Mutex<Option<Arc<announce::Announcer>>>>,
+}
+
+fn slot<T>() -> Arc<Mutex<Option<T>>> {
+    Arc::new(Mutex::new(None))
+}
+
+impl Discovery {
+    pub fn new(setting: Arc<Setting>, ssdp: Arc<SsdpPlugin>) -> Arc<Discovery> {
+        Arc::new(Discovery {
+            setting,
+            ssdp,
+            cast: slot(),
+            airplay: slot(),
+            announce: slot(),
+        })
+    }
+
+    /// Register the 8009 receiver once it has bound, so a later re-advertisement can
+    /// read the port it **actually** got (and not announce a port nobody serves —
+    /// `discovery_services`'s own doc carries that rule).
+    pub fn set_cast(&self, channel: Arc<macast_cast::CastChannel>) {
+        *self.cast.lock().unwrap() = Some(channel);
+    }
+
+    /// Register the RTSP receiver and its serving thread once both exist.
+    pub fn set_airplay(&self, receiver: Arc<airplay::AirPlayReceiver>, handle: thread::JoinHandle<()>) {
+        *self.airplay.lock().unwrap() = Some((receiver, handle));
+    }
+
+    pub fn ssdp_running(&self) -> bool {
+        self.ssdp.ssdp().is_running()
+    }
+
+    pub fn ssdp_healthy(&self) -> bool {
+        self.ssdp.ssdp().is_healthy()
+    }
+
+    /// The receiver as it is registered right now — for the shell's own status reads,
+    /// which must answer "is 8009 up" from the same slot the announcement reads.
+    pub fn cast(&self) -> Option<Arc<macast_cast::CastChannel>> {
+        self.cast.lock().unwrap().clone()
+    }
+
+    /// Take the announcer, leaving nothing behind. `take`, not `as_ref`: stopping it
+    /// joins its thread, and joining twice panics the second caller — a re-advertisement
+    /// on one thread and the window closing on another can both ask for this.
+    pub fn take_announcer(&self) -> Option<Arc<announce::Announcer>> {
+        self.announce.lock().unwrap().take()
+    }
+
+    /// Take the RTSP receiver with its thread handle, for the same reason.
+    pub fn take_airplay(&self) -> Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)> {
+        self.airplay.lock().unwrap().take()
+    }
+
+    pub fn stop_ssdp(&self) {
+        self.ssdp.stop();
+    }
+
+    /// Rebind the SSDP listener onto the interface that was just written.
+    ///
+    /// Asked for only by a run that had something to rebind: `update_ip` stops and
+    /// starts the listener, so calling it when SSDP never came up would have this
+    /// command announcing something nobody asked it to announce.
+    pub fn rebind_ssdp(&self) {
+        self.ssdp.update_ip();
+    }
+
+    /// Which services are worth publishing **right now**, from the slots as filled.
+    fn services(&self, discovery_log: &Arc<Logger>) -> Vec<announce::Service> {
+        let cast = self.cast.lock().unwrap();
+        let airplay = self.airplay.lock().unwrap();
+        discovery_services(
+            &self.setting,
+            &cast,
+            airplay.as_ref().map(|(receiver, _)| receiver),
+            discovery_log,
+        )
+    }
+
+    /// Say goodbye through whatever announcer is registered, build the services again,
+    /// and start a new one. Returns `(was_announcing, is_announcing)` — the pair
+    /// [`announcement_change`] turns into a sentence.
+    ///
+    /// The reference's `on_network_interface_changed` (`macast/macast.py:1324-1346`)
+    /// rebinds SSDP **and cycles every running protocol**, because in Python each
+    /// protocol owns its own advertiser; the sentence under it — 「Cycling does not touch
+    /// mpv, so anything playing keeps playing」 — is why a re-advertisement is allowed to
+    /// be this narrow. Here the mDNS half is **one** object (`Announcer`, one socket,
+    /// every service type), so cycling means exactly these three moves. The Cast and
+    /// AirPlay receivers keep their sockets — the ports did not change, and a sender
+    /// already connected to 8009 would have been dropped for nothing.
+    fn restart(&self, discovery_log: &Arc<Logger>, discovery_log_path: &std::path::Path) -> (bool, bool) {
+        let old = self.take_announcer();
+        let stopping = old.is_some();
+        if let Some(announcer) = old {
+            announcer.stop();
+        }
+        let started = start_announcement(
+            self.services(discovery_log),
+            discovery_log,
+            discovery_log_path,
+        );
+        let up = started.is_some();
+        *self.announce.lock().unwrap() = started;
+        (stopping, up)
+    }
+
+    /// Pin (or clear, with `""`) the interface used for discovery, re-advertise, and
+    /// answer. One implementation for the window's picker and the management POST row.
+    ///
+    /// Ported from `_set_network_interface` (`macast/protocol.py:1977-1995`) with its
+    /// refusal intact: an unknown interface name is refused rather than stored, because
+    /// a typo would otherwise silently drop Macast to the loopback fallback and make it
+    /// invisible while looking like it was configured. The known set is every row of the
+    /// picker's table, usable or not — matching Python, which does not filter, so that a
+    /// down-but-real interface is not "not found".
+    ///
+    /// The reference then publishes `network_interface_changed`, whose handler rebinds
+    /// SSDP **and** cycles mDNS; both halves are here, and the answer says whether each
+    /// one moved. **That is a widening**: the reference's dict is `{code, message,
+    /// interface}` because its publisher cannot tell the caller what the engine bus did,
+    /// while this call is direct. The two extra keys are additive — a page that reads the
+    /// three reference keys is unaffected — and they are the difference between 「切换成功」
+    /// and a control that looks like it works. Recorded as a divergence in
+    /// `docs/Rust-Port-Design.md` §8.
+    pub fn set_interface(&self, raw: &str) -> macast_upnp::http::Answer {
+        let name = raw.trim().to_string();
+        if !name.is_empty() {
+            let known: Vec<String> = {
+                let mut names: Vec<String> = net::network_interfaces(&self.setting)
+                    .into_iter()
+                    .map(|row| row.name)
+                    .collect();
+                names.sort();
+                names
+            };
+            if let Some(refusal) = net::pin_refusal(&name, &known) {
+                return macast_upnp::http::Answer::fail(refusal);
+            }
+        }
+
+        self.setting.set(Key::NetworkInterface, Value::String(name.clone()));
+
+        // The reference restarts both halves unconditionally; here each is asked for only
+        // when it exists, because `update_ip` stops and starts the SSDP listener and the
+        // announcer can only be rebuilt from receivers that are actually listening.
+        let rebound = self.ssdp_running();
+        if rebound {
+            self.rebind_ssdp();
+        }
+        // The mDNS half, which is the half a phone actually looks for. The reference
+        // cycles the protocols for exactly this reason.
+        let discovery_log = Logger::named(announce::LOGGER_NAME);
+        let discovery_log_path = discovery_log.claim();
+        let (stopping, up) = self.restart(&discovery_log, &discovery_log_path);
+        // The one sentence that tells a reader whether the switch did anything at all
+        // to mDNS: `up` without `stopping` is "started", `!up` with it is "said goodbye
+        // and could not start again", and `!up` without it is "there was nothing to say".
+        // Three states, one line, because the answer is the same `code: 0` in all three.
+        discovery_log.info(&format!(
+            "network interface changed -> {pin}; mDNS {state}",
+            pin = if name.is_empty() {
+                "auto".to_string()
+            } else {
+                name.clone()
+            },
+            state = announcement_change(stopping, up)
+        ));
+
+        macast_upnp::http::Answer::ok(format!(
+            "已切换到 {}",
+            if name.is_empty() { "自动选择" } else { &name }
+        ))
+        // The reference's three keys in the reference's order, then the two this port
+        // adds because its call is direct (see the doc above).
+        .with("interface", json!(name))
+        .with("ssdp_reannounced", json!(rebound))
+        .with("mdns_reannounced", json!(up))
+    }
+}
+
+/// The service list this machine should announce **right now**.
+///
+/// One owner for "which receivers get advertised, and what we say about the ones that
+/// do not", because there are now two callers: boot (which builds it once, after the
+/// receivers it depends on have bound) and `set_network_interface` (which has to rebuild
+/// it after the pin changes, when the address list inside every `Service` is stale).
+/// A second copy of this in the switch path is how a re-advertisement ends up publishing
+/// the interface the user just replaced.
+///
+/// Both arguments are "what is **actually listening**": `cast_channel` is `None` when
+/// 8009 never came up, and the AirPlay receiver is `None` when the port range was taken
+/// (macOS ships its own receiver on 7000). The reference advertises `cast_port` even
+/// after a failed bind, which puts a device in a menu that cannot be cast to — recorded
+/// in `announce`'s module header as a deliberate divergence, and the reason the
+/// refusals are logged here rather than answered with an empty packet.
+fn discovery_services(
+    setting: &Setting,
+    cast: &Option<Arc<macast_cast::CastChannel>>,
+    airplay: Option<&Arc<airplay::AirPlayReceiver>>,
+    discovery_log: &Arc<Logger>,
+) -> Vec<announce::Service> {
+    let mut services = Vec::new();
+    match cast.as_ref() {
+        Some(channel) => services.push(announce::Service::from_setting(
+            setting,
+            channel.port(),
+            discovery_log,
+        )),
+        None => discovery_log.info(
+            "mDNS: not announcing — 8009 is not listening, and a device that cannot be \
+             cast to is worse than no device",
+        ),
+    }
+    // Two things decide the AirPlay service's shape and both are measurements: the
+    // **port** is the one `start()` bound (so a sender is never pointed at 7000, which
+    // is often Apple's), and the **deviceid** is the receiver's own, so the TXT record
+    // and `GET /info` name the same device.
+    if let Some(receiver) = airplay {
+        services.push(announce::Service::airplay_from_setting(
+            setting,
+            receiver.port(),
+            receiver.device_id(),
+            discovery_log,
+        ));
+    }
+    services
+}
+
+/// Start the one announcer for `services`, and say out loud what it published.
+///
+/// **One socket announces every type** this machine serves — the reference's
+/// `discover()` is a singleton and both protocols register into it, so this is the
+/// shipped shape rather than an optimisation: with one socket there is no competing
+/// reader for 5353's unicast traffic (`scripts/mdns_reuseport_probe.py` measured what
+/// two give), and the answering half is per service type (`responder_answers()`), not
+/// per socket.
+///
+/// `None` is a real answer with two different meanings, and the log says which: no
+/// service worth publishing (both receivers down), or a start that was refused —
+/// whose reason `Announcer::start` already wrote to `Discovery.log`, which is what the
+/// per-instance warning here points at.
+fn start_announcement(
+    services: Vec<announce::Service>,
+    discovery_log: &Arc<Logger>,
+    discovery_log_path: &std::path::Path,
+) -> Option<Arc<announce::Announcer>> {
+    if services.is_empty() {
+        return None;
+    }
+    let summaries: Vec<(String, u16, String, &'static str)> = services
+        .iter()
+        .map(|service| {
+            (
+                service.instance.clone(),
+                service.port,
+                // The list, not just the count: §22 compares what the announcer
+                // decided to publish against what a second stack reads off the wire,
+                // and "3 interfaces" cannot be compared to a set of addresses.
+                service
+                    .addresses
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                if service.responder_answers() {
+                    "it answers queries for this type"
+                } else {
+                    "it announces this type and does not answer it — the responder table was measured for _googlecast._tcp"
+                },
+            )
+        })
+        .collect();
+    let announcer = announce::Announcer::new(services, Arc::clone(discovery_log));
+    if announcer.start().is_err() {
+        for (instance, _, _, _) in &summaries {
+            discovery_log.warning(&format!(
+                "mDNS: not announcing {instance} — see {}",
+                discovery_log_path.display()
+            ));
+        }
+        None
+    } else {
+        for (instance, port, published, mode) in &summaries {
+            discovery_log.info(&format!(
+                "mDNS: announcing {instance} on port {port} over [{published}]; \
+                 {mode}; re-announcing every {} s",
+                announce::REANNOUNCE.as_secs()
+            ));
+        }
+        Some(announcer)
+    }
+}
+
 /// Pin (or clear, with `""`) the interface used for discovery, and re-advertise.
 ///
-/// Ported from `_set_network_interface` (`macast/protocol.py:1977-1995`) with
-/// its refusal intact: an unknown interface name is refused rather than stored,
-/// because a typo would otherwise silently drop Macast to the loopback fallback
-/// and make it invisible while looking like it was configured. The known set is
-/// every row of the picker's table, usable or not — matching Python, which does
-/// not filter, so that a down-but-real interface is not "not found".
-///
-/// The reference then publishes `network_interface_changed`, whose handler
-/// (`macast/macast.py:1324-1330`) rebinds SSDP **and** cycles mDNS. Only the
-/// SSDP half is portable here: mDNS belongs to the Chromecast and AirPlay
-/// broadcasters, which are tasks #19 and #20. Until they exist, a phone looking
-/// for `_googlecast._tcp` has nothing to see anyway.
+/// The window's door on [`Discovery::set_interface`], which owns every part of the
+/// answer — the known-interface table and its refusal, `Setting[NetworkInterface]`,
+/// the SSDP rebind, the goodbye and the fresh announcement, and the four keys of the
+/// document. The management POST row (`set-interface`, `protocol.py:2288`) opens the
+/// same function: a picker that only worked from the window would answer a page's
+/// 「已切换到 en0」 with the phone still being told the previous interface's addresses.
 #[tauri::command]
 fn set_network_interface(runtime: State<'_, Runtime>, name: String) -> Value {
-    let name = name.trim().to_string();
-    if !name.is_empty() {
-        let known: Vec<String> = {
-            let mut names: Vec<String> = net::network_interfaces(&runtime.setting)
-                .into_iter()
-                .map(|row| row.name)
-                .collect();
-            names.sort();
-            names
-        };
-        if let Some(refusal) = net::pin_refusal(&name, &known) {
-            return json!({"code": 1, "message": refusal});
-        }
-    }
-
-    runtime.setting.set(Key::NetworkInterface, Value::String(name.clone()));
-
-    // The reference restarts the announcer unconditionally; here the restart is
-    // asked for only when the announcer is up, because `update_ip()` stops and
-    // starts it, and bringing SSDP up for a user who stopped the service would
-    // be this command announcing something nobody asked it to announce.
-    let rebound = runtime.ssdp.ssdp().is_running();
-    if rebound {
-        runtime.ssdp.update_ip();
-    }
-
-    json!({
-        "code": 0,
-        "message": format!("已切换到 {}", if name.is_empty() { "自动选择" } else { &name }),
-        "interface": name,
-        "ssdp_reannounced": rebound,
-    })
+    macast_upnp::http::answer_value(&runtime.discovery.set_interface(&name))
 }
 
 /// Read one log the way the settings page asks for it: `query=log` with an
@@ -1040,6 +1308,27 @@ pub fn run() {
             // the cold-start kick happens on the first `target_state()` poll, so a
             // shell that never opens the page never sends a multicast.
             let device_table = Arc::new(targets::Table::new(setting.clone()));
+            // `host.clone()` rather than `host`: the last one moves into `Runtime`
+            // below, and SSDP needs a `SharedHooks` of its own — the `notify` half is
+            // how a bind failure reaches the page, and the `stop_service` half is how
+            // it reaches *this* struct's `stop_services`.
+            //
+            // Built before the management face because the face holds the same
+            // `Arc<SsdpPlugin>` inside [`Discovery`]: `set-interface` has to rebind
+            // SSDP, and two copies of "which listener is running" is how a switch
+            // ends up reported but not performed. `SsdpPlugin::new` only registers
+            // devices and logs; it binds nothing until `start()` below.
+            let ssdp = SsdpPlugin::new(Arc::new(host.clone()) as SharedHooks, setting.clone());
+            // One handle for the two doors that can switch the interface. Its receiver
+            // slots are filled as boot binds each face, and it is read — never cloned
+            // into a second copy — by `ShellManagement` and `Runtime`.
+            let discovery = Discovery::new(setting.clone(), Arc::clone(&ssdp));
+            // Built here rather than next to the other listeners because the
+            // management face below takes the same `Arc` inside [`Discovery`]:
+            // `set-interface` has to rebind SSDP and re-announce, and two copies of
+            // "which listener is running" is how a switch ends up reported but not
+            // performed. `SsdpPlugin::new` only registers devices and logs one line;
+            // it binds nothing until `start()` near the bottom of this closure.
             let face = Face::new(
                 Arc::new(soap) as Arc<dyn Control>,
                 eventing.clone() as Arc<dyn Subscription>,
@@ -1058,6 +1347,7 @@ pub fn run() {
                     port: relay_port,
                     jobs: Arc::clone(&resolve_jobs),
                     targets: device_table,
+                    discovery: Arc::clone(&discovery),
                 }) as Arc<dyn macast_upnp::http::Management>,
                 setting.clone(),
                 // The same table SOAP writes and GENA reads — `query=status`'s
@@ -1068,11 +1358,6 @@ pub fn run() {
                 table.clone() as SharedStore,
             )?;
             let http = HttpServer::new(Arc::new(face));
-            // `host.clone()` rather than `host`: the last one moves into `Runtime`
-            // below, and SSDP needs a `SharedHooks` of its own — the `notify` half is
-            // how a bind failure reaches the page, and the `stop_service` half is how
-            // it reaches *this* struct's `stop_services`.
-            let ssdp = SsdpPlugin::new(Arc::new(host.clone()) as SharedHooks, setting.clone());
 
             // The Chromecast receiver and its setup face are one protocol, so they
             // share a certificate, a log file, and — load-bearing — an **order**:
@@ -1154,6 +1439,13 @@ pub fn run() {
             let cast_report = cast_channel
                 .as_ref()
                 .map(|channel| channel.port().to_string());
+            // The same handle, in the slot the announcement reads. Registered here so
+            // a re-advertisement reports the port this run **actually** bound rather
+            // than the one `Setting` says to try — and so `Runtime` never holds a
+            // second copy of "is 8009 up" for the picker to disagree with.
+            if let Some(channel) = &cast_channel {
+                discovery.set_cast(Arc::clone(channel));
+            }
             let setup_config = match &cast_pair {
                 Some(pair) => match pair.server_config() {
                     Ok(config) => Some(config),
@@ -1203,33 +1495,15 @@ pub fn run() {
                 )
             });
             let setup = Mutex::new(setup_server);
-            // The **announcement**: 8009 answers a sender that already knows our
-            // address, and this is the half that lets a sender find that address
-            // without being told. Started only when the channel is really
-            // listening — the reference advertises `cast_port` even when the TLS
-            // bind failed, which puts a device in a menu that cannot be cast to
-            // (AGENTS.md §4.1's first symptom row), and `announce`'s module header
-            // records that as a deliberate divergence rather than a silent one.
-            // The service, not the announcer: **one socket announces every type** this
-            // machine serves (see `Announcer`'s field comment — the per-service socket
-            // shape cost unicast queriers a coin flip, measured on two kernels). So the
-            // two blocks below only build `Service`s; the single `start()` after them
-            // binds once.
-            let cast_service = match cast_channel.as_ref() {
-                Some(channel) => {
-                    let service =
-                        announce::Service::from_setting(&setting, channel.port(), &discovery_log);
-                    Some(service)
-                }
-                None => {
-                    discovery_log.info(
-                        "mDNS: not announcing — 8009 is not listening, and a device that \
-                         cannot be cast to is worse than no device",
-                    );
-                    None
-                }
-            };
-
+            // The **announcement** is started below, after both receivers have bound,
+            // by `Discovery::restart` — the same call `set-interface` makes when the
+            // user moves to another 网卡. 8009 answers a sender that already knows our
+            // address, and the announcement is the half that lets a sender find that
+            // address without being told; it publishes only ports that are really
+            // listening, because the reference advertises `cast_port` even after a
+            // failed TLS bind, which puts a device in a menu that cannot be cast to
+            // (AGENTS.md §4.1's first symptom row, recorded in `announce`'s module
+            // header as a deliberate divergence rather than a silent one).
             // The **AirPlay receiver**: a second, independent protocol on its own
             // port, with its own door in the same one read of the enable list. The
             // reference binds RTSP *before* it advertises, because macOS ships an
@@ -1301,83 +1575,23 @@ pub fn run() {
                 }
             };
 
-            // The AirPlay announcement, from the receiver that is actually
-            // listening. Two things decide its shape and both are measurements:
-            // the **port** is the one `start()` bound (macOS owns 7000, so this
-            // machine's answer is often 7001 and a sender told 7000 would reach
-            // Apple's receiver, not ours), and the **deviceid** is the receiver's
-            // own, so the TXT record and `GET /info` name the same device.
-            let (airplay, airplay_service) = match airplay_started {
-                Some((recv, handle)) => {
-                    let receiver = Arc::clone(&recv);
-                    let service = announce::Service::airplay_from_setting(
-                        &setting,
-                        receiver.port(),
-                        receiver.device_id(),
-                        &discovery_log,
-                    );
-                    (Some((recv, handle)), Some(service))
-                }
-                None => (None, None),
-            };
+            match airplay_started {
+                Some((receiver, handle)) => discovery.set_airplay(receiver, handle),
+                // Either the protocol is switched off, or its port range was taken, or
+                // the serving thread refused to spawn — each of which said its own
+                // sentence above. `Discovery` reads an empty slot as "do not announce
+                // _airplay._tcp", which is the same answer the RTSP face gives.
+                None => {}
+            }
 
-            // **One announcer, one socket, every service.** The reference's
-            // `discover()` is a singleton and both protocols register into it, so this
-            // is the shipped shape rather than an optimisation: with one socket there is
-            // no competing reader for 5353's unicast traffic, and the answering half is
-            // per service type (`responder_answers()`), not per socket.
-            let services: Vec<announce::Service> =
-                [cast_service, airplay_service].into_iter().flatten().collect();
-            let announcer = if services.is_empty() {
-                None
-            } else {
-                let summaries: Vec<(String, u16, String, &'static str)> = services
-                    .iter()
-                    .map(|service| {
-                        (
-                            service.instance.clone(),
-                            service.port,
-                            // The list, not just the count: §22 compares what the
-                            // announcer decided to publish against what a second stack
-                            // reads off the wire, and "3 interfaces" cannot be compared
-                            // to a set of addresses.
-                            service
-                                .addresses
-                                .iter()
-                                .map(|a| a.to_string())
-                                .collect::<Vec<_>>()
-                                .join(","),
-                            if service.responder_answers() {
-                                "it answers queries for this type"
-                            } else {
-                                "it announces this type and does not answer it — the responder table was measured for _googlecast._tcp"
-                            },
-                        )
-                    })
-                    .collect();
-                let announcer = announce::Announcer::new(services, Arc::clone(&discovery_log));
-                // `start` logged its own reason on `Discovery.log`; the summary lines
-                // here answer "did it" for whoever reads the startup log, and a refusal
-                // keeps `None` so `stop_services` never joins a thread that did not exist.
-                if announcer.start().is_err() {
-                    for (instance, _, _, _) in &summaries {
-                        discovery_log.warning(&format!(
-                            "mDNS: not announcing {instance} — see {}",
-                            discovery_log_path.display()
-                        ));
-                    }
-                    None
-                } else {
-                    for (instance, port, published, mode) in &summaries {
-                        discovery_log.info(&format!(
-                            "mDNS: announcing {instance} on port {port} over [{published}]; \
-                             {mode}; re-announcing every {} s",
-                            announce::REANNOUNCE.as_secs()
-                        ));
-                    }
-                    Some(announcer)
-                }
-            };
+            // **One announcer, one socket, every service**, started once for both
+            // types — see [`start_announcement`] for why that is the shipped shape
+            // rather than an optimisation.
+            // Boot's first start is the same call the interface switch makes, minus the
+            // sentence: `stopping` is `false` here by construction (nothing was
+            // announced yet), and the answer a reader of `Discovery.log` wants at boot
+            // is the per-service line `start_announcement` writes, not a change report.
+            let _ = discovery.restart(&discovery_log, &discovery_log_path);
 
             // Managed before anything is started, and this ordering is load-bearing
             // rather than tidy: `ssdp`'s bind failure spawns a thread that calls
@@ -1398,13 +1612,10 @@ pub fn run() {
                 setting,
                 service_stopped,
                 http: http.clone(),
-                ssdp: ssdp.clone(),
+                discovery: Arc::clone(&discovery),
                 eventing: eventing.clone(),
                 relay: relay_store,
-                cast: cast_channel,
                 setup,
-                announce: announcer,
-                airplay: Mutex::new(airplay),
             });
 
             player.start();

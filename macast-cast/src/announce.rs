@@ -1066,8 +1066,36 @@ impl Announcer {
             .name("MDNS_KEEPALIVE".to_string())
             .spawn(move || {
                 let sock = engine.sock;
+                let egress = engine.egress;
                 let group = SocketAddr::from((MDNS_GROUP, MDNS_PORT));
-                let mut send = |bytes: &[u8]| sock.send_to(bytes, group).map(|_| ());
+                // Every group packet this thread writes leaves through every interface the
+                // announcement publishes — see [`send_group`] for the measurement that made
+                // this load-bearing. The warning is **once per run**, because a card that
+                // refuses membership is a permanent condition and §4.10's log is full of
+                // sentences that repeated a true thing on every packet.
+                let mut complained = false;
+                let mut send = |bytes: &[u8]| {
+                    let (copies, refused) = send_group(&sock, group, bytes, &egress);
+                    if !refused.is_empty() && !complained {
+                        complained = true;
+                        log.warning(&format!(
+                            "mDNS cannot send through {} — the announcement leaves the other \
+                             interface(s) only, so a sender on that segment will not find this \
+                             Macast; 设置 → 网络, or 自动选择 in the picker, is the way to give \
+                             it back [{}]",
+                            refused.join(", "),
+                            refused.len()
+                        ));
+                    }
+                    if copies == 0 {
+                        Err(io::Error::new(
+                            io::ErrorKind::NotConnected,
+                            "the mDNS group accepted no copy of this packet",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                };
                 let mut unicast =
                     |bytes: &[u8], peer: SocketAddr| sock.send_to(bytes, peer).map(|_| ());
                 let mut buf = vec![0u8; crate::mdns::READ_MAX];
@@ -1174,11 +1202,13 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
     sock.set_multicast_loop_v4(true)?;
     let mut joined = 0usize;
     let mut took: Vec<String> = Vec::new();
+    let mut egress: Vec<Ipv4Addr> = Vec::new();
     for address in interfaces {
         match sock.join_multicast_v4(&MDNS_GROUP, address) {
             Ok(()) => {
                 joined += 1;
                 took.push(address.to_string());
+                egress.push(*address);
             }
             Err(e) => log.warning(&format!(
                 "mDNS cannot join {} on {}: {}",
@@ -1220,6 +1250,7 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
         sock,
         joined,
         offered: interfaces.len(),
+        egress,
     })
 }
 
@@ -1230,6 +1261,14 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
 /// cannot name.
 pub(crate) struct Engine {
     sock: UdpSocket,
+    /// The interfaces whose membership **took**, in the order offered — the list every
+    /// group send fans out over ([`send_group`]).
+    ///
+    /// This is not a cosmetic duplicate of `joined`: the count is what the log sentence
+    /// prints, while the list is what the socket sends through. They are the same
+    /// information in two shapes because the two readers ask different questions — "did
+    /// any membership take" and "how many copies should this burst leave as".
+    pub egress: Vec<Ipv4Addr>,
     /// Read only by `announce_tests::e8`, which asserts the join count on the
     /// struct instead of parsing the log sentence that prints it — so the dead-code
     /// warning here is the product build, not a field nobody asked for. Deleting
@@ -1239,6 +1278,85 @@ pub(crate) struct Engine {
     pub joined: usize,
     #[allow(dead_code)]
     pub offered: usize,
+}
+
+/// One packet, out **every** interface this announcement publishes.
+///
+/// This is what makes 网卡 pinning mean something on the wire. Until it existed the
+/// engine set no outgoing interface at all, so the kernel chose one by route and the
+/// pin only changed the **A records**: measured here on 2026-10-20, after
+/// `set-interface=bridge100` the announcer logged `joined 1 of 1 interface(s)
+/// [192.168.139.3]` and `over [192.168.139.3]`, while a listener joined on 192.168.139.3
+/// counted **0** datagrams and the three-packet burst still arrived on 192.168.1.5. The
+/// page said 「已切换到 bridge100」 and a sender on that segment heard nothing — a control
+/// whose only effect was on a document.
+///
+/// The reference gets this for free from its shape: `discovery.py:222` hands zeroconf the
+/// narrowed address list, zeroconf makes **one socket per interface**, and each of them
+/// sends the same bytes (§22 measured six sockets, each string sent once per socket). This
+/// port has one socket because the merged engine is what makes unicast queries reliable
+/// (§16 第 32 条), so it reproduces the fan-out by rotating `IP_MULTICAST_IF` and sending
+/// once per interface. Same on-wire shape, one socket.
+///
+/// Answers are fanned out the same way as bursts, and that is also the reference's
+/// behaviour rather than a choice: its per-interface sockets each *hear* a multicast query
+/// (multicast is duplicated to every joined socket — measured on two kernels) and each
+/// answers, so a querier there receives one copy per interface too.
+///
+/// Returns `(copies, refused)`. `refused` names the addresses the kernel would not accept
+/// as the outgoing interface are **skipped, not fatal, and not sent anyway**: one dead card
+/// out of three must not cost the announcement the other two, and a copy that leaves
+/// through *some other* card while naming the dead one's address is exactly the
+/// 「搜到但投不上」 shape §4.1's first row is about. This is also what the reference's
+/// UDP sender does with an adapter that refuses the option (`sock.rs:16-23`:
+/// `WSAEADDRNOTAVAIL` on a hotspot/ICS adapter ⇒ the caller skips it).
+///
+/// An empty `egress` — every join failed — sends one copy and lets the route decide,
+/// which is the "announce anyway" rule [`bind_engine`] already logs: no membership is a
+/// listener problem, not a reason to stop publishing.
+pub fn send_group(
+    sock: &UdpSocket,
+    group: SocketAddr,
+    bytes: &[u8],
+    egress: &[Ipv4Addr],
+) -> (usize, Vec<String>) {
+    let mut copies = 0usize;
+    let mut refused = Vec::new();
+    if egress.is_empty() {
+        return (usize::from(sock.send_to(bytes, group).is_ok()), refused);
+    }
+    for address in egress {
+        if let Err(e) = pin_multicast_if(sock, *address) {
+            refused.push(format!("{}: {}", address, e));
+            continue;
+        }
+        if sock.send_to(bytes, group).is_ok() {
+            copies += 1;
+        }
+    }
+    (copies, refused)
+}
+
+/// Pin the outgoing multicast interface for one send.
+///
+/// `std::net::UdpSocket` has no setter for `IP_MULTICAST_IF`. It does not need a raw
+/// `setsockopt` either: socket2's [`socket2::SockRef`] borrows the option off any
+/// `AsFd`, which is how [`crate::announce_tests`]’s loopback querier already pins its
+/// egress — so this file borrows the crate's existing dependency instead of adding a
+/// second platform shape to maintain (contrast `macast-upnp/src/sock.rs:269-276`, which
+/// goes raw because *that* option, `SO_REUSEPORT`, is behind socket2's `all` feature).
+///
+/// **The address form is what moves the egress here, measured.** `sock.rs:28-36` says the
+/// BSDs want the interface *index* — the shape Python's `ssdp.py` packs for its SSDP
+/// sender — and this port's SSDP sender follows that. For a group send on this Mac the
+/// address form works: a datagram sent to `224.0.0.251` with `IP_MULTICAST_IF` set to
+/// `192.168.139.3` arrived at a listener joined on that card and **not** at one joined on
+/// the default route's `192.168.1.5` (probe run 2026-10-20, the measurement behind
+/// [`send_group`]). `sock.rs:31-33` also records that Windows accepts **only** the address
+/// form, so this one call is the shape both of the other platforms want as well; the
+/// Windows leg is not measured here and §16 第 39 条 says so.
+fn pin_multicast_if(sock: &UdpSocket, address: Ipv4Addr) -> io::Result<()> {
+    socket2::SockRef::from(sock).set_multicast_if_v4(&address)
 }
 
 /// The interfaces an announcement may name — the **narrowed** set, in one place.

@@ -169,6 +169,10 @@ const FILE_ROUTE_PARAMS: [&str; 1] = ["plugin-file"];
 /// the first matching field wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PostAction {
+    /// `set-interface=<name>`, or `set-interface=` to go back to automatic: pin the
+    /// network card discovery uses and re-advertise on it (`_set_network_interface`,
+    /// `protocol.py:1977-1995`, row **1** of the reference's table).
+    SetInterface,
     /// `set-github-mirror=<anything truthy>`: flip 「启用国内镜像地址」 and hand the page
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
@@ -223,6 +227,13 @@ struct PostRoute {
 /// never reaches the resolve job. Put `resolve-page` first and the same request
 /// silently starts a parse instead of casting -- and nothing else changes.
 const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
+    // Row **1** of the reference's table (`protocol.py:2288`), so it is row 1 here too:
+    // a request that carries `set-interface` alongside any other action field runs
+    // *this* one and never reaches the later ones (§4.7c's "顺序即语义"). Management-
+    // gated, like Python: it writes one setting and rebinds two listeners, and runs
+    // nothing the request handed us — the interface name is matched against this
+    // machine's own interface table before it is stored, and refused if it is not there.
+    PostRoute { field: "set-interface", gate: "management", action: PostAction::SetInterface },
     // `set-github-mirror` is row 5 of the reference's table (`protocol.py:2292`), which
     // puts it **ahead of** `cast-uri` (row 15) — and order is semantics here
     // (AGENTS.md §4.7c: a request carrying both action fields runs the earlier one and
@@ -1363,6 +1374,25 @@ pub trait Management: Send + Sync {
     /// that changed what is playing is the only one that can say what it played
     /// (see [`Face::cast_url_answer`]). `Err` stays a bare **sentence**, because
     /// that is all Python's failure dict carries.
+    /// Pin (or clear, with `""`) the interface discovery uses, re-advertise on it, and
+    /// answer with what actually moved.
+    ///
+    /// The implementer owns every decision in the sentence: the table of known
+    /// interfaces (`Setting.network_interfaces` — every row, usable or not, because a
+    /// down-but-real card is not "not found"), the refusal that names both the typo and
+    /// what was available, the write, the SSDP rebind, and the goodbye-plus-fresh
+    /// announcement. `macast-upnp` cannot bind a socket or read `getifaddrs`, so a face
+    /// that answered 「已切换到 en0」 from its own string comparison would be saying a
+    /// thing it cannot know — and this row's whole value is that the phone can now be
+    /// *found* on the card the user picked.
+    ///
+    /// **Empty is a request, not a missing argument.** Python's `_set_network_interface`
+    /// defaults `name or ''` to automatic and clears the key, so `set-interface=` (and a
+    /// form that omitted the field, which the route table already excludes) both mean
+    /// "stop pinning". Trimming belongs here too: the reference does `(name or '').strip()`
+    /// **before** the known-set lookup, so `"en0 "` is a pin, not a typo.
+    fn set_interface(&self, name: &str) -> Answer;
+
     fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String>;
 
     /// Start a background parse of the page (or share text) in `text`.
@@ -2548,6 +2578,18 @@ impl Face {
                 return Some(refusal);
             }
             return Some(match route.action {
+                // One string in, one document out — and the document is the
+                // implementer's, because "which interfaces does this machine have" is
+                // a fact about its network stack, not about this file. The reference
+                // reads `kwargs.get('set-interface')` and defaults the *missing* value
+                // to `''` inside `_set_network_interface` (`name or ''`), which is the
+                // same answer as handing an empty field here: 自动选择.
+                PostAction::SetInterface => answer_response(
+                    200,
+                    &self
+                        .management
+                        .set_interface(&param_value(req, "set-interface").unwrap_or_default()),
+                ),
                 PostAction::CastUrl => self.cast_url_answer(
                     &param_value(req, "cast-uri").unwrap_or_default(),
                     param_value(req, "cast-title")
@@ -3423,13 +3465,17 @@ fn dump_at(value: &Value, level: usize) -> String {
 
 /// [`py_json_dumps_indented`] and [`answer_bytes`], given an [`Answer`].
 ///
+/// Public for the shell's window commands, which answer the **same** document a POST
+/// row does: two doors printing one `Answer` is the rule, and a command that rebuilt
+/// the JSON from the seam's parts would be a second owner of the key order.
+///
 /// The order is the one [`Answer`] documents: `code`, `message`, then the extra
 /// keys as they were added. `serde_json::Map` is insertion-ordered here because
 /// `preserve_order` is a workspace feature -- **and this is the one place that
 /// depends on it**, so the two-key layout test that measures
 /// [`py_json_dumps_indented`]'s 84-byte body is also the witness that the
 /// feature is on.
-fn answer_value(answer: &Answer) -> Value {
+pub fn answer_value(answer: &Answer) -> Value {
     let mut map = serde_json::Map::new();
     map.insert("code".to_string(), Value::from(answer.code));
     map.insert("message".to_string(), Value::String(answer.message.clone()));
@@ -4393,6 +4439,7 @@ mod tests {
         clear_cookies_calls: AtomicUsize,
         browser_calls: Mutex<Vec<String>>,
         sub_show_calls: Mutex<Vec<bool>>,
+        interface_calls: Mutex<Vec<String>>,
     }
 
     impl FakeManagement {
@@ -4409,6 +4456,7 @@ mod tests {
                 clear_cookies_calls: AtomicUsize::new(0),
                 browser_calls: Mutex::new(Vec::new()),
                 sub_show_calls: Mutex::new(Vec::new()),
+                interface_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -4457,9 +4505,31 @@ mod tests {
         fn browser_calls(&self) -> Vec<String> {
             self.browser_calls.lock().expect("browser calls").clone()
         }
+
+        fn interface_calls(&self) -> Vec<String> {
+            self.interface_calls.lock().expect("interface calls").clone()
+        }
     }
 
     impl Management for FakeManagement {
+        fn set_interface(&self, name: &str) -> Answer {
+            self.interface_calls
+                .lock()
+                .expect("interface calls")
+                .push(name.to_string());
+            Answer::ok(format!(
+                "已切换到 {}",
+                if name.trim().is_empty() {
+                    "自动选择"
+                } else {
+                    name.trim()
+                }
+            ))
+            .with("interface", Value::String(name.trim().to_string()))
+            .with("ssdp_reannounced", Value::Bool(false))
+            .with("mdns_reannounced", Value::Bool(false))
+        }
+
         fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String> {
             self.calls
                 .lock()
@@ -6099,7 +6169,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 11, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 12, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is
@@ -6125,6 +6195,7 @@ mod tests {
             );
         }
         for action in [
+            PostAction::SetInterface,
             PostAction::CastUrl,
             PostAction::ResolvePage,
             PostAction::CastResolved,
@@ -6177,6 +6248,16 @@ mod tests {
             // and only the earlier may run.
             ("set-subtitle-show", "cast-uri"),
             ("clear-play-history", "clear-log"),
+            // `set-interface` is row **1** of the reference's table (`protocol.py:2288`),
+            // so it precedes every row this port has: a request carrying it alongside
+            // anything else pins the card and never casts, never flips the mirror, never
+            // clears a log. Moved to row 2 it would keep every single-field request
+            // working and change only a two-field one — the drift §4.7c calls invisible,
+            // and the reason these pairs are compared instead of a fixed sequence being
+            // spelled out once.
+            ("set-interface", "set-github-mirror"),
+            ("set-interface", "cast-uri"),
+            ("set-interface", "set-module-setting"),
         ] {
             assert!(
                 index(earlier) < index(later),
@@ -8588,6 +8669,103 @@ mod tests {
         );
     }
 
+    /// The interface row's three face-owned claims, in the order a reader meets them:
+    /// it is **first** in dispatch, it is behind the **management** gate (so a LAN
+    /// request without the token hears the management sentence and the seam is never
+    /// asked), and the face hands the seam the field **as it arrived** — no trim, no
+    /// lowercasing, no "helpful" default.
+    ///
+    /// The last one is the reason this test exists rather than being folded into the
+    /// table loop. Trimming belongs to `_set_network_interface` (`protocol.py:1985`,
+    /// `(name or '').strip()`), which is the side that owns the known-interface table;
+    /// a face that trimmed first would make `" en0 "` and `"en0"` the same request and
+    /// then disagree with the reference about `" en0 "` whenever the machine has an
+    /// interface whose name really does carry a space — and the only witness of that
+    /// disagreement would be a red test on someone else's card table.
+    #[test]
+    fn set_interface_is_first_behind_the_management_gate_and_hands_over_the_raw_field() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("interface-row");
+
+        // A LAN request with no token: refused, and refused *as management* — the
+        // accumulative order of `gate_denial` means the caller never learns that this
+        // field can move listeners, and the seam records nothing.
+        let denied = face.answer(&post_form(
+            "/api",
+            "set-interface=en0",
+            "10.0.0.7",
+            &[],
+        ));
+        assert_eq!(denied.status, 200, "POST refusals keep the shipped envelope");
+        let body: serde_json::Value = serde_json::from_slice(&denied.body).expect("object");
+        assert_eq!(body["code"], json!(403));
+        assert_eq!(
+            body["message"],
+            json!(MANAGEMENT_REFUSAL),
+            "a LAN caller hears the management sentence, not a hint about this field"
+        );
+        assert!(
+            management.interface_calls().is_empty(),
+            "the gate refused, and the switch still ran"
+        );
+
+        // Loopback, no token: the reference trusts this machine for exactly this row
+        // (it writes one setting and rebinds two listeners; it runs nothing the request
+        // handed us), and the field arrives **untouched**.
+        let padded = face.answer(&post_form(
+            "/api",
+            "set-interface=%20en0%20",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(padded.status, 200);
+        assert_eq!(
+            management.interface_calls(),
+            vec![" en0 ".to_string()],
+            "the face trimmed what only the seam is allowed to trim"
+        );
+
+        // An empty field is a request, not a missing argument: 自动选择. The route is
+        // selected by the field's *presence*, so `set-interface=` reaches the seam with
+        // "" rather than falling through to "no action".
+        let cleared = face.answer(&post_form("/api", "set-interface=", LOCAL, &[]));
+        let cleared_doc: serde_json::Value =
+            serde_json::from_slice(&cleared.body).expect("object");
+        assert_eq!(cleared_doc["code"], json!(0));
+        assert_eq!(
+            management.interface_calls().last().map(String::as_str),
+            Some(""),
+            "an empty pin must not be read as 'the caller said nothing'"
+        );
+
+        // Row 1 wins. Both fields present, and the cast is never asked — which is also
+        // the witness that dispatch walks the slice in order rather than by name lookup.
+        let both = face.answer(&post_form(
+            "/api",
+            "set-interface=en0&cast-uri=http%3A%2F%2Fexample.invalid%2Fa.mp4",
+            LOCAL,
+            &[],
+        ));
+        let both_doc: serde_json::Value = serde_json::from_slice(&both.body).expect("object");
+        assert_eq!(
+            both_doc["code"],
+            json!(0),
+            "the pin's own document answers, not the cast's: {both_doc:?}"
+        );
+        assert!(
+            both_doc["mdns_reannounced"].is_boolean(),
+            "the reply is the interface document: {both_doc:?}"
+        );
+        assert!(
+            both_doc.get("url").is_none(),
+            "the cast ran as well, so the table order is not the dispatch order"
+        );
+        assert!(
+            management.calls().is_empty(),
+            "the later row was selected but still executed"
+        );
+    }
+
     /// `set-subtitle-show` is the door a person uses when the subtitles are on and they
     /// want them off, so the two claims that matter are that the flag is read with the
     /// reference's **four words without a strip** (`" on "` means *hide*, and this is the
@@ -8636,6 +8814,17 @@ mod tests {
                 doc.as_object().expect("object").keys().collect::<Vec<_>>(),
                 vec!["code", "message"],
                 "the reference's two-key answer, and nothing about the player"
+            );
+            // **Per row**, not only in the aggregate vector below: the table's second
+            // column is the expectation, and a loop that ignores it while a later
+            // assertion spells the same eleven values out by hand has two owners of one
+            // rule — reorder the table and the aggregate still matches, so the row that
+            // drifted answers nothing (the same-source equality §13.4 keeps meeting).
+            let heard = management.sub_show_calls.lock().expect("sub calls").clone();
+            assert_eq!(
+                heard.last().copied(),
+                Some(want),
+                "set-subtitle-show={posted:?} should reach the player as {want}"
             );
         }
         // And the ownership half of §5: the door told the player, it did **not** write
