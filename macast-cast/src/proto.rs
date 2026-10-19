@@ -519,7 +519,16 @@ mod tests {
     /// upward, which is the complaint recorded above; what it does see, and saw here, is a
     /// **deletion** — which is the failure this floor exists for, and the reason it is a
     /// floor of the measured number rather than a round one.
-    const TESTS_IN_THIS_CRATE: usize = 731;
+    /// 731 → **732** on 2026-10-20 with `e12`: the rotation's second socket kind, added
+    /// because `scripts/mdns_unicast_bind_probe.py` measured that a wildcard bind receives
+    /// **no** unicast query addressed at this host, so a sender that asked us directly was
+    /// talking to a port this process could not hear. **733** from
+    /// `the_reading_thread_rotates_every_socket_the_engine_bound` — binding the second kind
+    /// is half the claim, and `start()` handing it to the read loop is the other half, which
+    /// no behavioural row in this crate can reach without announcing on a real card. **734**
+    /// from `e13`, which is the only row that can see the engine's summary echoing the
+    /// addresses it was *handed* instead of the sockets it *got*.
+    const TESTS_IN_THIS_CRATE: usize = 734;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

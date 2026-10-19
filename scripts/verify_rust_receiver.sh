@@ -422,14 +422,24 @@ PY
 # because the title lands a moment after the GET answers.
 mpv_ask() {
     python3 - "$SOCK" "$1" <<'PY'
-import json, socket, sys
+import json, socket, sys, time
 path, name = sys.argv[1], sys.argv[2]
 # An explicit AF_UNIX socket, not `create_connection`: that helper wants a
 # (host, port) pair and unpacks a path string one **character** at a time, so
 # every read died with `ValueError: too many values to unpack` while the player
 # was in fact answering — the harness, not the receiver, was wrong.
+#
+# The **total** wait is bounded, not the gap between bytes. A socket timeout only
+# fires while nothing arrives, and mpv keeps a connected client fed with events (the
+# on-screen controller's log messages among them). On 2026-10-20 §16 hung for five
+# minutes in exactly that shape: one probe never returned because lines kept arriving,
+# and since mpv's IPC server serves one client at a time, every later probe starved
+# behind it and read '' — which the section then reported as two product FAILs. A
+# harness that can hold the player's only socket is worse than one that returns nothing:
+# it makes the next reading a lie.
+DEADLINE = time.monotonic() + 8.0
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(6)
+s.settimeout(max(0.05, DEADLINE - time.monotonic()))
 try:
     s.connect(path)
 except OSError:
@@ -438,6 +448,10 @@ s.sendall(json.dumps({"command": ["get_property", name], "request_id": 7}).encod
 try:
     stream = s.makefile("rb")
     while True:
+        left = DEADLINE - time.monotonic()
+        if left <= 0:
+            raise SystemExit(1)
+        s.settimeout(max(0.05, left))
         line = stream.readline()
         if not line:
             raise SystemExit(1)
@@ -450,7 +464,7 @@ try:
             if isinstance(data, str):
                 sys.stdout.write(data)
             raise SystemExit(0)
-except socket.timeout:
+except (socket.timeout, TimeoutError, OSError):
     raise SystemExit(1)
 PY
 }
@@ -462,6 +476,49 @@ PY
 # different run, and which the teardown here will not own. The check is
 # deliberately *before* the EXIT trap is installed, so refusing does not kill the
 # very instance we are refusing to collide with.
+# A locked display is not a network condition, but it makes this script unable to mean
+# anything. Measured 2026-10-20 while this gate was being written: with
+# `CGSSessionScreenIsLocked=True`, a `loadfile` the shell wrote and a `loadfile` an
+# outside probe wrote **directly into the player's own socket** both went unexecuted —
+# no `start-file`, no property event, the process at 0.0% CPU — while the socket itself
+# accepted bytes and `get_property` from a second connection still answered. So every
+# check that reads the player (§13/§14/§16's titles, §21/§26/§27/§30's playbacks) would
+# have reported a product FAIL about the state of the machine, and each one would have
+# spent minutes polling to do it. Refusing costs one second and says the truth: an
+# instrument that cannot measure must not print a verdict — the same rule that makes the
+# port collision below exit 2 instead of driving somebody else's instance.
+screen_locked() {
+    python3 - <<'PY' 2>/dev/null
+import ctypes
+cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+cf.CFBooleanGetValue.restype = ctypes.c_bool
+cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+session = cg.CGSessionCopyCurrentDictionary()
+if not session:
+    # No session dictionary means this is not a GUI session at all. Answer "no" and let
+    # the run go: a headless SSH shell has no display to lock, and refusing there would
+    # make the script unrunnable in a place where mpv never needed one.
+    print("no")
+    raise SystemExit(0)
+key = cf.CFStringCreateWithCString(None, b"CGSSessionScreenIsLocked", 0x0600)
+value = cf.CFDictionaryGetValue(session, key)
+print("yes" if value and cf.CFBooleanGetValue(value) else "no")
+PY
+}
+if [ "$(screen_locked)" = "yes" ]; then
+    echo "this Mac's display is locked (CGSSessionScreenIsLocked=True)." >&2
+    echo "The player stops executing anything written to its IPC socket in that state," >&2
+    echo "so the playback and window-name checks would be a verdict about the machine." >&2
+    echo "Unlock the display and run again — nothing was started, exit 2 is not a failure." >&2
+    exit 2
+fi
+
 _taken=$(listener_pid)
 if [ -n "$_taken" ]; then
     echo "port $PORT is already listened on by pid $_taken;" >&2
@@ -3652,13 +3709,16 @@ PING
     # answers a different question entirely).
     ap_mpv_ask() {
         python3 - "$AP_SOCK" "$1" <<'PINGMPV'
-import json, socket, sys
+import json, socket, sys, time
 path, name = sys.argv[1], sys.argv[2]
 # An explicit AF_UNIX socket: `create_connection` wants a (host, port) pair and
 # unpacks a path string one character at a time, so every read died with
 # `ValueError: too many values to unpack` while the player was answering fine.
+# Same total-wait bound as `mpv_ask` (see the note there about who holds the
+# player's only IPC client slot): per-recv silence is not a deadline.
+DEADLINE = time.monotonic() + 8.0
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(4)
+s.settimeout(max(0.05, DEADLINE - time.monotonic()))
 try:
     s.connect(path)
 except OSError:
@@ -3669,6 +3729,10 @@ got = ""
 try:
     buf = b""
     while True:
+        left = DEADLINE - time.monotonic()
+        if left <= 0:
+            break
+        s.settimeout(max(0.05, left))
         chunk = s.recv(65536)
         if not chunk:
             break
@@ -5209,6 +5273,181 @@ else
         echo "  MACAST_VERIFY_KEEP: kept $S32_SDIR (macast.log, logs/Discovery.log, macast_setting.json)"
     else
         rm -rf "$S32_SDIR"
+    fi
+fi
+
+echo "== 33: a query sent to our own address reaches the socket that exists for it =="
+# Design doc §16 第 40 条. `scripts/mdns_unicast_bind_probe.py` measured the rule this
+# section is about: a socket bound to 0.0.0.0:5353 receives **no** datagram addressed at
+# this host's own port 5353, while a socket bound to that exact address receives all of
+# them and **no** group traffic. One socket cannot be both, so the engine now binds two
+# kinds — and `announce_tests::e12` proves the rotation hears both inside one process.
+# What only this machine can say is whether the **shipped process** answers a querier that
+# asks it directly, which is the shape RFC 6762 §5.1 allows and this Mac's own
+# mDNSResponder uses once it has learned an address for a responder.
+#
+# Measured here on 2026-10-20, before this section existed: the instance logged
+# 「mDNS engine heard query 1 of 8 on 5353 (40 bytes, asking Ptr _googlecast._tcp.local.)
+# from 127.0.0.1:60062」 and answered five asks in a row, and zeroconf's own DNSIncoming
+# read each reply as PTR/SRV/TXT/A/NSEC. That is the first **cross-process** witness this
+# responder has ever had, and it narrows §25's open cell rather than closing it: traffic
+# from another process does arrive when it is unicast to an address we bind, and what still
+# does not arrive is the group. The cause of the group half is still not named here, and no
+# fix is invented for it.
+#
+# The asker binds 127.0.0.1 and the destination is this machine's own address, so the
+# kernel loops the datagram internally and no byte of this section goes out on the LAN —
+# the discipline §22's取证 round keeps, because a real broadcast from a test would put a
+# phantom Chromecast in every Cast menu on the segment for the length of the run.
+S33_SDIR=$(mktemp -d /tmp/macast-rust-unicast.XXXXXX)
+S33_PORT=$((PORT + 13))
+S33_SOCK="$S33_SDIR/mpvsocket"
+S33_DLOG="$S33_SDIR/logs/Discovery.log"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Unicast", "Api_Token": "0123456789abcdef0123456789abcdef", "Macast_Protocols": ["DLNA Protocol", "Chromecast Protocol"]}' \
+    "$S33_PORT" > "$S33_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S33_SDIR" MACAST_MPV_SOCKET="$S33_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S33_SDIR/stdout.log" 2>&1 &
+S33_PID=$!
+disown "$S33_PID" 2>/dev/null || true
+S33_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S33_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S33_PID" ]; then
+        S33_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S33_READY" ]; then
+    fail "the unicast instance never became the listener on $S33_PORT"
+    kill -9 "$S33_PID" 2>/dev/null
+    rm -rf "$S33_SDIR"
+elif [ ! -x "$CAST_PY" ]; then
+    skip "no .venv python, so there is no second stack to ask the question with"
+    kill -9 "$S33_PID" 2>/dev/null
+else
+    # The announcement is the precondition twice over: it says an engine exists to be asked,
+    # and it is where the address to ask, and the instance name an answer must carry, are
+    # read from. Nothing below is typed — §22's rule that a needle from another run is a
+    # filter that can only return zero.
+    S33_LINE=""
+    for _ in $(seq 1 20); do
+        S33_LINE=$(grep -ahF 'mDNS: announcing ' "$S33_DLOG" 2>/dev/null | grep -aF '_googlecast._tcp' | tail -1)
+        [ -n "$S33_LINE" ] && break
+        sleep 0.5
+    done
+    if [ -z "$S33_LINE" ]; then
+        fail "no Cast announcement line in $S33_DLOG, so this instance has no engine to ask"
+    else
+        S33_INSTANCE=$(printf '%s' "$S33_LINE" | sed -n 's/.*announcing \([^ ]*\) on port .*/\1/p')
+        S33_LBL=$(printf '%s' "$S33_INSTANCE" | sed -n 's/\._.*//p')
+        S33_SET0=$(printf '%s' "$S33_LINE" | sed -n 's/.*over \[\([^]]*\)\].*/\1/p')
+        S33_IP=$(printf '%s' "$S33_SET0" | cut -d, -f1 | tr -d ' ')
+        echo "  asking $S33_IP about $S33_LBL (published set [$S33_SET0])"
+        S33_ENGINE=$(grep -ahF 'mDNS engine on ' "$S33_DLOG" | tail -1)
+        case "$S33_ENGINE" in
+            *"it also hears unicast queries on "*)
+                pass "the shipped process says it bound the second socket kind: ${S33_ENGINE#*] }" ;;
+            *) fail "the engine line does not mention the per-address listeners, so the shipped binary has only the wildcard bind: $S33_ENGINE" ;;
+        esac
+        # Which addresses it listens on is the same list it publishes: an extra bind would
+        # be this machine answering on an address no sender can reach (and §22's product bug
+        # was exactly a wider set going onto the wire), while a missing one is a card whose
+        # queriers are ignored. Compared as sorted lists, not as counts, because two
+        # different sets can be the same size.
+        S33_BIND=$(printf '%s' "$S33_ENGINE" | sed -n 's/.*unicast queries on \[\([^]]*\)\].*/\1/p' | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort | tr '\n' ' ')
+        S33_PUB=$(printf '%s' "$S33_SET0" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | sort | tr '\n' ' ')
+        [ "$S33_BIND" = "$S33_PUB" ] \
+            && pass "and it binds exactly the addresses it publishes: [$S33_BIND]" \
+            || fail "the listener set [$S33_BIND] is not the published set [$S33_PUB]"
+        # Lines appended **after** each ask, because the same sentence may already be in the
+        # file from a neighbour's traffic — a hearing check that reads history is asking
+        # "did this ever happen", which is not the question (§4.2's 「等那个账本」 again).
+        S33_MARK=0
+        s33_mark() {
+            S33_MARK=$(wc -l < "$S33_DLOG" 2>/dev/null | tr -d ' ')
+            S33_MARK=${S33_MARK:-0}
+        }
+        s33_seen() { tail -n +"$((S33_MARK + 1))" "$S33_DLOG" 2>/dev/null | grep -ahF "$1"; }
+        s33_ask() {  # $1 = extra flags, $2 = where to keep the reader's output
+            env -u PYTHONPATH "$CAST_PY" "$REPO/scripts/mdns_unicast_ask.py" \
+                --addr "$S33_IP" --needle "$S33_LBL" --seconds 6 $1 > "$2" 2>&1
+            echo $?
+        }
+
+        s33_mark
+        S33_OUT="$S33_SDIR/ask.txt"
+        S33_EXIT=$(s33_ask "" "$S33_OUT")
+        if [ "$S33_EXIT" = "0" ]; then
+            pass "another process asked this address directly and the shipped responder answered (exit 0)"
+            # The reply is judged by the **reference's parser**, not by ours: what it read is
+            # printed here so a reader can see the five records rather than a verdict word.
+            if grep -aqF 'types=[PTR,SRV,TXT,A,NSEC]' "$S33_OUT"; then
+                pass "…and zeroconf's own reader sees the five records the announcement carries: $(grep -a 'types=' "$S33_OUT" | head -1)"
+            else
+                fail "the answer it read back is not the record set the announcement sends: $(grep -a 'types=' "$S33_OUT" | head -1)"
+            fi
+            if grep -aqE "answer from \('[0-9.]+', 5353\)" "$S33_OUT"; then
+                pass "and the reply leaves **from** port 5353, which is what a querier's stack needs to accept it (the receive-only listeners never answer, so their source port would be an ephemeral one)"
+            else
+                fail "the reply did not come from 5353: $(grep -a 'answer from' "$S33_OUT" | head -1)"
+            fi
+            if [ -n "$(s33_seen 'mDNS engine heard query')" ]; then
+                S33_HEARD=$(s33_seen 'mDNS engine heard query' | head -1)
+                case "$S33_HEARD" in
+                    *"asking Ptr _googlecast._tcp.local."*)
+                        pass "and the engine's own sentence says what it was asked: ${S33_HEARD#*] }" ;;
+                    *) fail "the hearing line does not name the question: $S33_HEARD" ;;
+                esac
+            else
+                fail "it answered without ever reporting hearing a query — the reply and the sentence have different owners"
+            fi
+        elif [ -n "$(s33_seen 'mDNS engine heard query')" ]; then
+            fail "the engine heard the query and did not answer it (asker exit $S33_EXIT): $(tail -2 "$S33_OUT" | tr '\n' ' ')"
+        else
+            skip "nothing arrived and the engine reported hearing nothing either — two readings fit that, and this section cannot tell them apart: either this Mac does not hand another process's query to our socket (§25's open cell), or the shipped thread never puts the second socket kind into its rotation. The unit row the_reading_thread_rotates_every_socket_the_engine_bound is the one that can see the second, so a skip here is not a pass for the wiring (asker exit $S33_EXIT, reader said: $(tail -1 "$S33_OUT"))"
+        fi
+
+        # The same question carrying the unicast-response bit. This is **not** §37's fourth
+        # route: that branch is gated on the source port being 5353, and every ask here comes
+        # from an ephemeral one — so what this row witnesses is that the bit in the class
+        # field does not cost an answer, while the quarter-TTL rule still has only the
+        # readings in `mdns_responder_probe.py` and the unit rows.
+        s33_mark
+        S33_QU="$S33_SDIR/ask-qu.txt"
+        S33_QEXIT=$(s33_ask "--qu" "$S33_QU")
+        if [ "$S33_QEXIT" = "0" ]; then
+            pass "a question with the unicast-response bit set is answered too (class 0x8001)"
+        elif [ -n "$(s33_seen 'mDNS engine heard query')" ]; then
+            fail "it heard the QU-flagged question and stayed silent (asker exit $S33_QEXIT): $(tail -2 "$S33_QU" | tr '\n' ' ')"
+        else
+            skip "the QU-flagged ask was not delivered either — same cell as above, exit $S33_QEXIT"
+        fi
+
+        # The negative, and it is only safe because of how it is phrased: loopback is not in
+        # the published set, so the engine must not stand a listener there. An answer would
+        # mean the bind list is wider than what is advertised. Silence and a third party's
+        # answer are both fine readings — only **our** name coming back is a red — because a
+        # negative that another process can turn red is not a judgment (the same reasoning
+        # that keeps §24 from asserting on a neighbour's advertisement).
+        s33_mark
+        S33_LB="$S33_SDIR/ask-loopback.txt"
+        env -u PYTHONPATH "$CAST_PY" "$REPO/scripts/mdns_unicast_ask.py" \
+            --addr 127.0.0.1 --needle "$S33_LBL" --seconds 3 > "$S33_LB" 2>&1
+        S33_LBEXIT=$?
+        if [ "$S33_LBEXIT" = "0" ]; then
+            fail "the responder answered a query addressed at 127.0.0.1, which is not in the published set [$S33_SET0] — the listener list is wider than the announcement"
+        else
+            pass "and it does not answer on loopback, which it never publishes (exit $S33_LBEXIT: $(tail -1 "$S33_LB" | cut -c1-90))"
+        fi
+    fi
+    kill -9 "$S33_PID" 2>/dev/null
+    pkill -9 -f "$S33_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S33_SDIR (macast.log, logs/Discovery.log, ask*.txt)"
+    else
+        rm -rf "$S33_SDIR"
     fi
 fi
 

@@ -1067,6 +1067,15 @@ impl Announcer {
             .spawn(move || {
                 let sock = engine.sock;
                 let egress = engine.egress;
+                // Every socket this engine can hear from, in one list for the rotation:
+                // the wildcard group listener first (it is also the one that sends), then
+                // the per-address unicast listeners. Cloning the group handle keeps the
+                // send closures pointed at the same socket the bursts have always used;
+                // the listeners are receive-only by the reasoning on [`Engine::unicast`].
+                let mut listeners = vec![sock
+                    .try_clone()
+                    .expect("cloning this process's own socket cannot fail")];
+                listeners.extend(engine.unicast.iter().filter_map(|sock| sock.try_clone().ok()));
                 let group = SocketAddr::from((MDNS_GROUP, MDNS_PORT));
                 // Every group packet this thread writes leaves through every interface the
                 // announcement publishes — see [`send_group`] for the measurement that made
@@ -1105,24 +1114,9 @@ impl Announcer {
                 // 60-second re-announcement still gets asked for on schedule. Setting
                 // the option per call costs one syscall at a few hertz.
                 let mut recv = |wait: Duration| {
-                    let _ = sock.set_read_timeout(Some(wait));
-                    match sock.recv_from(&mut buf) {
-                    Ok((length, peer)) => {
-                        buf.truncate(length);
-                        Ok(Some((buf.clone(), peer)))
-                    }
-                    // The poll elapsing is not an event: nothing arrived, so do the
-                    // rest of the loop's work and ask again.
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                    }
+                    // The rotation owns the timeouts now — one slice per socket, bounded
+                    // by the same `wait` this closure has always been handed.
+                    recv_any(&listeners, &mut buf, wait)
                 };
                 run(
                     &services,
@@ -1232,26 +1226,120 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
     let sock: UdpSocket = sock.into();
     // The poll, not an infinite block: see [`run`]'s `recv`.
     sock.set_read_timeout(Some(READ_POLL))?;
+    // The second kind, one per address. `new_respond_socket` (`net.py:415-455`) is the
+    // reference's name for this shape and its comment is the rule — "Bind explicitly to
+    // the interface address" — while `new_listen_socket` (`:455-461`) keeps its own
+    // docstring as the statement of what the wildcard one is for: "used to receive
+    // multicast queries". A failure here is per address and non-fatal: the group listener
+    // is what makes the announcement answerable at all, so it must not be lost because
+    // one card refused a second bind.
+    let mut unicast: Vec<UdpSocket> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for address in interfaces {
+        match bind_unicast_listener(*address, &log) {
+            Ok(sock) => unicast.push(sock),
+            Err(e) => refused.push(format!("{address}: {e}")),
+        }
+    }
+    if !refused.is_empty() {
+        log.warning(&format!(
+            "mDNS cannot hear unicast queries on {} — a sender that asks this address\
+             directly is ignored, while one that asks the group is still answered: {}",
+            refused.len(),
+            refused.join(", ")
+        ));
+    }
     // And say out loud what this socket can now do, with the join count in the
     // sentence. Before this line existed, "the receiver never answered a query" had
     // three indistinguishable readings in the log — nothing bound, bound but not
     // joined, joined but deaf — and telling them apart took two machines and an hour
     // of probes. §4.2's 「别把端口在听当证据」 cuts both ways: the answer is the
     // membership, not the bind, so the membership is what gets reported.
+    //
+    // The unicast half is read **back off the sockets** rather than printed from
+    // `interfaces`, and that is a deliberate one-owner choice: a count taken from the
+    // request and a list taken from the sockets are two answers to one question, and the
+    // first can be wrong about a card that refused the second bind while looking exactly
+    // as healthy. §33's second check compares this list against the addresses the same
+    // process publishes, so the sentence has to be a report of fact, not of intent.
     log.info(&format!(
-        "mDNS engine on {} joined {} of {} interface(s) [{}]; {}",
+        "mDNS engine on {} joined {} of {} interface(s) [{}]; {}; it also hears unicast queries on [{}]",
         MDNS_PORT,
         joined,
         interfaces.len(),
         took.join(", "),
-        "it answers queries for every service type registered on it"
+        "it answers queries for every service type registered on it",
+        unicast
+            .iter()
+            .filter_map(|sock| sock.local_addr().ok())
+            .map(|address| address.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     ));
     Ok(Engine {
         sock,
+        unicast,
         joined,
         offered: interfaces.len(),
         egress,
     })
+}
+
+/// One socket bound to **this address** at 5353, with the same reuse options.
+///
+/// Not joined, on purpose: measured on this machine, a socket that is bound to an address
+/// receives no group traffic even when it joins the group on that same address
+/// (`bound AND joined on 192.168.1.5: group 0 of 6, unicast 6 of 6`), so a join here
+/// would buy nothing and would make the join count in the engine's sentence mean two
+/// different things.
+fn bind_unicast_listener(address: Ipv4Addr, log: &Logger) -> io::Result<UdpSocket> {
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    // The same reuse block the group socket gets, and the same logger: `EADDRINUSE` here
+    // would be another stack holding this exact address, which is a warning about one
+    // card, not a dead engine — the caller keeps the group listener either way.
+    crate::mdns::set_reuse_for_mdns(&sock, log);
+    sock.bind(&SocketAddr::from((address, MDNS_PORT)).into())?;
+    let sock: UdpSocket = sock.into();
+    sock.set_read_timeout(Some(READ_POLL))?;
+    Ok(sock)
+}
+
+/// One datagram from **any** of these sockets, within `wait`.
+///
+/// Rotation rather than `poll(2)`: the crate has `libc` only for the one `setsockopt`
+/// socket2 cannot reach, and a `WSAPoll` branch would be a second platform path this
+/// repository has never run. Each socket gets an equal slice of what is left, so the
+/// total wait is still bounded by `wait` — which is what keeps the aggregate queue's
+/// deadline honest (§16 第 37 条: the loop's wait is `min(poll, reannounce, queue)`, and
+/// a rotation that overshot would delay a queued answer past its own due time).
+pub fn recv_any(
+    sockets: &[UdpSocket],
+    buf: &mut [u8],
+    wait: Duration,
+) -> io::Result<Option<(Vec<u8>, SocketAddr)>> {
+    if sockets.is_empty() {
+        return Ok(None);
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        for sock in sockets {
+            let slice = (remaining / sockets.len() as u32).max(Duration::from_millis(1));
+            let _ = sock.set_read_timeout(Some(slice));
+            match sock.recv_from(buf) {
+                Ok((length, peer)) => return Ok(Some((buf[..length].to_vec(), peer))),
+                // Nothing on this one; the next socket gets its slice too.
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                Err(e) => return Err(e),
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+        }
+    }
 }
 
 /// The socket plus what it managed to join.
@@ -1261,6 +1349,24 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
 /// cannot name.
 pub(crate) struct Engine {
     sock: UdpSocket,
+    /// The sockets bound **to an interface address**, one per offered address that took
+    /// the bind — the second socket kind [`crate::mdns`] does not have either, and the
+    /// reason both exist is measured in
+    /// `scripts/mdns_unicast_bind_probe.py` (2026-10-20, this machine, loopback and the
+    /// LAN address, both controls passing): a socket bound to `0.0.0.0:5353` receives
+    /// **0 of 6** datagrams sent to this host's own address:5353, while a socket bound to
+    /// that address receives **6 of 6** — and hears **0 of 6** of the group traffic the
+    /// wildcard socket receives. So one socket cannot be both, and a querier that asks us
+    /// directly (RFC 6762 §5.1 allows a unicast query; the machine's own `mDNSResponder`
+    /// holds the exact-address bind, which is why the wildcard socket hears nothing) was
+    /// talking to a port we could not hear.
+    ///
+    /// They are **receive-only** here: bursts and answers still leave through `sock`, so a
+    /// unicast reply's source address is whatever the route picks rather than the address
+    /// it was asked at. That is the half this machine cannot price — it needs a second
+    /// host to see the source field — design doc §8 carries that row, §16 第 41 条 the
+    /// reading, and neither of them guesses.
+    pub unicast: Vec<UdpSocket>,
     /// The interfaces whose membership **took**, in the order offered — the list every
     /// group send fans out over ([`send_group`]).
     ///

@@ -2472,3 +2472,336 @@ fn e11_the_announcement_copies_itself_onto_every_published_interface() {
     );
     assert!(refused.is_empty());
 }
+
+/// A query sent **to our address** — not to the group — is heard, and is heard on the
+/// socket that only exists because of the measurement in
+/// `scripts/mdns_unicast_bind_probe.py`.
+///
+/// Before that probe, this engine had one socket kind: bound to `0.0.0.0:5353`, joined,
+/// reading. The probe's third line is what said that is not enough — two such sockets
+/// together received **0 of 6** datagrams addressed at this host's own port 5353, while a
+/// socket bound to that address received **6 of 6**. So the coin flip §16 第 13 条
+/// described was never the failure here; the failure was that neither shape of wildcard
+/// bind can hear a unicast query, and a querier that asks us directly (which RFC 6762
+/// §5.1 allows, and which this machine's own `mDNSResponder` does when it has already
+/// learned an address for a responder) was being ignored by a process that had no socket
+/// able to receive it.
+///
+/// Loopback-only **on the wire**: the asker is bound to `127.0.0.1` and every
+/// group-addressed leg of an answer is held back by this test instead of sent, because
+/// the engine has to join on a real card to have a real card's address to bind. That is
+/// also why the address is read from `advertised_addresses` rather than typed — and why
+/// it cannot be a second loopback address: macOS refuses any bind but `127.0.0.1`
+/// (measured 2026-10-20: `127.0.0.53 refused: [Errno 49] Can't assign requested
+/// address`), and `127.0.0.1:5353` is exactly what `e8` and `e11` already hold, so a
+/// third socket there would be competing with them for the same flow. A unicast datagram
+/// to port 5353 is handed to exactly **one** socket in the reuse group (§16 第 13 条's
+/// rule), so this test must ask on an address nobody else binds — and the machines that
+/// do hold `*:5353` (this one has a dozen) are wildcard binds, which the probe measured
+/// as receiving **none** of that traffic.
+#[test]
+fn e12_a_unicast_query_to_our_own_address_is_heard_by_the_socket_that_exists_for_it() {
+    crate::pin_test_dir();
+    use std::time::Instant;
+
+    let logger = Logger::named(LOGGER_NAME);
+    let service = fixture_service();
+    let ours_addr: Ipv4Addr = macast_core::net::advertised_addresses(&setting("e12"))
+        .into_iter()
+        .filter_map(|text| text.parse().ok())
+        .find(|address: &Ipv4Addr| !address.is_loopback())
+        .unwrap_or_else(|| {
+            panic!(
+                "this machine publishes no non-loopback address, so there is no address to \
+                 bind that the wildcard socket is not already standing on — a missing \
+                 witness, not a pass"
+            )
+        });
+    let engine = match bind_engine(&[ours_addr], &logger) {
+        Ok(engine) => engine,
+        Err(e) => panic!("cannot bind the engine socket the product binds: {}", e),
+    };
+    assert_eq!(
+        engine.unicast.len(),
+        1,
+        "one socket bound per offered address — the wildcard bind is not one of those"
+    );
+
+    let group = engine.sock.try_clone().expect("clone of the group socket");
+    let mut listeners = vec![group
+        .try_clone()
+        .expect("the group socket joins the rotation")];
+    listeners.extend(
+        engine
+            .unicast
+            .iter()
+            .filter_map(|sock| sock.try_clone().ok()),
+    );
+    let ourselves = SocketAddr::from((ours_addr, MDNS_PORT));
+    let asker = UdpSocket::bind("127.0.0.1:0").expect("an ephemeral querier binds");
+    let query = ptr_query(SERVICE_TYPE);
+
+    asker
+        .send_to(&query, ourselves)
+        .expect("the unicast query leaves");
+
+    // The shipped trio, not a stand-in for it: [`bind_engine`]'s sockets, [`recv_any`]'s
+    // rotation, and [`serve`] answering what arrives. The queue is flushed the way `run`
+    // flushes it, because an answer whose bucket is Aggregate is only on the wire after
+    // its own deadline — so a test that asserts on `served.direct` alone would be
+    // asserting the bucketing rather than the hearing.
+    //
+    // **Nothing group-addressed is actually sent.** This engine has to join on a real
+    // card to have a real card's address to bind, and a multicast answer from it would
+    // put the fixture service on the LAN for the length of the test — the side effect
+    // §22's取证 round was built to avoid ("真广播会在跑的这一段时间里让本机多出一台
+    // Chromecast"). So the two group legs (a bucketed answer's flush and a
+    // multicast-source reply) are counted and dropped, and a reply is only written when
+    // its peer is loopback. What is left to prove the hearing is the one thing the test is
+    // asking about: the answer that comes back to this process's own querier.
+    let clock = Instant::now();
+    let mut buf = vec![0u8; crate::mdns::READ_MAX];
+    let mut queues = crate::aggregate::Outgoing::new();
+    let held = std::sync::atomic::AtomicUsize::new(0);
+    let mut send = |_bytes: &[u8]| {
+        held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    };
+    let mut unicast = |bytes: &[u8], peer: SocketAddr| {
+        if peer.ip().is_loopback() {
+            group.send_to(bytes, peer).map(|_| ())
+        } else {
+            // Some other host asked us directly and this test is not going to answer it
+            // on its behalf: the socket exists to be heard, the reply is not the witness.
+            held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(6);
+    let mut heard_our_query = 0usize;
+    let mut ask_again = Instant::now();
+    while Instant::now() < deadline && heard_our_query == 0 {
+        let now_ms = clock.elapsed().as_millis() as u64;
+        for batch in queues.due(now_ms) {
+            if let Some(bytes) = datagram_for(&batch, &[&service]) {
+                held.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = bytes;
+            }
+        }
+        match recv_any(&listeners, &mut buf, Duration::from_millis(250))
+            .expect("the rotation's read")
+        {
+            Some((data, peer)) => {
+                if data == query {
+                    heard_our_query += 1;
+                }
+                serve(
+                    &data,
+                    peer,
+                    &service,
+                    0,
+                    now_ms,
+                    &mut send,
+                    &mut unicast,
+                    &mut queues,
+                    &logger,
+                );
+            }
+            // Nothing anywhere within the slice; loop, and repeat the question the way a
+            // real querier would after its own timeout.
+            None => {
+                if Instant::now() >= ask_again {
+                    asker
+                        .send_to(&query, ourselves)
+                        .expect("the retry leaves");
+                    ask_again = Instant::now() + Duration::from_secs(1);
+                }
+            }
+        }
+    }
+    assert!(
+        heard_our_query > 0,
+        "the rotation never saw the query sent straight to {} — either the second socket \
+         kind is not in the list, or another socket bound to that same address won the \
+         kernel's one-socket-per-flow choice ({} datagram(s) were held back from the group \
+         by this test, so the hearing path did run on something)",
+        ourselves,
+        held.load(std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let mut got = vec![0u8; crate::mdns::READ_MAX];
+    asker
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("a read timeout on the asker");
+    let (length, from) = asker.recv_from(&mut got).expect("the querier got an answer");
+    got.truncate(length);
+    let message = mdns::parse_message(&got, "engine", &logger).expect("the answer parses");
+    assert!(
+        message
+            .records
+            .iter()
+            .any(|record| record.rtype == TYPE_PTR && record.rdata == RData::Name(service.instance.clone())),
+        "a unicast querier got a packet that does not name us: {:?}",
+        message.records
+    );
+    assert_eq!(
+        from.port(),
+        MDNS_PORT,
+        "the answer must come from 5353 — this one is written by the group socket, which \
+         is the half of the shape this port has NOT changed (see [`Engine::unicast`])"
+    );
+
+    // ---- the control that makes the socket load-bearing, not merely present ----
+    // The same datagram, sent again, with the rotation pointed at the **wildcard socket
+    // alone**: nothing that looks like our query may come back. Unrelated traffic on this
+    // machine is filtered out rather than assumed absent, because that wildcard socket is
+    // joined on a real card and the operating system's own responder puts group traffic
+    // on it — a control that reddens on a neighbour's packet would be an instrument, not a
+    // judgment. The filter is byte-identity with the query this test wrote, so a same-shape
+    // question from anyone else is not counted.
+    asker
+        .send_to(&query, ourselves)
+        .expect("the control query leaves");
+    let only_group = group.try_clone().expect("one more handle");
+    let start = Instant::now();
+    let mut heard_on_wildcard = 0usize;
+    while start.elapsed() < Duration::from_millis(1200) {
+        if let Some((data, _peer)) =
+            recv_any(std::slice::from_ref(&only_group), &mut buf, Duration::from_millis(200))
+                .expect("the control read")
+        {
+            // Ours is the only packet this control counts: same question, same bytes.
+            if data == query {
+                heard_on_wildcard += 1;
+            }
+        }
+    }
+    assert_eq!(
+        heard_on_wildcard, 0,
+        "the wildcard bind heard a unicast query after all — the reading in \
+         scripts/mdns_unicast_bind_probe.py no longer holds on this machine, and the \
+         second socket kind needs re-justifying"
+    );
+}
+
+/// The engine's two socket kinds are **read**, not just bound: the thread `start()` spawns
+/// has to hand both to [`recv_any`], or the second one is a socket nobody looks at.
+///
+/// Why this is a source audit and not a behaviour row: the only way to run `start()` here
+/// is to let it announce a real service on a real card, which is what §22's取证 discipline
+/// refuses — a unit test that puts a phantom Chromecast on the segment for its duration is
+/// an instrument that changes the thing it measures. So the behaviour half of this claim
+/// lives in the shipped process: `verify_rust_receiver.sh` §33 asks a query to the app's
+/// own address and requires an answer from another process, and that check goes red the
+/// moment the rotation drops a socket. What this row can see **without a machine** is the
+/// wiring, which is the half §16 第 13 条 spent two rounds getting wrong.
+///
+/// The needles are short and they are **method and field names**, not prose: `cargo fmt`
+/// may rewrap a chain across lines, but it cannot rename `.extend(` or move
+/// `engine.unicast` out of the place where the list is built.
+///
+/// This row has one revision of its own, and the battery is why. The first version asked
+/// whether the word `unicast` appeared within 400 characters of `let mut listeners` — and
+/// the mutation written for exactly that claim (`listeners.extend(engine.unicast…)`
+/// replaced by `let _ = &engine.unicast;`, i.e. bind them and never read them) came back
+/// **0 red**, because the replacement still mentions `unicast` in the same region. A
+/// witness that survives the deletion of the thing it witnesses is not a witness; §4.2's
+/// 「不提问的检查」 again, this time caught by the battery rather than by a user.
+#[test]
+fn the_reading_thread_rotates_every_socket_the_engine_bound() {
+    crate::pin_test_dir();
+    let src = include_str!("announce.rs");
+
+    let at = src
+        .find("let mut listeners")
+        .expect("start() builds its listener list somewhere");
+    let body = &src[at..at + 400];
+    assert!(
+        body.contains(".extend(") && body.contains("engine.unicast"),
+        "the list is no longer extended with the engine's per-address sockets, so unicast \
+         queries are bound and never read: {body}"
+    );
+
+    let recv_at = src
+        .find("let mut recv = ")
+        .expect("start() defines the loop's read somewhere");
+    let recv_body = &src[recv_at..recv_at + 300];
+    assert!(
+        recv_body.contains("recv_any(") && recv_body.contains("listeners"),
+        "the loop's read is not the rotation over that list: {recv_body}"
+    );
+
+    // One rotation in the product, so a second read path cannot grow next to it and be the
+    // one that misses the second socket kind. Asked as a count of the call site, not as
+    // "no other `recv_any` exists" — the definition and the tests are legitimately there.
+    assert_eq!(
+        src.matches("recv_any(&listeners").count(),
+        1,
+        "the rotation is driven from more than one place, and the second one is a claim \
+         about a socket nobody reads"
+    );
+}
+
+/// A card that **refused** the second bind is missing from the sentence that reports it.
+///
+/// This is the row that keeps the engine's summary a report rather than a receipt. The
+/// list in `it also hears unicast queries on [...]` is read back off the sockets that
+/// exist (`local_addr()`), not echoed from the addresses that were offered — and the only
+/// way to ask that question in a unit test is to offer one address that cannot be bound.
+/// `192.0.2.1` (TEST-NET-1) is not this machine's on any platform, so `bind` answers
+/// `Can't assign requested address` here (measured 2026-10-20) rather than succeeding
+/// because of the reuse options; an earlier draft used `127.0.0.53`, which macOS refuses
+/// and Linux happily accepts, and that is §4.8's Part 40 trap — a judgment decided by the
+/// machine that runs it.
+///
+/// The absence is checked **inside the engine's own line**, because the file also carries
+/// the join warning for that same address (`mDNS cannot join 224.0.0.251 on 192.0.2.1`),
+/// and an assertion that reads the whole file would be answering a different question than
+/// the one the sentence claims to answer.
+#[test]
+fn e13_a_card_that_refused_the_second_bind_is_absent_from_the_sentence_that_reports_it() {
+    crate::pin_test_dir();
+
+    let logger = Logger::named("Discovery-Refused");
+    let path = logger.claim();
+    let good: Ipv4Addr = macast_core::net::advertised_addresses(&setting("e13"))
+        .into_iter()
+        .filter_map(|text| text.parse().ok())
+        .find(|address: &Ipv4Addr| !address.is_loopback())
+        .unwrap_or_else(|| panic!("no published address to stand as the card that works"));
+    let dead = V4::new(192, 0, 2, 1);
+
+    let engine = match bind_engine(&[good, dead], &logger) {
+        Ok(engine) => engine,
+        Err(e) => panic!("the engine must still bind with one good card: {}", e),
+    };
+    assert_eq!(
+        engine.unicast.len(),
+        1,
+        "a refused address contributed a socket to the rotation, or a good one lost its own"
+    );
+
+    let text = loud(&path);
+    let line = text
+        .lines()
+        .find(|line| line.contains("mDNS engine on "))
+        .unwrap_or_else(|| panic!("no engine sentence was written: {text}"));
+    assert!(
+        line.contains(&format!("unicast queries on [{good}]")),
+        "the sentence does not report exactly the one address that took the bind: {line}"
+    );
+    assert!(
+        !line.contains(&dead.to_string()),
+        "the sentence claims a listener on an address the operating system refused: {line}"
+    );
+    // And the refusal is *said*, with the operating system's reason, so a reader of
+    // `logs/Discovery.log` learns which card is deaf instead of counting brackets.
+    assert!(
+        text.contains("mDNS cannot hear unicast queries on 1"),
+        "the refusal count is missing: {text}"
+    );
+    assert!(
+        text.contains(&format!("{dead}: ")),
+        "the refusal does not name the address and its reason: {text}"
+    );
+}
