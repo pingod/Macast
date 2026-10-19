@@ -2550,6 +2550,33 @@ CROSSPY
     [ "$CROSS" = "$CROSS_AGG" ] \
         && pass "subscribers' own rows and its aggregated list are the same set of SIDs" \
         || fail "rows '$CROSS' vs aggregated '$CROSS_AGG'"
+    # ---- the three reads that answer "this build has no such face"
+    #
+    # `plugin-info` is real data with an empty list; the two mirror reads are a full
+    # refusal document behind the **token** gate (loopback is not enough — the reference
+    # says why: one of them hands over a frame of the desktop). A card polling either one
+    # needs something it can stop on, which is what `code` plus a sentence gives it.
+    api_probe "$BASE/api?query=plugin-info"
+    [ "$API_STATUS" = "200" ] && [ "$(json_len plugins)" = "0" ] \
+        && pass "plugin-info answers an empty plugin list — nothing installable from this build, said as a list" \
+        || fail "plugin-info: HTTP $API_STATUS plugins='$(json_ask plugins)'"
+    [ "$(json_ask platform)" = "$(env -u PYTHONPATH "$CAST_PY" -c 'import sys; print({"darwin":"darwin","win32":"win32","linux":"linux"}.get(sys.platform, sys.platform))')" ] \
+        && pass "and its platform string is the one the rest of the app uses" \
+        || fail "plugin-info platform: $(json_ask platform)"
+    api_probe "$BASE/api?query=mirror-state"
+    [ "$API_STATUS" = "403" ] \
+        && pass "mirror-state needs the token even from this machine" \
+        || fail "mirror-state answered a tokenless loopback caller: HTTP $API_STATUS"
+    TOKEN_STORED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("Api_Token",""))' "$SDIR/macast_setting.json")
+    api_probe "$BASE/api?query=mirror-state&token=$TOKEN_STORED"
+    [ "$(json_ask code)" = "1" ] \
+        && pass "with the token it answers a complete absence document, so the card stops polling" \
+        || fail "mirror-state with a token: code '$(json_ask code)' message '$(json_ask message)'"
+    case "$(json_ask message)" in
+        *"镜像"*) pass "and the sentence names the missing piece instead of a bare status" ;;
+        *) fail "mirror-state's message says nothing useful: $(json_ask message)" ;;
+    esac
+
     curl -s -m 5 -o /dev/null -X UNSUBSCRIBE "$BASE/AVTransport/event" -H "SID: $SID"
     ok=""
     for _ in $(seq 1 20); do

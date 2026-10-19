@@ -2444,6 +2444,14 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
 * **一处文案回归**：合并时我把 AirPlay 的总结句从 `it announces only — queries about this type are not answered` 改成了新措辞，而 §26 的 needle 还找旧句子 → 真机 1 红。修法两边一起：句子写成一行（续行 `\` 被吞过一次，留下 34 个空格）并把 needle 换成 `does not answer it`。**这是"文案一改，找旧字串的断言就永远成立/或立刻变红"的第 N 次**：改文案时必须同时改 needle，或者像 §26 这样把 needle 钉在新措辞上。
 * **计数与边界**：`macast-cast` **702**、`macast-core` 107、`macast-upnp` 353、`macast-mpv` 149、`macast-tauri` **19**；真机 **318 / 0 / 1**。仍然欠着：没有 iPhone 连过；5353 上仍是两个 socket（浏览器 + 引擎），参考实现也是一个引擎服务浏览与广播 —— 那一条仍记在 §16 第 13 条；**本分支从未推送 ⇒ 这一轮的 702 + 1 条与那 318 条读数没有任何 CI 见证过。**
 
+**Rust 侧把管理面最后三个 GET 接上时量到的事**（2026-10-20，`macast-upnp/src/http.rs` GET 表 13 → **16** 行；`macast-upnp` 353 → **355**，真机 **323 PASS / 0 FAIL / 1 SKIP，退出码 1**）：
+
+* **"这个壳没有那一面"要答成一份完整文档，不是 404 也不是 `{}`**：`plugin-info` 给真数据（`platform` / `version` / **空插件列表** / `plugin_repo` 的四个键），空列表是"从这个构建里装不了东西"的答案；两张 mirror 读给 `{code: 1, message: "这台设备还没有镜像面：…"}`。一张轮询的卡片要的是一个能停下来的答复（`cast-targets` 立过的形状）。
+* **`plugin_repo` 的四个值都是诚实的空**：本壳没有插件子系统与 extras 安装器，编一个能拉索引的地址等于让页面指向一个这个构建装不了的仓库 —— 与 `mirror-action` 不在 POST 表里同一条理由。谁要在这里做插件安装，先移植 `plugin_repo` 与插件管理器。
+* **两张 mirror 读的门口比别处严**：`GATE_TOKEN`，**本机也不例外** —— 参考实现自己写了理由（一个返回局域网设备列表与活动流，另一个返回桌面的**一帧**）。门照抄、答复是缺席文档：一句能让人行动的话，比 404（读起来像坏了）与 `{}`（读起来像正在镜像）都强。
+* **判据与变异**：单元 2 条 + 表循环（每行的门都被无令牌局域网与带令牌各打一遍，所以"新增一行忘了门"不靠记忆）+ 真机 §23 的 5 条；变异体把 `mirror-state` 的门降级成 management → **1** 红，把 `plugins` 改成 `null` → **1** 红。
+* **计数与边界**：GET 表 **16** 行（`the_get_route_table_is_well_formed` 的 `== 16` 与附录 B 同步）、`macast-upnp` **355**；其余 702 / 107 / 149 / 19 不变；真机 **323 / 0 / 1**。**本分支从未推送 ⇒ 这 355 条与那 323 条读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

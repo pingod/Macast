@@ -466,6 +466,20 @@ enum Action {
     /// it and what does it do", and the answer is a table the port owns
     /// ([`macast_core::module_settings`]), not a second copy of the settings file.
     ModuleSettings,
+    /// `query=plugin-info`: platform, version, the loaded plugin list and the plugin
+    /// repository coordinates. **The list is empty here** — this shell has no plugin
+    /// subsystem — and the document says so by being a list of length zero rather than
+    /// by refusing: a page that asks "what can I install" is answered "nothing, from
+    /// this build" instead of being left to retry.
+    PluginInfo,
+    /// `query=mirror-state` / `query=mirror-snapshot`: the 电脑投屏 tab's two reads.
+    /// **Both answer a full refusal document here**: the screen-mirror plugin is not
+    /// part of this port, so there is no state and no frame to hand over. The shape
+    /// (and the gate) follow the reference's, which is stricter than the rest of this
+    /// table: the token is required even from loopback (`protocol.py:2097-2106`), because
+    /// one of these hands over a frame of the user's desktop.
+    MirrorState,
+    MirrorSnapshot,
 }
 
 /// The twelve answers this port implements out of the shipped management API's
@@ -497,7 +511,7 @@ enum Action {
 /// POST table is. Here it is a row with its own gate, which is the shape AGENTS.md
 /// §4.7c asks for; the consequence is that the *next* sensitive query must be added
 /// **here**, not to a list elsewhere, or it answers a LAN caller.
-const GET_MANAGEMENT_ROUTES: [GetRoute; 13] = [
+const GET_MANAGEMENT_ROUTES: [GetRoute; 16] = [
     GetRoute {
         query: "cast",
         // `GATE_TOKEN`: the loopback answer is *not* enough here. Any webpage
@@ -645,6 +659,31 @@ const GET_MANAGEMENT_ROUTES: [GetRoute; 13] = [
         // neither is demoted to "public status".
         gate: "management",
         action: Action::ModuleSettings,
+    },
+    GetRoute {
+        query: "plugin-info",
+        // Management-gated: the document names this machine's platform and version, and
+        // the reference gates it with the same list as `cast-info` (it is the payload
+        // behind a settings tab). The **plugin list is empty** in this build and that is
+        // the honest answer — see [`Action::PluginInfo`].
+        gate: "management",
+        action: Action::PluginInfo,
+    },
+    GetRoute {
+        query: "mirror-state",
+        // `GATE_TOKEN`, not management: the reference says why in its own comment — "one
+        // returns the list of devices on the user's LAN plus their activity feed, the
+        // other returns an actual frame of their desktop. Loopback is not proof of
+        // intent here" (`protocol.py:2097-2103`). This port answers a refusal document,
+        // but the door is copied exactly: a page that cannot get the token cannot even
+        // learn whether a mirror exists.
+        gate: "token",
+        action: Action::MirrorState,
+    },
+    GetRoute {
+        query: "mirror-snapshot",
+        gate: "token",
+        action: Action::MirrorSnapshot,
     },
 ];
 
@@ -1660,6 +1699,8 @@ impl Face {
             Action::LogDownload => self.log_download_entry(req),
             Action::LaunchParam => self.launch_param_entry(),
             Action::ModuleSettings => self.module_settings_entry(),
+            Action::PluginInfo => self.plugin_info_entry(),
+            Action::MirrorState | Action::MirrorSnapshot => self.mirror_absent_entry(),
         }
     }
 
@@ -1969,6 +2010,56 @@ impl Face {
     /// is how a page ends up writing a key the read side put in 其他（未归类）.
     fn module_settings_entry(&self) -> Response {
         json_value_response(&macast_core::module_settings::payload(&self.setting.snapshot()))
+    }
+
+    /// `query=plugin-info` — platform, version, the (empty) plugin list, and the plugin
+    /// repository coordinates.
+    ///
+    /// **The coordinates are empty on purpose.** The reference hands over
+    /// `plugin_repo.describe()`: a repo URL, the index URLs in freshness order, the
+    /// mirror switch and the WebRTC-extras descriptor. This shell has no plugin
+    /// subsystem and no extras installer, so inventing a URL would be the page pointing
+    /// at a repository whose files this build cannot install — the same reason
+    /// `mirror-action` is not in the POST table. The shape is kept (every key present,
+    /// `plugins: []`, `index_urls: []`) because the page's "what can I install" question
+    /// has an answer here: **nothing, from this build**.
+    fn plugin_info_entry(&self) -> Response {
+        let mut repo = serde_json::Map::new();
+        repo.insert("repo_url".into(), Value::String(String::new()));
+        repo.insert("index_urls".into(), Value::Array(Vec::new()));
+        repo.insert("mirror_enabled".into(), Value::Bool(false));
+        let mut extras = serde_json::Map::new();
+        extras.insert("packages".into(), Value::Array(Vec::new()));
+        extras.insert("asset".into(), Value::String(String::new()));
+        repo.insert("extras".into(), Value::Object(extras));
+        json_value_response(&object(&[
+            ("platform", Value::String(macast_core::paths::sys_platform())),
+            ("version", Value::String(macast_core::paths::version())),
+            ("plugins", Value::Array(Vec::new())),
+            ("plugin_repo", Value::Object(repo)),
+        ]))
+    }
+
+    /// `query=mirror-state` and `query=mirror-snapshot` — a **full document that says
+    /// this build has no mirror face**, not a 404 and not an empty object.
+    ///
+    /// The shape is `cast-targets`' lesson (§16 第 23 条): a card that polls a read has
+    /// to be told something it can stop on. `code: 1` with a sentence naming the missing
+    /// piece is that; `{}` would read as "mirroring, with no state" and a 404 as "the
+    /// app is broken". The gate is the reference's `token` (see the route rows), so this
+    /// sentence only reaches a caller who already holds the management token.
+    fn mirror_absent_entry(&self) -> Response {
+        json_value_response(&object(&[
+            ("code", Value::Number(1.into())),
+            (
+                "message",
+                Value::String(
+                    "这台设备还没有镜像面：屏幕镜像插件不在这个 Rust 壳里（\
+                     mirror-state / mirror-snapshot 由它提供）"
+                        .to_string(),
+                ),
+            ),
+        ]))
     }
 
     /// `query=log` — the panel's tail of one log file.
@@ -5827,7 +5918,7 @@ mod tests {
         // The number is a measurement (`grep -c '        query: "' http.rs`), and the
         // per-row loop below is what gives it teeth: a row that is counted but not gated
         // fails there, not here.
-        assert_eq!(GET_MANAGEMENT_ROUTES.len(), 13, "the GET table changed size; move this number from a count, and the docs' route count with it");
+        assert_eq!(GET_MANAGEMENT_ROUTES.len(), 16, "the GET table changed size; move this number from a count, and the docs' route count with it");
         let mut names: Vec<&str> = GET_MANAGEMENT_ROUTES.iter().map(|r| r.query).collect();
         names.sort_unstable();
         names.dedup();
@@ -8173,6 +8264,65 @@ mod tests {
                 listed.iter().any(|k| k == name),
                 owned,
                 "the read and the write disagree about {name}"
+            );
+        }
+    }
+
+    /// `plugin-info` answers **every key** the page reads, with the empty plugin list
+    /// spelled as a list rather than as a refusal: "nothing installable from this build"
+    /// is an answer, and a missing key would be a `undefined` in a renderer.
+    #[test]
+    fn plugin_info_keeps_the_shape_and_says_the_list_is_empty() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("plugin-info-shape");
+        let response = face.answer(&get_api("/api?query=plugin-info", LOCAL));
+        assert_eq!(response.status, 200);
+        let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("an object");
+        assert_eq!(doc["platform"], json!(macast_core::paths::sys_platform()));
+        assert_eq!(doc["version"], json!(macast_core::paths::version()));
+        assert_eq!(doc["plugins"], json!([]), "the plugin list must be an empty list, not null");
+        // The repo block keeps the reference's four keys, each honest about this build:
+        // no URL to point at, no index to fetch, no mirror switch, no extras asset.
+        for key in ["repo_url", "index_urls", "mirror_enabled", "extras"] {
+            assert!(doc["plugin_repo"].get(key).is_some(), "plugin_repo lost {key}");
+        }
+        assert_eq!(doc["plugin_repo"]["index_urls"], json!([]));
+        assert_eq!(doc["plugin_repo"]["mirror_enabled"], json!(false));
+        assert_eq!(doc["plugin_repo"]["extras"]["packages"], json!([]));
+    }
+
+    /// The two mirror reads are gated with **the token, loopback included** — the
+    /// reference's own choice, because one of them hands over a frame of the desktop
+    /// (`protocol.py:2097-2106`). This build has no mirror at all, so the answer is a
+    /// refusal document; the point of the test is that the **door** is still the strict
+    /// one, and that the document is complete enough for a card to stop polling.
+    #[test]
+    fn the_mirror_reads_need_the_token_and_answer_a_complete_absence() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("mirror-absent");
+        for query in ["mirror-state", "mirror-snapshot"] {
+            let refused = face.answer(&get_api(&format!("/api?query={query}"), LOCAL));
+            assert_eq!(
+                refused.status, 403,
+                "{query} answered a loopback caller with no token — loopback is not proof of intent here"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&refused.body).expect("a refusal is JSON");
+            assert_eq!(body["message"].as_str(), Some(TOKEN_REFUSAL), "{query}");
+        }
+        store_token(&face.setting, Some(SECRET));
+        for query in ["mirror-state", "mirror-snapshot"] {
+            let served = face.answer(&get_api(
+                &format!("/api?query={query}&token={SECRET}"),
+                LOCAL,
+            ));
+            assert_eq!(served.status, 200, "{query} was refused to a tokened caller");
+            let doc: serde_json::Value = serde_json::from_slice(&served.body).expect("an object");
+            assert_eq!(doc["code"], json!(1), "{query} did not say it has no mirror: {doc}");
+            let message = doc["message"].as_str().expect("a message");
+            assert!(
+                message.contains("镜像"),
+                "{query}'s absence sentence names nothing: {message}"
             );
         }
     }
