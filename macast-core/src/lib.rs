@@ -15,6 +15,8 @@ pub mod logging;
 pub mod module_settings;
 pub mod net;
 pub mod paths;
+pub mod plugin_repo;
+pub mod pyops;
 pub mod setting;
 pub mod timefmt;
 pub mod token;

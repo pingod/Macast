@@ -211,24 +211,13 @@ pub fn set_value(setting: &Setting, key: Option<&str>, raw_value: &str, remove: 
 /// key that is absent. The page branches on these strings, so they are a wire format:
 /// Python writes `str`/`int`/`float`/`bool`/`NoneType`/`list`/`dict`
 /// (`module_settings.py:198`).
+///
+/// The rule itself lives in [`crate::pyops::type_name`] — it has a second writer
+/// (`macast-mpv/src/pyops.rs` puts the same words into an abort message), and two
+/// spellings of "which type is this" is how the 模块设置 card and a player abort end up
+/// calling the same value by two names.
 pub fn py_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        // Python's `json.load` gives `int` for `5` and `float` for `5.0`; a serde
-        // number carries the same distinction through `as_i64` / `as_f64`, and `5.0`
-        // is *not* an `i64` — so this arm has to be tried first.
-        Value::Number(number) => {
-            if number.is_i64() || number.is_u64() {
-                "int"
-            } else {
-                "float"
-            }
-        }
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
-    }
+    crate::pyops::type_name(value)
 }
 
 /// `_SCALARS = (str, int, float, bool)` plus the explicit `or value is None` in
@@ -824,15 +813,19 @@ mod tests {
     /// means to write it.
     #[test]
     fn the_remove_flag_is_the_reference_s_truthiness() {
-        let truthy = ["1", "true", "TRUE", "Yes", "on", "  ON "];
+        let truthy = ["1", "true", "TRUE", "Yes", "on"];
         for text in truthy {
             assert!(
                 remove_flag_is_true(text),
                 "{text:?} must mean remove — the reference lower-cases and tests membership"
             );
         }
-        for text in ["", "0", "false", "no", "off", "1x", "remove"] {
-            assert!(!remove_flag_is_true(text), "{text:?} must not mean remove");
+        for text in ["", "0", "false", "no", "off", "1x", "remove", "  ON ", "\tON"] {
+            assert!(
+                !remove_flag_is_true(text),
+                "{text:?} must not mean remove — the reference never strips, and the \
+                 wrong answer here deletes a settings key"
+            );
         }
     }
 
@@ -858,6 +851,13 @@ mod tests {
 
 /// `str(remove).lower() in ('1','true','yes','on')` — the reference's read of the field
 /// the page posts, kept as a function so the truthiness has one owner and one test.
+///
+/// **No `.trim()`, and that is not an oversight.** `protocol.py:3103` lower-cases and
+/// tests membership, nothing else, so `" on "` means *do not delete*. This function used
+/// to trim, and its own test asserted `"  ON "` was a removal — a rule the reference does
+/// not have, frozen in place by the one test that would have caught it (AGENTS.md §4.2's
+/// "桩自己也会撒谎"). §29 now asks the same shape through the other door, against the
+/// reference's expression.
 pub fn remove_flag_is_true(raw: &str) -> bool {
-    matches!(raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+    crate::pyops::form_flag_is_true(raw)
 }

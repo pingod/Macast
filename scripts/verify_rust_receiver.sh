@@ -4328,6 +4328,338 @@ PY
 fi
 
 
+
+echo "== 29: the 插件仓库 coordinates are the ones the shipped module writes =="
+# Two implementations read **one settings file** and answer "which URLs does the page
+# fetch, and is the domestic mirror on". The Rust side answers through its HTTP face; the
+# Python side is the shipped `macast/plugin_repo.py`, loaded by file path with a stub
+# parent package — its module-level `from .utils import Setting` (`plugin_repo.py:23`) is
+# exactly the import that would otherwise drag in cherrypy and a `SETTING_DIR` frozen at
+# import time (§4.9). The stub `Setting` reads **the instance's own file from disk**, so
+# this is not two fixtures agreeing with each other: it is the shipped module looking at
+# the bytes this port wrote.
+#
+# Why this section exists at all: the previous round answered `plugin_repo` with four
+# empty values, and while porting the module the emptiness turned out to be **a lie about
+# a key this shell does have** — `Github_CN_Mirror` is in the 模块设置 ownership table
+# (§28), so one file produced `true` in that card and `false` in this one. The pair of
+# rows marked "two readers" below is that claim's permanent witness.
+PR_SDIR=$(mktemp -d /tmp/macast-rust-pluginrepo.XXXXXX)
+PR_PORT=$((PORT + 9))
+PR_SOCK="$PR_SDIR/mpvsocket"
+PR_TOKEN=0123456789abcdef0123456789abcdef
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust PluginRepo", "Macast_Protocols": ["DLNA Protocol"], "Api_Token": "%s", "CheckUpdate": true}' \
+    "$PR_PORT" "$PR_TOKEN" > "$PR_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$PR_SDIR" MACAST_MPV_SOCKET="$PR_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$PR_SDIR/stdout.log" 2>&1 &
+PR_PID=$!
+disown "$PR_PID" 2>/dev/null || true
+PR_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$PR_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$PR_PID" ]; then
+        PR_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$PR_READY" ]; then
+    fail "the plugin-repo instance never became the listener on $PR_PORT"
+    kill -9 "$PR_PID" 2>/dev/null
+    rm -rf "$PR_SDIR"
+else
+    PR_BASE="http://127.0.0.1:$PR_PORT/api"
+    PR_DOC="$PR_SDIR/rust.json"
+    PR_SET="$PR_SDIR/macast_setting.json"
+    PR_PANEL="$PR_SDIR/module-settings.json"
+
+    # One read of the coordinates, into a file the cross-checkers open.
+    pr_read() {
+        curl -s --noproxy '*' -m 5 "$PR_BASE?query=plugin-info&token=$PR_TOKEN" > "$PR_DOC"
+    }
+
+    # $1 = a python expression over `doc`. Same shape as §28's `ms_ask`: the expression
+    # travels as **argv**, because the program itself arrives on stdin.
+    pr_ask() {
+        env -u PYTHONPATH "$CAST_PY" - "$PR_DOC" "$1" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+answer = eval(compile(sys.argv[2], "<pr_ask>", "eval"), {"doc": doc, "json": json})
+print(answer if isinstance(answer, str) else repr(answer))
+PYEOF
+    }
+
+    # Both sides of one comparison, in one program: the reference's document and this
+    # face's, keyed by key, with the **field order** of each printed as its own line.
+    pr_cross() {
+        env -u PYTHONPATH "$CAST_PY" - "$REPO" "$PR_DOC" "$PR_SET" <<'PYEOF'
+import importlib.util, json, sys, types
+
+repo, doc_path, set_path = sys.argv[1], sys.argv[2], sys.argv[3]
+pkg = types.ModuleType("pr_ref")
+pkg.__path__ = []
+utils = types.ModuleType("pr_ref.utils")
+
+
+class _Prop:
+    def __init__(self, name):
+        self.name = name
+
+
+class _Setting:
+    def _table(self):
+        try:
+            with open(set_path, encoding="utf-8-sig") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return {}
+
+    def has(self, prop):
+        return prop.name in self._table()
+
+    def get(self, prop, default=None):
+        return self._table().get(prop.name, default)
+
+    def set(self, prop, value):
+        raise AssertionError("Python must not write this file")
+
+    def unset(self, prop):
+        raise AssertionError("Python must not write this file")
+
+
+utils.Setting = _Setting()
+utils.SettingProperty = types.SimpleNamespace(Github_CN_Mirror=_Prop("Github_CN_Mirror"))
+pkg.utils = utils
+sys.modules["pr_ref"] = pkg
+sys.modules["pr_ref.utils"] = utils
+spec = importlib.util.spec_from_file_location(
+    "pr_ref.plugin_repo", repo + "/macast/plugin_repo.py")
+ref = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ref)
+
+rust = json.load(open(doc_path))
+
+
+def canon(x):
+    return json.dumps(x, sort_keys=True, ensure_ascii=False)
+
+
+want = ref.describe()
+got = rust.get("plugin_repo")
+rows = []
+if canon(want) == canon(got):
+    rows.append("EQUAL")
+else:
+    rows.append("DIFFER")
+    keys = set(want) | set(got if isinstance(got, dict) else {})
+    for key in sorted(keys):
+        mine = canon(want.get(key))
+        theirs = canon(got.get(key) if isinstance(got, dict) else None)
+        if mine != theirs:
+            rows.append("KEY %s py=%s rust=%s" % (key, mine[:220], theirs[:220]))
+rows.append("PYORDER=" + ",".join(want.keys()))
+rows.append("RUSTORDER=" + (",".join(got.keys()) if isinstance(got, dict) else "-none-"))
+rows.append("PLUGINS=%r" % (rust.get("plugins"),))
+rows.append("HASMSG=%s" % ("message" in rust))
+# The asset template's hole count, read out of **this face's** document (not the
+# reference's): four positional holes are the release asset's name, and three or five
+# would be a well-formed string that matches nothing on any release.
+rust_asset = (got.get("extras") or {}).get("asset") if isinstance(got, dict) else None
+rows.append("HOLES=%d" % (rust_asset.count("{}") if isinstance(rust_asset, str) else -1))
+# The naming rule, composed **across** the two implementations: the Rust face's template,
+# filled in the reference's argument order, must equal the name the reference's own
+# formatter produces. Filling Python's template with Python's function would be one
+# implementation reading itself — the same-source equality that has bitten this port
+# three times (§13.4).
+args = ("macos", "arm64", "cp312", "0.22.0")
+by_rust_template = rust_asset.format(*args) if isinstance(rust_asset, str) else None
+name = ref.extras_asset_name(*args)
+rows.append("ASSET=%s" % (
+    "OK" if by_rust_template == name and isinstance(rust_asset, str)
+    else "DIFFER rust-template=%s reference=%s" % (by_rust_template, name)))
+print("\n".join(rows))
+PYEOF
+    }
+
+    pr_read
+    PR_CROSS=$(pr_cross)
+    [ "$(printf '%s\n' "$PR_CROSS" | head -1)" = "EQUAL" ] \
+        && pass "the shipped module and this face describe one file the same way, cell by cell" \
+        || fail "the two implementations describe the same file differently: $(printf '%s\n' "$PR_CROSS" | tr '\n' ' ' | head -c 700)"
+
+    # Fresh-first, in the **page's** order: the caching CDN last is what keeps a pushed
+    # index from being a half-day-old list (AGENTS §4.6: 「把会缓存的放前面」 is the wrong
+    # fix, and the order *is* the design).
+    PR_FIRST=$(pr_ask 'doc["plugin_repo"]["index_urls"][0]')
+    [ "$PR_FIRST" = "https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json" ] \
+        && pass "index row 1 is the canonical raw URL, not the caching one" \
+        || fail "index row 1 came back as: $PR_FIRST"
+    [ "$(pr_ask 'len(doc["plugin_repo"]["index_urls"])')" = "3" ] \
+        && pass "with the switch off the chain is three rows: raw, ghproxy, jsDelivr" \
+        || fail "the off chain has $(pr_ask 'len(doc["plugin_repo"]["index_urls"])') rows, expected 3"
+
+    # The other readers of the same document, in its own order.
+    [ "$(printf '%s\n' "$PR_CROSS" | grep -a '^RUSTORDER=' | cut -d= -f2-)" = "repo_url,index_urls,mirror_enabled,extras" ] \
+        && pass "the coordinates keep the reference's field order, not an alphabetical paraphrase" \
+        || fail "field order: $(printf '%s\n' "$PR_CROSS" | grep -a '^RUSTORDER=')"
+    [ "$(pr_ask 'doc["plugin_repo"]["extras"]["packages"]')" = "['aiortc', 'av']" ] \
+        && pass "extras names exactly the two declared packages, as a list — not null, not a third" \
+        || fail "extras packages: $(pr_ask 'doc["plugin_repo"]["extras"]["packages"]')"
+    [ "$(printf '%s\n' "$PR_CROSS" | grep -a '^ASSET=')" = "ASSET=OK" ] \
+        && pass "filling this face's template gives the name the reference's formatter gives" \
+        || fail "the asset naming rule diverged: $(printf '%s\n' "$PR_CROSS" | grep -a '^ASSET=')"
+    [ "$(printf '%s\n' "$PR_CROSS" | grep -a '^HOLES=')" = "HOLES=4" ] \
+        && pass "and the template has four holes — os, arch, cpython tag, version" \
+        || fail "$(printf '%s\n' "$PR_CROSS" | grep -a '^HOLES=')"
+
+    # The 模块设置 card is the **second** reader of this key. Asked here, in both states,
+    # because the first version of this face answered the switch from a constant while the
+    # panel answered it from the file.
+    pr_panel() {
+        # Written to a file and opened by name, exactly like `pr_ask`: the program
+        # arrives on stdin, so piping the document into the same stdin makes the reader
+        # parse **its own source**. That is how this row reported `panel=` (empty) while
+        # the card behind it was answering correctly — a false product red about a
+        # disagreement that was really a heredoc.
+        curl -s --noproxy '*' -m 5 "$PR_BASE?query=module-settings&token=$PR_TOKEN" > "$PR_PANEL"
+        env -u PYTHONPATH "$CAST_PY" - "$PR_PANEL" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+for group in doc["groups"]:
+    for cell in group["keys"]:
+        if cell["key"] == "Github_CN_Mirror":
+            print("%s|%s" % (cell["present"], cell["value"]))
+            raise SystemExit(0)
+print("no-row|-")
+PYEOF
+    }
+    [ "$(pr_ask 'doc["plugin_repo"]["mirror_enabled"]')" = "False" ] && [ "$(pr_panel)" = "False|None" ] \
+        && pass "off is **absent** in both readers: the panel has no value, the face says false" \
+        || fail "the two readers disagree about an absent switch: face=$(pr_ask 'doc["plugin_repo"]["mirror_enabled"]') panel=$(pr_panel)"
+
+    # ---- the door, and the rule it reads the field with
+    #
+    # `set-github-mirror` is management-gated (`protocol.py:2292`), **not** code-gated:
+    # unlike the `set-module-setting` row §28 tested, loopback is admitted here. A LAN
+    # caller with no token is still refused, and a refusal must not move the switch.
+    PR_MD5=$(md5 -q "$PR_SET")
+    api_post "http://$LAN:$PR_PORT/api" "set-github-mirror=1"
+    [ "$API_STATUS" = "200" ] && [ "$API_CODE" = "403" ] \
+        && pass "a LAN caller with no token is refused the switch" \
+        || fail "a LAN caller flipped the switch: HTTP $API_STATUS code '$API_CODE'"
+    case "$API_MSG" in
+        *"$MANAGEMENT_MARK"*) pass "and hears the management sentence, which is the gate that ran" ;;
+        *) fail "refusal wording: $API_MSG" ;;
+    esac
+    [ "$(md5 -q "$PR_SET")" = "$PR_MD5" ] \
+        && pass "a refused flip wrote nothing to disk" \
+        || fail "the refused POST rewrote the settings file"
+
+    # The flag table, asked **of the reference's own expression** rather than of a list
+    # typed from memory. This is where the port's `.trim()` died: the reference lower-cases
+    # and tests membership, nothing else, so a space on either side means *off* — and the
+    # first version of this port answered *on*, with a unit test asserting the wrong side.
+    PR_FLAG_BAD=""
+    for PR_SAMPLE in "1" "true" "TRUE" "Yes" "on" "0" "false" "no" "" " 1 " "on "; do
+        EXPECT=$(env -u PYTHONPATH "$CAST_PY" - "$PR_SAMPLE" <<'PYEOF'
+import sys
+print("true" if str(sys.argv[1]).lower() in ("1", "true", "yes", "on") else "false")
+PYEOF
+)
+        api_post "$PR_BASE" "set-github-mirror=$PR_SAMPLE"
+        # Both sides lower-cased on purpose: `json_ask` renders the document's own
+        # `true`/`false`, the oracle above used to print Python's `True`/`False`, and the
+        # first version of this loop therefore reported **eleven drifts** on a run whose
+        # answers were all correct. A comparison that cannot tell a case difference from a
+        # disagreement is not asking about the disagreement.
+        GOT=$(json_ask mirror_enabled | tr 'A-Z' 'a-z')
+        [ "$GOT" = "$EXPECT" ] || PR_FLAG_BAD="$PR_FLAG_BAD '$PR_SAMPLE'->$GOT/want-$EXPECT"
+    done
+    [ -z "$PR_FLAG_BAD" ] \
+        && pass "all eleven spellings of the flag answer what the reference's own expression answers" \
+        || fail "the flag drifted on:$PR_FLAG_BAD"
+
+    # On, through the door. The reply carries the fresh coordinates (the reference's
+    # `_set_github_mirror` returns `describe()` to save the page a second round trip), so
+    # the document below is read **from the POST**, not from a following GET.
+    api_post "$PR_BASE" "set-github-mirror=1"
+    [ "$(json_ask code)" = "0" ] && [ "$(json_ask message)" = "success" ] \
+        && [ "$(json_ask mirror_enabled | tr 'A-Z' 'a-z')" = "true" ] \
+        && pass "loopback flips it, and the answer is success in the reference's fields" \
+        || fail "the flip answered: HTTP $API_STATUS code='$(json_ask code)' msg='$(json_ask message)'"
+    [ "$(json_keys plugin_repo)" = "repo_url,index_urls,mirror_enabled,extras" ] \
+        && pass "and it hands back the coordinates in the same reply — no second round trip" \
+        || fail "plugin_repo keys in the POST reply: $(json_keys plugin_repo)"
+    grep -q '"Github_CN_Mirror": true' "$PR_SET" \
+        && pass "the stored value is a JSON bool, the way Setting.set writes it" \
+        || fail "the file does not hold a true: $(grep -c Github_CN_Mirror "$PR_SET") line(s)"
+
+    pr_read
+    PR_CROSS=$(pr_cross)
+    [ "$(printf '%s\n' "$PR_CROSS" | head -1)" = "EQUAL" ] \
+        && pass "with the mirror on, the shipped module still describes the same file the same way" \
+        || fail "mirror-on documents differ: $(printf '%s\n' "$PR_CROSS" | tr '\n' ' ' | head -c 700)"
+    [ "$(pr_ask 'len(doc["plugin_repo"]["index_urls"])')" = "2" ] \
+        && pass "the on-chain is two rows, not three: the mirrored raw collapses onto the ghproxy row already there" \
+        || fail "the on-chain has $(pr_ask 'len(doc["plugin_repo"]["index_urls"])') rows (a double prefix would keep three)"
+    [ "$(pr_ask 'doc["plugin_repo"]["index_urls"][0]')" = "https://ghproxy.net/https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json" ] \
+        && pass "and row 1 is still the fresh one — mirrored, not the caching CDN" \
+        || fail "mirror row 1 came back as: $(pr_ask 'doc["plugin_repo"]["index_urls"][0]')"
+    pr_ask 'doc["plugin_repo"]["index_urls"][1]' | grep -q '^https://cdn.jsdelivr.net/' \
+        && pass "jsDelivr stays last and never carries the prefix — it already is a mirror" \
+        || fail "jsDelivr row wrong: $(pr_ask 'doc["plugin_repo"]["index_urls"][1]')"
+    pr_ask 'doc["plugin_repo"]["repo_url"]' | grep -q '^https://ghproxy.net/https://github.com/' \
+        && pass "「打开插件仓库」 moves with the index, so the button and the fetch tell one story" \
+        || fail "repo_url did not move: $(pr_ask 'doc["plugin_repo"]["repo_url"]')"
+
+    # The two readers again, now that the key exists — the pair the previous round got
+    # wrong in the other direction.
+    [ "$(pr_panel)" = "True|True" ] && [ "$(pr_ask 'doc["plugin_repo"]["mirror_enabled"]')" = "True" ] \
+        && pass "the 模块设置 row and plugin-info now read the SAME key and answer the same thing" \
+        || fail "two readers, one key, two answers: panel=$(pr_panel) face=$(pr_ask 'doc["plugin_repo"]["mirror_enabled"]')"
+
+    # Off is **absence**, not a stored false (AGENTS §4.6). Otherwise the page's toggle
+    # leaves a key behind whose only meaning is "the default", and every later reader has
+    # to know which of the two off-shapes it is looking at.
+    api_post "$PR_BASE" "set-github-mirror=0"
+    [ "$(json_ask mirror_enabled | tr 'A-Z' 'a-z')" = "false" ] \
+        && pass "the off answer comes back false, as the page needs" \
+        || fail "off answered: $(json_ask mirror_enabled)"
+    grep -q 'Github_CN_Mirror' "$PR_SET" \
+        && fail "the key is still in the file after the off answer: $(grep -c Github_CN_Mirror "$PR_SET")" \
+        || pass "and the key is **gone** from the file, not stored as false"
+    pr_read
+    [ "$(pr_cross | head -1)" = "EQUAL" ] \
+        && pass "back to the off state the two documents match again — the switch is reversible" \
+        || fail "the off round trip differs: $(pr_cross | tr '\n' ' ' | head -c 500)"
+
+    # The read must not be the thing that writes: the page polls `plugin-info`, and
+    # `Setting.get`'s default side effect (AGENTS §4.2) is exactly how a poll becomes a
+    # write. Asserted **with a file that exists**, so "no file" cannot stand in for "no write".
+    PR_MD5_POLL=$(md5 -q "$PR_SET")
+    for _ in 1 2 3; do pr_read; done
+    [ "$(md5 -q "$PR_SET")" = "$PR_MD5_POLL" ] \
+        && pass "three polls of the coordinates did not grow the file they report" \
+        || fail "polling plugin-info wrote the settings file ($PR_MD5_POLL -> $(md5 -q "$PR_SET"))"
+
+    # Shape rows: the plugin list stays a list, and a success carries no message key.
+    [ "$(pr_ask 'doc["plugins"]')" = "[]" ] \
+        && pass "plugins is an empty list, not null — this build installs nothing, and says so" \
+        || fail "plugins came back as: $(pr_ask 'doc["plugins"]')"
+    [ "$(pr_cross | grep -a '^HASMSG=')" = "HASMSG=False" ] \
+        && pass "the coordinates document has no message key on a success" \
+        || fail "$(pr_cross | grep -a '^HASMSG=')"
+
+    kill -9 "$PR_PID" 2>/dev/null
+    pkill -9 -f "$PR_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $PR_SDIR (rust.json, macast.log, macast_setting.json)"
+    else
+        rm -rf "$PR_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

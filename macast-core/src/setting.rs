@@ -189,12 +189,19 @@ pub fn https_enabled(setting: &Setting) -> bool {
 /// Absent key means off; a *false* value is not stored, the Python side unsets
 /// the key instead (AGENTS.md §4.6), so the file never grows a key whose only
 /// meaning is "the default".
+///
+/// **Present means Python's `bool(value)`, not "the value is the word true".** The
+/// reference reads it as `bool(Setting.get(prop, False))`, and `bool("0")` is `True` —
+/// so a user who hand-edits 「高级设置」 and writes `"Github_CN_Mirror": "0"` gets the
+/// mirror **on** in the shipped app. The first version of this function accepted only
+/// `true` and the strings `"1"/"true"/"True"`, which answers *off* for those same bytes
+/// on disk: two implementations reading one file and disagreeing about which URLs the
+/// settings page fetches. [`crate::pyops::truthy`] is now the single rule, and §29 asks
+/// both sides the same file.
 pub fn github_cn_mirror(setting: &Setting) -> bool {
-    match setting.peek(Key::GithubCnMirror) {
-        Some(v) => matches!(v.as_str(), Some("1") | Some("true") | Some("True"))
-            || v.as_bool() == Some(true),
-        None => false,
-    }
+    setting
+        .peek(Key::GithubCnMirror)
+        .is_some_and(|value| crate::pyops::truthy(&value))
 }
 
 /// One read of the settings table.
@@ -921,6 +928,47 @@ mod tests {
         assert!(github_cn_mirror(&setting));
         setting.unset(Key::GithubCnMirror);
         assert!(!github_cn_mirror(&setting));
+    }
+
+    /// The key's **value** is read with Python's `bool()`, not with "is it the word
+    /// true". Each row here is what a hand-edited 「高级设置」 can actually contain, and
+    /// two of them are the rows a defensive implementation gets wrong in opposite
+    /// directions: `"0"` (Python: truthy — a string is non-empty) and `[]` (Python:
+    /// falsy — an empty container). Without this test, narrowing the rule back to
+    /// "only `true` counts" would be caught by nothing but §29's panel/face pair — which
+    /// only runs when the real machine is on — and the port would silently disagree with
+    /// the shipped app about a file both of them can read.
+    #[test]
+    fn the_switch_is_python_s_bool_not_the_word_true() {
+        for (stored, want) in [
+            ("true", true),
+            ("false", false),
+            ("1", true),
+            ("0", false),
+            ("\"0\"", true),
+            ("\"false\"", true),
+            ("\"", false),
+            ("null", false),
+            ("[]", false),
+            ("[\"\"]", true),
+            ("{}", false),
+            ("-1", true),
+            ("0.0", false),
+        ] {
+            let scratch = Scratch::new("boolrule");
+            fs::write(
+                scratch.file(),
+                format!("{{ \"Github_CN_Mirror\": {stored} }}"),
+            )
+            .expect("seed");
+            let setting = Setting::new(scratch.file());
+            setting.load();
+            assert_eq!(
+                github_cn_mirror(&setting),
+                want,
+                "Python: bool({stored}) is {want}"
+            );
+        }
     }
 
     #[test]

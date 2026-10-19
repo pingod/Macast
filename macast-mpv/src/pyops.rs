@@ -19,41 +19,35 @@
 //! (AGENTS.md §5), and an abort is far easier to read when it names its type the
 //! way Python's own `TypeError` did, so both are reproduced rather than
 //! re-invented.
+//!
+//! **Two of these rules moved down a layer** (2026-10-20): [`truthy`] and
+//! [`type_name`] are one-line delegates to [`macast_core::pyops`]. The reason is the
+//! same one that keeps them written out rather than improvised at a call site — the
+//! management face, the page resolver and the 「启用国内镜像地址」 switch read the same
+//! JSON values with the same Python semantics, and a rule with four readers cannot live
+//! in the crate that owns one of them. The tables in `mod tests` still exercise them
+//! **through this module**, because that is what these call sites actually call.
 
 use serde_json::{Number, Value};
 
 /// Python's truthiness for a JSON value.
 ///
-/// The shape that makes this necessary: mpv reports `pause` as a real boolean,
-/// but the Python branch is `if res['data'] and res['data'] is not None`, which
-/// is a truthiness test wearing a null check. A `0`, an empty track list, or an
-/// empty string all take the `else` arm — which for `pause` means "the player is
-/// playing", so reading presence instead of truth would report the wrong
-/// transport state to every control point.
+/// **The rule has one owner now: [`macast_core::pyops::truthy`].** This name stays
+/// because four crates read the same JSON values with the same Python semantics —
+/// the renderer (`if res['data']`), the management face's legacy-key fallbacks, the
+/// page resolver's `or` chains, and the 「启用国内镜像地址」 switch
+/// ([`macast_core::setting::github_cn_mirror`]) — and a fifth implementation that
+/// "simplified" the string case would make two of them answer differently about one
+/// file on disk.
+///
+/// The shape that makes this necessary here: mpv reports `pause` as a real boolean,
+/// but the Python branch is `if res['data'] and res['data'] is not None`, which is a
+/// truthiness test wearing a null check. A `0`, an empty track list, or an empty string
+/// all take the `else` arm — which for `pause` means "the player is playing", so
+/// reading presence instead of truth would report the wrong transport state to every
+/// control point.
 pub fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => number_is_nonzero(n),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-fn number_is_nonzero(n: &Number) -> bool {
-    if let Some(i) = n.as_i64() {
-        return i != 0;
-    }
-    if let Some(u) = n.as_u64() {
-        return u != 0;
-    }
-    match n.as_f64() {
-        // Zero, and both infinities, are representable in JSON only through
-        // serde_json's non-standard path; `0.0` is the case that matters.
-        Some(f) => f != 0.0,
-        None => true,
-    }
+    macast_core::pyops::truthy(value)
 }
 
 /// Python's `int(value)`, for the values that arrive over mpv's IPC.
@@ -114,24 +108,15 @@ pub fn as_int(value: &Value) -> Option<i64> {
 /// `bool` rather than `Bool`, and an integral JSON number reporting `int` where
 /// Rust's type would say `Number`.
 pub fn type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "NoneType",
-        Value::Bool(_) => "bool",
-        // Python's json decoder gives `int` for `5` and `float` for `5.0`; the
-        // two shapes are distinguishable here because serde_json keeps them
-        // distinguishable.
-        Value::Number(n) => {
-            if n.as_i64().is_some() || n.as_u64().is_some() {
-                "int"
-            } else {
-                "float"
-            }
-        }
-        Value::String(_) => "str",
-        Value::Array(_) => "list",
-        Value::Object(_) => "dict",
-    }
+    macast_core::pyops::type_name(value)
 }
+
+/// The version of this rule that used to live in this file, kept as a comment because
+/// it is the reason the arm order matters (`macast-core/src/pyops.rs` owns it now):
+///
+/// Python's json decoder gives `int` for `5` and `float` for `5.0`; the two shapes are
+/// distinguishable here because serde_json keeps them distinguishable — but only if the
+/// `i64`/`u64` question is asked **before** the float arm.
 
 /// The clock string mpv's numbers become on the wire: `'%d:%02d:%02d'`.
 ///

@@ -486,7 +486,7 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 699;
+    const TESTS_IN_THIS_CRATE: usize = 702;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

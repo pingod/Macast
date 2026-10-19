@@ -1345,15 +1345,12 @@ fn obj_get<'a>(v: &'a Value, key: &str) -> &'a Value {
 /// Python truthiness over a JSON value: `Null`/`false`/`0`/`0.0`/`""`/`[]`/`{}`
 /// are falsy, everything else is truthy. A string counts by length, never by
 /// `strip()` — `'  '` is truthy in Python and here.
+///
+/// [`macast_core::pyops::truthy`] is the owner: the same rule decides mpv's `pause`
+/// branch, a legacy management key, and the 「启用国内镜像地址」 switch, and a
+/// per-crate copy is how one JSON file ends up meaning three things.
 fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map_or(true, |f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
+    macast_core::pyops::truthy(v)
 }
 
 /// Python `str(v)` for the shapes a JSON tree can carry. Numbers keep their

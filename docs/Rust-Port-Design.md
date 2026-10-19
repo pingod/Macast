@@ -296,6 +296,17 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 > *"How many there are is that module's own business; restating the number here is how
 > it goes stale."*
 
+**2026-10-20 这座孤岛分了两层。** 同一条 Python 规则被三个 crate 各抄了一遍 ——
+truthiness 在 `macast-mpv/src/pyops.rs`、`macast-upnp` 的 `py_truthy`、`macast-cast` 的
+`resolve::truthy` 里各有一份，`type_name` 在 mpv 与 `module_settings::py_type_name` 里各有一份 ——
+而三份**今天恰好同意**，所以没有任何一条用例是红的。这正是散布的代价：漂移不是发生在写下的那一天，
+是发生在"只有一个人改了其中一份"的那一天。现在规则体在 `macast-core/src/pyops.rs`（四个读者都够得着的
+最低一层），其余三处是委托；`pyops.rs` 里那条 `each_value_rule_has_one_body_in_the_workspace`
+按整棵树扫**规则体**，地板 40 个源文件，并且**故意把表单开关留成两处** ——
+参考实现自己就有两种拼法（`remove` / `set-github-mirror` 不 `strip()`，`?refresh=` 要 `strip()`），
+所以那条用例钉的是"两种拼法、各有各的主人、strip 的那一处真的 strip"，而不是"全树只许一个"。
+变异电池在这一格里没有用：**杀一份副本，另外两份照样答**，只有结构扫描问得出"有几份"。
+
 同样的形状在 §3 里被本文遵守了一次：不抄计数。
 
 `pyjson` 是这个政策的极端例子：它不是"一个 JSON 解析器"，而是**从 CPython 自己的扫描器
@@ -324,6 +335,8 @@ dict 的插入序、`str.strip()` 的字符集、时间戳的舍入方向。
 | `setup`（`Server:` 头） | 交回 `Macast/<版本>`，不抄 `BaseHTTP/0.6 Python/3.12.15` | 参考实现那个值是"它恰好继承了哪个类"的产物；把 CPython 的名字写到线上是关于"谁在答"的一句谎。`dial.py` 不读这个头，所以这不是兼容性代价，只是诚实 |
 | `setup`（非 `GET`） | `501` + **无正文**；Python 也回 501，但带 `BaseHTTPRequestHandler` 生成的 `text/html` 错误页 | 抄那页 HTML 就是把 CPython 的模板串放进我们的字节里，而唯一的读者（`dial.py:173-184`）把 `HTTPError` 折成一句 warning，从不渲染正文 |
 | `setup`（8008 的端口回落） | **不回落**：绑不上 8008 就交回 `Err`，而不是参考实现那样沿 `PORT_FALLBACK_RANGE` 走 20 个口 | 两条理由合成一条：`dial.py:25` 把 8008 钉死，所以 8010 上的这张脸是"绑上了但没人敲"；而回落的第一步就是 **8009**，那是 Cast socket 的口。参考实现能承受这个重叠，是因为它 `start()` 里**先**绑 Cast 再绑 setup（`protocol_cast.py:411-413`），8009 已在自己手里；一个还没接上 Cast 通道的壳只会把它抢走。判据：`setup_tests` 的 `d_a_taken_port_…` 用一份**同样绑在 0.0.0.0** 的夹具占住口（第一版用 `127.0.0.1` 占，结果 wildcard 绑定照样成功，那条"拒绝"从未发生 —— 夹具没生产会遇到的形状，用例就是在测夹具） |
+| `plugin_repo`（「启用国内镜像地址」的**读法**） | 与参考实现**一致**，而它以前不一致：`bool(value)` 的 Python 语义（`"0"` 是**真**、`""` 是假、`"  "` 是真），而不是"值是不是那个词 true" | 关掉的一条偏离（2026-10-20）。旧实现只认 `true` 与 `"1"/"true"/"True"` 三个串，于是在高级设置里手写下 `"Github_CN_Mirror": "0"` 的那台机器，Python 开镜像、本壳关 —— 同一份文件两个答案，而页面按这个答案决定去哪个 host 拉索引。规则体现在只有 `macast-core/src/pyops.rs` 一份（`truthy`），三条委托都从它走 |
+| `plugin_repo` / `module_settings`（表单里那个"是"的开关） | **不 `strip()`**，而本壳以前 `strip()` 过 | 参考实现两处都不 strip（`protocol.py:2493` 与 `:3103`），所以 `" on "` 在那里是**关**、`remove="  1  "` 是**不删**。这一格被自己的用例钉错过：`remove_flag_is_true` 的表把 `"  ON "` 写在"算删除"那一侧，也就是**测试替错误的形状作证**（§4.2「桩自己也会撒谎」的镜像形状 —— 判据本身是错的那一半时，变异电池不会响）。现在的三层：`pyops` 的字面表、`module_settings` 的表、以及真机 §29 把十一种拼写打给**参考实现自己的表达式**比。方向也要读对：这一侧的错答案是"删掉用户的键"，不是"少删一次" |
 | `announce`（一个 socket 承担广播 + 应答；2026-10-18 接线前它不 join、也从不读） | 参考实现给**每一个** IPv4 接口各绑一个发送 socket 并逐口加入多播组（本机量到 6 个 socket、每轮广播 6 份相同字节）；本端口一个 `0.0.0.0:5353` socket，**不 join** | 这一行原来的理由**是一句从没问过内核的猜测**，现已量掉（`scripts/mdns_reuseport_probe.py`；2026-10-18 在这台 Mac 与那台 CachyOS 上各跑；egress 用 `IP_MULTICAST_IF=127.0.0.1` + TTL 1 钉在 lo0，一个字节都不上局域网；每例的报文**事务 id 各不相同**，所以"每个 socket 都拿到全部"是逐条可核而不是两个计数相等；并且只统计**自己发出去的那些 id** —— 第一次在 Linux 上读出 `14 of 12`，那是场上真实 mDNS 的噪声，不是发现）。两台机器的答案：① **多播是复制的** —— macOS 两个 joined `[12, 12, 0]`、三个 `[12, 12, 12]`；Linux 同样三行是 `[8, 8, 8]`，**包括那个没 join 的**（Linux 上绑到 5353 的 socket 不管加没加入组都收得到多播）。所以旧句子里"`SO_REUSEPORT` 把进来的数据报只交给一个读者，第二个 joined socket 会偷走设备列表的一半"**在两个内核上都不成立**。② **单播整条只交给一个 socket，而交给谁不是"后绑的那个"** —— Linux 同一进程三趟都是 `[8, 0, 0]`，换两个进程（源端口不同）则分别给出 `[0, 0, 12]` 与 `[0, 8, 0]`：选谁是**按流**算的，任何一趟都不能当成规则。macOS 上 wildcard 绑定的 socket 连**对照组**都是 `0`（场上系统的 mDNSResponder 很可能就是持有者，非特权 `lsof` 点不出它），而绑到**确切目的地址**的 socket 把整条流从 wildcard 那个手里全部拿走（`[12, 0]`，逐趟稳定）。③ **结论因此不是"不用合并"**：要合并，但理由换成**单播**，而且合并的位置是**长期在场的那个 socket**，不是每次三秒钟的临时 browse。接线**之前**它是单播的一个**竞争者却从不读**，在 Linux 上还是每一份多播的**接收者而队列没人排空**。responder 落地之后（2026-10-18，§15 那一行）同一个 socket **join 且读**：答查询，并把听到的喂进设备账本 —— 于是"一直在端口上的那个 socket"恰好是"有人在读的那个"。**还没做的那半句**是设备账本那一侧：读到的**别人的**记录今天只统计不入库（`Served::absorbed` 那一个计数器），所以合并的是 socket，不是两张表。`mdns.rs::open` 那句" replies 会以单播回到我们这里"也已按测量改成**条件句**：单播只回到**某一个**绑在 5353 的 socket，只有读它的那个是我们的时候才算数 |
 | `announce`（不做唯一性探测） | 参考实现在广播之前先发 3 个 `QU` 的 PTR 查询并等回话（`generate_service_query`，`_core.py:263-283`），撞名就 `NonUniqueNameException` —— 而 `advertise()` 让它冒出去，所以 Python 那一侧撞名的后果是**这台机器根本不广播** | 我们照播。代价写在模块头：同一局域网里两个相同友好名的实例会发布**同一个** instance 与 SRV 目标，发送端可能把名字解到另一台的端口上。**而且我们连那个探测包都不构造**：没有"发完再听"的探测就只是一句问话，谁也不答它，写出来就是一段长得像覆盖的死代码（§4.13「不提问的检查」的形状）。语料里那行 `probe` 因此是**参考实现的**证据，`every_packet_we_write_is_a_response_and_never_a_query` 断言我们四个构造器没有一个交回它 |
 | `announce`（属性过长时） | 参考实现**整条起不来**：`ServiceInfo(...)` 打包 TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而这一句不在 `advertise()` 那两个 `try` 里（本机实测：200 字节过、300 字节抛），于是异常一路冲出 `ChromecastProtocol.start()` —— 用户改一个长设备名，买到的是 Chromecast 接收端没了 | 本端口砍属性、不砍接收端：按字符边界截到 255 字节，WARNING 里点名字段、原长度与上限，然后照常广播。方向与 §4.8「越界夹住而不是拒绝」、`vt_level` 的"少钉一个 level 只是不明确，钉错是每一帧都没了"是同一条。**Python 那一侧今天仍然如此**，这句话不是说它修好了 —— 记在这里是因为它是一条会被下一次"照抄参考实现"重新引进来的行为 |
@@ -931,7 +944,8 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
 | 管理面的 `module-settings` 两面（「模块设置」那张卡的数据源，与它唯一的写入口） | **已交付**（2026-10-19：读 = GET 表第 **13** 行，门 management；写 = POST 表第 **8** 行 `set-module-setting`，门 **code-execution** —— 本壳第一行这种门，`macast_core::module_settings::set_value` 与读侧共用同一张归属表） | 判据三层。**单元 11 条**：`Key::all()` 的每一个名字被恰好一张表认领（两张表的行数之和 **恰好等于** 键表，两个方向都问 —— 有键没标签 = 漂移，有标签没键 = 指向一个这台机器写不了的键）、label 必须是中文（唯一例外是参考实现自己写成 `SSDP USN` 的那一格，例外表钉成 1 条且必须继续对得上）、七种 `type(value).__name__` 与 `editable` 的规则、缺席的键仍然是**一行**（`present: false` + `type: ''` + 可写）、其他（未归类）逐字用键名当 label 并给那句下一步、**建 payload 不创造键**（对着真的 `Setting` 问 `has()` 仍然为假 —— §4.2 第一条陷阱）。**HTTP 3 条**：文档形状与 absent 行、`launch-param` 与这份读文档**逐键比同一个值**（一份文件两个读者 —— §4.8 那条「两处答案不一致比没有数字更糟」的第三种形状）、LAN 无令牌整份拒。**真机 §28 共 16 条**：把 `macast/module_settings.py` **按文件路径** load 进来（`import macast` 会把 cherrypy 和 `SETTING_DIR` 一起拖进来），用**本机 HTTP 刚交回来的那些行**重算一份文档，再逐格对拍 —— 对拍用 present 行重建输入，是为了不去和"启动时实例自己写了 USN 与友好名"这件事赛跑。**三处记账的偏离**：① **没有插件组** —— 本壳还没有插件子系统，而参考实现在 `plugins=[]` 时交回的就是这个形状，所以这一格不是"我们少了"而是**用参考实现自己算一遍来证明**；② **`Timeout` 从 `cast_local_file` 的键变成本壳 core 的键**，连带 hint 改成本壳的读者（对拍时按名字排除这一格，并且**数过**：排除必须恰好一行、参考侧必须没有 Timeout，否则判据自己变红 —— 一条允许无界差异的比较就不再是比较，与 `--ci` 的豁免名单是同一条规矩）；③ 每格内部字段顺序两侧**相同**（工作区 manifest 开了 `serde_json` 的 `preserve_order`），§8 那条字母序偏离说的是 `Setting` 自己的 `BTreeMap` 表（`launch-param` 交回的就是它），不是文档格 —— 这两件事在写这一节的第一版里被我混成一件事，于是报出一条不存在的产品偏离，见 §16 第 30 条 |
-| 管理面的 `plugin-info` 与两张 mirror 读 | **已交付答复**（2026-10-20）：`plugin-info` 是真数据（platform / version / 空的插件列表 / 空的仓库坐标）；`mirror-state` 与 `mirror-snapshot` 是"这个壳没有镜像面"的完整文档，门是 **token**（loopback 也不例外，照参考实现） | 判据：单元 2 条 + 表循环（每行的门都被无令牌局域网与带令牌各打一遍）+ 真机 §23 的 5 条。**`plugin_repo` 的四个值都是诚实的空**：本壳没有插件子系统与 extras 安装器，编一个能拉索引的地址等于让页面指向一个这个构建装不了的仓库。见 §16 第 33 条 |
+| 管理面的 `plugin-info` 与两张 mirror 读 | **已交付答复**（2026-10-20；同一天的下一轮把 `plugin_repo` 那半句**翻面了**，见下面那一行）：`plugin-info` 是真数据（platform / version / 空的插件列表 / **真坐标**）；`mirror-state` 与 `mirror-snapshot` 是"这个壳没有镜像面"的完整文档，门是 **token**（loopback 也不例外，照参考实现） | 判据：单元 4 条 + 表循环（每行的门都被无令牌局域网与带令牌各打一遍）+ 真机 §23 的 5 条 + 真机 §29 的整节。`plugins` 仍然是**空列表而不是拒绝**（"从这个构建里装不了东西"是答案）。见 §16 第 33 条与第 34 条 |
+| `macast/plugin_repo.py`（插件仓库坐标、「启用国内镜像地址」那一个开关、extras 的命名与地址规则） | **坐标与开关已交付**（2026-10-20，`macast-core/src/plugin_repo.rs`）：`mirror_enabled` / `set_mirror_enabled` / `to_mirror_url` / `index_urls` / `describe` / `extras_describe` / `extras_asset_name` / `extras_urls`；GET 面 `plugin-info` 交回 `describe()`，POST 表第 1 行 `set-github-mirror`（门 management，照参考实现的行序排在 `cast-uri` 之前）。**插件管理器与 extras 安装器仍未做** —— `plugins` 因此是空的，`extras_urls` 与 `extras_asset_name` 今天是**纯规则 + 用例**，没有产品读者（先中再壳，与 `targets.rs` 那条同一形状） | 判据：单元 14 条（三行的新鲜顺序、镜像开时**三行塌成两行**、jsDelivr 永不加前缀、关是**键消失**而不是存 `false`、读不造键、资产名四洞按序、开关的四词表）+ 单元 3 条 HTTP（两个读者读同一个键必须同答、门的三种来源、表序优先）+ **真机 §29**：把 `macast/plugin_repo.py` **按文件路径** load 进来（它模块级就 `from .utils import Setting`，所以要一个假父包；而桩 `Setting` 读的是**实例自己写的那份文件**），两个开关状态各逐格对拍一次；十一种拼写的"是"打给**参考实现自己的表达式**比；`Github_CN_Mirror` 从 HTTP 面与「模块设置」面各问一次。见 §16 第 34 条 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 || AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting`，由**同一个** announcer 与 Cast 一起广播 —— 2026-10-19 合并成一个 5353 socket，见 §16 第 32 条）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**"会广播 ≠ 会答问"这一格在合并之后变了一半**：判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门），合并后的 socket 对**每个** `responder_answers()` 为真的 service 才答问 —— 所以 AirPlay 的查询**今天有答案**，那是参考实现的行为（一个引擎答所有注册类型），而它的单元见证是 `one_socket_answers_the_measured_type_and_stays_silent_for_the_other`。**没有真机见证者**：§25 的送达那一格在本机仍 SKIP，§26 的 browse 从突发就能成功，它既证不了答问也证不了不答问。announcer 自己那一行日志仍然明说这件事（`it announces this type and does not answer it — the responder table was measured for _googlecast._tcp`），§26 有一条问它在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
@@ -1494,6 +1508,37 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *计数*：`macast-upnp` 353 → **355**、GET 表 13 → **16** 行（`the_get_route_table_is_well_formed` 的 `== 16` 与附录 B 同步）、其余不变；真机 **323 PASS / 0 FAIL / 1 SKIP，退出码 1（上一轮 318/0/1）**。
     *诚实边界*：① `plugin-info` 的 `plugin_repo` 是**空坐标**，不是参考实现那份能拉索引的地址 —— 谁要在这个壳里做插件安装，先移植 `plugin_repo` 与插件管理器，再把这四个值填上；② 两张 mirror 读的**门**与**形状**是照参考实现抄的，但它们背后没有任何镜像实现，所以"本机能不能镜像"这个问题在这个壳里没有可验证的答案；③ 本分支从未推送 ⇒ 这一轮 355 条与那 323 条读数 没有任何 CI 见证过。
 
+34. **`plugin_repo` 移植进来，第一件事是把它上一轮那句「诚实的空」证明成一句谎**（2026-10-20，`macast-core/src/plugin_repo.rs` + `macast-core/src/pyops.rs`（值语义收敛到一个主人）+ `macast-core/src/setting.rs` 的 `github_cn_mirror` + `macast-upnp/src/http.rs` 的 POST 表第 1 行 `set-github-mirror` + 真机 §29）：
+    *谎长在哪一格*：`Github_CN_Mirror` **是本壳的一个键** —— 它在「模块设置」归属表里（`module_settings.rs:104`，标签「启用国内镜像地址」），而 §28 的写路径刚刚能让页面真的写它。所以上一轮那份 `mirror_enabled: false` 不是"这个壳没有那一面"的文档，是**对着用户已经打开的开关说它没开**：同一份文件，「模块设置」那张卡答 `true`，`plugin-info` 答 `false`。这跟 §4.8 那句「两处答案不一致比没有数字更糟」是同一件事，只是这次的两个读者一个是我写的、另一个也是。**坐标本身是无害的**（这个构建里没有任何一侧去 fetch 它们，索引在参考实现里也是空的），所以交回真坐标不是许诺，交回假的那个才是谎。
+    *收敛值语义的收获是一支 `.trim()`*：把 `truthy` / `type_name` / 表单开关收成一位主人之后逐条读参考实现，发现 `remove_flag_is_true` **过去 strip，而 `protocol.py:3103` 与 `:2493` 都不 strip** —— 也就是带空格的 `remove` 在 Python 里**不删**、在本壳里**删**。更贵的是这一格**有自己的用例写着"必须算删除"**（`"  ON "` 在 truthy 那一列），所以这不是"电池没抓到"而是**判据替错误的形状作证**：一条把规则本身抄错的用例，会让下一次有人"顺手 trim 一下"时全绿。现在三层各问一遍（`pyops` 的字面表、`module_settings` 的表、真机 §29 把十一种拼写打给**参考实现自己的表达式**比），并把方向写进 doc：这一侧的错答案是删掉用户的键，不是少删一次。
+    *另一条同族的窄读法*：`github_cn_mirror` 过去只认 `true` 和 `"1"/"true"/"True"` 三个串，而参考实现是 `bool(value)` —— **`"0"` 在 Python 里是真**。手改高级设置写下 `"Github_CN_Mirror": "0"` 的那台机器，Python 开镜像、本壳关。改成 `pyops::truthy` 之后两边逐字一致（§8 两行都记了，一行是"关掉一条偏离"、一行是"不 strip"）。
+    *新鲜顺序是这张表唯一会腐烂的地方*：三行索引在开关开的时候**塌成两行**，因为 mirrored raw 与表里本来那条 ghproxy 行是同一个串。把去重删掉的后果不是"少一行"而是多出一行 `ghproxy.net/https://ghproxy.net/…` —— 一条谁都不服务的地址；把 jsDelivr 也加进 `MIRROR_HOSTS` 的后果是给唯一那个国内永远可达的 host 再加一跳。两条各有单元用例，§29 再各问一遍线上串。
+    *关是键消失，不是存 `false`*（AGENTS §4.6）：`set_mirror_enabled(false)` 走 `unset`，判据在真机上是对**那份文件** grep 那个键必须不存在 —— 对着答复断言 `false` 是问不到这一格的，两种形状在 HTTP 面上读起来一模一样。
+    *判据三层与两台仪器*：单元 `macast-core` 14 条（坐标）+ 6 条（`pyops` 的三张表 + 那条整棵树的"一份规则体"扫描）、`macast-upnp` 3 条（两个读者同答一问、门的三种来源、表序优先于 `cast-uri`）；真机 §29 把 `macast/plugin_repo.py` **按文件路径**加载（它模块级 `from .utils import Setting`，所以要一个假父包；桩 `Setting` 读的是**实例自己刚写的那份文件**，不是第二份夹具），两个开关状态各逐格对拍一次，加上线上的门、十一格拼写表、四洞资产名两侧合成比对、以及三次轮询之后文件 md5 不变。
+    *两条仪器谎都在 §29 自己身上，都长得像产品坏了*（§4.2 那一族在 Rust 侧的第 N 次）：① `pr_panel` 把 curl 的正文**从 stdin 灌进一段程序，而程序自己也从 stdin 来** —— 于是读者解析的是它自己的源码，报 `JSONDecodeError`、`panel=` 空串，读起来像「模块设置」那张卡没有这一行。这正是 §28 的 `ms_ask` 头注释写过的同一件事，我在下一节里重犯了一次；改法是落文件、按名字开。② 那张十一格的表把 Python 的 `True`/`False` 与 JSON 的 `true`/`false` 直接比字符串，于是**十一种拼写全部"漂移"**，而十一格答案逐格是对的。判据换成"两侧都归一化之后再比"，并把这件事写在循环旁边：**比不出大小写区别的比较，问的不是那件事**。
+    *变异电池：16 支，逐支的红数*（一支一条命令，`/tmp` 备份 + 还原 + md5 回到当轮基线，且**先证明那一处真的改了**再跑；`/tmp/vrr_mut_*.txt` 与 `/tmp/bat29/` 是当时量过的那批）：
+    ① 把 `.trim()` 加回表单开关 → **4** 红（`pyops` 的字面表、`module_settings` 的表、`plugin_repo` 门自己的表，以及那条整棵树的"一个主人"扫描 —— 它看见两处都 strip 了）；
+    ② `to_mirror_url` 不再问 host、一律加前缀 → **4** 红；
+    ③ `index_urls` 不去重 → 单元 **3** 红，**真机 §29 另交 3 红**（mirror-on 那份对拍报 DIFFER、开链是三行而不是两行、jsDelivr 那一格读回来的是 ghproxy 那一行 —— 三支各落在自己的那一格上，红法逐条印出来）；
+    ④ `github_cn_mirror` 从 `peek` 改回带默认的 `get` → **2** 红（§4.2 第一条陷阱在 Rust 侧的形状）；
+    ⑤ 把开关读窄回"只认那个词 true" → **1** 红，而且红在**本轮新加的那一条**（`the_switch_is_python_s_bool_not_the_word_true`）—— 它是因为我先去数"这一格有没有人问"才写出来的，不是电池逼的；
+    ⑥ 关的时候存 `false` 而不是 `unset` → **2** 红；
+    ⑦ 资产名的 arch 与 python tag 两个洞换序 → **2** 红；
+    ⑧ `set-github-mirror` 的门从 management 升成 token → **3** 红（本机那次"门是承重的"在第二张脸上再现）；
+    ⑨ 把 POST 表里那一行删掉 → 单元 **4** 红，**真机 §29 红 12 条**（LAN 那一格读到的是 fall-through 的「不认识字段」而不是 403、十一格拼写表整张塌下来 —— 每一格的答案都是空串、文件里那位从来没出现过、四张 mirror 行全部不动、两个读者那一格读到 panel=False / face=False）；
+    ⑩ `describe()` 换成上一轮那份常量文档 → **2** 红（其中一条就是"两个读者读同一个键"那一格 —— 上一轮的那个形状今天有名字了）；
+    ⑪ `truthy` 的字符串臂去 strip → **1** 红；
+    ⑫ `type_name` 的 int/float 两臂换序 → **3** 红；
+    ⑬ `py_type_name` 不再委托、交回常量 `"str"` → **3** 红；
+    ⑭ extras 加第三个包 → **1** 红；
+    ⑮ 成功文档把 `code` 与 `message` 换序 → **1** 红；
+    ⑯ **把第二份 truthiness 规则体抄回 `macast-cast/src/resolve.rs`**（行为逐字等价，委托与本地体答同一个问题）→ **1** 红，而且**只有那条整棵树的扫描问得到**：这一支就是 §7 那两句"副本会替被杀那一份答话"的具体形状 —— 传统电池在这一格上结构性失明，因为被杀的那一份没有任何用例专属地读它。
+    **本轮没有一支 0 红。**
+    *仪器的错一支，而且伪装成"干净跑"*：那趟"收尾的全量跑"我加了 `--no-build`，而上一支变异体（⑨）改的是 `macast-upnp` 的产品码 —— 源文件已经按 md5 还原，**产物没有重新构建**，于是那 12 条 §29 红**全是真的**，只是真的在一份变异的二进制上。这是 Python 侧那条"等长还原留下一份有效的旧 `.pyc`"的 Rust 版本，方向也一样：**还原之后必须重新构建再跑**，`--no-build` 只在你确认过产物与源码同时钟的时候才是省时间的。判据换成先 `cargo build` 再跑，重跑读数 **350 / 0 / 1**。
+    *仍然欠着的*：① **插件子系统本身** —— 管理器、热插拔、`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file` 上传、`save-launch-param`，以及 extras 的**安装器**（`extras_urls` / `extras_asset_name` 今天是纯规则加用例，没有产品读者）；② POST 表 **9 / 23 行**（参考实现那 23 行是 2026-10-20 数出来的，不是抄的）；③ §29 的对拍是**坐标文档**，不是"有人真去拉了那份索引"。
+    *计数*（两台仪器一致：`--list` 与整跑读数；`macast-cast` 那台扫描仪器说 **702**）：`macast-core` 107 → **128**（+14 坐标 / +6 `pyops` 的表与扫描 / +1 开关的 bool 规则）、`macast-upnp` 355 → **358**、`macast-mpv` **149**（委托之后一条不少：它的表继续通过本模块的名字问这条规则）、`macast-cast` **702**、`macast-tauri` **19**；POST 表 8 → **9** 行（`the_post_route_table_is_well_formed` 的 `== 9`），GET 表仍是 **16** 行；真机脚本 31 → **32** 节，**350 PASS / 0 FAIL / 1 SKIP，退出码 1**（那一条 SKIP 仍是 §25 的送达那一格；§29 一节 **27 条**，上一轮那份 323 是 §29 之前的数）。
+    顺手补了一格**落后的地板**：`macast-cast` 的 `TESTS_IN_THIS_CRATE` 停在 699 而两台仪器都说 702 —— 上一轮我在散文里写了 702，没有回来改这个常量，而它的判据是 `>=`，**低 3 不会红**（§4.13「一个没被机器问过的数字」在地板上的形状）。现在按量出来的 702 钉住。
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1540,7 +1585,7 @@ grep -oE 'macast-(core|mpv|upnp|cast)/src/[a-z_]+\.rs' docs/Rust-Port-Design.md 
 # 不是"看起来应该"）
 grep -n "TESTS_IN_THIS_CRATE: usize" macast-cast/src/proto.rs   # 期望它**等于两台仪器量出的数**：
 #   `cargo test -p macast-cast --lib -- --list` 的计数，与 proto.rs 里那条扫描用例扫到的条数。
-#   2026-10-19 最后一趟两边都是 **699**（AirPlay 的 RTSP 那一轮 +5，`_airplay._tcp` 的广播这一轮 +4：语料对拍 /
+#   2026-10-20 最后一趟两边都是 **702**（AirPlay 的 RTSP 那一轮 +5，`_airplay._tcp` 的广播这一轮 +4：语料对拍 /
 #   "广播但绝不答问" / AirPlay 的拒绝句点名 AirPlay / 答问那半是派生的不是写死的）。这里故意不写成一个可以照抄的常量：上一版写的 656
 #   在被写下的那一轮就已经落后两级（656 → 671 → 686 → 688 → 690），一个会随加用例腐烂的数
 #   不是引用体检，是§4.13 那句「一个没被机器问过的数字」的文档版本。
@@ -1560,7 +1605,7 @@ grep -c "set_read_timeout(None)" macast-cast/src/channel.rs      # 期望 **0**�
 grep -c "pub const READ_POLL\|pub const MAX_FRAME_BYTES" macast-cast/src/channel.rs  # 期望 **2**
 grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**（主人在这儿）
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **31**（§28 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **32**（§28 是最后一节：
 #   两份实现各自把「哪个键属于谁」这张表写一遍，再逐格对拍；§27 是重投历史那一节，
 #   重启之后重投历史还在；§26 是 iPhone 的 RTSP 问答，§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
 #   门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，
@@ -1598,6 +1643,18 @@ grep -c 'responder_answers' macast-cast/src/announce.rs                     # �
 grep -cE 'discovery_log\.(info|warning)\(' src-tauri/src/main.rs            # 期望 **5** = 下面这两条之和
 grep -c 'mDNS: announcing' src-tauri/src/main.rs                            # 期望 **2**（Cast 与 AirPlay 各一条总结）
 grep -c 'mDNS: not announcing' src-tauri/src/main.rs                        # 期望 **3**（两条拒绝 + 一条"8009 没在听"）
+# 值语义一座孤岛（§7 的两层，2026-10-20）：`truthy` 的规则体在整棵树里必须**恰好一处**，
+# 而表单开关**故意两处**（参考实现自己有两种拼法：`remove`/`set-github-mirror` 不 strip，
+# `?refresh=` 要 strip）。这两条 grep 是 `each_value_rule_has_one_body_in_the_workspace`
+# 的外部对应物 —— 电池杀不掉它们（副本会替被杀那一份答话），所以只有扫描问得出"有几份"。
+grep -rn 'Value::Null => false' --include='*.rs' macast-core/src macast-mpv/src \
+  macast-upnp/src macast-cast/src src-tauri/src | wc -l                       # 期望 **1**
+grep -c 'trim().to_ascii_lowercase()' macast-core/src/*.rs | awk -F: '{s+=$2} END {print s}'  # 期望 **0**
+# 坐标只有一个主人，两个读者（GET 的 describe、POST 的成功文档）都从它走。
+grep -c '^pub fn describe' macast-core/src/plugin_repo.rs                      # 期望 **1**
+grep -c 'plugin_repo::describe(&self.setting)\|plugin_repo::set_mirror_answer(' macast-upnp/src/http.rs  # 期望 **2**
+grep -c 'field: "set-github-mirror"' macast-upnp/src/http.rs                   # 期望 **1**（表里那一行；
+#   行数由 `the_post_route_table_is_well_formed` 的 `== 9` 在管，这里是它在文档里的对应物）
 #   这三行合起来是一条**目的地**判据：壳自己的 mDNS 句子一条都不许再骑在播放器的 logger 上
 #   （§16 第 29 条 ④ —— 它们以前全在 `logs/MPV.log` 里，而 §5 那条排障配方 grep 的是 `macast.log`）。
 #   真机那侧的对应物是按文件名读：

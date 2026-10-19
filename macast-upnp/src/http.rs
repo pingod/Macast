@@ -169,6 +169,10 @@ const FILE_ROUTE_PARAMS: [&str; 1] = ["plugin-file"];
 /// the first matching field wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PostAction {
+    /// `set-github-mirror=<anything truthy>`: flip 「启用国内镜像地址」 and hand the page
+    /// the fresh coordinates in the same reply (`_set_github_mirror`,
+    /// `protocol.py:2486-2501`).
+    SetGithubMirror,
     ResolvePage,
     CastResolved,
     CastUrl,
@@ -210,6 +214,12 @@ struct PostRoute {
 /// never reaches the resolve job. Put `resolve-page` first and the same request
 /// silently starts a parse instead of casting -- and nothing else changes.
 const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
+    // `set-github-mirror` is row 5 of the reference's table (`protocol.py:2292`), which
+    // puts it **ahead of** `cast-uri` (row 15) — and order is semantics here
+    // (AGENTS.md §4.7c: a request carrying both action fields runs the earlier one and
+    // never reaches the later). Management-gated, not code-gated: this writes one bool
+    // that decides which host the *browser* fetches next.
+    PostRoute { field: "set-github-mirror", gate: "management", action: PostAction::SetGithubMirror },
     PostRoute { field: "cast-uri",        gate: "management", action: PostAction::CastUrl },
     PostRoute { field: "resolve-page",    gate: "management", action: PostAction::ResolvePage },
     PostRoute { field: "cast-resolved",   gate: "management", action: PostAction::CastResolved },
@@ -2012,31 +2022,34 @@ impl Face {
         json_value_response(&macast_core::module_settings::payload(&self.setting.snapshot()))
     }
 
-    /// `query=plugin-info` — platform, version, the (empty) plugin list, and the plugin
+    /// `query=plugin-info` — platform, the (empty) plugin list, and the plugin
     /// repository coordinates.
     ///
-    /// **The coordinates are empty on purpose.** The reference hands over
-    /// `plugin_repo.describe()`: a repo URL, the index URLs in freshness order, the
-    /// mirror switch and the WebRTC-extras descriptor. This shell has no plugin
-    /// subsystem and no extras installer, so inventing a URL would be the page pointing
-    /// at a repository whose files this build cannot install — the same reason
-    /// `mirror-action` is not in the POST table. The shape is kept (every key present,
-    /// `plugins: []`, `index_urls: []`) because the page's "what can I install" question
-    /// has an answer here: **nothing, from this build**.
+    /// `plugins` is `[]` and stays that way for an honest reason: this shell has no
+    /// plugin subsystem, so there is nothing installed to list (the reference reads the
+    /// answer off `cherrypy.engine.publish('get_plugin_info')`).
+    ///
+    /// `plugin_repo` is **the reference's own document**, built by
+    /// [`macast_core::plugin_repo::describe`] from the same settings key the 模块设置 tab
+    /// shows. It used to be four empty strings here, on the reasoning that handing out a
+    /// repository this build cannot install from would mislead the page. That reasoning
+    /// was wrong in one specific way, found while porting the module: `Github_CN_Mirror`
+    /// **is** a key of this shell (it is in the ownership table, label 「启用国内镜像地址」,
+    /// `module_settings.rs:104`), so a user who turned the mirror on saw the panel say
+    /// `true` while this face answered `mirror_enabled: false` — two readers of one file
+    /// giving opposite answers, which is AGENTS.md §4.8's 「两处答案不一致比没有数字更糟」.
+    /// The coordinates themselves are inert here (nothing in this build fetches them
+    /// server-side; the page fetches the index from a browser, and the shipped index is
+    /// empty either way — AGENTS.md §4.6), so handing them over is not a promise.
     fn plugin_info_entry(&self) -> Response {
-        let mut repo = serde_json::Map::new();
-        repo.insert("repo_url".into(), Value::String(String::new()));
-        repo.insert("index_urls".into(), Value::Array(Vec::new()));
-        repo.insert("mirror_enabled".into(), Value::Bool(false));
-        let mut extras = serde_json::Map::new();
-        extras.insert("packages".into(), Value::Array(Vec::new()));
-        extras.insert("asset".into(), Value::String(String::new()));
-        repo.insert("extras".into(), Value::Object(extras));
         json_value_response(&object(&[
             ("platform", Value::String(macast_core::paths::sys_platform())),
             ("version", Value::String(macast_core::paths::version())),
             ("plugins", Value::Array(Vec::new())),
-            ("plugin_repo", Value::Object(repo)),
+            (
+                "plugin_repo",
+                macast_core::plugin_repo::describe(&self.setting),
+            ),
         ]))
     }
 
@@ -2131,7 +2144,6 @@ impl Face {
         }
     }
 
-    /// `POST clear-log=<anything>&module=<name>` — empty one log and its backups.
     /// `set-module-setting` — the 模块设置 tab's only write, and the reason the ownership
     /// table has **one** owner: the read side (`query=module-settings`) and this write side
     /// both ask [`macast_core::module_settings`] which group a name belongs to. Two lists
@@ -2150,6 +2162,7 @@ impl Face {
         ))
     }
 
+    /// `POST clear-log=<anything>&module=<name>` — empty one log and its backups.
     fn clear_log_answer(&self, req: &Request) -> Response {
         let module = param_value(req, "module");
         json_value_response(&macast_core::logging::clear_log_document(
@@ -2552,6 +2565,12 @@ impl Face {
                 // must not answer it differently from the app's own panel.
                 PostAction::ClearLog => self.clear_log_answer(req),
                 PostAction::SetModuleSetting => self.set_module_setting_answer(req),
+                PostAction::SetGithubMirror => json_value_response(
+                    &macast_core::plugin_repo::set_mirror_answer(
+                        &self.setting,
+                        &param_value(req, "set-github-mirror").unwrap_or_default(),
+                    ),
+                ),
             });
         }
         None
@@ -2562,9 +2581,14 @@ impl Face {
     /// In Python this is `return super(DLNAHandler, self).POST(...)`
     /// (`protocol.py:3160`) arriving at the end of the base `Handler.POST`, after
     /// `_same_site()`, the upload loop, and the whole `POST_ROUTES` walk. The
-    /// shipped table has **16** rows; [`POST_MANAGEMENT_ROUTES`] carries the six
-    /// this port has implemented, so a field Python knows and this port has not
-    /// ported yet (`clear-log`, `set-subtitle-show`, `mirror-action`,
+    /// shipped table has **23** rows (`protocol.py:2287-2331`, counted 2026-10-20;
+    /// AGENTS.md §4.7c carries the same correction — the "16" it once quoted was the
+    /// count on the day that section was written, and a `>= 16` floor cannot see seven
+    /// rows arriving);
+    /// [`POST_MANAGEMENT_ROUTES`] carries the nine this port has implemented, so a field
+    /// Python knows and this port has not ported yet (`set-interface`, `plugin-enable`,
+    /// `set-renderer`, `toggle-protocol`, `app-action`, `mirror-action`,
+    /// `set-subtitle-show`, `clear-play-history`, `install-plugin`,
     /// `install-webrtc-extras`, …) lands here and is echoed as 不认识字段. That is
     /// the honest half of a partial port: a page button whose backend does not
     /// exist yet must not read as "saved", and §4.7c's original bug was exactly
@@ -3124,6 +3148,9 @@ fn strings(items: Vec<String>) -> Value {
 
 /// Python's truthiness for a JSON value — the rule behind `x or y`.
 ///
+/// [`macast_core::pyops::truthy`] owns the rule; this name stays because the table
+/// below documents **which four printed answers** depend on it.
+///
 /// Four of these decide a printed answer rather than an internal branch, so the
 /// spellings are worth naming: `0` and `0.0` are **false** (a stored
 /// `ApplicationPort: 0` is not what makes this fire — it is a stored
@@ -3132,17 +3159,7 @@ fn strings(items: Vec<String>) -> Value {
 /// is a real value to `or`), and so is a list holding one empty string — `[""]` is
 /// a non-empty list.
 fn py_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number
-            .as_f64()
-            .map(|value| value != 0.0)
-            .unwrap_or(true),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(fields) => !fields.is_empty(),
-    }
+    macast_core::pyops::truthy(value)
 }
 
 /// [`json_answer`] for the routes whose dict carries more than two keys.
@@ -5979,12 +5996,14 @@ mod tests {
         // agree with anything. Same two questions, same reason: unique field names
         // (a duplicate would shadow the later one forever) and a gate every row can
         // actually be parsed to.
-        // **8, not \">= 7"** — the same correction the GET table got in the previous
-        // round: a floor that trails the size by one row cannot see a row being deleted,
-        // and the row that would be cheapest to lose here is the one nobody polls
-        // (`set-module-setting` answers nothing until the page posts it). The number is a
-        // count, taken from the table, not from a plan.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 8, "the POST table changed size");
+        // **9, not ">= 8"** — the same correction the GET table got: a floor that trails
+        // the size by one row cannot see a row being deleted, and the rows cheapest to
+        // lose here are the two nobody polls (`set-module-setting` and
+        // `set-github-mirror` answer nothing until the page posts them). The number is a
+        // count, taken from the table, not from a plan — and the reference's own table is
+        // **23** rows (`protocol.py:2287-2331`, measured), so this is a port in progress
+        // and the count is the progress.
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 9, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is
@@ -8271,6 +8290,10 @@ mod tests {
     /// `plugin-info` answers **every key** the page reads, with the empty plugin list
     /// spelled as a list rather than as a refusal: "nothing installable from this build"
     /// is an answer, and a missing key would be a `undefined` in a renderer.
+    ///
+    /// The `plugin_repo` half is the reference's own document, not a placeholder: three
+    /// index rows in freshness order, the switch read from the key it lives in, and the
+    /// extras naming rule. Only `plugins` is legitimately empty here.
     #[test]
     fn plugin_info_keeps_the_shape_and_says_the_list_is_empty() {
         crate::pin_test_dir();
@@ -8281,14 +8304,181 @@ mod tests {
         assert_eq!(doc["platform"], json!(macast_core::paths::sys_platform()));
         assert_eq!(doc["version"], json!(macast_core::paths::version()));
         assert_eq!(doc["plugins"], json!([]), "the plugin list must be an empty list, not null");
-        // The repo block keeps the reference's four keys, each honest about this build:
-        // no URL to point at, no index to fetch, no mirror switch, no extras asset.
-        for key in ["repo_url", "index_urls", "mirror_enabled", "extras"] {
-            assert!(doc["plugin_repo"].get(key).is_some(), "plugin_repo lost {key}");
-        }
-        assert_eq!(doc["plugin_repo"]["index_urls"], json!([]));
-        assert_eq!(doc["plugin_repo"]["mirror_enabled"], json!(false));
-        assert_eq!(doc["plugin_repo"]["extras"]["packages"], json!([]));
+        let repo = &doc["plugin_repo"];
+        assert_eq!(
+            repo["repo_url"],
+            json!("https://github.com/pingod/Macast/tree/main/plugins")
+        );
+        let rows = repo["index_urls"].as_array().expect("a list");
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(
+            rows[0],
+            json!("https://raw.githubusercontent.com/pingod/Macast/main/plugins/info.json"),
+            "the caching CDN must not be first: that is how a page shows a half-day-old list"
+        );
+        assert_eq!(repo["mirror_enabled"], json!(false));
+        assert_eq!(repo["extras"]["packages"], json!(["aiortc", "av"]));
+        assert_eq!(
+            repo["extras"]["asset"],
+            json!("Macast-WebRTC-extras-{}-{}-{}-v{}.zip")
+        );
+    }
+
+    /// The two readers of one key. `Github_CN_Mirror` is in the 模块设置 ownership table,
+    /// so the panel shows its real value; if `plugin-info` answered the switch from a
+    /// constant, the same file would produce `true` in one card and `false` in the other
+    /// — AGENTS.md §4.8's 「两处答案不一致比没有数字更糟」. This is the shape the first
+    /// version of this face had, and the reason the coordinates got ported.
+    #[test]
+    fn the_switch_the_panel_lists_is_the_switch_plugin_info_answers() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("plugin-info-switch");
+        let read = |face: &Face| {
+            let response = face.answer(&get_api("/api?query=plugin-info", LOCAL));
+            let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("object");
+            doc["plugin_repo"].clone()
+        };
+        let off = read(&face);
+        assert_eq!(off["mirror_enabled"], json!(false));
+        assert_eq!(off["index_urls"].as_array().expect("l").len(), 3);
+
+        // Flip it through the door the page uses, then ask both faces the same question.
+        let posted = face.answer(&post_form("/api", "set-github-mirror=1", LOCAL, &[]));
+        assert_eq!(posted.status, 200);
+        let answer: serde_json::Value =
+            serde_json::from_slice(&posted.body).expect("an object");
+        assert_eq!(answer["code"], json!(0));
+        assert_eq!(answer["message"], json!("success"));
+        assert_eq!(answer["mirror_enabled"], json!(true));
+        assert_eq!(
+            answer["plugin_repo"]["index_urls"].as_array().expect("l").len(),
+            2,
+            "the reply is the fresh coordinates — the page must not need a second round trip"
+        );
+
+        let on = read(&face);
+        assert_eq!(on["mirror_enabled"], json!(true));
+        assert_eq!(
+            on["repo_url"],
+            json!("https://ghproxy.net/https://github.com/pingod/Macast/tree/main/plugins"),
+            "「打开插件仓库」 moves with the index, or the button and the fetch disagree"
+        );
+
+        // …and the 模块设置 card, which is the *other* reader of the same key.
+        let grouped = face.answer(&get_api("/api?query=module-settings", LOCAL));
+        let doc: serde_json::Value = serde_json::from_slice(&grouped.body).expect("object");
+        let cell = doc["groups"]
+            .as_array()
+            .expect("groups")
+            .iter()
+            .flat_map(|g| g["keys"].as_array().expect("keys").iter())
+            .find(|c| c["key"] == json!("Github_CN_Mirror"))
+            .expect("the mirror row is in the ownership table");
+        assert_eq!(cell["present"], json!(true));
+        assert_eq!(cell["value"], json!(true));
+        assert_eq!(
+            cell["value"],
+            on["mirror_enabled"],
+            "the panel and plugin-info gave opposite answers about one key"
+        );
+
+        // Off is **absent**, not `false` (AGENTS.md §4.6): the file must not keep growing
+        // a key whose only meaning is "the default".
+        face.answer(&post_form("/api", "set-github-mirror=0", LOCAL, &[]));
+        assert!(
+            !face.setting.has(macast_core::Key::GithubCnMirror),
+            "the off answer left the key behind"
+        );
+        assert_eq!(read(&face)["mirror_enabled"], json!(false));
+    }
+
+    /// The door a drive-by page cannot use without the token it cannot read.
+    /// `set-github-mirror` is **management**-gated (the reference's row), so loopback is
+    /// admitted — unlike `set-module-setting`, whose gate is `code-execution` and which
+    /// refuses 127.0.0.1 with no token. The two rows next to each other in this file are
+    /// the clearest statement of what the three gate names are for.
+    #[test]
+    fn the_mirror_door_is_management_not_code_execution() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("mirror-door");
+        // Loopback, no token: admitted (management), and it writes.
+        let local = face.answer(&post_form("/api", "set-github-mirror=1", LOCAL, &[]));
+        assert_eq!(local.status, 200);
+        let doc: serde_json::Value = serde_json::from_slice(&local.body).expect("object");
+        assert_eq!(doc["mirror_enabled"], json!(true));
+        assert_eq!(
+            doc["message"].as_str(),
+            Some("success"),
+            "a code-gated refusal would mean the gate column drifted: {doc:?}"
+        );
+        face.setting.unset(macast_core::Key::GithubCnMirror);
+        // A LAN caller with no token: refused, hears the management sentence, and the
+        // switch does not move.
+        let stranger = face.answer(&post_form("/api", "set-github-mirror=1", "10.0.0.7", &[]));
+        assert_eq!(stranger.status, 200, "a POST refusal is a 200 with a body code");
+        let refused: serde_json::Value = serde_json::from_slice(&stranger.body).expect("object");
+        assert_eq!(refused["code"], json!(403));
+        assert_eq!(refused["message"], json!(MANAGEMENT_REFUSAL));
+        assert!(
+            !face.setting.has(macast_core::Key::GithubCnMirror),
+            "a refused POST still wrote the switch"
+        );
+        // With the token the same caller is served.
+        store_token(&face.setting, Some(SECRET));
+        let served = face.answer(&post_form(
+            "/api",
+            &format!("set-github-mirror=yes&token={SECRET}"),
+            "10.0.0.7",
+            &[],
+        ));
+        let ok: serde_json::Value = serde_json::from_slice(&served.body).expect("object");
+        assert_eq!(ok["code"], json!(0));
+        assert_eq!(ok["mirror_enabled"], json!(true), "\"yes\" is one of the four words");
+    }
+
+    /// Order is semantics (§4.7c): `set-github-mirror` is the reference's row 5 and
+    /// `cast-uri` is row 15, so a request carrying both runs the switch and never
+    /// reaches the cast. A reordered table would cast anyway and read as "saved".
+    #[test]
+    fn set_github_mirror_precedes_cast_uri_like_the_reference_table() {
+        crate::pin_test_dir();
+        let index_of = |name: &str| {
+            POST_MANAGEMENT_ROUTES
+                .iter()
+                .position(|r| r.field == name)
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            index_of("set-github-mirror") < index_of("cast-uri"),
+            "the table order drifted: {:?}",
+            POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect::<Vec<_>>()
+        );
+        assert!(index_of("set-github-mirror") < index_of("set-module-setting"));
+        let (face, _) = harness_management("mirror-precedence");
+        let response = face.answer(&post_form(
+            "/api",
+            "set-github-mirror=1&cast-uri=http%3A%2F%2Fexample.invalid%2Fa.mp4",
+            LOCAL,
+            &[],
+        ));
+        let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("object");
+        assert_eq!(
+            doc["code"],
+            json!(0),
+            "the switch's own answer, not the cast's: {doc:?}"
+        );
+        assert!(
+            doc.get("plugin_repo").is_some(),
+            "the reply is the switch document, so the earlier row won: {doc:?}"
+        );
+        assert!(
+            doc.get("url").is_none(),
+            "the later row ran too, which means the table order is not the dispatch order"
+        );
+        assert!(
+            face.setting.has(macast_core::Key::GithubCnMirror),
+            "the earlier row was selected but never executed"
+        );
     }
 
     /// The two mirror reads are gated with **the token, loopback included** — the
