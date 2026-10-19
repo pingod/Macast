@@ -133,6 +133,11 @@ pub const CLASS_MASK: u16 = 0x7FFF;
 /// whether a *responder* suppresses its own retransmission — not our problem.
 pub const CLASS_UNIQUE: u16 = 0x8000;
 
+/// The query/response bit (`const.py:100-102`). The responder's dispatch — ingest
+/// this packet or answer it — is this bit and nothing else (`_listener.py:326`).
+pub const FLAGS_QR_MASK: u16 = 0x8000;
+pub const FLAGS_QR_QUERY: u16 = 0x0000;
+
 /// The two high bits of a length byte mark a compressed label (`incoming.py:43`).
 const POINTER_TAG: u8 = 0xC0;
 const DNS_COMPRESSION_HEADER_LEN: usize = 1;
@@ -265,8 +270,36 @@ pub struct Question {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub id: u16,
+    /// The raw 16-bit header flags, kept because the **responder** dispatches on
+    /// one of them: `_listener.py:326` is `if not msg.is_query(): ingest and
+    /// return`, so "was this packet asking something" is decided by the QR bit and
+    /// not by whether the packet happens to carry questions. The browser fold
+    /// still ignores every bit here (a browser ingests answers whether or not the
+    /// sender claims authority); this is the one reader that cannot.
+    pub flags: u16,
     pub questions: Vec<Question>,
     pub records: Vec<Record>,
+}
+
+impl Message {
+    /// `_listener.py:326` + `incoming.py:is_query`: QR clear means this is an
+    /// **answer**, and an answer is food for the cache, never a question to answer.
+    /// A packet with both questions and QR clear is a response, and the reference
+    /// ingests it and stays silent — which is why the responder must not key this
+    /// off `questions.is_empty()`.
+    pub fn is_query(&self) -> bool {
+        self.flags & FLAGS_QR_MASK == FLAGS_QR_QUERY
+    }
+
+    /// `_protocol/incoming.py:is_probe`: **`_num_authorities > 0`**, with no QR
+    /// test in it. A probe is an address-conflict announcement — a *query* that
+    /// carries authority records — and `query_handler.py:110` answers every record
+    /// of one without waiting for the aggregation window. The QR test belongs to
+    /// the caller that dispatches on it (`is_query` above), not folded into this
+    /// definition, so the two rules stay one line each in the source.
+    pub fn is_probe(&self) -> bool {
+        self.records.iter().any(|r| r.section == Section::Authority)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -492,7 +525,7 @@ pub fn parse_message(data: &[u8], source: &str, log: &Logger) -> Option<Message>
         source,
         log,
     };
-    let (id, qd, an, ns, ar) = p.read_header()?;
+    let (id, flags, qd, an, ns, ar) = p.read_header()?;
     let questions = p.read_questions(qd)?;
     // Widen each count before adding: three `u16`s sum to 196,605 at most,
     // which fits `u32`, but the arithmetic here is deliberately done in the
@@ -500,6 +533,7 @@ pub fn parse_message(data: &[u8], source: &str, log: &Logger) -> Option<Message>
     let records = p.read_others(an as usize, ns as usize, ar as usize);
     Some(Message {
         id,
+        flags,
         questions,
         records,
     })
@@ -514,16 +548,18 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     /// The 12-byte header. Everything after the flags is a count this parser
-    /// obeys, and nothing here looks at the QR/AA bits: a browser ingests
-    /// answers whether or not the sender claims authority.
-    fn read_header(&mut self) -> Option<(u16, u16, u16, u16, u16)> {
+    /// obeys. The flags themselves are **kept but not interpreted here**: the
+    /// browser fold never looks at the QR/AA bits (it ingests answers whether or
+    /// not the sender claims authority), while the responder dispatches on one of
+    /// them — see [`Message::is_query`].
+    fn read_header(&mut self) -> Option<(u16, u16, u16, u16, u16, u16)> {
         let id = self.u16()?;
-        let _flags = self.u16()?;
+        let flags = self.u16()?;
         let qd = self.u16()?;
         let an = self.u16()?;
         let ns = self.u16()?;
         let ar = self.u16()?;
-        Some((id, qd, an, ns, ar))
+        Some((id, flags, qd, an, ns, ar))
     }
 
     /// Questions are read and kept (a responder will want them) but never

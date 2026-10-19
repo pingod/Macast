@@ -78,8 +78,9 @@ src-tauri       托盘 + 设置窗口；唯一知道 UI 的 crate
 "一个没被机器问过的数字和不提问的检查是同一件事"，在 Rust 侧同样成立 ——
 而**计数最好的家是决定它的那个文件**。
 
-- 用例总数的家是 `macast-cast/src/proto.rs:410` 的 `const TESTS_IN_THIS_CRATE`
-  加 `proto.rs:847` 那条全仓扫描用例；
+- 用例总数的家是 `macast-cast/src/proto.rs` 里那个 `const TESTS_IN_THIS_CRATE`（**按名字找，别按行号**：
+  这一条原来写的是 `:410`，两轮之后它已经在 513 行 —— 行号是会烂的引用，而文档正是教过「会腐烂的锚要改成问法」的那一个）
+  加同一文件里那条 `scanned >= TESTS_IN_THIS_CRATE` 的全仓扫描用例；
 - 模块清单的家是每个 crate 的 `lib.rs` 头注释；
 - Python↔Rust 对应关系的家是 §4 这一张表（它是设计，不是计数）。
 
@@ -341,8 +342,10 @@ truthiness 在 `macast-mpv/src/pyops.rs`、`macast-upnp` 的 `py_truthy`、`maca
 | `announce`（不做唯一性探测） | 参考实现在广播之前先发 3 个 `QU` 的 PTR 查询并等回话（`generate_service_query`，`_core.py:263-283`），撞名就 `NonUniqueNameException` —— 而 `advertise()` 让它冒出去，所以 Python 那一侧撞名的后果是**这台机器根本不广播** | 我们照播。代价写在模块头：同一局域网里两个相同友好名的实例会发布**同一个** instance 与 SRV 目标，发送端可能把名字解到另一台的端口上。**而且我们连那个探测包都不构造**：没有"发完再听"的探测就只是一句问话，谁也不答它，写出来就是一段长得像覆盖的死代码（§4.13「不提问的检查」的形状）。语料里那行 `probe` 因此是**参考实现的**证据，`every_packet_we_write_is_a_response_and_never_a_query` 断言我们四个构造器没有一个交回它 |
 | `announce`（属性过长时） | 参考实现**整条起不来**：`ServiceInfo(...)` 打包 TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而这一句不在 `advertise()` 那两个 `try` 里（本机实测：200 字节过、300 字节抛），于是异常一路冲出 `ChromecastProtocol.start()` —— 用户改一个长设备名，买到的是 Chromecast 接收端没了 | 本端口砍属性、不砍接收端：按字符边界截到 255 字节，WARNING 里点名字段、原长度与上限，然后照常广播。方向与 §4.8「越界夹住而不是拒绝」、`vt_level` 的"少钉一个 level 只是不明确，钉错是每一帧都没了"是同一条。**Python 那一侧今天仍然如此**，这句话不是说它修好了 —— 记在这里是因为它是一条会被下一次"照抄参考实现"重新引进来的行为 |
 | `announce`（没有监听就不广播） | 参考实现里 `_advertise()` 在 `_start_tls_server()` 之后无条件跑，而 `cast_port` 绑定失败时保持默认值 —— 于是它广播一个**没人听的端口** | 本端口只在 8009 真的在听时广播（`main.rs` 里那一格是 `match cast_channel.as_ref()`）。一台出现在菜单里却投不上的设备，正是 `AGENTS.md` §4.1 第一行的症状，不是它的小版本 |
-| `announce`（**立即作答，没有聚合队列**） | 参考实现把非立即答案压进一个 `U(20,120)` ms 的聚合队列（`_RESTRICTED_QUERIES` / `outgoing` 那条路），只有 `{SRV,A,AAAA,NSEC}` 那一集合立刻发；本端口的 `serve` 收到查询**当场发**，`respond::timing()` 算出的四个 `Timing` 值**没有任何产品代码读它** | 这是本轮量出来的惰性格，不是风格选择：把 `mdns.rs` 里 `unicast_request: class & CLASS_UNIQUE != 0` 换成恒假，整 crate **688 passed / 0 failed**（2026-10-18），因为 QU 位唯一的消费者就是那个没人读的 `Timing::Direct`。**代价是真实的**：同一分钟内 N 个冷启动的浏览器会把 N 份答案打到组播上，而 §4.10 在本机日志里量到的膨胀（SSDP 那一路 49% 的行是同一件事重播）就是这条队列存在的理由。补法不是"再断言一次"，是把聚合落地（按记录键合并 + 随机延迟），落地时 `delays_ms` 那批读数**仍故意不作判据**（断言毫秒数就是断言这台机器的计时器）；判据见 §16 第 23 条 |
-| `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
+| `announce`（聚合队列**已落地**，但那一问仍缺） | 参考实现在 `add_qu_question_response` （`query_handler.py:126-135`）里还有一问：QU 问题如果**过去 ¼ TTL 内多播过这条记录**，就只回单播、不再往组播上刷。本端口只按**源端口**判 `ucast_source`（`:272`），QU 位除此之外没有第二个消费者 —— 语料里唯一那行 `ptr-qu` 量到的答案是走组播的，所以那行仍然对得上，**但那一问在这里没人回答** | 没有一起搬过来的原因：那一支需要 cache 里那条记录的 **created 与 TTL**（`_has_mcast_within_one_quarter_ttl` 用 `record.ttl / 4`），而本端口的 `Ledger` 故意只存「什么时候听见的」这一个问题（见下面那行）。**没做**不等于做错：`ptr-qu` 那行有见证，这一支没有 —— 所以它是记账的偏离，不是待办的一行代码 |
+| `aggregate`（账本只回答一个问题） | 参考实现的防洪读的是 `DNSCache`，那张表同时喂 `ServiceBrowser` 监听者、过期堆与 goodbye 记账 | 本端口的 `Ledger` 只存「记录身份 → 什么时候听见的」，并按一秒窗口修剪。设备那本账在 `targets.rs`，浏览器那本在 `mdns::browse`。**代价**：一条记录在参考实现里能保护到 TTL 到期为止的其它判决（¼ TTL 那一问），在这里活不过一秒 —— 上面那行缺的分支正是这一条的后果 |
+| `aggregate`（NSEC 听不见） | 参考实现把 NSEC 解进 cache，于是重复的 `AAAA` 问题第二次走的是保护队列 | `mdns.rs` 按设计不读 NSEC（广播语料钉的是它**写**的字节，不是它读），`wire_identity` 因此对 NSEC 交回 `None` 而不是一个从名字编出来的键 —— 编出来的键会保护**另一条**记录。判据是 `the_ledger_cannot_hear_an_nsec_and_says_so`，它同时断言同一包里的 TXT 是被保护的，所以这一格是「一种记录类型」而不是「整个机制」 |
+| `aggregate`（一条 A 计划 = 一个桶） | 一台有两个可广播地址的机器，参考实现对两条 A 各判一次；本端口的 `Chosen` 是一条计划、写到线上才展开成 N 条记录 | `plan_identity` 交回 **Vec**（每条地址一个键），`last_heard` 取其中**最新**的那一次 —— 即「任何一条刚被听见就整体延后一秒」。反向的读法（要全部被听见才保护）会把刚多播过的那条地址再喊一遍，而 RFC 6762 §14 要的正是别喊。判据：`one_planned_a_record_is_one_record_per_advertisable_address` + `a_heard_answer_protects_every_address_it_named` || `relay`（等待预算） | 两个等待（响应头之前、EOF 之后管道里）**合成一个连接级参数** | Python 里它们是同一个 `GROW_WAIT_SECONDS`，因为它们是**同一条策略**："读者可以先干等多久，才轮到'还没有'这个诚实答案"。写死成两个常量之后，一个夹具里两条预算可以悄悄漂成不同值 |
 | `status`（四个键用 `peek` 读） | 参考实现的文档是 `Setting.get(key, default)` 拼出来的，而**那一次读会把默认值写进表里**，下一次 `save` 就落盘（`AGENTS.md` §4.2 的第一条陷阱）。本脸对 `Macast_Protocols` / `Macast_Protocol` / `Macast_Renderer` / `Play_History` 改用 `peek`，答案逐字相同、磁盘上不多一个键 | 边界要写清，因为它**不是**"本端口再也不写设置"：`ApplicationPort`、`Https_enabled`、`Https_Port` 与网卡钉 (`Network_Interface`) 仍然走共享读接口（前两者是壳自己启动时就在用的值，后者是 `macast_core::net::network_interfaces` 内部读的，改它要一起动 SSDP/广播/中转三张脸）。判据 `the_status_read_creates_no_key_that_was_not_there` 钉的就是这条边界，并且它**断言 `Network_Interface` 确实被创建** —— 一个把"什么都没写"当成整体主张的测试，会在下一次"顺手改成 peek"时红得说不清是谁的锅 |
 | `launch-param`（键的顺序） | 参考实现交回 `Setting.setting` —— 那个 dict 保的是**文件里的插入顺序**；本端口这张表是 `BTreeMap`，于是键按名字排序 | 页面的「高级设置」是一个 JSON 编辑器，本机没有任何读者按顺序读它（量过：这条路上唯一的读者还没写）。真要保序，改的是那张表而不是在这条路由上再排一次 —— 那会是第二个主人。**同一张路由携带 `Api_Token`**：这条不是偏离而是决定，写在路由的行注释里，并由 `the_face_never_answers_a_cors_question` 与 `launch_param_answers_the_whole_table…` 两条一起守（前者守"为什么可以带"，后者守"它确实带"） |
 | `subscribers`（文档比参考实现多两个键） | 参考实现的 `query=subscribers` 交回 `{aggregated, children[{title, type, running, event_thread_alive, subscribed, pending_append, pending_state}]}`；本端口那份**多** `pending_remove` 与 `children[].rows` | `pending_remove`：一个卡住的回收线程与一个卡住的追加线程是**同一种故障形状**，而少了这个数字，"订阅者永远不走"就没有见证者。`rows`：想知道"哪个 SID 落在哪个回调口"的调用方不该被迫去读 `query=status` 的 `clients` 再自己 diff 一份名单。**两个读者共用一个建造者**（`subscribers_document` —— HTTP 路由与窗口命令各调一次），所以"多出来的键"只可能长在一处而不是两份文档各长各的；审计与它的 0 红教训见 §16 第 16 条 |
@@ -829,7 +832,7 @@ AGENTS.md §4.13 那条「一个没被机器问过的数字」在这里的形状
 主人），把查询真的发到 lo0 上的 `224.0.0.251:5353`，再把 `zeroconf._core.async_send_with_transport`
  recorder 截住的**答复字节**解码。一个字节都没上局域网（查询钉在 lo0 / TTL 1，答复被记录不发送）。
 语料冻在 **`macast-cast/tests/golden/mdns_responder.jsonl`**（17 行，一行一个查询形状），
-对拍它的是 `macast-cast/src/respond.rs`（判决层 + 装配层，22 条用例）—— 还差的只有 socket
+对拍它的是 `macast-cast/src/respond.rs`（判决层 + 装配层，24 条用例 —— 2026-10-20 由聚合队列补了两条）—— 还差的只有 socket
 接线，见 §15 那一行。装配层的判据分两条读者：一条独立遍历（自己走记录骨架，读得到 NSEC 的
 位置与字节）+ 一条 `mdns::parse_message`（证明发给发送端的字节我们自己的浏览器读得懂）。
 
@@ -940,7 +943,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 "读到的**别人的**记录喂设备账本"：今天非查询的数据报只进 `Served::absorbed` 一个计数器，所以 
 §8/§16 那条"合并"结论只合并了 socket，没有合并两张表。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
-| 应答者的**聚合队列**（四个答案桶里那三个延后桶的调度） | **未做**；取证已完成（2026-10-20） | 四行概率性行为是在跑的引擎上量出来的，见 §16 第 36 条。判决语料仍只含 17 行无状态判定，队列那 4 行按名字排除并且数过 |
+| 应答者的**聚合队列**（四个答案桶里那三个延后桶的调度） | **已落地**（2026-10-20，`macast-cast/src/aggregate.rs`） | 先取证（§16 第 36 条，四行读数），再照那四行落地（§16 第 37 条）。两个 `OutgoingQueue`（普通 0+500 / 保护 1000+200）、按记录身份合并、`_remove_answers_from_queue`、到点前顺延，加一本只从**听见**里学的 `Ledger`。判决语料仍是 17 行无状态判定 —— 队列那 4 行按名字排除并且数过。**剩下的不是这一条**：QU 的 quarter-TTL 分支、NSEC 听不见、一台两地址的 A，都记在 §8 |
 | SSDP **客户端**（M-SEARCH 之后拉描述、建设备表） | **库层已完成**（issue #27，见 §14.5）；**2026-10-18 接进壳** | `macast-cast/src/targets.rs` + `lib.rs`（`pub mod targets;`）。同一判据本轮重量：`grep -rn "targets::" src-tauri/src/` 从 **0 行** 变成 **2 行**（`host.rs` 的 `pub targets: Arc<targets::Table>` 与 `main.rs` 的 `Table::new(setting)`）|
 | 渲染器插件的 `target_push` 面（设备下拉真正投到远端） | **已交付这一半**（2026-10-18）：壳把 `cast-targets` 从拒绝文档改成读这张表，`cast-resolved` 的设备臂做 `target_by_id` → `push_url_to` | 之前该面答的是**参考实现的完整拒绝文档**（提交 `d9cf9de`）。**剩下的不是接线**：本局域网里没有可投的真设备（§16 第 1 条），所以设备臂的**成功**那一路在真机上仍无见证者，只有 `push_tests` 的 46 条打在自家假设备上；`CastSender` 的 pause/seek/音量与 `text_tracks` 是 §15 下面那行的裁剪决定 |
 | 管理面的 `query=status` 与 `query=interfaces`（设置页心跳文档） | **已交付**（2026-10-18，`macast-upnp/src/http.rs` 一张文档两个读者；`Face` 拿到 `SharedStore`，`Subscription` 多一个 `rows()` 读门） | 判据：`http_tests` 12 条（文档形状、16 个状态名、六种客户端键、`current` 与 `interface` 两种拼法、四键 peek 边界、`py_truthy` 表）+ 真机 §23。**同一轮后面又把 `query=subscribers` 接了进来**（GET 表 7→8 行、`Subscription::diagnostics()` 一扇门、`subscribers_document` 一个建造者两个读者 —— 窗口那条命令过去自己 `json!` 一份，现在与 HTTP 那份出自同一函数），`http_tests` 再加 5 条。**两条偏离记在 §8**（四个键用 `peek`；`history` 那一条**已经关掉** —— 2026-10-18 起它写进设置文件，判据在 §27）。**M9 那一支是本分支第一条"单元 0 红 / 真机红"的读数**：把宽地址集合喂给这一张文档，328 条单元用例全绿，只有 §23 的"页面与线上必须给同一个集合"红了 —— 因为一次 `network_facts()` 同时喂两个键，单元层里那两个键永远互等。见 §16 第 15 条 |
@@ -1272,7 +1275,11 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     那一支。改成线标签 `\x0b_googlecast` 之后现跑整套是 **250 PASS / 1 SKIP / 0 FAIL、退出码 1**，
     读数是 `wire queries=3 answers=0` + app 一句没响 —— 这一格从此是**计败的 skip**，不是静默，
     也不是"responder 坏了"。
-23. **`Timing` 在装配层还是惰的，所以一个把 QU 位读成恒假的变异体 0 红**（2026-10-18，实测）。
+23. **`Timing` 在装配层还是惰的，所以一个把 QU 位读成恒假的变异体 0 红**（2026-10-18，实测。
+    **`Timing` 那一半在 2026-10-20 翻面了** —— 聚合队列落地（第 37 条），`serve` 现在逐答案按桶行动；
+    **QU 位那一半仍然开着**，而且开着的原因不是遗忘：`ucast_request` 在参考实现里唯一的消费者是
+    `add_qu_question_response` 的 ¼ TTL 那一问，而本端口的账本不存 TTL（第 8 节新增的两行记的就是这一条）。
+    下面那段 688/0 红的读数照旧是它的出处，别当成"已经补完了"读。）。
     `mdns.rs` 读出的 `unicast_request` 只喂给 `respond::timing()`，而 `announce::serve`
     **从不读 `reply.timing`** —— 它把每条答复立即发出去。把 `class & CLASS_UNIQUE != 0`
     换成 `false` 之后整 crate **688 passed / 0 failed**。这不是"覆盖够"，是**这一格在结构上
@@ -1562,6 +1569,47 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *判据的纪律*：这四行**不进判决语料**。`respond::respond` 是无状态的，"几个数据报、在第几毫秒"它答不了；把它们冻进同一份 JSONL 就是给 Rust 的 diff 一行正确答案依赖队列的记录，而那件事失败的诚实形状是一次静默跳过。所以按名字排除、并且**数过**（`queue` 行不是恰好 4 条 → 探针退出 1）。顺手改掉一处自己骗人的计数：那行 `wrote 21 case row(s)` 数的是收集到的用例而不是写出的行 —— 一个把被排除的行也算进去的数字，会让下一个读者以为过滤器坏了。
     *仍然欠着的那半*：队列本体。要落地至少需要：两组 `AnswerGroup`（`send_after`/`send_before`、合并判据、到点前顺延）、发送时按记录身份去重（`_remove_answers_from_queue`）、以及一本"我刚多播过什么"的账来喂"最后一秒"那一桶（或者把 §16 第 13 条的合并做完，直接用它听见的那一份）。今天记为**没做**，不是做错。
 
+37. **聚合队列落地：四行读数各自有了牙，而其中一行的牙是我自己的第二个集合磨掉的**（2026-10-20，
+    `aggregate_tests` 22 条 + `announce_tests` 新增 2 条（36→38）+ `respond_tests` 新增 2 条（22→24）；
+    `macast-cast` **728** 条，两台仪器一致：`--list` 728、逐文件签名扫描 728；裸 `grep -c '#[test]'` 给 734，
+    多出来的六处是散文与 needle 里的字面提及 —— 第 16 节第 34 条那一条规矩第二次用在上线前的计数上）。
+    *形状*：两个队列（普通 `0 + 500`、保护 `1000 + 200`，`_core.py:200-201` 那两个构造点逐字照抄）、
+    合并判据 `send_after(新) <= send_after(最后一组)`、`dict.update` 的**覆盖**而不是并集、
+    `async_ready` 的「两组以上就等到第一组的 `send_before`」、发送前 `_remove_answers_from_queue`。
+    随机延迟**由调用方交进来**（`Outgoing::with_random`），否则第 36 条那四行读数没法当判据用；
+    时钟也是参数，且是本线程的单调毫秒而不是参考实现的 epoch 毫秒 —— 这里没有任何一秒跟墙钟比过，
+    所以 NTP 往回纠一次不会把一条答案困在一个已经过去的 `send_after` 后面。
+    *听见自己*：`Ledger` 只从**读到的响应**里学（`_listener.py:326` 那句 `if not msg.is_query()`，
+    分派看的是 QR 位、不是「有没有问题」——所以有一条**同时带问题和记录**的响应才有判据，
+    `a_response_that_also_carries_questions_is_ingested_and_not_answered`；只看 `questions.is_empty()`
+    的旧写法在那一条上红）。TTL 0 是**忘掉**而不是学会（`record_manager.py:130-135` 的不对称：
+    不在表里的过期记录什么都不做，所以 `learn` 的计数也不给它 —— 第一版数了，M7 一支红）。
+    *真机那半*：本机 2026-10-20 量到 `mDNS engine heard a response on 5353 and learned 4 record(s)`
+    在第一串广播之后约 0.8 秒出现（§31），四个不是五个 —— NSEC 我们的解析器不读，那条偏离单独记 §8，
+    并由 `the_ledger_cannot_hear_an_nsec_and_says_so` 同时断言同一包里的 TXT **确实**被保护，
+    免得那一行被读成「机制在这里不生效」。**同一支探针还量到**：另一个进程发的查询（单播到
+    `127.0.0.1:5353`、以及打到组播的）在这台 Mac 上让这个进程听不见，而它自己的多播环回听得见 ——
+    于是 §25 那一格的"这个二进制收不到入站多播"收窄成"收不到**别人**的入站多播"，原因仍未定，不挑一个填。
+    *电池 16 支，逐支读数*：M1 1 / M2 1 / M3 1 / M4 1 / M5 2 / M6 1 / M7 1 / M8 1 / M9 3 / M10 1 /
+    **M11 第一次 0 红** / M12 1 / M13 1 / M14 1 / M15 1 / M16 1。
+    **M11 那一支是本轮的形状**：`datagram_multi` 的去重我当时写成了**两个集合** ——
+    一个用全部答案记录预置（对应 `sending = set(answers)`），一个记"这一段里已经写过"。
+    把前者删干净，套件**一个字都不红**，因为我们的用例都是「一个服务、一段」的形状，
+    后者把活全干了。也就是说这条规则的两半**在测试眼里是同一半**，而参考实现只有一份集合。
+    修法不是补一条断言，是**删掉第二个集合**（一份 `sending`，先被答案灌满、随写随长），
+    改完 M11 红 1 条（`two_questions_that_share_the_host_pair_cost_one_copy_of_it`）。
+    这条与"两条规则在纸上只差一个 `HashSet`，在答案上差一份重复记录"是同一件事，
+    而它只有在一支**0 红**的变异体面前才看得见。
+    *顺带被这条纪律抓到的第二格*：`the_production_draw_stays_inside_the_inclusive_window` 第一版
+    从 `Outgoing::new()` 抽 400 次样，要求上下两端都出现过 —— 那是一条**概率判据**，
+    本机一跑就红（`low=0 high=3`，miss 概率约 4%）。把抽样次数抬到 5000 是止痛不是修：
+    修法是给生产延迟一个**有名字的主人**（`production_draw`），用例问它，
+    再加一条文本审计问 `Outgoing::new` 确实用的是它 —— 于是 `..120`（M15）与
+    "构造函数里另写一份延迟"（M16）各自红 1 条，而断言本身不再是硬币。
+    *仍未做*：QU 的 ¼ TTL 那一问（§8）、`Ledger` 之外的第二问（它只回答"最后一秒"）、
+    以及 §25 的送达那一格 —— 所以**这一节里聚合的"少发一份"在真机上没有跨机器见证**，
+    它有的是第 36 条那四行读数、728 条单元判据，和 §31 那句"我们听得见自己"。
+    **以及本分支从未推送 ⇒ 这一轮的 728 条与 §31 的读数没有任何 CI 见证过。**
 ---
 
 ## 17. 提交与文档的规矩
@@ -1630,7 +1678,20 @@ grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**�
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
 grep -c '"queue": True' scripts/mdns_responder_probe.py                     # 期望 **4**（聚合行；判决语料必须把它们排除在外，
 #   而排除是数过的：不是 4 条探针就退出 1 —— 这一行是那个数在文档里的对应物）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **33**（§28 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **34**（§31 是最后一节：
+#   引擎有没有听见自己发出的那份答案 —— 只有真机能答这一问，因为账本喂它的字节来自内核环回。
+#   §30 是那两行 POST（清空与字幕显隐）打到真播放器与真文件，§29 是插件仓库坐标的跨实现对拍，
+#   §28 是「哪个键属于谁」那张表的对拍；§27 是重投历史那一节，重启之后还在；
+#   §26 是 iPhone 的 RTSP 问答，§25 是 responder 的局域网那一节，§24 是门。
+#   §23 是 2026-10-18 的 status 一节，门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与
+#   `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，编号变了而判据没变）
+# §31 之前，聚合与账本的两条"只有一个主人"锚：
+grep -c 'pub fn production_draw' macast-cast/src/aggregate.rs   # 期望 **1**（生产延迟的主人；
+#   用例抽样的是这个函数，不是 `Outgoing::new` 里再抄一份表达式 —— 抄的那份证明的是测试自己）
+grep -c 'Outgoing::with_random(Box::new(production_draw))' macast-cast/src/aggregate.rs  # 期望 **1**
+grep -c 'written: HashSet' macast-cast/src/respond.rs           # 期望 **0**（去重只有一份 `sending`；
+#   第二个集合是 M11 那一支 0 红的成因，见 §16 第 37 条 —— 两条规则在测试眼里是同一半）
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # （旧值 33；§28 那一节：
 #   两份实现各自把「哪个键属于谁」这张表写一遍，再逐格对拍；§27 是重投历史那一节，
 #   重启之后重投历史还在；§26 是 iPhone 的 RTSP 问答，§25 是 responder 的局域网那一节，§24 是门。§23 是 2026-10-18 的 status 一节，
 #   门那一节当时从 §23 挪到 §24 —— 本文、脚本注释与 `AGENTS.md` 里指"那一节"的句子一起跟着改了编号，

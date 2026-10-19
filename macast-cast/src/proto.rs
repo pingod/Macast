@@ -434,7 +434,7 @@ mod tests {
     /// The scan is deliberately non-recursive, so the `#[path]`-included
     /// `*_tests.rs` files still land in it because they sit in `src/` itself.
     /// The previous floors — 603, 633, 637, 655, 656, 671, 672, 677, 678, 686,
-    /// 687, 688, 690, 695 — were carried by the
+    /// 687, 688, 690, 695, 699, 702, 723 — were carried by the
     /// same two instruments
     /// until `setup.rs` landed with its own module, then until the Cast
     /// connection itself was reached by a real socket (2026-10-18, +4 in
@@ -486,7 +486,31 @@ mod tests {
     /// move this constant in the same pass, and a round that removes a whole file
     /// of tests must move it down — either way, from the measurement, never from a
     /// diff.
-    const TESTS_IN_THIS_CRATE: usize = 702;
+    /// 702 → **723** on 2026-10-20, when the aggregation queue landed: nineteen
+    /// rows in the new `aggregate_tests` (the four measured answers as rules, the
+    /// merge boundary, `dict.update`'s overwrite-not-union, the deferral ceiling,
+    /// `_remove_answers_from_queue`, the emptied group that still defers, two queues
+    /// as two batches, the deadline being the sooner of the two, the production draw
+    /// read *through* a queue rather than by copying its expression, and six rows for
+    /// the ledger (19 rows) — the round trip from our own bytes to our own key, the NSEC this
+    /// parser cannot hear, a goodbye that forgets instead of protecting, the prune,
+    /// the QR dispatch, and the hearing that moves an answer from 520 ms to 1520 ms),
+    /// plus two in `respond_tests` that the queue made visible: the suppression of an
+    /// additional that is already an answer in the same batch — a rule the frozen
+    /// corpus structurally cannot see, because it compares **sets** and every one of
+    /// its rows asks one question — and the identity between `Reply::records` and
+    /// `flatten(Reply::groups)` that keeps the two fields from becoming two answers
+    /// about the same query.
+    /// 723 → **727** in the same pass, from the four rows that only appeared once
+    /// the battery was written: one planned `A` answer becoming one ledger entry **per
+    /// advertisable address** (a single-interface laptop cannot tell that list from a
+    /// truncation, so the fixture has two), the heard packet protecting every address it
+    /// named, a **response that also carries a question** — the one packet shape that
+    /// separates the QR bit from `questions.is_empty()`, which is what §31's dispatch
+    /// reads — and `run` being asked for a read *shorter* than the poll ceiling while an
+    /// answer is queued, which is the only row that can see a queue that is drained on
+    /// time only by accident.
+    const TESTS_IN_THIS_CRATE: usize = 728;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the

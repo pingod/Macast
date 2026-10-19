@@ -174,6 +174,23 @@ fn flatten(replies: &[Reply]) -> BTreeSet<String> {
     out
 }
 
+/// The questions one corpus row asks, through the same mapping `run` uses.
+///
+/// A separate reader rather than a second copy of the table: the bucket assertion
+/// below has to ask about the **same** question the reply was built for, and an
+/// independently hand-written question list would test the mapping instead of the
+/// bucket — the failure mode this file's header is explicit about.
+fn questions_for(case: &str) -> Vec<Question> {
+    crate::pin_test_dir();
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let row = corpus()
+        .into_iter()
+        .find(|row| row.case == case)
+        .unwrap_or_else(|| panic!("no corpus row named {}", case));
+    let (questions, _, _) = inputs_for(&row, &shape);
+    questions
+}
+
 fn run(case: &str) -> (BTreeSet<String>, Vec<Reply>) {
     crate::pin_test_dir();
     let shape = Shape::new(INSTANCE, SERVER, true);
@@ -182,7 +199,7 @@ fn run(case: &str) -> (BTreeSet<String>, Vec<Reply>) {
         .find(|row| row.case == case)
         .unwrap_or_else(|| panic!("no corpus row named {}", case));
     let (questions, known, ucast_source) = inputs_for(&row, &shape);
-    let replies = respond(&questions, &known, ucast_source, &shape, None, 0);
+    let replies = respond(&questions, &known, ucast_source, &shape);
     (row.answers, replies)
 }
 
@@ -195,7 +212,7 @@ fn every_corpus_row_is_answered_exactly_as_the_reference_answered_it() {
     for row in &rows {
         let shape = Shape::new(INSTANCE, SERVER, true);
         let (questions, known, ucast_source) = inputs_for(row, &shape);
-        let replies = respond(&questions, &known, ucast_source, &shape, None, 0);
+        let replies = respond(&questions, &known, ucast_source, &shape);
         assert_eq!(
             flatten(&replies),
             row.answers,
@@ -368,8 +385,17 @@ fn the_unicast_leg_is_direct_and_the_group_leg_is_not() {
     assert_eq!(replies.len(), 2, "expected a group copy and a direct copy");
     let direct = replies.iter().find(|reply| reply.unicast).expect("no unicast reply");
     let group = replies.iter().find(|reply| !reply.unicast).expect("no group reply");
-    assert_eq!(direct.timing, Timing::Direct);
-    assert_ne!(group.timing, Timing::Direct);
+    // The bucket the **group** leg's answer falls into, asked of the one owner.
+    // This is the corpus's `+110.4 ms` claim stated without a millisecond: PTR is not
+    // an immediate question type, so the multicast copy went through the aggregation
+    // queue like a QM query's did, while the direct reply went out at +0.3 ms because
+    // `_ucast` is written by the caller and never touches a queue.
+    assert_eq!(
+        bucket(&questions_for("ptr-ephemeral-src"), false, None, 0),
+        Timing::Aggregate,
+        "the multicast leg of a unicast-sourced PTR query was not bucketed for the queue"
+    );
+    assert!(group.records.iter().all(|record| record.section == Section::Answer || record.section == Section::Additional));
     assert!(
         direct.records.iter().all(|record| !record.flush),
         "the unicast copy still carries cache-flush bits, which the reference clears"
@@ -397,14 +423,14 @@ fn without_an_address_no_host_record_is_promised() {
     // hanging on a connection that cannot be made.
     let shape = Shape::new(INSTANCE, SERVER, false);
     let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
-    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let replies = respond(&questions, &[], false, &shape);
     let seen = flatten(&replies);
     assert!(!seen.iter().any(|row| row.contains("/A/")), "{:?}", seen);
     assert!(!seen.iter().any(|row| row.contains("/NSEC/")), "{:?}", seen);
     assert!(seen.iter().any(|row| row.starts_with("an/PTR/")));
     let a_row = vec![question(SERVER, Kind::A, false)];
     assert!(
-        respond(&a_row, &[], false, &shape, None, 0).is_empty(),
+        respond(&a_row, &[], false, &shape).is_empty(),
         "we answered an A question with no address to give"
     );
 }
@@ -609,7 +635,7 @@ fn every_corpus_answer_survives_our_own_writer_and_our_own_parser() {
     let mut rows_checked = 0usize;
     for row in rows {
         let (questions, known, ucast_source) = inputs_for(&row, &shape);
-        let replies = respond(&questions, &known, ucast_source, &shape, None, 0);
+        let replies = respond(&questions, &known, ucast_source, &shape);
         if replies.is_empty() {
             assert!(
                 row.answers.is_empty(),
@@ -714,7 +740,7 @@ fn the_nsec_record_is_written_even_though_our_parser_skips_it() {
     let service = fixture_service();
     let shape = Shape::new(INSTANCE, SERVER, true);
     let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
-    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let replies = respond(&questions, &[], false, &shape);
     let bytes = datagram(&replies[0].records, &service);
     let nsec = walk(&bytes)
         .into_iter()
@@ -737,7 +763,7 @@ fn two_addresses_answer_with_two_a_records_not_one() {
     service.addresses.push("192.0.2.8".parse().unwrap());
     let shape = Shape::new(INSTANCE, SERVER, true);
     let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
-    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let replies = respond(&questions, &[], false, &shape);
     let bytes = datagram(&replies[0].records, &service);
     let a_rows = walk(&bytes)
         .into_iter()
@@ -777,7 +803,7 @@ fn the_answer_names_the_host_and_the_port_a_sender_would_connect_to() {
     let service = fixture_service();
     let shape = Shape::new(INSTANCE, SERVER, true);
     let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
-    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let replies = respond(&questions, &[], false, &shape);
     let bytes = datagram(&replies[0].records, &service);
     let log = macast_core::logging::Logger::named("respond-selftest");
     let message = crate::mdns::parse_message(&bytes, "127.0.0.1:5353", &log).unwrap();
@@ -828,7 +854,7 @@ fn the_answer_carries_the_same_nsec_bytes_as_the_announcement() {
     let service = fixture_service();
     let shape = Shape::new(INSTANCE, SERVER, true);
     let questions = vec![question(SERVICE_TYPE, Kind::Ptr, false)];
-    let replies = respond(&questions, &[], false, &shape, None, 0);
+    let replies = respond(&questions, &[], false, &shape);
     let answered = walk(&datagram(&replies[0].records, &service))
         .into_iter()
         .find(|(_, rtype, ..)| *rtype == 47)
@@ -849,4 +875,108 @@ fn the_answer_carries_the_same_nsec_bytes_as_the_announcement() {
     // order their records differently. What must match is the bitmap the two paths
     // derive from the same three lines: window 0, one octet, the A bit.
     assert_eq!(&answered[answered.len() - 3..], &[0x00, 0x01, 0x40]);
+}
+
+#[test]
+fn two_questions_that_share_the_host_pair_cost_one_copy_of_it() {
+    crate::pin_test_dir();
+    // `_add_answers_additionals` (`answers.py:98-110`) starts with
+    // `sending = set(answers)` and writes an additional **only if it is not already
+    // in `sending`**. So a PTR question and an SRV question in one packet do not each
+    // bring the host pair: SRV is an answer of this batch, and the A and NSEC that
+    // rode with the PTR are the same records that would ride with the SRV.
+    //
+    // This was invisible to every corpus row because each row asks **one** question,
+    // and a set comparison cannot see a duplicate anyway. A responder that writes the
+    // same record twice in one datagram is not merely wasteful: the querier's cache
+    // sees one news item twice, and a `known-answer` suppression computed against it
+    // starts from a packet the reference never sent.
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    let questions = vec![
+        question(SERVICE_TYPE, Kind::Ptr, false),
+        question(INSTANCE, Kind::Srv, false),
+    ];
+    let replies = respond(&questions, &[], false, &shape);
+    assert_eq!(replies.len(), 1, "two questions produced two packets");
+    assert_eq!(
+        replies[0].groups.len(),
+        2,
+        "the plan lost one of the two answers: {:?}",
+        replies[0].groups
+    );
+    let bytes = datagram(&replies[0].records, &fixture_service());
+    let logger = macast_core::logging::Logger::named("Respond-Dedupe");
+    let message = crate::mdns::parse_message(&bytes, "test", &logger).expect("the reply parses");
+    let count = |kind: u16, answers: bool| {
+        message
+            .records
+            .iter()
+            .filter(|r| {
+                r.rtype == kind
+                    && match (answers, r.section) {
+                        (true, crate::mdns::Section::Answer)
+                | (false, crate::mdns::Section::Additional) => true,
+                        _ => false,
+                    }
+            })
+            .count()
+    };
+    assert_eq!(count(TYPE_PTR, true), 1, "the PTR answer vanished");
+    assert_eq!(count(TYPE_SRV, true), 1, "two SRV records reached the wire");
+    assert_eq!(
+        count(TYPE_SRV, false),
+        0,
+        "the SRV rode along as an additional **and** answered as an answer"
+    );
+    assert_eq!(count(TYPE_TXT, false), 1, "the TXT duplicated");
+    assert_eq!(count(TYPE_A, false), 1, "the host A duplicated");
+    // The NSEC cannot be counted from the parse: `mdns.rs` skips it (the announcement
+    // corpus pins that skip, and `aggregate_tests` keeps the resulting divergence in
+    // view). The header's own counts come from the writer's per-record calls, so they
+    // are the only reader that sees this record at all — and they are exactly what a
+    // failed dedupe would change: five additionals (SRV, TXT, A, NSEC, then A and
+    // NSEC again) instead of three.
+    assert_eq!(
+        &bytes[6..8],
+        &2u16.to_be_bytes(),
+        "ANCOUNT is not the two answers this batch earned: {bytes:?}"
+    );
+    assert_eq!(
+        &bytes[10..12],
+        &3u16.to_be_bytes(),
+        "ARCOUNT counts a record the reference suppressed"
+    );
+    assert_eq!(
+        message.records.len(),
+        4,
+        "the readable half of the batch changed: {:?}",
+        message
+            .records
+            .iter()
+            .map(|r| (r.rtype, format!("{:?}", r.section)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn the_flat_records_are_exactly_the_flattened_groups() {
+    crate::pin_test_dir();
+    // `Reply` now carries the same answer twice — once as the flat list the wire and
+    // the corpus read, once grouped by which additionals ride with which answer. Two
+    // fields, one builder, and this is the line that stops them becoming two answers
+    // about the same query.
+    let shape = Shape::new(INSTANCE, SERVER, true);
+    for case in [
+        "ptr", "srv", "txt", "any", "aaaa", "enum", "ptr-ephemeral-src",
+    ] {
+        let (expected, replies) = run(case);
+        for reply in &replies {
+            assert_eq!(
+                reply.records,
+                crate::respond::flatten(&reply.groups),
+                "{case}: the flat reply is no longer the grouping, in order"
+            );
+        }
+        assert!(!expected.is_empty(), "{case}: a corpus row that answers nothing");
+    }
 }

@@ -2488,6 +2488,52 @@ not-found 的碎片（单数 `'cookie database'` 在整个已安装 `yt_dlp` 包
 * **判据的纪律**：这四行**不进判决语料** —— `respond::respond` 无状态，答不了"几个数据报、在第几毫秒"；把它们冻进同一份 JSONL 等于给 Rust 的 diff 一行正确答案依赖队列的记录，而那件事失败的诚实形状是一次静默跳过。所以按名字排除且**数过**：`queue` 行不是恰好 4 条，探针退出 1。顺手改掉一处自己骗人的计数 —— 那行 `wrote 21 case row(s)` 数的是收集到的用例而不是写出的行（**一个把被排除的行也算进去的数字，会让下一个读者以为过滤器坏了**）；现在写的是 `wrote 17 corpus row(s) of 21 case(s)`。
 * 复跑核对过：17 行判决语料逐行不变（只 `delays_ms`/`dsts` 随机器动，那本来就不是判据），探针退出码 0，`grep -c '"queue": True' scripts/mdns_responder_probe.py` = 4。
 
+**Rust 侧把聚合队列落地时量到的事**（2026-10-20，`macast-cast/src/aggregate.rs`（新增，22 条用例）+
+`announce.rs` 的 `serve`/`run` 改写 + `respond.rs` 的 `bucket`/`datagram_multi`/`Reply.groups` +
+`mdns.rs` 的 QR 位；`macast-cast` **728** 条，两台仪器一致；真机新增 §31）：
+
+* **四行读数变成四行判据**：同一问两次隔 10 ms ⇒ **一个**数据报（合并）、两组时第一组等到
+  `send_before`（实测那个 502 ms 的顺延）、SRV 后接 TXT ⇒ **两个**、隔 1.25 s 的第二问走保护队列
+  ⇒ floor 是 1000 + 随机而不是 500。随机延迟**由调用方交进来**（`Outgoing::with_random`），
+  时钟也是参数 —— 有 100 个值的硬币不可能是判据；生产那一份抽样的是一只**有名字的函数**
+  （`production_draw`），不是 `Outgoing::new` 里那条表达式（第一版从构造函数抽 400 次要求两端都出现过，
+  本机一跑就红：那是**一条概率判据**，miss 率约 4%，而一条一跑就红的用例会被删掉而不是被修好）。
+* **`Ledger` 只从「听见」里学，而分派看的是 QR 位**。`_listener.py:326` 是 `if not msg.is_query()`，
+  不是「问题列表是不是空」——两者只在一种包上分开：**同时带问题和记录的响应**，所以判据就是那种包
+  （`a_response_that_also_carries_questions_is_ingested_and_not_answered`）。goodbye（TTL 0）是
+  **忘掉**，且不在表里时什么都不做（`record_manager.py:130-135` 那个不对称），第一版把也计数了 ⇒ M7 红。
+* **TTL 与 section 不是记录身份**（`_dns.py:113` + `DNSPointer._eq`/`DNSText._eq`）。这条不是洁癖：
+  `datagram_multi` 的 `_add_answers_additionals` 去重要问「这条 additional 是不是本批已发的 answer」，
+  而一个是 AN 一个是 AR —— 按 `Chosen` 的结构等值去重等于**从不**去重。于是 `Reply` 多了
+  `groups`（哪个 additional 挂哪个 answer，队列的合并与移除按它），`records` 由它派生并由判据钉住
+  `records == flatten(groups)`，两份字段一个主人。**顺手抓到一条产品 bug**：一条答复里两个问题
+  （PTR + SRV）以前会各交一份 A/NSEC，`sending = set(answers)` 那一半被抑制的 SRV 也会重新上线；
+  语料看不见这件事是**结构性的**（它比的是集合，且每行只问一个问题），所以判据是新写的一条
+  （`two_questions_that_share_the_host_pair_cost_one_copy_of_it`，问 ANCOUNT=2 / ARCOUNT=3）。
+* **电池 16 支：15 支各红 1–3 条，而 M11 第一次是 0 红——红的是我自己的设计，不是产品。**
+  去重我写成了**两个集合**：一个用全部答案预置（`sending`），一个记「这一段里已经写过」（`written`）。
+  把第一个删干净，全套件一字不红，因为现有用例都是「一个服务、一段」的形状，第二个把活全干了 ——
+  **一条规则的两半在测试眼里是同一半**。修法不是补断言而是**删掉第二个集合**（一份 `sending`，
+  先被答案灌满、随写随长，正是 `answers.py:100` 那一份），改完 M11 红 1 条。附录 B 因此多了一条
+  `grep -c 'written: HashSet' macast-cast/src/respond.rs` **期望 0** 的锚。
+* **一条新形状：`pkill -f <临时目录>` 杀不到我起的实例**。那些进程是
+  `perl -MPOSIX -e 'setsid(); exec'` 起来的，配置目录在**环境变量**里而环境变量**不在 argv** 里，
+  于是 pkill 匹配零个进程。第一次 §24 因此红 3 条（"关掉 Chromecast 的实例上 8009/8008 仍在答"），
+  而 §24 的 browse 里明明白白印着我那个探针的实例名 `Macast-Hear2` —— 场上确实多了一台
+  Chromecast 接收端，产品一个字没错。判据回到 §4.2 那条老话：**按 `lsof -nP -iTCP:<port>
+  -sTCP:LISTEN -t` 交回的 PID 杀**，不是按模式杀。顺带按同一句话只收本次新增的两个 `ppid=1` 孤儿 mpv
+  （IPC 口指向我自己那两个已删目录），HanCast 的那一个不动。
+* **§31 的量到的那半**：本机在第一串广播后约 0.8 秒出现 `learned 4 record(s)` —— **4 而不是 5**，
+  因为 NSEC 我们的解析器不读（§8 新增一行；判据同时断言同一包里的 TXT 确实被保护，免得那一行被读成
+  「机制不生效」）。同一支探针还量到：**自己发的多播听得见，别的进程发的查询听不见**
+  （单播到 `127.0.0.1:5353` 与打到组播的各试一次，`heard query` 一句都没有），于是 §25 那一格从
+  "这个二进制收不到入站多播"收窄成"**收不到别人的**入站多播"；原因仍未定，不挑一个填。
+* **仍未做的三件，方向别读成"做完了"**：① QU 的 ¼ TTL 那一问（`add_qu_question_response`）没有落地 ——
+  它需要账本存 TTL，而本端口的 `Ledger` 故意只回答"最后一秒"这一个问题；② 因此 §16 第 23 条的
+  "QU 位没有第二个消费者"**照旧成立**（翻面的只有 `Timing` 那一半）；③ §25 的送达那一格还跳着，
+  所以"聚合让组播上少了一份答案"这件事在**跨机器**上没有见证者，它有的只是那四行读数、728 条单元判据
+  和 §31 那句"我们听得见自己"。**以及本分支从未推送 ⇒ 这一轮的 728 条与 §31 的读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

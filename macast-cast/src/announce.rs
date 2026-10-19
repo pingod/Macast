@@ -451,6 +451,26 @@ impl Service {
         self.service_type == SERVICE_TYPE
     }
 
+    /// The TXT record's rdata: every property length-prefixed, in table order.
+    ///
+    /// **One producer for these bytes**, because three readers need them to agree
+    /// character for character: [`Service::datagram`] writes them into an
+    /// announcement, `respond::datagram` writes them into an answer, and
+    /// [`crate::aggregate::plan_identity`] hashes them into a record's identity. If
+    /// the identity ever drifted from the bytes, the ledger would file a key under
+    /// a name the wire never carried, and the flood protection would stop firing
+    /// with no symptom short of a second Chromecast menu asking six times and
+    /// hearing six answers back.
+    pub(crate) fn txt_rdata(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (key, value) in &self.txt {
+            let property = property_bytes(key, value);
+            body.push(property.len() as u8);
+            body.extend_from_slice(&property);
+        }
+        body
+    }
+
     /// `ttl = None` means "each record's own TTL", the way
     /// `_add_broadcast_answer` passes it; `Some(n)` overrides every one of them,
     /// which is how `unregister` gets zeros everywhere.
@@ -462,7 +482,6 @@ impl Service {
         let instance = self.instance.as_str();
         let server = self.server.as_str();
         let service_type = self.service_type.as_str();
-        let txt = self.txt.as_slice();
         let addresses = self.addresses.as_slice();
         let port = self.port;
 
@@ -476,13 +495,12 @@ impl Service {
             w.u16(port);
             w.name(server);
         });
-        // 3. TXT: the properties, in order, each one length-prefixed.
+        // 3. TXT: the properties, in order, each one length-prefixed — the same
+        // bytes [`txt_rdata`](Self::txt_rdata) names, so an announcement and an
+        // answer cannot drift apart from the identity the ledger files them under.
+        let txt_rdata = self.txt_rdata();
         w.record(instance, TYPE_TXT, other, true, |w| {
-            for (key, value) in txt {
-                let body = property_bytes(key, value);
-                w.u8(body.len() as u8);
-                w.octets(&body);
-            }
+            w.octets(&txt_rdata);
         });
         // 4 and 5. The address pair, in whichever order the caller asked for.
         let write_nsec = |w: &mut Writer| {
@@ -1045,7 +1063,14 @@ impl Announcer {
                 let mut unicast =
                     |bytes: &[u8], peer: SocketAddr| sock.send_to(bytes, peer).map(|_| ());
                 let mut buf = vec![0u8; crate::mdns::READ_MAX];
-                let mut recv = || match sock.recv_from(&mut buf) {
+                // The loop says how long it can wait, and the answer becomes this
+                // socket's receive timeout: an aggregated answer whose random interval
+                // has already run must not also wait for a poll boundary, while the
+                // 60-second re-announcement still gets asked for on schedule. Setting
+                // the option per call costs one syscall at a few hertz.
+                let mut recv = |wait: Duration| {
+                    let _ = sock.set_read_timeout(Some(wait));
+                    match sock.recv_from(&mut buf) {
                     Ok((length, peer)) => {
                         buf.truncate(length);
                         Ok(Some((buf.clone(), peer)))
@@ -1061,6 +1086,7 @@ impl Announcer {
                         Ok(None)
                     }
                     Err(e) => Err(e),
+                    }
                 };
                 run(
                     &services,
@@ -1268,21 +1294,35 @@ const HEARD_SENTENCES: usize = 8;
 /// The counters exist because **a drop is a fact, not an absence**. This socket now
 /// receives (see the module header's first divergence, measured by
 /// `scripts/mdns_reuseport_probe.py`): multicast is duplicated to every joined
-/// socket, so so is everything else on this group, and a **unicast** datagram to
-/// port 5353 is handed to exactly one socket in the reuse group — which may be this
-/// one. When that happens and the packet is not a query, there is nothing here to do
-/// with it: it was an answer meant for whoever else binds 5353, quite possibly our
-/// own browser. `absorbed` is where that loss stops being invisible.
+/// socket, so everything else on this group arrives here too, and a **unicast**
+/// datagram to port 5353 is handed to exactly one socket in the reuse group — which
+/// may be this one.
+///
+/// `ingested` and `queued` were added when the aggregation queue landed, and both
+/// are the reason the old `absorbed` sentence had to shrink. A response packet used
+/// to be something this loop threw away; now it is the only source of the
+/// last-second ledger, and an answer can be *taken* by a queue without having
+/// reached the wire yet. A counter that means "on the wire" and a counter that means
+/// "promised" must not share a name, or the summary line lies about packets nobody
+/// has sent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Served {
     /// Queries this datagram carried (of any type, answered or not).
     pub queries: usize,
-    /// Replies written to the multicast group.
+    /// Replies written to the multicast group **on this call**.
     pub group: usize,
     /// Replies written back to the asker's address.
     pub direct: usize,
-    /// Non-query packets dropped here. See the doc above: this is the unicast hole,
-    /// counted rather than smoothed over.
+    /// Answers handed to a queue instead of to the wire. Not a send.
+    pub queued: usize,
+    /// Records a **response** packet contributed to the last-second ledger
+    /// ([`crate::aggregate::Ledger`]), including the looped-back copy of our own
+    /// answer — the only witness that ever makes the protected bucket reachable.
+    pub ingested: usize,
+    /// Packets the parser could not read at all. This used to be "a non-query
+    /// datagram, dropped"; responses are read now, so the name covers only what
+    /// genuinely goes nowhere, and the doc above is why that distinction is worth
+    /// a field.
     pub absorbed: usize,
     /// Whether one of those queries asked about records this service holds — the
     /// decision layer's own answer, not a name comparison made here.
@@ -1294,40 +1334,33 @@ pub struct Served {
     pub asking: String,
 }
 
-/// The DNS type number → the kind the decision layer speaks.
-///
-/// Unknown numbers come back as `None` rather than a guess: a question we cannot
-/// name is a question we cannot answer, and inventing a `Kind` for it would make
-/// the reply table claim things about types this port does not model.
-fn kind_from_rtype(rtype: u16) -> Option<crate::respond::Kind> {
-    use crate::respond::Kind;
-    match rtype {
-        TYPE_A => Some(Kind::A),
-        TYPE_PTR => Some(Kind::Ptr),
-        TYPE_TXT => Some(Kind::Txt),
-        TYPE_SRV => Some(Kind::Srv),
-        28 => Some(Kind::Aaaa),
-        47 => Some(Kind::Nsec),
-        255 => Some(Kind::Any),
-        _ => None,
+impl Served {
+    /// Did this query turn into anything at all — sent now or scheduled?
+    ///
+    /// The first-answer sentence asks this rather than `group + direct > 0`
+    /// because an answer that went into the aggregation queue has not reached the
+    /// wire yet, and a reader of §25 needs to learn "we replied" at the moment the
+    /// query produced it, not a poll later. The group total stays bytes-only.
+    pub fn answered_any(&self) -> bool {
+        self.group + self.direct + self.queued > 0
     }
 }
 
 /// The questions a datagram asked, in the words a reader of a log wants:
 /// `Ptr _googlecast._tcp.local. + A pavia-macbookpro.local.`, three at most.
 ///
-/// The type is spelled the way [`crate::respond::Kind`] prints it rather than by a
-/// second table of names, and an rtype this port does not model keeps its number
-/// (`type48 …`) instead of vanishing: a line that quietly dropped the question it
-/// could not name would read as "nothing was asked", which is the exact
-/// ambiguity §25 exists to remove.
+/// The type is spelled the way [`crate::respond::Kind`] prints it, from
+/// [`crate::respond::kind_of`] — the one table — and an rtype this port does not
+/// model keeps its number (`type48 …`) instead of vanishing: a line that quietly
+/// dropped the question it could not name would read as "nothing was asked", which
+/// is the exact ambiguity §25 exists to remove.
 fn describe_questions(questions: &[crate::mdns::Question]) -> String {
     const NAMED: usize = 3;
     let mut words: Vec<String> = questions
         .iter()
         .take(NAMED)
         .map(|question| {
-            let kind = kind_from_rtype(question.rtype)
+            let kind = crate::respond::kind_of(question.rtype)
                 .map_or_else(|| format!("type{}", question.rtype), |kind| format!("{kind:?}"));
             format!("{kind} {}", question.name)
         })
@@ -1338,7 +1371,61 @@ fn describe_questions(questions: &[crate::mdns::Question]) -> String {
     words.join(" + ")
 }
 
-/// Answer one received datagram, sending through the two closures.
+/// When did this responder last **hear** the record this answer would put on the
+/// wire, if ever?
+///
+/// The protective half of a divergence, stated rather than hidden: one planned `A`
+/// record expands to one record per advertisable address, and the reference buckets
+/// *those* separately, so a machine with two interfaces could split one answer
+/// across two queues. `Chosen` is one record and one bucket, so this takes the
+/// newest sighting of any expansion — the reading that never shouts a record the
+/// wire has just carried. The cost is that a fresh second address can hold a stale
+/// first one for a second; the alternative reading would flood a record we did just
+/// shout, which is the thing RFC 6762 §14 exists to stop.
+fn last_heard(
+    record: &crate::respond::Chosen,
+    service: &Service,
+    queues: &crate::aggregate::Outgoing,
+    now_ms: u64,
+) -> Option<u64> {
+    crate::aggregate::plan_identity(record, service)
+        .into_iter()
+        .filter_map(|key| queues.heard.seen(&key, now_ms))
+        .max()
+}
+
+/// Split one reply's answer groups by the bucket each one falls in, preserving the
+/// order in which the buckets first appear.
+///
+/// The reference loops over the answers of a reply and `continue`s into whichever
+/// bucket each one lands in (`query_handler.py:106-125`), so a reply can occupy two
+/// buckets at once and the two go out as two datagrams at two different times. A
+/// port that answered the whole reply with one bucket would be right on every
+/// corpus row (each row asks one question) and wrong on the first `ANY` that
+/// arrives half a second after we shouted its TXT.
+fn split_by_bucket(
+    groups: &[crate::respond::Group],
+    service: &Service,
+    questions: &[crate::respond::Question],
+    probe: bool,
+    queues: &crate::aggregate::Outgoing,
+    now_ms: u64,
+) -> Vec<(crate::respond::Timing, Vec<crate::respond::Group>)> {
+    use crate::respond::Timing;
+    let mut buckets: Vec<(Timing, Vec<crate::respond::Group>)> = Vec::new();
+    for group in groups {
+        let seen = last_heard(&group.answer, service, queues, now_ms);
+        let bucket = crate::respond::bucket(questions, probe, seen, now_ms);
+        match buckets.iter_mut().find(|(held, _)| *held == bucket) {
+            Some((_, held)) => held.push(group.clone()),
+            None => buckets.push((bucket, vec![group.clone()])),
+        }
+    }
+    buckets
+}
+
+/// Answer one received datagram, sending through the two closures and scheduling
+/// through `queues`.
 ///
 /// `peer` is the source address, and its **port** is the input the reference uses
 /// to decide whether the querier wants a unicast reply (`ucast_source = port !=
@@ -1349,16 +1436,23 @@ fn describe_questions(questions: &[crate::mdns::Question]) -> String {
 /// Known answers are read from the **answer section only**, because that is what
 /// the querier declared it holds; the additional section is records the querier is
 /// *sending to us*.
+///
+/// `index` is this service's position in the answering list `run` built, and it
+/// travels into the queue because a queued answer has to remember whose addresses
+/// and whose TXT it means — the reference's queue holds record objects, which carry
+/// that with them, and our plan layer deliberately does not.
 pub fn serve(
     bytes: &[u8],
     peer: SocketAddr,
     service: &Service,
+    index: usize,
+    now_ms: u64,
     multicast: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
+    queues: &mut crate::aggregate::Outgoing,
     log: &Logger,
 ) -> Served {
-    use crate::mdns::Section;
-    use crate::respond::{self, Known, Question, Shape};
+    use crate::respond::{self, Known, Question, Shape, Timing};
     let mut out = Served::default();
     let message = match crate::mdns::parse_message(bytes, &peer.to_string(), log) {
         Some(message) => message,
@@ -1367,9 +1461,16 @@ pub fn serve(
             return out;
         }
     };
+    if !message.is_query() {
+        // `_listener.py:326`: a response is fed to the cache and nothing else. This
+        // is where the flood protection learns anything — the datagram is very
+        // often the kernel's looped-back copy of what this socket sent one poll
+        // ago, which is the mechanism design doc §16 measured before writing.
+        out.ingested = queues.heard.learn(&message.records, now_ms);
+        return out;
+    }
     if message.questions.is_empty() {
-        // An announcement or an answer, not a question. Nothing to send.
-        out.absorbed = 1;
+        // A query that asks nothing: `async_response` returns without an answer set.
         return out;
     }
     out.queries = message.questions.len();
@@ -1382,7 +1483,7 @@ pub fn serve(
         .questions
         .iter()
         .filter_map(|question| {
-            kind_from_rtype(question.rtype).map(|kind| Question {
+            respond::kind_of(question.rtype).map(|kind| Question {
                 name: question.name.clone(),
                 kind,
                 unicast_request: question.unicast_request,
@@ -1393,13 +1494,13 @@ pub fn serve(
     let known: Vec<Known> = message
         .records
         .iter()
-        .filter(|record| record.section == Section::Answer)
+        .filter(|record| record.section == crate::mdns::Section::Answer)
         .filter_map(|record| {
             let alias = match &record.rdata {
                 crate::mdns::RData::Name(name) => Some(name.clone()),
                 _ => None,
             };
-            kind_from_rtype(record.rtype).map(|kind| Known {
+            respond::kind_of(record.rtype).map(|kind| Known {
                 kind,
                 owner: record.name.clone(),
                 ttl: record.ttl,
@@ -1408,53 +1509,123 @@ pub fn serve(
         })
         .collect();
     let ucast_source = peer.port() != MDNS_PORT;
-    for reply in respond::respond(&questions, &known, ucast_source, &shape, None, 0) {
-        let datagram = respond::datagram(&reply.records, service);
-        let sent = if reply.unicast {
-            unicast(&datagram, peer)
-        } else {
-            multicast(&datagram)
-        };
-        match sent {
-            Ok(()) => {
-                if reply.unicast {
-                    out.direct += 1;
-                } else {
-                    out.group += 1;
-                }
+    let probe = message.is_probe();
+    for reply in respond::respond(&questions, &known, ucast_source, &shape) {
+        if reply.unicast {
+            let datagram = respond::datagram(&reply.records, service);
+            match unicast(&datagram, peer) {
+                Ok(()) => out.direct += 1,
+                Err(e) => log.warning(&format!(
+                    "mDNS answer could not be sent ({} bytes to {}): {}",
+                    datagram.len(),
+                    peer,
+                    e
+                )),
             }
-            Err(e) => log.warning(&format!(
-                "mDNS answer could not be sent ({} bytes to {}): {}",
-                datagram.len(),
-                if reply.unicast { peer.to_string() } else { MDNS_GROUP.to_string() },
-                e
-            )),
+            continue;
+        }
+        for (bucket, groups) in split_by_bucket(&reply.groups, service, &questions, probe, queues, now_ms)
+        {
+            match bucket {
+                Timing::Now => {
+                    let records = respond::flatten(&groups);
+                    let datagram = respond::datagram(&records, service);
+                    match multicast(&datagram) {
+                        Ok(()) => out.group += 1,
+                        Err(e) => log.warning(&format!(
+                            "mDNS answer could not be sent ({} bytes to {}): {}",
+                            datagram.len(),
+                            MDNS_GROUP,
+                            e
+                        )),
+                    }
+                }
+                bucket => out.queued += queues.enqueue(bucket, index, &groups, now_ms),
+            }
         }
     }
     out
+}
+
+/// Render one queue batch into the single datagram it goes out as.
+///
+/// A public function because the flush has **two** readers with the same job:
+/// [`run`] on the real socket, and `announce_tests`'s `serve` harness, which has to
+/// see the bytes an aggregated answer eventually becomes. A test that reimplemented
+/// this rendering would be a second owner of the batch-to-packet rule and would
+/// drift the way every duplicate here has drifted — silently, and only on the
+/// machine that reads it.
+///
+/// `answering[queued.service]` is why [`crate::aggregate::Queued`] carries an index:
+/// one engine answers for every registered service, so a merged batch can name two
+/// of them and each record must be rendered against the TXT table and addresses it
+/// was planned for.
+pub fn datagram_for(
+    batch: &[crate::aggregate::Queued],
+    answering: &[&Service],
+) -> Option<Vec<u8>> {
+    use crate::respond::Chosen;
+    let mut parts: Vec<(Vec<Chosen>, &Service)> = Vec::new();
+    for queued in batch {
+        let Some(service) = answering.get(queued.service) else {
+            // The index came from this same list, so reaching here means the list
+            // changed under the queue. It cannot — `run` builds it once — and a batch
+            // that lost its service is dropped rather than rendered against a guess
+            // about whose port and whose TXT these records mean.
+            continue;
+        };
+        parts.push((queued.records(), *service));
+    }
+    if parts.is_empty() {
+        // `None`, not an empty `Vec`: a header-only packet is twelve bytes that
+        // parse as "a response with nothing in it", which is a different answer to
+        // give a reader than "this batch had nothing left to say".
+        return None;
+    }
+    let refs: Vec<(&[Chosen], &Service)> = parts
+        .iter()
+        .map(|(records, service)| (records.as_slice(), *service))
+        .collect();
+    Some(crate::respond::datagram_multi(&refs))
+}
+
+/// Milliseconds since `start`, the one clock every scheduling decision here reads.
+///
+/// Monotonic rather than epoch like the reference's `current_time_millis()`, and
+/// nothing in this loop compares it to anything outside itself: a wall clock that
+/// steps (NTP correcting a lagging laptop) would strand a queued answer behind a
+/// `send_after` it had already passed, or fire it a second early.
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis() as u64
 }
 
 /// The announcer's whole loop: shout, then answer questions until the next shout,
 /// then goodbye.
 ///
 /// `send` writes to the group, `unicast` writes back to one asker, `recv` asks the
-/// socket for the next datagram without blocking longer than the poll interval.
-/// All three are closures for the reason `burst`'s `send` always was — the cadence
-/// and the dispatch can then be driven without binding 5353, which on this machine
-/// is shared with the OS responder and every other receiver running. The read is a
+/// socket for the next datagram and says how long it may hold the thread. All three
+/// are closures for the reason `burst`'s `send` always was — the cadence and the
+/// dispatch can then be driven without binding 5353, which on this machine is
+/// shared with the OS responder and every other receiver running. The read is a
 /// **poll**, not a blocking read, because the same thread owns the 60-second
 /// re-announcement: a read that blocks forever would make the announcer silent
 /// forever, and that is the §4.2 shape where "the receiver is up and nobody finds
 /// it" reads like a network problem (`channel.rs`'s 「读不得跨阻塞持锁」 is the same
 /// thing one layer down, where the lock was the casualty rather than the schedule).
+///
+/// The timeout is a parameter rather than a constant because of the queues: a fixed
+/// 200 ms ceiling would add up to 200 ms to every aggregated answer on top of the
+/// delay the reference itself chose, and an answer that has *already* been held for
+/// its random interval has no reason to wait for a poll boundary too.
 fn run(
     services: &[Service],
     send: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
-    recv: &mut dyn FnMut() -> io::Result<Option<(Vec<u8>, SocketAddr)>>,
+    recv: &mut dyn FnMut(Duration) -> io::Result<Option<(Vec<u8>, SocketAddr)>>,
     running: &AtomicBool,
     log: &Logger,
 ) {
+    use crate::aggregate::Outgoing;
     // One burst per service, the reference's own registration order (Cast first, then
     // AirPlay — the order the shell builds them in). Each burst is three packets, and
     // the gaps are the measured ones; sending them back to back is what the Python
@@ -1469,7 +1640,8 @@ fn run(
         );
         bytes_per_service.push(bytes);
     }
-    let mut next = Instant::now() + REANNOUNCE;
+    let start = Instant::now();
+    let mut next = start + REANNOUNCE;
     let mut served = Served::default();
     let mut heard = 0usize;
     let mut other_heard = 0usize;
@@ -1480,11 +1652,22 @@ fn run(
     // announced, never answered, which is the shape §26 pins on the wire.
     let answering: Vec<&Service> = services.iter().filter(|s| s.responder_answers()).collect();
     let mut silent_notice = answering.is_empty();
+    let mut queues = Outgoing::new();
+    let mut first_answer_said = false;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
         }
-        match recv() {
+        let now_ms = elapsed_ms(start);
+        // Shortest of: the poll ceiling, the earliest queued deadline, and the next
+        // re-announcement. The last one is what keeps a quiet network from parking
+        // this thread past `REANNOUNCE` while a queue is empty.
+        let reannounce_in = next.saturating_duration_since(Instant::now());
+        let mut wait = READ_POLL.min(reannounce_in);
+        if let Some(deadline) = queues.deadline(now_ms) {
+            wait = wait.min(Duration::from_millis(deadline.saturating_sub(now_ms)));
+        }
+        match recv(wait) {
             Ok(Some((data, peer))) => {
                 // The one place this loop can put a packet on the wire **in reply to
                 // somebody else**. Every answering service gets the same datagram and
@@ -1495,11 +1678,23 @@ fn run(
                 // (a joined socket that is never read is the queue nobody drains that
                 // `mdns_reuseport_probe.py` measured) and simply not answered.
                 let mut one = Served::default();
-                for service in &answering {
-                    let part = serve(&data, peer, service, send, unicast, log);
+                for (index, service) in answering.iter().enumerate() {
+                    let part = serve(
+                        &data,
+                        peer,
+                        service,
+                        index,
+                        now_ms,
+                        send,
+                        unicast,
+                        &mut queues,
+                        log,
+                    );
                     one.queries += part.queries;
                     one.group += part.group;
                     one.direct += part.direct;
+                    one.queued += part.queued;
+                    one.ingested += part.ingested;
                     one.absorbed += part.absorbed;
                     one.for_us |= part.for_us;
                     if part.asking.len() > one.asking.len() {
@@ -1509,13 +1704,13 @@ fn run(
                         one.asking = part.asking.clone();
                     }
                 }
-                if answering.is_empty() {
+                if answering.is_empty() && one.ingested == 0 && one.absorbed == 0 {
                     if silent_notice {
                         silent_notice = false;
                         log.debug(
-                            "mDNS engine received a datagram and did not answer it: \
-                             this socket announces only, and no service type it carries \
-                             has a measured responder table",
+                            "mDNS engine received a query and did not answer it: this socket \
+                             announces only, and no service type it carries has a measured \
+                             responder table",
                         );
                     }
                 }
@@ -1561,36 +1756,58 @@ fn run(
                         other_heard, HEARD_SENTENCES, MDNS_PORT, data.len(), one.asking, peer
                     ));
                 }
-                if served.group + served.direct == 0 && one.group + one.direct > 0 {
-                    // Once, at INFO: the first query this process ever answered is
-                    // the moment "listening" stops being an assumption. Its absence
-                    // next to a join count above zero is the other half of the same
-                    // sentence, and that pair is what §25 reads. Not gated by
-                    // HEARD_SENTENCES: a machine whose log is full of other people's
-                    // probes must still say the one thing that is news.
+                if !first_answer_said && one.answered_any() {
+                    // Once, at INFO: the first query this process ever produced an
+                    // answer for is the moment "listening" stops being an assumption.
+                    // `answered_any` includes an answer the queue took, because the
+                    // reader of §25 is asking "did the query land", and a promise held
+                    // for 100 ms is not the same fact as a byte — which is why the
+                    // group total below still counts only writes.
+                    first_answer_said = true;
                     log.info(&format!(
-                        "mDNS answered its first query ({} to the group, {} direct), of {} from {}",
-                        one.group, one.direct, one.asking, peer
+                        "mDNS answered its first query ({} to the group, {} direct, {} queued), of {} from {}",
+                        one.group, one.direct, one.queued, one.asking, peer
+                    ));
+                }
+                if one.absorbed == 1 && served.absorbed == 0 {
+                    // Said once, not per packet: a packet this parser cannot read is
+                    // news the first time and noise every time after. The reason the
+                    // socket sees traffic at all is measured (`mdns_reuseport_probe.py`):
+                    // multicast is duplicated to every joined socket, and a **unicast**
+                    // reply to port 5353 is handed to exactly one socket in the reuse
+                    // group, which may be this one even when the question was the OS
+                    // responder's or our own browser's.
+                    log.debug(
+                        "mDNS engine holds 5353 and received a packet it could not parse: a \
+                         unicast reply aimed at another socket's query can arrive here, and \
+                         unreadable bytes are counted rather than smoothed over (announce.rs's \
+                         first divergence, and §16's shared-reader note, carry why)",
+                    );
+                }
+                if one.ingested > 0 && served.ingested == 0 {
+                    // Once, at INFO, with the count in it. This is the row that says
+                    // whether the protected bucket can ever fire **in this process**:
+                    // `respond::bucket`'s one-second branch reads the ledger, and the
+                    // ledger is fed only by what this socket *hears* — in practice the
+                    // kernel's looped-back copy of our own announcement. A receiver
+                    // that never hears itself is not broken; it answers every query as
+                    // fast as before and simply has no flood protection. That is a fact
+                    // a reader can only learn from a line like this one, which is why
+                    // §31 of the acceptance script reads it. Said once because every
+                    // other receiver on a LAN produces this traffic continuously.
+                    log.info(&format!(
+                        "mDNS engine heard a response on {} and learned {} record(s): the \
+                         last-second ledger is live, so an answer this socket already sent \
+                         waits a second before it goes out again",
+                        MDNS_PORT, one.ingested
                     ));
                 }
                 served.queries += one.queries;
                 served.group += one.group;
                 served.direct += one.direct;
+                served.queued += one.queued;
+                served.ingested += one.ingested;
                 served.absorbed += one.absorbed;
-                if one.absorbed == 1 && served.absorbed == 1 {
-                    // Said once, not per packet. This socket now competes for unicast
-                    // traffic on port 5353 (measured: one socket in the reuse group
-                    // takes the whole stream), so a reply meant for another bound
-                    // socket can land here and be dropped. That is the honest name
-                    // for it, and a per-packet line would be the log flood §4.10
-                    // measured at 49% of one file.
-                    log.debug(
-                        "mDNS engine holds 5353 and received a non-query datagram: a \
-                         unicast reply aimed at another socket's query can arrive here \
-                         and is dropped (announce.rs's first divergence, and §16's \
-                         shared-reader note, carry why this is not new)",
-                    );
-                }
             }
             Ok(None) => {}
             Err(e) => {
@@ -1601,6 +1818,26 @@ fn run(
                 log.warning(&format!("mDNS receive failed: {}", e));
             }
         }
+        // Whatever has come due goes out now, one datagram per queue's merged batch.
+        // This is the flush the whole queue exists for, and it is also where a
+        // queued answer becomes a **write**: `served.group` counts what left, so it
+        // can never read as more than the wire carried.
+        for batch in queues.due(now_ms) {
+            let Some(datagram) = datagram_for(&batch, &answering) else {
+                continue;
+            };
+            match send(&datagram) {
+                Ok(()) => served.group += 1,
+                Err(e) => log.warning(&format!(
+                    "mDNS aggregated answer could not be sent ({} bytes to {}): {}",
+                    datagram.len(),
+                    MDNS_GROUP,
+                    e
+                )),
+            }
+        }
+        // Keys older than the window answer no question this loop asks.
+        queues.heard.prune(now_ms);
         if Instant::now() >= next {
             // Every service re-announces on the same tick: one timer for the socket,
             // which is what "one engine, N registrations" means. The reference's
@@ -1619,8 +1856,13 @@ fn run(
     }
     if served.queries > 0 {
         log.debug(&format!(
-            "mDNS engine served {} queries ({} to the group, {} direct, {} non-query dropped)",
-            served.queries, served.group, served.direct, served.absorbed
+            "mDNS engine served {} queries ({} to the group, {} direct, {} queued, {} response records learned, {} unreadable)",
+            served.queries,
+            served.group,
+            served.direct,
+            served.queued,
+            served.ingested,
+            served.absorbed
         ));
     }
     for service in services {

@@ -76,6 +76,7 @@
 //! strings is the single mistake that makes a device discoverable and
 //! uncastable (§4.1), and it produces no error on our side at all.
 
+pub mod aggregate;
 pub mod airplay;
 pub mod announce;
 pub mod cert;

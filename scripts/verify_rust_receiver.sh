@@ -4883,6 +4883,107 @@ PYEOF
     fi
 fi
 
+echo "== 31: the engine hears the answer it sent, which is where its flood protection comes from =="
+# Design doc §16 第 36 条 measured something on the running reference that changes what a port
+# of RFC 6762 §14 has to wire up: the reference's "did we just shout this record" check reads
+# its **cache**, and the record sitting in that cache got there because the responder's own
+# answer was looped back by the kernel and its socket **heard** it. The flood protection is
+# therefore not "I remember sending" — it is "I heard myself". A port that never reads the
+# group answers every query as fast as ever and simply has no protection at all, and that is
+# a machine, not a bug report.
+#
+# The queue itself is pinned in `aggregate_tests` against the four recorded readings; what
+# only a real machine can say is whether the *input* to that mechanism arrives in the shipped
+# process. So this section starts its own instance (with Chromecast on, since §24 kills the
+# main one and the announcer only runs behind that door) and asks one question of its log.
+#
+# Measured here on 2026-10-20, twice: the sentence lands about 0.8 s after the first burst
+# with `4 record(s)` — four, not five, because the parser skips the NSEC (design doc §8's
+# recorded divergence), and four is what the announcement's own record list says. The same
+# probe also found that this process hears **its own** multicast and nobody else's: a TXT
+# query sent to it by another process, unicast to 127.0.0.1:5353 or sent to the group,
+# produces no `heard query` line at all. That narrows §25's unresolved cell from "inbound
+# multicast does not arrive" to "inbound multicast **from another sender** does not arrive";
+# the cause is still not named here, and neither is a fix invented for it.
+S31_SDIR=$(mktemp -d /tmp/macast-rust-hear.XXXXXX)
+S31_PORT=$((PORT + 11))
+S31_SOCK="$S31_SDIR/mpvsocket"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Hearing", "Api_Token": "0123456789abcdef0123456789abcdef", "Macast_Protocols": ["DLNA Protocol", "Chromecast Protocol"]}' \
+    "$S31_PORT" > "$S31_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S31_SDIR" MACAST_MPV_SOCKET="$S31_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S31_SDIR/stdout.log" 2>&1 &
+S31_PID=$!
+disown "$S31_PID" 2>/dev/null || true
+S31_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S31_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S31_PID" ]; then
+        S31_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S31_READY" ]; then
+    fail "the hearing instance never became the listener on $S31_PORT"
+    kill -9 "$S31_PID" 2>/dev/null
+    rm -rf "$S31_SDIR"
+else
+    s31_grep() { grep -ahF "$1" "$S31_SDIR/macast.log" "$S31_SDIR"/logs/*.log 2>/dev/null; }
+    # The announcement is the precondition: a socket that bound nothing hears nothing, and
+    # "no hearing line" would then be about the door rather than about the wire.
+    S31_ANNOUNCED=""
+    for _ in $(seq 1 20); do
+        [ -n "$(s31_grep 'mDNS: announcing ')" ] && { S31_ANNOUNCED=1; break; }
+        sleep 0.5
+    done
+    if [ -z "$S31_ANNOUNCED" ]; then
+        skip "this instance announced nothing (no advertisable address, or Chromecast was switched off), so there is no answer for it to hear"
+    else
+        HEARD_LINE=""
+        for _ in $(seq 1 30); do
+            HEARD_LINE=$(s31_grep 'mDNS engine heard a response on' | head -1)
+            [ -n "$HEARD_LINE" ] && break
+            sleep 0.5
+        done
+        if [ -z "$HEARD_LINE" ]; then
+            # Not a failure of the queue: with nothing arriving, the protected bucket simply
+            # is never reached, and the honest statement is that this machine did not let the
+            # section ask. `skip` counts as a failure in this script on purpose.
+            skip "the engine never reported hearing a response: this process sees no inbound multicast at all, so the ledger cannot be live here — §25's cell, and not something this section can manufacture"
+        else
+            pass "the engine heard its own answer: ${HEARD_LINE#*] }"
+            S31_RECORDS=$(printf '%s' "$HEARD_LINE" | sed -n 's/.*learned \([0-9][0-9]*\) record.*/\1/p')
+            [ "$S31_RECORDS" = "4" ] \
+                && pass "and it learned four records — PTR, SRV, TXT and A, the NSEC the parser does not read (design doc §8)" \
+                || fail "the ledger learned $S31_RECORDS record(s) from our own announcement; four is what the announcement has and what the parser reads"
+            # A line that only reports a number sends the reader to the source for what it
+            # means. AGENTS.md §4.2's 「每一条失败文案必须给出下一步」 applies to the healthy
+            # sentences too, because this one is the only place a reader learns whether the
+            # one-second rule is armed in this process.
+            case "$HEARD_LINE" in
+                *"waits a second"*) pass "the hearing sentence says what it protects against, rather than just counting" ;;
+                *) fail "the hearing sentence names no consequence: $HEARD_LINE" ;;
+            esac
+            # The asymmetry this section exists to record, asked rather than asserted: if a
+            # query from another process ever does arrive, §25's gap has closed and this
+            # reading has to change with it.
+            if [ -n "$(s31_grep 'mDNS engine heard query')" ]; then
+                pass "queries from other processes reach this socket too, so §25's delivery cell has closed on this machine"
+            else
+                pass "own loopback arrives while another sender's query does not — §25's gap is inbound delivery from elsewhere, not the responder"
+            fi
+        fi
+    fi
+    kill -9 "$S31_PID" 2>/dev/null
+    pkill -9 -f "$S31_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S31_SDIR (macast.log, logs/Discovery.log)"
+    else
+        rm -rf "$S31_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

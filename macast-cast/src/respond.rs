@@ -41,7 +41,7 @@
 //!   suppression on `(name, type)` alone would go silent there.
 
 use crate::announce::{
-    property_bytes, FLAGS_ANNOUNCE, HOST_TTL, OTHER_TTL, SERVICE_TYPE, TYPE_A, TYPE_NSEC,
+    FLAGS_ANNOUNCE, HOST_TTL, OTHER_TTL, SERVICE_TYPE, TYPE_A, TYPE_NSEC,
     TYPE_PTR, TYPE_SRV, TYPE_TXT, Writer,
 };
 use crate::announce::Service;
@@ -167,8 +167,17 @@ impl<'a> Shape<'a> {
     }
 }
 
-/// When the reference lets this answer go out. Carried because the choice is part of
-/// the protocol (`mcast_now` vs the aggregation queue), asserted by no test.
+/// When the reference lets an **answer record** of the group leg go out.
+///
+/// One bucket per answer, not one per reply: `query_handler.py:106-125` loops over
+/// the answers and `continue`s into whichever bucket each one falls in, so an `ANY`
+/// reply whose TXT was multicast a moment ago and whose SRV was not is **split**
+/// across two queues. A reply-level choice could not express that, and the record
+/// that would have been protected goes out on the fast path instead.
+///
+/// `Direct` is deliberately absent: the unicast leg is [`Reply::unicast`], decided
+/// by the source port before any bucketing happens, and the reference's fourth
+/// bucket (`_ucast`) never mixes with these three.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Timing {
     /// Sent immediately to the group.
@@ -178,21 +187,28 @@ pub enum Timing {
     /// The protected queue: we already multicast this record in the last second, so
     /// RFC 6762 §14 says wait another one.
     AggregateProtected,
-    /// Unicast straight back to the asker.
-    Direct,
 }
 
 /// One datagram's worth of records, and where it goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
     pub records: Vec<Chosen>,
+    /// The same answers as [`Reply::records`], but keeping **which additionals ride
+    /// with which answer**. The flat list is what the wire needs and what the corpus
+    /// pins; the grouping is what the aggregation queue needs, because its merge and
+    /// dedupe rules are keyed on the answer record and carry that answer's
+    /// additionals with it (`_remove_answers_from_queue` pops *keys*).
+    ///
+    /// `records` is always `flatten(groups)`, asserted by
+    /// `the_flat_records_are_exactly_the_flattened_groups` — two fields, one builder,
+    /// so neither can drift into being a second answer about the same query.
+    pub groups: Vec<Group>,
     /// The unicast copy. The reference writes it with **every cache-flush bit
     /// cleared** — the corpus's `ptr-ephemeral-src` row holds both copies of the
     /// same five records in one capture, one set `flush=True` (the group) and one
     /// set `flush=False` (the reply to `127.0.0.1:55759`). A port that reused the
     /// multicast records would send flush bits the reference never sends.
     pub unicast: bool,
-    pub timing: Timing,
 }
 
 /// One answer record and the records that ride out with it.
@@ -204,9 +220,9 @@ pub struct Reply {
 /// and no answer". A flat list here would have sent exactly that, which is the
 /// flooding the suppression rule exists to prevent.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Group {
-    answer: Chosen,
-    additionals: Vec<Chosen>,
+pub struct Group {
+    pub answer: Chosen,
+    pub additionals: Vec<Chosen>,
 }
 
 /// What one question is worth, as answer records plus the records that ride with
@@ -405,7 +421,7 @@ fn suppress(groups: Vec<Group>, known: &[Known]) -> Vec<Group> {
 
 /// Answers first, then the surviving groups' additionals, deduplicated: two answers
 /// in one packet (the ANY case) must not write the same A record twice.
-fn flatten(groups: &[Group]) -> Vec<Chosen> {
+pub fn flatten(groups: &[Group]) -> Vec<Chosen> {
     let mut out: Vec<Chosen> = groups.iter().map(|group| group.answer.clone()).collect();
     for group in groups {
         for record in &group.additionals {
@@ -417,35 +433,78 @@ fn flatten(groups: &[Group]) -> Vec<Chosen> {
     out
 }
 
-/// Which timing the reference would pick for the **group** leg of an answer. The
-/// direct leg is `Timing::Direct` by definition and never comes through here.
+/// Which bucket the reference would put an answer in — `query_handler.py:106-125`
+/// (`add_mcast_question_response`), branch for branch, in the source's order. The
+/// order is the rule: a probe check that ran after the last-second check would send
+/// a probe's just-shouted record on the protected queue instead of now, and the two
+/// are 1000 ms apart.
 ///
-/// Carried because the choice is part of the protocol, asserted only by shape
-/// (`the_unicast_leg_is_direct_and_the_group_leg_is_not`): the millisecond figures
-/// belong to this machine's timer, not to mDNS.
-fn timing(
+/// Asked **once per answer record**, because that is how the reference loops: an
+/// `ANY` reply whose TXT was multicast a moment ago and whose SRV was not is split
+/// across two queues, and a reply-level answer could only be wrong about one of
+/// them. The record-specific input is `last_seen_ms`; the rest of the inputs belong
+/// to the packet.
+///
+/// `probe` is the incoming packet's own property (`_num_authorities > 0`), not a
+/// property of this record, which is why it is an argument. `last_seen_ms` is when
+/// this responder **heard** this exact record — the caller reads it out of the
+/// ledger [`crate::aggregate`] keeps from what the engine's socket receives, and
+/// `None` means "never, or not within the window". `None` for a caller with no
+/// send history is also the reference's answer for a process that cannot hear
+/// itself: the protection is learned from the wire, not remembered from the send
+/// (design doc §16's aggregation round — `_has_mcast_record_in_last_second` reads
+/// the **cache**, and the cache is filled by the looped-back copy of our own
+/// announcement).
+pub fn bucket(
     questions: &[Question],
-    records: &[Chosen],
-    last_mcast_ms: Option<u64>,
+    probe: bool,
+    last_seen_ms: Option<u64>,
     now_ms: u64,
 ) -> Timing {
-    // A QU question from port 5353 is not answered directly unless we already
-    // multicast the record within a quarter of its TTL: `ptr-qu` went to the group
-    // at +0.3 ms, which is `add_qu_question_response`'s "not recent ⇒ multicast so
-    // every peer's cache learns" branch.
-    if let Some(created) = last_mcast_ms {
-        if now_ms.saturating_sub(created) < 1000 {
+    if probe {
+        return Timing::Now;
+    }
+    if let Some(created) = last_seen_ms {
+        if now_ms.saturating_sub(created) < crate::aggregate::PROTECTION_WINDOW_MS {
             return Timing::AggregateProtected;
         }
     }
-    let single = questions.len() == 1;
-    if single
-        && !records.is_empty()
-        && records.iter().all(|record| record.kind.is_immediate())
-    {
+    // The branch is on the **question's** type, exactly as `query_handler.py:119`
+    // writes it, not on what we answer with. Honest about its own teeth: on every
+    // row the frozen corpus holds, the two readings agree — a single `AAAA` question
+    // answers with an NSEC and both kinds are immediate, a single `ANY` expands to a
+    // TXT and neither rule is satisfied. So this line is not a bug fix and no
+    // mutation battery here can make it red; it is written the source's way because
+    // a plan layer that grows another answer kind (a second instance's PTR, say)
+    // would make the two disagree, and the side that wins should be the one the
+    // reference measured. Recorded as **unmeasured** rather than pretending a test
+    // asks it.
+    if questions.len() == 1 && questions[0].kind.is_immediate() {
         return Timing::Now;
     }
     Timing::Aggregate
+}
+
+/// The DNS type number → the kind the decision layer speaks.
+///
+/// Unknown numbers come back as `None` rather than a guess: a question we cannot
+/// name is a question we cannot answer, and inventing a `Kind` for it would make
+/// the reply table claim things about types this port does not model.
+///
+/// This is the one owner. `announce.rs` used to keep a private copy for its log
+/// sentence, and a second table of type numbers is how a responder starts
+/// describing a question in words the decision layer would not answer.
+pub fn kind_of(rtype: u16) -> Option<Kind> {
+    match rtype {
+        crate::mdns::TYPE_A => Some(Kind::A),
+        crate::mdns::TYPE_PTR => Some(Kind::Ptr),
+        crate::mdns::TYPE_TXT => Some(Kind::Txt),
+        crate::mdns::TYPE_SRV => Some(Kind::Srv),
+        28 => Some(Kind::Aaaa),
+        47 => Some(Kind::Nsec),
+        255 => Some(Kind::Any),
+        _ => None,
+    }
 }
 
 /// Everything the responder sends for one packet's questions.
@@ -453,17 +512,16 @@ fn timing(
 /// `ucast_source` is `source port != 5353` — a property of the datagram, not of the
 /// question, which is why it is a parameter and not something derived here. When it
 /// is true the reference answers **both** ways: the direct copy with the cache-flush
-/// bits cleared, and the usual multicast copy. `last_mcast_ms` / `now_ms` feed the
-/// "did we just shout this" checks; `None` means "not recently", which is what a
-/// caller with no send history should pass.
-pub fn respond(
-    questions: &[Question],
-    known: &[Known],
-    ucast_source: bool,
-    shape: &Shape,
-    last_mcast_ms: Option<u64>,
-    now_ms: u64,
-) -> Vec<Reply> {
+/// bits cleared, and the usual multicast copy.
+///
+/// No timing decision is made here. Bucketing is per answer record and needs the
+/// ledger (when did we last *hear* this record), which is a fact about the running
+/// engine rather than about this packet — so [`bucket`] is asked by
+/// `announce::serve`, and this function answers only "which records, in which
+/// grouping, on which leg". Keeping it out of here is also what stops the decision
+/// from being made once for a whole reply, which is the split the reference makes
+/// and a reply-level answer cannot express.
+pub fn respond(questions: &[Question], known: &[Known], ucast_source: bool, shape: &Shape) -> Vec<Reply> {
     let mut groups: Vec<Group> = Vec::new();
     for question in questions {
         for group in suppress(answers(question, shape), known) {
@@ -475,31 +533,34 @@ pub fn respond(
     if groups.is_empty() {
         return Vec::new();
     }
-    let records = flatten(&groups);
+    let mut replies = Vec::new();
+    if ucast_source {
+        let mut direct = groups.clone();
+        for group in &mut direct {
+            // The reference's unicast leg clears every cache-flush bit: the corpus
+            // holds both copies of the same five records in one capture, one set
+            // `flush=True`, one `flush=False`.
+            group.answer.flush = false;
+            for record in &mut group.additionals {
+                record.flush = false;
+            }
+        }
+        let records = flatten(&direct);
+        replies.push(Reply {
+            records,
+            groups: direct,
+            unicast: true,
+        });
+    }
     // The multicast leg of a unicast-sourced query is bucketed exactly as any other
     // answer would be — the corpus's `ptr-ephemeral-src` pair is a direct reply at
     // +0.3 ms and the group copy at +110.4 ms, i.e. it went through the aggregation
     // queue like a QM query did.
-    let group_reply = timing(questions, &records, last_mcast_ms, now_ms);
-    let mut replies = Vec::new();
-    if ucast_source {
-        let mut direct = records.clone();
-        for record in direct.iter_mut() {
-            // The reference's unicast leg clears every cache-flush bit: the corpus
-            // holds both copies of the same five records in one capture, one set
-            // `flush=True`, one `flush=False`.
-            record.flush = false;
-        }
-        replies.push(Reply {
-            records: direct,
-            unicast: true,
-            timing: Timing::Direct,
-        });
-    }
+    let records = flatten(&groups);
     replies.push(Reply {
         records,
+        groups,
         unicast: false,
-        timing: group_reply,
     });
     replies
 }
@@ -536,64 +597,140 @@ pub fn kind_name(rtype: u16) -> String {
 ///   are read from the captures, not chosen: every answer the reference sent in
 ///   `mdns_responder.jsonl` came back `id=0 aa=True`.
 pub fn datagram(records: &[Chosen], service: &Service) -> Vec<u8> {
+    datagram_multi(&[(records, service)])
+}
+
+/// Several planned replies assembled into **one** datagram.
+///
+/// This is what the aggregation queue needs: when two questions' answers were
+/// merged into one batch — possibly from two different services on one engine,
+/// which is the reference's own shape, since `Zeroconf` has a single pair of
+/// outgoing queues for every registration — the reference writes the whole batch
+/// with one [`Writer`], and one name-compression table. Two calls to
+/// [`datagram`] would be two packets *and* two compression tables, i.e. twice the
+/// bytes for the same news.
+///
+/// The dedupe is not an optimization. `_add_answers_additionals`
+/// (`answers.py:98-110`) starts with `sending = set(answers)` and then writes an
+/// additional **only if it is not already in `sending`** — so a PTR answer and an
+/// SRV answer in one batch do not each bring their own copy of the host pair, and
+/// an additional that happens to also be an answer in this batch is dropped
+/// wherever it appears in the order. Identity for that test is
+/// [`crate::aggregate::RecordKey`]: name/type/class/rdata, **not** the section and
+/// **not** the TTL, which is exactly why an `A` that answered an `A` question is
+/// suppressed from a PTR's additionals even though one is in AN and the other in AR.
+pub fn datagram_multi(parts: &[(&[Chosen], &Service)]) -> Vec<u8> {
+    use std::collections::HashSet;
     let mut w = Writer::new(FLAGS_ANNOUNCE);
-    let txt = service.txt.as_slice();
-    let addresses = service.addresses.as_slice();
-    let server = service.server.as_str();
-    let port = service.port;
-    for record in records {
-        let unique = record.flush;
-        match record.kind {
-            Kind::Ptr => {
-                let alias = record
-                    .alias
-                    .as_deref()
-                    .unwrap_or(record.owner.as_str());
-                emit(&mut w, record.section, &record.owner, TYPE_PTR, record.ttl, unique, |w| {
-                    w.name(alias)
-                });
-            }
-            Kind::Srv => emit(&mut w, record.section, &record.owner, TYPE_SRV, record.ttl, unique, |w| {
-                w.u16(0);
-                w.u16(0);
-                w.u16(port);
-                w.name(server);
-            }),
-            Kind::Txt => emit(&mut w, record.section, &record.owner, TYPE_TXT, record.ttl, unique, |w| {
-                for (key, value) in txt {
-                    let body = property_bytes(key, value);
-                    w.u8(body.len() as u8);
-                    w.octets(&body);
-                }
-            }),
-            Kind::A => {
-                for address in addresses {
-                    emit(&mut w, record.section, &record.owner, TYPE_A, record.ttl, unique, |w| {
-                        w.octets(&address.octets());
-                    });
+    let mut sending: HashSet<crate::aggregate::RecordKey> = HashSet::new();
+    // Pass one: every answer record claims its identity first, in the reference's
+    // `sending = set(answers)`. Doing this before any writing is what makes the
+    // suppression independent of the order the two sections happen to be planned in.
+    for (records, service) in parts {
+        for record in *records {
+            if record.section == Section::Answer {
+                for key in crate::aggregate::plan_identity(record, service) {
+                    sending.insert(key);
                 }
             }
-            Kind::Nsec => emit(&mut w, record.section, &record.owner, TYPE_NSEC, record.ttl, unique, |w| {
-                w.name(server);
-                w.u8(0);
-                w.u8(1);
-                w.u8(0x40);
-            }),
-            Kind::Any | Kind::Aaaa => {
-                // BOTH are question-only types: `AAAA` is answered with an NSEC (see
-                // the `aaaa` corpus row), and `ANY` is expanded into TXT and SRV.
-                // Nothing should ever choose one as an answer record, and a reply
-                // that carries one means the plan layer leaked a question through.
-                // Loud, not silent.
-                debug_assert!(false, "respond::datagram was handed a question-only kind");
+        }
+    }
+    // Pass two: write, dropping any additional whose identity is already going out.
+    // One set, not two. `answers.py:100` keeps a single `sending` that starts as the
+    // answers and grows with every additional written, and mirroring that is not
+    // tidiness: with a second "already written in this part" set, the answer-seeded
+    // suppression and the within-batch suppression became two rules that could be
+    // broken one at a time — and the battery proved it, because deleting the answer
+    // half left the other half doing the same work on every case we had written.
+    for (records, service) in parts {
+        for record in *records {
+            let keys = crate::aggregate::plan_identity(record, service);
+            if record.section == Section::Additional {
+                // `keys` holds more than one entry only for `A`, where the plan is
+                // one record and the wire is one per address: each address is then
+                // its own record and is suppressed or written on its own identity.
+                let keep: Vec<usize> = keys
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, key)| !sending.contains(*key))
+                    .map(|(index, _)| index)
+                    .collect();
+                if keep.is_empty() {
+                    continue;
+                }
+                emit(&mut w, record, service, &keep);
+                for index in keep {
+                    sending.insert(keys[index].clone());
+                }
+            } else {
+                emit(&mut w, record, service, &all_indexes(&keys));
+                sending.extend(keys);
             }
         }
     }
     w.finish()
 }
 
+fn all_indexes(keys: &[crate::aggregate::RecordKey]) -> Vec<usize> {
+    (0..keys.len()).collect()
+}
+
+/// Write one planned record, restricted to the expanded rdata at `keep`.
+fn emit(w: &mut Writer, record: &Chosen, service: &Service, keep: &[usize]) {
+    let unique = record.flush;
+    let owner = record.owner.as_str();
+    let server = service.server.as_str();
+    let port = service.port;
+    match record.kind {
+        Kind::Ptr => {
+            let alias = record.alias.as_deref().unwrap_or(owner);
+            route(w, record.section, owner, TYPE_PTR, record.ttl, unique, |w| {
+                w.name(alias)
+            });
+        }
+        Kind::Srv => route(w, record.section, owner, TYPE_SRV, record.ttl, unique, |w| {
+            w.u16(0);
+            w.u16(0);
+            w.u16(port);
+            w.name(server);
+        }),
+        Kind::Txt => route(w, record.section, owner, TYPE_TXT, record.ttl, unique, |w| {
+            // The service's own producer, so the bytes here and the bytes
+            // [`crate::aggregate::plan_identity`] names are one computation.
+            let body = service.txt_rdata();
+            w.octets(&body);
+        }),
+        Kind::A => {
+            // One planned record, N on the wire: `keep` says which addresses this
+            // batch may still carry. An index that is not an address means the plan
+            // and the service disagree, so it is dropped by `get` rather than
+            // panicking on a LAN.
+            for index in keep.iter().filter_map(|i| service.addresses.get(*i)) {
+                let address = *index;
+                route(w, record.section, owner, TYPE_A, record.ttl, unique, |w| {
+                    w.octets(&address.octets())
+                });
+            }
+        }
+        Kind::Nsec => route(w, record.section, owner, TYPE_NSEC, record.ttl, unique, |w| {
+            w.name(server);
+            w.u8(0);
+            w.u8(1);
+            w.u8(0x40);
+        }),
+        Kind::Any | Kind::Aaaa => {
+            // BOTH are question-only types: `AAAA` is answered with an NSEC (see
+            // the `aaaa` corpus row), and `ANY` is expanded into TXT and SRV.
+            // Nothing should ever choose one as an answer record, and a reply
+            // that carries one means the plan layer leaked a question through.
+            // Loud, not silent.
+            debug_assert!(false, "respond::datagram was handed a question-only kind");
+        }
+    }
+}
+
 /// Write one record into the section the plan chose.
-fn emit<F>(w: &mut Writer, section: Section, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
+fn route<F>(w: &mut Writer, section: Section, name: &str, rtype: u16, ttl: u32, unique: bool, rdata: F)
 where
     F: FnOnce(&mut Writer),
 {

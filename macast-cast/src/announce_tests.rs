@@ -619,7 +619,7 @@ fn the_run_function_goodbyes_even_when_the_flag_is_already_down() {
         // loop's first check ends it before a read or an answer is asked for. They
         // are here because the signature says so, not to simulate anything.
         let mut no_unicast = |_bytes: &[u8], _peer: std::net::SocketAddr| Ok(());
-        let mut no_recv = || Ok(None);
+        let mut no_recv = |_| Ok(None);
         run(
             std::slice::from_ref(&service),
             &mut send,
@@ -960,11 +960,20 @@ fn the_answering_half_is_derived_not_written() {
     // …and no literal `responder_answers()` replacement: `serve` must be reached only
     // through that set. Asked as "the loop's call site names the set", not as "no
     // `true` appears in the file".
-    let loop_at = src.find("for service in &answering {").expect("the loop exists");
-    let loop_body = &src[loop_at..loop_at + 600];
+    let loop_at = src
+        .find("for (index, service) in answering.iter().enumerate() {")
+        .expect("the loop exists");
+    let loop_body = &src[loop_at..loop_at + 700];
     assert!(
-        loop_body.contains("serve(&data, peer, service, send, unicast, log)"),
-        "the loop no longer serves through the answering set"
+        loop_body.contains("serve(") && loop_body.contains("&mut queues,"),
+        "the loop no longer serves through the answering set and the shared queues"
+    );
+    // `index` is not decoration: a queued answer has to remember which service it was
+    // planned for, and a loop that handed in a constant 0 would render the AirPlay
+    // batch against the Cast TXT table the moment two services answered one query.
+    assert!(
+        loop_body.contains("index,\n                        now_ms,"),
+        "the answering index is no longer handed to serve"
     );
     assert!(
         !src.contains("bind_engine(&self.service.addresses, &self.log, true)"),
@@ -1056,8 +1065,49 @@ fn query_with_known(ttl: u32, in_answers: bool) -> Vec<u8> {
     packet
 }
 
-/// Drive `serve` with recording sinks.
+/// The instant `served_by` pretends the datagram arrived, and the draw it hands the
+/// queue. Fixed numbers rather than the clock because every assertion below is about
+/// *which* queue took the answer and whether the bytes came out of it — a question
+/// that cannot be asked of a process whose `now` nobody wrote down.
+const SERVE_NOW_MS: u64 = 1_000;
+/// The reference's own minimum draw (`randint(20, 120)`), so one flush at
+/// `SERVE_NOW_MS + AGGREGATE_FLUSH_MS` is enough for the ordinary queue.
+const SERVE_DRAW_MS: u64 = crate::aggregate::RANDOM_MIN_MS;
+/// Long enough that the **protected** queue has come due too (its floor is a second
+/// on top of the draw), which is what makes `Sent.group` a complete record of the
+/// answer rather than a partial one.
+const AGGREGATE_FLUSH_MS: u64 = 1_100;
+
+/// Drive `serve` with recording sinks, then give the queues the tick `run` would
+/// have given them.
+///
+/// The flush is inside the helper because answering is a **two-step** action now:
+/// `serve` decides and schedules, and the wire gets the bytes when the schedule
+/// comes due. A helper that stopped at `serve` would report "no bytes" for every
+/// aggregated answer — true at that instant, and useless as a witness for the eight
+/// tests that read it. Tests that care about *which* queue, or about a queue that
+/// has not come due yet, call [`served_by_at`] with their own flush moment.
 fn served_by(service: &Service, data: &[u8], from: SocketAddr) -> (Served, Sent) {
+    served_by_at(
+        service,
+        data,
+        from,
+        SERVE_NOW_MS,
+        SERVE_DRAW_MS,
+        SERVE_NOW_MS + AGGREGATE_FLUSH_MS,
+    )
+}
+
+/// [`served_by`] with the three numbers a queue question needs to be able to answer
+/// "not yet": same `now`, same draw, a flush moment *before* the deadline.
+fn served_by_at(
+    service: &Service,
+    data: &[u8],
+    from: SocketAddr,
+    now_ms: u64,
+    draw_ms: u64,
+    flush_ms: u64,
+) -> (Served, Sent) {
     let logger = Logger::named(LOGGER_NAME);
     let sent = Rc::<RefCell<Sent>>::default();
     let group_sink = {
@@ -1076,7 +1126,24 @@ fn served_by(service: &Service, data: &[u8], from: SocketAddr) -> (Served, Sent)
     };
     let mut group_sink = group_sink;
     let mut direct_sink = direct_sink;
-    let served = serve(data, from, service, &mut group_sink, &mut direct_sink, &logger);
+    let mut queues = crate::aggregate::Outgoing::with_random(Box::new(move || draw_ms));
+    let served = serve(
+        data,
+        from,
+        service,
+        0,
+        now_ms,
+        &mut group_sink,
+        &mut direct_sink,
+        &mut queues,
+        &logger,
+    );
+    // The flush, exactly as `run` does it: one datagram per batch that came due.
+    for batch in queues.due(flush_ms) {
+        if let Some(bytes) = datagram_for(&batch, &[service]) {
+            sent.borrow_mut().group.push(bytes);
+        }
+    }
     // Borrowed rather than `Rc::try_unwrap`: this function's own handle is one of
     // the strong counts, so a unwrap that expected to be the last owner failed for
     // the wrong reason and made four answering tests look like four wrong answers.
@@ -1090,7 +1157,9 @@ fn e1_a_query_from_port_5353_is_answered_on_the_group_and_nowhere_else() {
     let service = fixture_service();
     let (served, sent) = served_by(&service, &ptr_query(SERVICE_TYPE), peer(5353));
     assert_eq!(served.queries, 1);
-    assert_eq!(served.group, 1, "one datagram to the group: {:?}", served);
+    assert_eq!(served.group, 0, "nothing was written on the tick it was decided");
+    assert_eq!(served.queued, 1, "the queue took the answer: {:?}", served);
+    assert_eq!(sent.group.len(), 1, "one datagram to the group, after the flush");
     assert_eq!(
         served.direct, 0,
         "a multicast querier must not get a unicast leg"
@@ -1115,7 +1184,7 @@ fn e2_a_query_from_an_ephemeral_port_is_answered_twice_the_reference_way() {
     let service = fixture_service();
     let asker = peer(55759);
     let (served, sent) = served_by(&service, &ptr_query(SERVICE_TYPE), asker);
-    assert_eq!(served.group, 1);
+    assert_eq!(served.group + served.queued, 1, "one answer, on the wire or in a queue");
     assert_eq!(served.direct, 1);
     assert_eq!(sent.direct[0].1, asker, "the direct leg went elsewhere");
 }
@@ -1131,8 +1200,16 @@ fn e3_a_packet_that_is_not_a_query_is_counted_rather_than_answered() {
     let announcement = service.announcement();
     let (served, sent) = served_by(&service, &announcement, peer(5353));
     assert_eq!(served.queries, 0);
-    assert_eq!(served.absorbed, 1, "a non-query must be counted");
-    assert_eq!(served.group + served.direct, 0);
+    assert_eq!(
+        served.absorbed, 0,
+        "a readable response is not an unreadable packet"
+    );
+    assert!(
+        served.ingested > 0,
+        "a response contributed nothing to the last-second ledger: {:?}",
+        served
+    );
+    assert_eq!(served.group + served.direct + served.queued, 0);
     assert!(sent.group.is_empty() && sent.direct.is_empty());
 }
 
@@ -1147,7 +1224,11 @@ fn e4_a_query_for_a_service_we_do_not_run_costs_no_bytes_and_no_error_line() {
     let service = fixture_service();
     let (served, _sent) = served_by(&service, &ptr_query("_airplay._tcp.local."), peer(5353));
     assert_eq!(served.queries, 1, "the question was understood");
-    assert_eq!(served.group + served.direct, 0, "and declined");
+    assert_eq!(
+        served.group + served.direct + served.queued,
+        0,
+        "and declined"
+    );
     assert_eq!(served.absorbed, 0, "a query is not an absorbed packet");
     assert!(
         !lines(&path).contains("ERROR"),
@@ -1167,7 +1248,7 @@ fn e5_a_known_answer_in_the_answer_section_silences_the_reply_as_the_reference_d
     );
     assert_eq!(served.queries, 1);
     assert_eq!(
-        served.group + served.direct,
+        served.group + served.direct + served.queued,
         0,
         "the asker said it holds this PTR with a full TTL; answering is the flooding \
          the suppression rule exists to stop"
@@ -1188,7 +1269,7 @@ fn e6_a_known_answer_in_the_additional_section_does_not_silence_anything() {
         peer(5353),
     );
     assert_eq!(
-        served.group,
+        served.queued,
         1,
         "an additional-section record was read as a known answer: {:?}",
         served
@@ -1226,7 +1307,8 @@ fn e7_the_loop_answers_between_bursts_and_survives_a_failed_read() {
                 Ok(())
             }
         };
-        let mut recv = || {
+        let watching = Rc::clone(&sends);
+        let mut recv = |_: Duration| {
             calls += 1;
             match calls {
                 // A query first: the loop must answer it without waiting for the
@@ -1234,9 +1316,23 @@ fn e7_the_loop_answers_between_bursts_and_survives_a_failed_read() {
                 1 => Ok(Some((query.clone(), peer(5353)))),
                 // Then a failed read: logged, not fatal.
                 2 => Err(std::io::Error::other("transient read failure")),
-                // Then nothing, and the announcer is asked to stop.
+                // Then nothing until the answer the queue took has come due. This is
+                // `run`'s own half of the queue being tested rather than `serve`'s: an
+                // aggregated answer is decided on one tick and written on a later one,
+                // and a loop that stopped polling at its first empty read would have
+                // no equivalent of the reference's scheduled `async_ready` at all.
                 _ => {
-                    running.store(false, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(5));
+                    let wrote = watching
+                        .borrow()
+                        .iter()
+                        .any(|bytes| *bytes != announcement && *bytes != goodbye);
+                    if wrote || calls > 2_000 {
+                        // The cap is a failure brake, not a second budget: past it the
+                        // assertion below reports the send count instead of this thread
+                        // spinning forever.
+                        running.store(false, Ordering::SeqCst);
+                    }
                     Ok(None)
                 }
             }
@@ -1315,7 +1411,21 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut answered = 0usize;
     let mut ask_again = std::time::Instant::now();
+    // The queues live **across** iterations, the way `run` holds them, and each tick
+    // flushes whatever has come due. A per-iteration queue would answer nothing here:
+    // an aggregated reply is decided on one tick and written on a later one, so the
+    // witness this test exists for — bytes reaching a querier over a real socket —
+    // requires the scheduling state to outlive the packet that created it.
+    let clock = std::time::Instant::now();
+    let mut queues = crate::aggregate::Outgoing::new();
     while std::time::Instant::now() < deadline && answered == 0 {
+        let now_ms = clock.elapsed().as_millis() as u64;
+        for batch in queues.due(now_ms) {
+            if let Some(bytes) = datagram_for(&batch, &[&service]) {
+                sock.send_to(&bytes, group).expect("the queued answer leaves");
+                answered += 1;
+            }
+        }
         match sock.recv_from(&mut buf) {
             Ok((length, from)) => {
                 let data = buf[..length].to_vec();
@@ -1327,11 +1437,14 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
                     &data,
                     from,
                     &service,
+                    0,
+                    now_ms,
                     &mut send,
                     &mut unicast,
+                    &mut queues,
                     &logger,
                 );
-                answered = served.group + served.direct;
+                answered += served.group + served.direct;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
@@ -1397,7 +1510,7 @@ fn drive_services(
     let mut queue: std::collections::VecDeque<(Vec<u8>, SocketAddr)> = packets.into();
     let mut send = |_bytes: &[u8]| Ok(());
     let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
-    let mut recv = || match queue.pop_front() {
+    let mut recv = |_: Duration| match queue.pop_front() {
         Some((bytes, peer)) => Ok(Some((bytes, peer))),
         None => {
             running.store(false, Ordering::SeqCst);
@@ -1452,7 +1565,7 @@ fn every_service_in_the_engine_gets_its_own_burst() {
         Ok(())
     };
     let mut unicast = |_b: &[u8], _p: SocketAddr| Ok(());
-    let mut recv = || {
+    let mut recv = |_: Duration| {
         running.store(false, Ordering::SeqCst);
         Ok(None)
     };
@@ -1532,10 +1645,27 @@ fn one_socket_answers_the_measured_type_and_stays_silent_for_the_other() {
         (ptr_query(SERVICE_TYPE), peer(MDNS_PORT)),
         (ptr_query(crate::airplay::AIRPLAY_SERVICE), peer(MDNS_PORT)),
     ]);
-    let mut recv = || match queue.pop_front() {
+    let mut asked = 0usize;
+    let watching = Arc::clone(&sent);
+    let mut recv = |_: Duration| match queue.pop_front() {
         Some((bytes, peer)) => Ok(Some((bytes, peer))),
         None => {
-            running.store(false, Ordering::SeqCst);
+            // Same reason as `e7`: the answer to the Cast query is **scheduled**, so
+            // the loop has to keep polling for the tick that writes it. Stopping at
+            // the first empty read would test a loop that answers nothing and still
+            // let the silence below be read as "the AirPlay query was declined",
+            // which is the reading this test exists to make impossible.
+            asked += 1;
+            std::thread::sleep(Duration::from_millis(5));
+            let wrote = watching.lock().unwrap().iter().any(|bytes| {
+                *bytes != cast.announcement()
+                    && *bytes != airplay.announcement()
+                    && *bytes != cast.goodbye()
+                    && *bytes != airplay.goodbye()
+            });
+            if wrote || asked > 2_000 {
+                running.store(false, Ordering::SeqCst);
+            }
             Ok(None)
         }
     };
@@ -1774,6 +1904,133 @@ fn e9_the_receiving_sentence_fires_for_a_query_and_never_for_our_own_echo() {
 }
 
 
+#[test]
+fn the_run_loop_asks_for_a_read_shorter_than_the_poll_when_an_answer_is_queued() {
+    crate::pin_test_dir();
+    // The queue is only a latency win if somebody wakes up for it. `run` turns
+    // [`Outgoing::due`] into the read timeout, and a loop that kept asking for the full
+    // [`READ_POLL`] would still answer — just up to one poll later,
+    // which no assertion on *bytes* can see. So this row counts the waits themselves:
+    // after a query is served, at least one read must be asked for shorter than the
+    // ceiling, and the queued answer must then reach the wire inside that window.
+    let service = fixture_service();
+    let query = mdns::query(&service.instance, TYPE_TXT).expect("the query encodes");
+    let logger = Logger::named("Aggregate-Deadline");
+    let running = std::sync::atomic::AtomicBool::new(true);
+    let sends: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>> = std::rc::Rc::new(
+        std::cell::RefCell::new(Vec::new()),
+    );
+    let waits: std::rc::Rc<std::cell::RefCell<Vec<std::time::Duration>>> = std::rc::Rc::new(
+        std::cell::RefCell::new(Vec::new()),
+    );
+    let announcement = service.announcement();
+    let watching = std::rc::Rc::clone(&sends);
+    let recording = std::rc::Rc::clone(&waits);
+    let mut send = {
+        let sends = std::rc::Rc::clone(&sends);
+        move |bytes: &[u8]| {
+            sends.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        }
+    };
+    let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
+    let mut calls = 0usize;
+    let mut recv = |wait: std::time::Duration| {
+        recording.borrow_mut().push(wait);
+        calls += 1;
+        match calls {
+            1 => Ok(Some((query.clone(), "192.0.2.9:5353".parse::<std::net::SocketAddr>().expect("peer")))),
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                let wrote = watching
+                    .borrow()
+                    .iter()
+                    .any(|bytes| *bytes != announcement && *bytes != service.goodbye());
+                if wrote || calls > 2_000 {
+                    running.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(None)
+            }
+        }
+    };
+    run(
+        std::slice::from_ref(&service),
+        &mut send,
+        &mut unicast,
+        &mut recv,
+        &running,
+        &logger,
+    );
+    let goodbye = service.goodbye();
+    let answered: Vec<Vec<u8>> = sends
+        .borrow()
+        .iter()
+        .filter(|bytes| **bytes != announcement && **bytes != goodbye)
+        .cloned()
+        .collect();
+    assert_eq!(
+        answered.len(),
+        1,
+        "the queued answer never reached the wire through `run`"
+    );
+    let short = waits
+        .borrow()
+        .iter()
+        .any(|w| *w < READ_POLL);
+    assert!(
+        short,
+        "every read was asked for the full poll ceiling: {:?}",
+        waits.borrow()
+    );
+}
+#[test]
+fn the_hearing_sentence_is_said_once_and_names_what_it_protects() {
+    crate::pin_test_dir();
+    // §31 of the acceptance script reads this sentence on a real machine, which makes
+    // it a wire contract rather than a comment: the one thing a reader can learn about
+    // the flood protection is whether it is armed in this process, and the sentence is
+    // the only place that says so. Two rows here: it is said **once** (every other
+    // receiver on a LAN answers continuously, and §4.10 measured what an unbounded
+    // periodic line does to this product's own log), and it names the consequence
+    // rather than just the count — AGENTS.md §4.2's 「每一条失败文案必须给出下一步」
+    // applies to the healthy sentences too, because "learned 4 records" with no verb
+    // sends the reader to the source.
+    let logger = Logger::named("Discovery-Hearing");
+    let path = logger.claim();
+    let service = fixture_service();
+    let announcement = service.announcement();
+    drive(
+        &service,
+        &logger,
+        vec![
+            (announcement.clone(), peer(MDNS_PORT)),
+            (announcement, peer(MDNS_PORT)),
+        ],
+    );
+    let all = lines(&path);
+    let heard: Vec<&str> = all
+        .lines()
+        .filter(|line| line.contains("mDNS engine heard a response on"))
+        .collect();
+    assert_eq!(
+        heard.len(),
+        1,
+        "the hearing sentence was said {} times for two looped-back packets: {}",
+        heard.len(),
+        lines(&path)
+    );
+    let line = heard[0];
+    assert!(
+        line.contains("4 record(s)"),
+        "the hearing sentence does not count what it learned: {line}"
+    );
+    assert!(
+        line.contains("waits a second"),
+        "the hearing sentence names no consequence: {line}"
+    );
+}
+
+
 /// A query built by a **foreign stack**, in the exact shape one went across the LAN
 /// from 192.168.1.68 on 2026-10-18 (a python sender on that machine, its bytes
 /// printed before sending), and the answer that same host saw back: 296 bytes,
@@ -1811,10 +2068,11 @@ fn e10_a_query_written_by_a_foreign_stack_is_answered() {
         ("id 0, QU bit set", foreign_query(SERVICE_TYPE, 0, true)),
     ] {
         assert_eq!(bytes.len(), 40, "{label}: the frozen wire shape drifted");
-        let (served, _sent) = served_by(&service, &bytes, peer(5353));
+        let (served, sent) = served_by(&service, &bytes, peer(5353));
         assert_eq!(served.queries, 1, "{label}: not read as a question");
         assert_eq!(
-            served.group, 1,
+            sent.group.len(),
+            1,
             "{label}: a question we run the answer to was declined"
         );
     }
@@ -1997,7 +2255,7 @@ fn the_airplay_service_is_announced_and_never_answered() {
     let announced = cast.announcement();
     let question = ptr_query(SERVICE_TYPE);
     let mut queue = std::collections::VecDeque::from(vec![question.clone()]);
-    let mut recv = || match queue.pop_front() {
+    let mut recv = |_: Duration| match queue.pop_front() {
         Some(bytes) => Ok(Some((bytes, peer(MDNS_PORT)))),
         None => {
             running.store(false, Ordering::SeqCst);
