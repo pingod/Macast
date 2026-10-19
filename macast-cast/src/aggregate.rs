@@ -66,10 +66,24 @@ pub const PLAIN_ADDITIONAL_DELAY_MS: u64 = 0;
 pub const PROTECTED_ADDITIONAL_DELAY_MS: u64 = 1000;
 
 /// `const.py:29` — `_ONE_SECOND`, the window `_has_mcast_record_in_last_second`
-/// and `_has_mcast_within_one_quarter_ttl` are both measured against. Used as the
-/// ledger's own lifetime too: an entry older than this can answer no question this
-/// port asks, which is why the ledger may prune on it (see [`Ledger`]).
+/// measures against: an answer this socket already shouted waits a full second
+/// before it goes out again.
 pub const PROTECTION_WINDOW_MS: u64 = 1000;
+
+/// `_dns.py:28` — `_RECENT_TIME_MS = 250`, used as `created + 250 * ttl > now` with
+/// `ttl` in **seconds**, i.e. "less than a quarter of the record's own lifetime has
+/// passed since we heard it". `_dns.py:208-210` (`is_recent`) is exactly what
+/// `_has_mcast_within_one_quarter_ttl` asks, and RFC 6762 §5.4 is why the number
+/// exists: a QU question should be answered by unicast, *unless* this responder has
+/// not sent that record within a quarter of its TTL, in which case the group is
+/// supposed to hear it so peer caches stay current.
+///
+/// A PTR at 4500 s is therefore "recent" for 1125 seconds and an A at 120 s for 30 —
+/// one to two orders of magnitude more than [`PROTECTION_WINDOW_MS`]. That is why
+/// [`Ledger::prune`] cannot age entries out on the one-second window: the QU question
+/// needs the same entry seconds to minutes later, and a prune tuned to one question
+/// silently makes the other answer "no" forever.
+pub const RECENT_FRACTION_MS_PER_TTL: u64 = 250;
 
 /// The reference's record identity, as one comparable string.
 ///
@@ -204,24 +218,30 @@ pub fn wire_identity(record: &Record) -> Option<RecordKey> {
     Some(RecordKey::new(kind, record.class, &record.name, Some(&detail)))
 }
 
-/// "Did this wire already carry this record?" — the last-second question
-/// `query_handler.py:152-160` asks, and the only question this type answers.
+/// What the engine heard, and the only two questions it is ever asked about it.
 ///
-/// It is **not** a general cache. The reference's `DNSCache` also serves
-/// `ServiceBrowser` listeners, expiry heaps and goodbye bookkeeping; those live
-/// elsewhere in this port (`targets.rs` holds the device ledger, `browse` holds its
-/// own fold). Keeping this one question here means the flood protection can be
-/// reasoned about in eleven lines, and it means the divergence in how long a key
-/// lives is stated rather than inherited.
-///
-/// Entries are pruned after [`PROTECTION_WINDOW_MS`] because an entry older than
-/// the window answers "no" to the only question asked, and a machine that runs for
-/// a week discovering neighbours would otherwise grow a map nobody reads. The
-/// reference expires by TTL instead; for this question the two agree on every
-/// answer within the window and differ only in memory.
+/// The reference answers both from one structure, its `DNSCache`: the one-second
+/// flood question (`_has_mcast_record_in_last_second`) and the QU question
+/// (`_has_mcast_within_one_quarter_ttl` → `is_recent`). This type is **not** a general
+/// cache — `ServiceBrowser` listeners, expiry heaps and goodbye bookkeeping live
+/// elsewhere (`targets.rs` holds the device ledger, `mdns::browse` its own fold) — but
+/// it now has to hold what *both* questions need, which is `created` **and `ttl`**:
+/// a 4500-second PTR is "recent" for 1125 s and a 120-second A for 30 s, so an entry
+/// keyed on "heard at" alone cannot answer the QU question at all, and a prune tuned to
+/// the one-second window would silently make the other question answer "no" forever.
+/// That is why [`Ledger::prune`] ages on the record's own quarter-TTL.
 #[derive(Debug, Default)]
 pub struct Ledger {
-    entries: HashMap<RecordKey, u64>,
+    entries: HashMap<RecordKey, Heard>,
+}
+
+/// One heard record: when it arrived on this socket, and the lifetime the wire claimed
+/// for it. `ttl` is kept in seconds exactly as `mdns::Record` reads it, because the
+/// quarter-TTL arithmetic (`_dns.py:210`) multiplies it by 250 rather than by 1000.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Heard {
+    created: u64,
+    ttl: u32,
 }
 
 impl Ledger {
@@ -243,6 +263,7 @@ impl Ledger {
     /// records with TTL 0, looped back one poll later) must not leave the keys it
     /// names protected — that would be a stale "we just shouted this" for a record
     /// we have just announced as gone.
+    ///
     /// Returns how many records it **acted on** (learned or forgot), because a
     /// caller that only wants to log "I heard myself" must not count the ones this
     /// parser could not read — an unparseable record contributes nothing, and a
@@ -262,26 +283,60 @@ impl Ledger {
                     touched += 1;
                 }
             } else {
-                self.entries.insert(key, now_ms);
+                self.entries.insert(
+                    key,
+                    Heard {
+                        created: now_ms,
+                        ttl: record.ttl,
+                    },
+                );
                 touched += 1;
             }
         }
         touched
     }
 
-    /// When did we hear this record, if that was inside the window? The caller
-    /// passes the result straight to [`crate::respond::bucket`].
+    /// When did we hear this record, if that was inside the one-second window? The
+    /// caller passes the result straight to [`crate::respond::bucket`].
     pub fn seen(&self, key: &RecordKey, now_ms: u64) -> Option<u64> {
-        let created = *self.entries.get(key)?;
-        (now_ms.saturating_sub(created) < PROTECTION_WINDOW_MS).then_some(created)
+        let entry = *self.entries.get(key)?;
+        (now_ms.saturating_sub(entry.created) < PROTECTION_WINDOW_MS).then_some(entry.created)
     }
 
-    /// Drop what can no longer answer "yes". Called once per engine tick, not per
-    /// packet: the sweep is `O(entries)` and the window is a second, so a tick of
-    /// 200 ms bounds the map at "what the last second of traffic named".
+    /// `_dns.py:208-210` — `created + 250 * ttl > now`: less than a quarter of the
+    /// record's own lifetime has passed since it was heard. This is the QU question,
+    /// and it is asked by [`crate::announce::serve`] per answer record, the way
+    /// `add_qu_question_response` asks it per record.
+    ///
+    /// Note which way this is read: `is_recent` true means "**do not** multicast it
+    /// again, send the asker a unicast instead". A port that treats recency as "go
+    /// ahead and shout" inverts RFC 6762 §5.4 and turns every QU query from every
+    /// browser on the LAN into a group-addressed flood — the exact traffic the rule is
+    /// there to prevent.
+    pub fn is_recent(&self, key: &RecordKey, now_ms: u64) -> bool {
+        match self.entries.get(key) {
+            Some(entry) => {
+                entry.created
+                    + RECENT_FRACTION_MS_PER_TTL * entry.ttl as u64
+                    > now_ms
+            }
+            None => false,
+        }
+    }
+
+    /// Drop what can no longer answer either question — which is "older than a
+    /// quarter of its own TTL", the longer of the two windows for every TTL this
+    /// protocol uses (a record would have to arrive with ttl < 4 s for the one-second
+    /// window to outlive it, and the reference's own cache would have expired it by
+    /// then anyway). Pruning on the shorter window is the trap this function used to
+    /// be in: the flood answer stayed right, and `is_recent` quietly became a
+    /// function that had never seen an entry old enough to answer "yes".
+    ///
+    /// Called once per engine tick, not per packet.
     pub fn prune(&mut self, now_ms: u64) {
-        self.entries
-            .retain(|_, created| now_ms.saturating_sub(*created) < PROTECTION_WINDOW_MS);
+        self.entries.retain(|_, entry| {
+            entry.created + RECENT_FRACTION_MS_PER_TTL * entry.ttl as u64 > now_ms
+        });
     }
 
     /// How many keys are held. A test reads this to prove a goodbye removed

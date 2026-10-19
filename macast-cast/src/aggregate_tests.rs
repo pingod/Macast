@@ -21,7 +21,7 @@ use super::{
     RANDOM_MAX_MS,
     RANDOM_MIN_MS, AGGREGATION_DELAY_MS, PROTECTION_WINDOW_MS, PROTECTED_AGGREGATION_DELAY_MS,
     PROTECTED_ADDITIONAL_DELAY_MS};
-use crate::announce::{self, Served, Service};
+use crate::announce::{self, Service, Served, MDNS_PORT};
 use macast_core::logging::Logger;
 use crate::mdns;
 use crate::respond::{Chosen, Group, Kind, Section, Shape, Timing};
@@ -55,6 +55,7 @@ fn planned(kind: Kind, owner: &str, alias: Option<&str>) -> Group {
     Group {
         answer: answer(kind, owner, alias),
         additionals: Vec::new(),
+            from_qu: false,
     }
 }
 
@@ -205,10 +206,12 @@ fn a_merged_batch_replaces_the_riding_records_rather_than_unioning_them() {
     let with_rider = Group {
         answer: answer(Kind::Txt, "a", None),
         additionals: vec![answer(Kind::A, "host", None)],
+            from_qu: false,
     };
     let without = Group {
         answer: answer(Kind::Txt, "a", None),
         additionals: Vec::new(),
+            from_qu: false,
     };
     queue.add(0, RANDOM_MAX_MS, vec![Queued::new(0, &with_rider)]);
     queue.add(10, RANDOM_MIN_MS, vec![Queued::new(0, &without)]);
@@ -494,38 +497,288 @@ fn a_goodbye_forgets_what_it_named_instead_of_protecting_it() {
 }
 
 #[test]
-fn the_prune_ages_entries_and_leaves_a_young_one_alone() {
+fn the_prune_ages_on_a_quarter_of_the_ttl_because_that_is_the_longer_question() {
     crate::pin_test_dir();
+    // The one-second window and the quarter-TTL window live in the same entry, so
+    // `prune` has to age on the *longer* one. The first version of this function pruned
+    // at `PROTECTION_WINDOW_MS` and passed every assertion that existed — which is
+    // exactly what a silent loss looks like: `seen` kept answering correctly, and
+    // `is_recent` quietly became a function that had never met an entry old enough to
+    // answer "yes". The TXT this fixture announces carries TTL 4500, so it must still be
+    // recent at +1124 s and not at +1126 s.
     let service = service();
     let logger = Logger::named("Aggregate-Prune");
     let hello = mdns::parse_message(&service.announcement(), "t", &logger).expect("parses");
     let mut ledger = Ledger::default();
     ledger.learn(&hello.records, 0);
-    ledger.prune(PROTECTION_WINDOW_MS - 1);
-    assert_eq!(ledger.len(), 4, "the prune deleted an entry still inside the window");
-    ledger.prune(PROTECTION_WINDOW_MS);
+    assert_eq!(ledger.len(), 4);
+    let txt = plan_identity(&answer(Kind::Txt, &service.instance, None), &service)
+        .into_iter()
+        .next()
+        .expect("a key for the TXT");
+    // At one minute the 120-second SRV and A are correctly gone (`_RECENT_TIME_MS * 120`
+    // is 30 s), and the two 4500-second records — PTR and TXT — are not. Under the old
+    // one-second prune all four vanished, which is the loss this row exists to catch:
+    // the flood question would still have answered "no", as it always does by then, and
+    // the QU question would have answered "no" forever.
+    ledger.prune(60_000);
+    assert_eq!(
+        ledger.len(),
+        2,
+        "the long-TTL records did not outlive the short ones: {:?}",
+        ledger
+    );
+    assert!(ledger.is_recent(&txt, 60_000), "the entry is gone from the map");
+    // The boundary is `created + 250 * ttl > now` — strict, the reference's own `>`.
+    assert!(
+        ledger.is_recent(&txt, 4500 * 250 - 1),
+        "the quarter window ended early"
+    );
+    assert!(
+        !ledger.is_recent(&txt, 4500 * 250),
+        "the window is `>=`; `_dns.py:210` is `>`"
+    );
+    ledger.prune(4500 * 250 + 1);
     assert_eq!(
         ledger.len(),
         0,
-        "an entry that can only answer 'no' lived on — the map would grow with the LAN"
+        "an entry that answers neither question lived on — the map would grow with the LAN"
+    );
+    // …and the one-second question still says "no" long after its own window, rather
+    // than panicking or resurrecting: two questions, one entry, no contradiction.
+    assert_eq!(ledger.seen(&txt, 4500 * 250 - 1), None);
+}
+
+#[test]
+fn a_qu_question_from_the_group_is_multicast_now_when_the_record_is_not_recent() {
+    crate::pin_test_dir();
+    // This is the corpus's `ptr-qu` row, and the reason the port had to grow a fourth
+    // route: `async_response` sends a QU answer that arrived on the **group** through
+    // `add_qu_question_response`, which puts it in `_mcast_now` — immediately, not
+    // behind the aggregation delay — when the record has not gone out within a quarter
+    // of its TTL. Measured: that row answered at +0.3 ms while the plain `ptr` row of
+    // the same corpus went out at +92 ms. Until this round the port queued it like any
+    // other PTR answer, so the row's own delay was a witness nobody was reading.
+    let service = service();
+    let query = qu_query(&service.service_type, mdns::TYPE_PTR);
+    let (served, group, direct) = served_from(&service, &query, 500, 600, MDNS_PORT, |_| {});
+    assert_eq!(served.queries, 1);
+    assert_eq!(
+        served.group, 1,
+        "a QU question over the group was queued instead of answered now: {:?}",
+        served
+    );
+    assert_eq!(served.queued, 0, "the QU answer reached a queue");
+    assert_eq!(
+        served.direct, 0,
+        "a QU answer with nothing recent also went back to the asker"
+    );
+    assert_eq!(group.len(), 1);
+    assert!(direct.is_empty());
+}
+
+#[test]
+fn a_qu_question_from_the_group_is_unicast_only_once_the_record_is_recent() {
+    crate::pin_test_dir();
+    // RFC 6762 §5.4's other half, and the reason `_mcast_now` is not the only answer:
+    // once this responder has sent the record within a quarter of its TTL, a QU
+    // question is answered **back to the asker alone** — the group already has it, and
+    // re-shouting it is the flood. Six browsers opening a Cast menu in one second is
+    // the shape this exists for. Note what the route is *not*: it is not the direct copy
+    // an ephemeral-port query gets, which is also sent to the group;
+    // `query_handler.py:245-248`'s `continue` skips the multicast branch entirely.
+    let service = service();
+    let announcement = service.announcement();
+    let query = qu_query(&service.service_type, mdns::TYPE_PTR);
+    let heard = |out: &mut Outgoing| {
+        let logger = Logger::named("Aggregate-QuRecent");
+        let message = mdns::parse_message(&announcement, "t", &logger).expect("parses");
+        out.heard.learn(&message.records, 0);
+    };
+    let (served, group, direct) = served_from(&service, &query, 500, 600, MDNS_PORT, heard);
+    assert_eq!(served.direct, 1, "the QU answer did not go back to the asker");
+    assert_eq!(
+        served.group + served.queued,
+        0,
+        "the group was told again about a record it already has: {:?}",
+        served
+    );
+    assert!(group.is_empty(), "bytes reached the group sink: {group:?}");
+    assert_eq!(direct.len(), 1);
+    // And the reply the asker gets is the flush-stripped copy — the same rule the
+    // ephemeral-port leg uses, which is why both go through `respond::unicast_of`.
+    let logger = Logger::named("Aggregate-QuFlush");
+    let message = mdns::parse_message(&direct[0].0, "t", &logger).expect("the unicast parses");
+    assert!(
+        message.records.iter().all(|r| !r.flush),
+        "the QU unicast leg kept cache-flush bits: {:?}",
+        message.records.iter().map(|r| r.flush).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        direct[0].1.port(),
+        MDNS_PORT,
+        "the QU reply went back somewhere other than the asker"
     );
 }
 
 #[test]
-fn serving_a_response_feeds_the_ledger_and_answers_nothing() {
+fn a_qu_question_from_an_ephemeral_port_is_not_routed_by_the_qu_rule() {
     crate::pin_test_dir();
-    // The dispatch is the QR bit (`_listener.py:326`), **not** "were there questions":
-    // a packet that carries records and asks nothing is a response, and the reference
-    // ingests it and stays silent. A responder keyed on the question count would
-    // answer another receiver's reply as if it were a query.
+    // `if not ucast_source and is_unicast` — the QU branch is guarded by the source
+    // port first. A QU flag on a packet that already arrived by unicast is answered the
+    // ordinary way (direct copy **plus** the bucketed multicast copy), because the asker
+    // is one host and the group still needs the record. Dropping that guard would take
+    // the multicast copy away from every legacy unicast querier — the corpus's
+    // `ptr-ephemeral-src` row, which the aggregation round kept its pair for.
     let service = service();
     let announcement = service.announcement();
-    let (served, sent) = served_with_ledger(&service, &announcement, 0, 5_000, |_| {});
-    assert_eq!(served.queries, 0, "a response was read as a question");
-    assert_eq!(served.ingested, 4);
-    assert_eq!(served.absorbed, 0, "a readable response is not an unreadable packet");
+    let query = qu_query(&service.service_type, mdns::TYPE_PTR);
+    let heard = |out: &mut Outgoing| {
+        let logger = Logger::named("Aggregate-QuEphemeral");
+        let message = mdns::parse_message(&announcement, "t", &logger).expect("parses");
+        out.heard.learn(&message.records, 0);
+    };
+    let (served, group, direct) = served_from(&service, &query, 500, 600, 55_759, heard);
+    assert_eq!(served.direct, 1, "the ephemeral querier got no direct copy");
+    assert_eq!(direct[0].1.port(), 55_759, "the direct reply was sent elsewhere");
+    // **The bucket path, with the ledger's answer.** The group copy of the same reply is
+    // queued — and queued into the *protected* queue, because the record was heard 500 ms
+    // ago — so it is not on the wire at +100 ms. Asking the QU route instead would have
+    // produced `direct = 1, queued = 0`: exactly one copy, and a group that never learns.
+    assert_eq!(
+        served.queued, 1,
+        "the group copy vanished: {:?}",
+        served
+    );
+    assert!(
+        group.is_empty(),
+        "a protected answer reached the wire at +100 ms: {group:?}"
+    );
+    let (_again, group, _direct) = served_from(&service, &query, 500, 1_600, 55_759, heard);
+    assert_eq!(
+        group.len(),
+        1,
+        "the group copy never arrived, so this is a missing packet, not a delay"
+    );
+}
+
+#[test]
+fn one_planned_a_record_is_one_record_per_advertisable_address() {
+    crate::pin_test_dir();
+    // The expansion behind [`plan_identity`]'s `Vec` return: `Chosen` carries no
+    // address (`respond::datagram`'s own comment says the plan decides *whether* the
+    // host rides along, not which of several), so one planned `A` answer is N records
+    // on the wire and N identities in the ledger. A laptop with one interface cannot
+    // tell this from a port that truncates the list to the first address — which is
+    // why the service here has **two**, and why the two keys have to differ.
+    //
+    // The same asymmetry the reference cannot express in this port: it buckets each A
+    // record on its own, while a single `Chosen` gets a single bucket. `last_heard`
+    // takes the newest sighting of the expansions (the protective side), and
+    // `a_heard_answer_protects_every_address_it_named` asks what that means on the
+    // wire.
+    let one = service();
+    let mut service = one.clone();
+    service.addresses = vec![
+        "192.0.2.1".parse().expect("first"),
+        "192.0.2.2".parse().expect("second"),
+    ];
+    let record = answer(Kind::A, &service.server, None);
+    let keys: Vec<String> = plan_identity(&record, &service)
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect();
+    assert_eq!(
+        keys.len(),
+        2,
+        "one planned A record became {} ledger entries for a two-address service",
+        keys.len()
+    );
+    assert_ne!(keys[0], keys[1], "the two addresses share one identity");
+    // And a single-address service still costs one entry — the `Vec` is not standing
+    // in for a bug that fires whenever there is exactly one interface.
+    assert_eq!(plan_identity(&record, &one).len(), 1);
+}
+
+#[test]
+fn a_heard_answer_protects_every_address_it_named() {
+    crate::pin_test_dir();
+    // Reading the other half of the expansion: the looped-back copy carries both A
+    // records, so both keys enter the ledger, and the TXT riding in the same packet is
+    // what a later TXT question is measured against. Asserted through the packet's
+    // record count rather than through a bucket, because the bucket rule with one
+    // answer per packet is already `a_query_the_wire_just_answered_waits_a_second…`.
+    let mut service = service();
+    service.addresses = vec![
+        "192.0.2.1".parse().expect("first"),
+        "192.0.2.2".parse().expect("second"),
+    ];
+    let logger = Logger::named("Aggregate-TwoAddresses");
+    let message = mdns::parse_message(&service.announcement(), "t", &logger)
+        .expect("a two-address announcement parses");
+    let mut ledger = Ledger::default();
+    let touched = ledger.learn(&message.records, 0);
+    assert_eq!(
+        touched,
+        5,
+        "the ledger learned {} records from a two-address packet, not the five it carries",
+        touched
+    );
+    for address in ["192.0.2.1", "192.0.2.2"] {
+        let record = answer(Kind::A, &service.server, None);
+        let key = crate::aggregate::RecordKey::new(
+            Kind::A,
+            crate::mdns::CLASS_IN,
+            &service.server,
+            Some(address),
+        );
+        assert!(
+            plan_identity(&record, &service)
+                .iter()
+                .any(|held| held == &key),
+            "the plan does not name {address}"
+        );
+        assert_eq!(ledger.seen(&key, 500), Some(0), "{address} was not heard");
+    }
+}
+
+#[test]
+fn a_response_that_also_carries_questions_is_ingested_and_not_answered() {
+    crate::pin_test_dir();
+    // The dispatch is the **QR bit**, not "were there questions" — and this row is the
+    // only thing that can tell the two apart, because an ordinary announcement has no
+    // questions in it and both readings agree there. `incoming.py` counts questions and
+    // records independently, and `_listener.py:326` tests only the flag, so a packet
+    // that does both is a response. A responder keyed on the question list would answer
+    // its own announcements as soon as another receiver's reply happened to carry a
+    // question — which is the flood this whole module is about.
+    let service = service();
+    let logger = Logger::named("Aggregate-QR");
+    let mut response = mdns::query(&service.instance, mdns::TYPE_TXT).expect("encodes");
+    // One question, one record, and the QR bit set: a packet that asks *and* claims to
+    // answer. The record is what makes the two readings differ in the other direction
+    // too — without it "ingested" would be zero for a reason that has nothing to do
+    // with the dispatch.
+    let parsed = mdns::parse_message(&service.announcement(), "t", &logger).expect("parses");
+    let txt = parsed
+        .records
+        .iter()
+        .find(|r| r.rtype == mdns::TYPE_TXT)
+        .expect("the announcement carries a TXT");
+    let mut extra = Vec::new();
+    write_record(&mut extra, txt);
+    response.extend_from_slice(&extra);
+    response[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+    response[2] |= 0x80; // QR: this is a response
+    let (served, sent) = served_with_ledger(&service, &response, 0, 5_000, |_| {});
+    assert_eq!(served.queries, 0, "a response with a question in it was answered");
     assert_eq!(served.group + served.direct + served.queued, 0);
-    assert!(sent.is_empty(), "a response cost bytes on the wire");
+    assert!(sent.is_empty(), "bytes went out for a packet that was not a query");
+    assert_eq!(
+        served.ingested, 1,
+        "the QR dispatch is right but the ledger still missed it: {:?}",
+        served
+    );
 }
 
 #[test]
@@ -664,152 +917,70 @@ fn write_record(out: &mut Vec<u8>, record: &mdns::Record) {
     out.extend_from_slice(&rdata);
 }
 
-#[test]
-fn one_planned_a_record_is_one_record_per_advertisable_address() {
-    crate::pin_test_dir();
-    // The expansion behind [`plan_identity`]'s `Vec` return: `Chosen` carries no
-    // address (`respond::datagram`'s own comment says the plan decides *whether* the
-    // host rides along, not which of several), so one planned `A` answer is N records
-    // on the wire and N identities in the ledger. A laptop with one interface cannot
-    // tell this from a port that truncates the list to the first address — which is
-    // why the service here has **two**, and why the two keys have to differ.
-    //
-    // The same asymmetry the reference cannot express in this port: it buckets each A
-    // record on its own, while a single `Chosen` gets a single bucket. `last_heard`
-    // takes the newest sighting of the expansions (the protective side), and
-    // `a_heard_answer_protects_every_address_it_named` asks what that means on the
-    // wire.
-    let one = service();
-    let mut service = one.clone();
-    service.addresses = vec![
-        "192.0.2.1".parse().expect("first"),
-        "192.0.2.2".parse().expect("second"),
-    ];
-    let record = answer(Kind::A, &service.server, None);
-    let keys: Vec<String> = plan_identity(&record, &service)
-        .iter()
-        .map(|key| key.as_str().to_string())
-        .collect();
-    assert_eq!(
-        keys.len(),
-        2,
-        "one planned A record became {} ledger entries for a two-address service",
-        keys.len()
-    );
-    assert_ne!(keys[0], keys[1], "the two addresses share one identity");
-    // And a single-address service still costs one entry — the `Vec` is not standing
-    // in for a bug that fires whenever there is exactly one interface.
-    assert_eq!(plan_identity(&record, &one).len(), 1);
-}
-
-#[test]
-fn a_heard_answer_protects_every_address_it_named() {
-    crate::pin_test_dir();
-    // Reading the other half of the expansion: the looped-back copy carries both A
-    // records, so both keys enter the ledger, and the TXT riding in the same packet is
-    // what a later TXT question is measured against. Asserted through the packet's
-    // record count rather than through a bucket, because the bucket rule with one
-    // answer per packet is already `a_query_the_wire_just_answered_waits_a_second…`.
-    let mut service = service();
-    service.addresses = vec![
-        "192.0.2.1".parse().expect("first"),
-        "192.0.2.2".parse().expect("second"),
-    ];
-    let logger = Logger::named("Aggregate-TwoAddresses");
-    let message = mdns::parse_message(&service.announcement(), "t", &logger)
-        .expect("a two-address announcement parses");
-    let mut ledger = Ledger::default();
-    let touched = ledger.learn(&message.records, 0);
-    assert_eq!(
-        touched,
-        5,
-        "the ledger learned {} records from a two-address packet, not the five it carries",
-        touched
-    );
-    for address in ["192.0.2.1", "192.0.2.2"] {
-        let record = answer(Kind::A, &service.server, None);
-        let key = crate::aggregate::RecordKey::new(
-            Kind::A,
-            crate::mdns::CLASS_IN,
-            &service.server,
-            Some(address),
-        );
-        assert!(
-            plan_identity(&record, &service)
-                .iter()
-                .any(|held| held == &key),
-            "the plan does not name {address}"
-        );
-        assert_eq!(ledger.seen(&key, 500), Some(0), "{address} was not heard");
+/// A question with the **QU** bit set on its class field (`_QU_BIT_MASK`).
+fn qu_query(name: &str, rtype: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&0u16.to_be_bytes()); // flags: query
+    out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+    for label in name.trim_end_matches('.').split('.') {
+        if label.is_empty() {
+            continue;
+        }
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
     }
-}
-
-#[test]
-fn a_response_that_also_carries_questions_is_ingested_and_not_answered() {
-    crate::pin_test_dir();
-    // The dispatch is the **QR bit**, not "were there questions" — and this row is the
-    // only thing that can tell the two apart, because an ordinary announcement has no
-    // questions in it and both readings agree there. `incoming.py` counts questions and
-    // records independently, and `_listener.py:326` tests only the flag, so a packet
-    // that does both is a response. A responder keyed on the question list would answer
-    // its own announcements as soon as another receiver's reply happened to carry a
-    // question — which is the flood this whole module is about.
-    let service = service();
-    let logger = Logger::named("Aggregate-QR");
-    let mut response = mdns::query(&service.instance, mdns::TYPE_TXT).expect("encodes");
-    // One question, one record, and the QR bit set: a packet that asks *and* claims to
-    // answer. The record is what makes the two readings differ in the other direction
-    // too — without it "ingested" would be zero for a reason that has nothing to do
-    // with the dispatch.
-    let parsed = mdns::parse_message(&service.announcement(), "t", &logger).expect("parses");
-    let txt = parsed
-        .records
-        .iter()
-        .find(|r| r.rtype == mdns::TYPE_TXT)
-        .expect("the announcement carries a TXT");
-    let mut extra = Vec::new();
-    write_record(&mut extra, txt);
-    response.extend_from_slice(&extra);
-    response[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
-    response[2] |= 0x80; // QR: this is a response
-    let (served, sent) = served_with_ledger(&service, &response, 0, 5_000, |_| {});
-    assert_eq!(served.queries, 0, "a response with a question in it was answered");
-    assert_eq!(served.group + served.direct + served.queued, 0);
-    assert!(sent.is_empty(), "bytes went out for a packet that was not a query");
-    assert_eq!(
-        served.ingested, 1,
-        "the QR dispatch is right but the ledger still missed it: {:?}",
-        served
-    );
+    out.push(0);
+    out.extend_from_slice(&rtype.to_be_bytes());
+    out.extend_from_slice(&(crate::mdns::CLASS_IN | 0x8000).to_be_bytes());
+    out
 }
 
 // ---------------------------------------------------------------------------
 // Helpers that reach `serve` with a ledger that may already be filled
 // ---------------------------------------------------------------------------
 
-/// Drive `serve` at `now_ms`, then flush the queues at `flush_ms`, and hand back
-/// what reached the wire.
+/// Drive `serve` at `now_ms` from a peer on `peer_port`, then flush the queues at
+/// `flush_ms`, and hand back what reached each sink.
 ///
 /// `fill` exists so a test can put the ledger in the state it wants **before** the
-/// query is served — the same order the engine does it in, since a datagram is
-/// ingested on the tick it arrives and an answer is bucketed on the tick it is asked.
-fn served_with_ledger(
+/// query is served — the same order the engine does it in, since a datagram is ingested
+/// on the tick it arrives and an answer is bucketed on the tick it is asked.
+fn served_from(
     service: &Service,
     data: &[u8],
     now_ms: u64,
     flush_ms: u64,
+    peer_port: u16,
     fill: impl FnOnce(&mut Outgoing),
-) -> (Served, Vec<Vec<u8>>) {
+) -> (
+    Served,
+    Vec<Vec<u8>>,
+    Vec<(Vec<u8>, SocketAddr)>,
+) {
     let logger = Logger::named("Aggregate-Serve");
-    let mut group: Vec<Vec<u8>> = Vec::new();
+    let group: std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let direct: std::rc::Rc<std::cell::RefCell<Vec<(Vec<u8>, SocketAddr)>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let mut queues = Outgoing::with_random(Box::new(|| RANDOM_MIN_MS));
     fill(&mut queues);
-    let mut multicast = |bytes: &[u8]| {
-        group.push(bytes.to_vec());
-        Ok(())
+    let mut multicast = {
+        let group = std::rc::Rc::clone(&group);
+        move |bytes: &[u8]| {
+            group.borrow_mut().push(bytes.to_vec());
+            Ok(())
+        }
     };
-    let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
-    let from: SocketAddr = "192.0.2.9:5353".parse().expect("a peer");
+    let mut unicast = {
+        let direct = std::rc::Rc::clone(&direct);
+        move |bytes: &[u8], peer: SocketAddr| {
+            direct.borrow_mut().push((bytes.to_vec(), peer));
+            Ok(())
+        }
+    };
+    let from: SocketAddr = format!("192.0.2.9:{peer_port}").parse().expect("a peer");
     let served = announce::serve(
         data,
         from,
@@ -821,13 +992,35 @@ fn served_with_ledger(
         &mut queues,
         &logger,
     );
-    // The flush `run` would do on a later tick. Rendered through the product's own
-    // `datagram_for`, so a batch that only this helper can render is a batch the
-    // engine would drop.
+    // The flush `run` would do on a later tick, rendered through the product's own
+    // `datagram_for` — a batch only this helper could render is a batch the engine
+    // would drop.
     for batch in queues.due(flush_ms) {
         if let Some(bytes) = announce::datagram_for(&batch, &[service]) {
-            group.push(bytes);
+            group.borrow_mut().push(bytes);
         }
     }
+    let group_out = {
+        let mut held = group.borrow_mut();
+        std::mem::take(&mut *held)
+    };
+    let direct_out = {
+        let mut held = direct.borrow_mut();
+        std::mem::take(&mut *held)
+    };
+    (served, group_out, direct_out)
+}
+
+/// [`served_from`] with the ordinary group-port peer and the direct sink dropped, which
+/// is what most of the rows above only want to ask about.
+fn served_with_ledger(
+    service: &Service,
+    data: &[u8],
+    now_ms: u64,
+    flush_ms: u64,
+    fill: impl FnOnce(&mut Outgoing),
+) -> (Served, Vec<Vec<u8>>) {
+    let (served, group, _direct) =
+        served_from(service, data, now_ms, flush_ms, MDNS_PORT, fill);
     (served, group)
 }

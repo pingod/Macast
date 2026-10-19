@@ -965,7 +965,6 @@ fn the_flat_records_are_exactly_the_flattened_groups() {
     // the corpus read, once grouped by which additionals ride with which answer. Two
     // fields, one builder, and this is the line that stops them becoming two answers
     // about the same query.
-    let shape = Shape::new(INSTANCE, SERVER, true);
     for case in [
         "ptr", "srv", "txt", "any", "aaaa", "enum", "ptr-ephemeral-src",
     ] {

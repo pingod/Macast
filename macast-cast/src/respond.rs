@@ -223,6 +223,22 @@ pub struct Reply {
 pub struct Group {
     pub answer: Chosen,
     pub additionals: Vec<Chosen>,
+    /// Did the **question that earned this answer** ask for a unicast response
+    /// (`_QU_BIT_MASK` on the class field, `question.unique`)?
+    ///
+    /// Carried on the group rather than decided here because the reference carries it
+    /// on the question and branches on it in `async_response`
+    /// (`if not ucast_source and is_unicast: add_qu_question_response(...)`): a QU
+    /// question that reached us over the **group** is answered by unicast back to the
+    /// asker, *unless* we have not sent that record within a quarter of its TTL, in
+    /// which case the whole group is supposed to hear it (RFC 6762 §5.4). That is a
+    /// different bucket set from the multicast one — not a re-timing of it — so it has
+    /// to be knowable per answer.
+    ///
+    /// Stamped by [`respond`] rather than by the answer table, because `answers_any`
+    /// builds groups for a question the reader of it should not have to name: the flag
+    /// describes why an answer exists, and one writer is enough.
+    pub from_qu: bool,
 }
 
 /// What one question is worth, as answer records plus the records that ride with
@@ -270,12 +286,17 @@ fn answers(question: &Question, shape: &Shape) -> Vec<Group> {
                 record(Kind::Txt, Section::Additional, &instance, OTHER_TTL, true),
             ];
             host_pair(&mut additionals);
-            vec![Group { answer, additionals }]
+            vec![Group {
+                answer,
+                additionals,
+                from_qu: false,
+            }]
         }
         // The enumeration answer is one PTR naming the *type*, with no additionals —
         // the corpus's `enum` row carries exactly one record, owner
         // `_services._dns-sd._udp.local.`, alias our service type.
         Kind::Ptr if question.name == ENUM_TYPE => vec![Group {
+            from_qu: false,
             answer: Chosen {
                 kind: Kind::Ptr,
                 section: Section::Answer,
@@ -290,6 +311,7 @@ fn answers(question: &Question, shape: &Shape) -> Vec<Group> {
             let mut additionals = Vec::new();
             host_pair(&mut additionals);
             vec![Group {
+                from_qu: false,
                 answer: record(Kind::Srv, Section::Answer, &instance, HOST_TTL, true),
                 additionals,
             }]
@@ -298,10 +320,12 @@ fn answers(question: &Question, shape: &Shape) -> Vec<Group> {
         // corpus's `txt` row is a single record — an "obvious" addition of the host
         // pair here would be a divergence nobody measured.
         Kind::Txt if named_instance => vec![Group {
+            from_qu: false,
             answer: record(Kind::Txt, Section::Answer, &instance, OTHER_TTL, true),
             additionals: Vec::new(),
         }],
         Kind::A if question.name == server && shape.has_v4 => vec![Group {
+            from_qu: false,
             answer: record(Kind::A, Section::Answer, &server, HOST_TTL, true),
             additionals: vec![record(Kind::Nsec, Section::Additional, &server, HOST_TTL, true)],
         }],
@@ -310,6 +334,7 @@ fn answers(question: &Question, shape: &Shape) -> Vec<Group> {
         // reference does not go silent here, which is the difference between
         // "no such record" and "I am not listening".
         Kind::Aaaa if question.name == server => vec![Group {
+            from_qu: false,
             answer: record(Kind::Nsec, Section::Answer, &server, HOST_TTL, true),
             additionals: Vec::new(),
         }],
@@ -372,6 +397,7 @@ fn answers_any(name: &str, shape: &Shape) -> Vec<Group> {
     }
     vec![
         Group {
+            from_qu: false,
             answer: Chosen {
                 kind: Kind::Txt,
                 section: Section::Answer,
@@ -383,6 +409,7 @@ fn answers_any(name: &str, shape: &Shape) -> Vec<Group> {
             additionals: Vec::new(),
         },
         Group {
+            from_qu: false,
             answer: Chosen {
                 kind: Kind::Srv,
                 section: Section::Answer,
@@ -507,6 +534,27 @@ pub fn kind_of(rtype: u16) -> Option<Kind> {
     }
 }
 
+/// The same answers as a **unicast** leg: every cache-flush bit cleared.
+///
+/// The one owner of that rule, because two branches need it. `ucast_source` (the
+/// asker's port was not 5353) builds a direct copy of the whole reply, and
+/// `query_handler.py:245-248`'s QU-over-multicast branch sends **one answer record**
+/// back to the asker when that record was multicast within a quarter of its TTL — a
+/// packet `respond` never sees as a reply, because the question arrived on the group.
+/// Both write flush bits the reference does not send: the corpus's `ptr-ephemeral-src`
+/// row holds the same five records twice in one capture, once with `flush=True` (the
+/// group copy) and once with `flush=False` (the reply to `127.0.0.1:55759`).
+pub fn unicast_of(groups: &[Group]) -> Vec<Group> {
+    let mut direct: Vec<Group> = groups.to_vec();
+    for group in &mut direct {
+        group.answer.flush = false;
+        for record in &mut group.additionals {
+            record.flush = false;
+        }
+    }
+    direct
+}
+
 /// Everything the responder sends for one packet's questions.
 ///
 /// `ucast_source` is `source port != 5353` — a property of the datagram, not of the
@@ -524,7 +572,10 @@ pub fn kind_of(rtype: u16) -> Option<Kind> {
 pub fn respond(questions: &[Question], known: &[Known], ucast_source: bool, shape: &Shape) -> Vec<Reply> {
     let mut groups: Vec<Group> = Vec::new();
     for question in questions {
-        for group in suppress(answers(question, shape), known) {
+        for mut group in suppress(answers(question, shape), known) {
+            // The answer table builds groups without an opinion about who asked; this is
+            // the one place that knows the question, so the QU flag is stamped here.
+            group.from_qu = question.unicast_request;
             if !groups.iter().any(|held| *held == group) {
                 groups.push(group);
             }
@@ -535,16 +586,7 @@ pub fn respond(questions: &[Question], known: &[Known], ucast_source: bool, shap
     }
     let mut replies = Vec::new();
     if ucast_source {
-        let mut direct = groups.clone();
-        for group in &mut direct {
-            // The reference's unicast leg clears every cache-flush bit: the corpus
-            // holds both copies of the same five records in one capture, one set
-            // `flush=True`, one `flush=False`.
-            group.answer.flush = false;
-            for record in &mut group.additionals {
-                record.flush = false;
-            }
-        }
+        let direct = unicast_of(&groups);
         let records = flatten(&direct);
         replies.push(Reply {
             records,

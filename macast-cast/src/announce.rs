@@ -179,9 +179,17 @@ pub const GOODBYE_GAP: Duration = Duration::from_millis(125);
 /// announcement per start is not enough to *stay* known.
 pub const REANNOUNCE: Duration = Duration::from_secs(60);
 
-/// The group and port every burst is written to.
+/// The group every burst is written to.
 pub const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
-pub const MDNS_PORT: u16 = 5353;
+
+/// The port — **re-exported**, not repeated. This file used to declare its own
+/// `pub const MDNS_PORT: u16 = 5353`, so a reader comparing the two modules' copies
+/// found agreement and nothing more: two owners of a protocol number, and the only
+/// thing that could ever disagree about it is a change to one of them. `crate::mdns`
+/// owns it (its doc already says whose port it is — "the only port a browser binds"),
+/// and `§16 第 13 条`'s merged-socket work is exactly the change that would have to
+/// move it once and have both sides follow.
+pub use crate::mdns::MDNS_PORT;
 
 /// The DNS numbers. Reading lives in [`crate::mdns`]; these are the writing side
 /// of the same table, and a mismatch between the two is a packet our own browser
@@ -1394,8 +1402,21 @@ fn last_heard(
         .max()
 }
 
-/// Split one reply's answer groups by the bucket each one falls in, preserving the
-/// order in which the buckets first appear.
+/// Where one answer group goes: into a bucket of the aggregation scheduler, or
+/// straight back to the asker as a unicast packet.
+///
+/// `Direct` is not a fourth bucket — the reference's `_ucast` set is written by the
+/// caller and never touches a queue — but it has to be one of the answers
+/// [`split_by_bucket`] can give, because `query_handler.py:245-248` routes an entire
+/// QU-over-multicast answer there whenever the record is recent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    Bucket(crate::respond::Timing),
+    Direct,
+}
+
+/// Split one reply's answer groups by **where each one goes**, preserving the order in
+/// which the routes first appear.
 ///
 /// The reference loops over the answers of a reply and `continue`s into whichever
 /// bucket each one lands in (`query_handler.py:106-125`), so a reply can occupy two
@@ -1408,18 +1429,47 @@ fn split_by_bucket(
     service: &Service,
     questions: &[crate::respond::Question],
     probe: bool,
+    ucast_source: bool,
     queues: &crate::aggregate::Outgoing,
     now_ms: u64,
-) -> Vec<(crate::respond::Timing, Vec<crate::respond::Group>)> {
+) -> Vec<(Route, Vec<crate::respond::Group>)> {
     use crate::respond::Timing;
-    let mut buckets: Vec<(Timing, Vec<crate::respond::Group>)> = Vec::new();
-    for group in groups {
-        let seen = last_heard(&group.answer, service, queues, now_ms);
-        let bucket = crate::respond::bucket(questions, probe, seen, now_ms);
-        match buckets.iter_mut().find(|(held, _)| *held == bucket) {
+    let mut buckets: Vec<(Route, Vec<crate::respond::Group>)> = Vec::new();
+    let mut push = |route: Route, group: &crate::respond::Group| {
+        match buckets
+            .iter_mut()
+            .find(|(held, _)| *held == route)
+        {
             Some((_, held)) => held.push(group.clone()),
-            None => buckets.push((bucket, vec![group.clone()])),
+            None => buckets.push((route, vec![group.clone()])),
         }
+    };
+    for group in groups {
+        if !ucast_source && group.from_qu {
+            // `_has_mcast_within_one_quarter_ttl`, asked of the same ledger the
+            // one-second question uses and with the same protective reading of a plan
+            // that expands to several records (`last_heard` carries why). **Recent
+            // means do not shout it again**: answer the asker alone. Inverting that
+            // sentence is how a port turns every browser's Cast menu into six
+            // group-addressed copies of a record the group already has.
+            let recent = crate::aggregate::plan_identity(&group.answer, service)
+                .into_iter()
+                .any(|key| queues.heard.is_recent(&key, now_ms));
+            push(
+                if recent {
+                    Route::Direct
+                } else {
+                    Route::Bucket(Timing::Now)
+                },
+                group,
+            );
+            continue;
+        }
+        let seen = last_heard(&group.answer, service, queues, now_ms);
+        push(
+            Route::Bucket(crate::respond::bucket(questions, probe, seen, now_ms)),
+            group,
+        );
     }
     buckets
 }
@@ -1524,10 +1574,17 @@ pub fn serve(
             }
             continue;
         }
-        for (bucket, groups) in split_by_bucket(&reply.groups, service, &questions, probe, queues, now_ms)
-        {
-            match bucket {
-                Timing::Now => {
+        for (route, groups) in split_by_bucket(
+            &reply.groups,
+            service,
+            &questions,
+            probe,
+            ucast_source,
+            queues,
+            now_ms,
+        ) {
+            match route {
+                Route::Bucket(Timing::Now) => {
                     let records = respond::flatten(&groups);
                     let datagram = respond::datagram(&records, service);
                     match multicast(&datagram) {
@@ -1540,7 +1597,29 @@ pub fn serve(
                         )),
                     }
                 }
-                bucket => out.queued += queues.enqueue(bucket, index, &groups, now_ms),
+                Route::Bucket(bucket) => {
+                    out.queued += queues.enqueue(bucket, index, &groups, now_ms)
+                }
+                Route::Direct => {
+                    // Unicast back to the asker, flush bits cleared by the same owner
+                    // the ephemeral-port reply uses, and **nothing to the group** —
+                    // that omission is the content of RFC 6762 §5.4's "respond with a
+                    // unicast packet directed back to the querier". A port that also
+                    // multicast it is the flood the rule exists to prevent when six
+                    // browsers open a Cast menu in the same second.
+                    let leg = respond::unicast_of(&groups);
+                    let records = respond::flatten(&leg);
+                    let datagram = respond::datagram(&records, service);
+                    match unicast(&datagram, peer) {
+                        Ok(()) => out.direct += 1,
+                        Err(e) => log.warning(&format!(
+                            "mDNS unicast answer could not be sent ({} bytes to {}): {}",
+                            datagram.len(),
+                            peer,
+                            e
+                        )),
+                    }
+                }
             }
         }
     }
