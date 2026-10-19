@@ -4660,6 +4660,229 @@ PYEOF
     fi
 fi
 
+
+
+echo "== 30: the two 清空/显隐 buttons on the page reach a real player and the real file =="
+# Two POST rows whose backing already existed in this shell: `set-subtitle-show`
+# (`protocol.py:2699-2703`, the reference's row 14) publishes to the renderer, and
+# `clear-play-history` (`protocol.py:3083-3089`, row 21) empties the ledger the
+# 「播放历史」 card prints.
+#
+# **Its own instance, deliberately.** §24 kills the main instance on purpose (8009/8008 are
+# addresses the sender pins, so "we are not listening" and "we are listening but cannot get
+# the port" are indistinguishable from outside while the first one is alive) — which means
+# every section after it has to bring its own process. These two rows also need a **live
+# mpv**: the subtitle toggle is answered by the face with `{code, message}` and nothing
+# about the player, exactly as Python answers it, so the only witness that anything happened
+# is `query=status`'s `DisplayCurrentSubtitle` — and that value arrives **through mpv's own
+# property echo**, never from the request. That is AGENTS.md §5's ownership rule visible
+# from outside: this HTTP face does not write state variables, and the ledger is the one
+# list it is allowed to empty.
+#
+# The flag rule is asked at the door too. The reference does **not** strip this field
+# (`str(...).lower() in ('1','true','yes','on')`), unlike `?refresh=`, which does — so
+# `"1 "` (a one with a trailing space) must *hide* the subtitles even though the text
+# contains a yes-word. §29 measures the same asymmetry through the mirror switch; this is
+# the second door sharing that rule, which is why the rule has one owner.
+S30_SDIR=$(mktemp -d /tmp/macast-rust-subtitle.XXXXXX)
+S30_PORT=$((PORT + 10))
+S30_SOCK="$S30_SDIR/mpvsocket"
+S30_TOKEN=0123456789abcdef0123456789abcdef
+S30_BASE="http://127.0.0.1:$S30_PORT/api"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Subtitle", "Macast_Protocols": ["DLNA Protocol"], "Api_Token": "%s"}' \
+    "$S30_PORT" "$S30_TOKEN" > "$S30_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S30_SDIR" MACAST_MPV_SOCKET="$S30_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S30_SDIR/stdout.log" 2>&1 &
+S30_PID=$!
+disown "$S30_PID" 2>/dev/null || true
+S30_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S30_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S30_PID" ]; then
+        S30_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S30_READY" ]; then
+    fail "the subtitle instance never became the listener on $S30_PORT"
+    kill -9 "$S30_PID" 2>/dev/null
+    rm -rf "$S30_SDIR"
+else
+    # A player has to exist before a toggle can reach it, and the way this shell starts
+    # one is a cast. §23 taught the read: **poll for PLAYING, do not grab one instant**.
+    if [ ! -s "$CLIP" ]; then
+        skip "no test clip on this machine, so there is no player to toggle — the two rows below cannot be asked"
+    else
+        api_probe "$S30_BASE?query=cast&url=$MEDIA_URL&title=Rust-Subtitle-Witness&token=$S30_TOKEN"
+        PLAYING=""
+        for _ in $(seq 1 60); do
+            api_probe "$S30_BASE?query=status"
+            [ "$(json_ask media.TransportState)" = "PLAYING" ] && { PLAYING=1; break; }
+            sleep 0.25
+        done
+        if [ -z "$PLAYING" ]; then
+            fail "the cast never reached PLAYING on the subtitle instance ('$(json_ask media.TransportState)') — nothing below can be asked of a player that is not running"
+        else
+            pass "a cast put a real mpv in PLAYING, which is the only thing that can answer a subtitle toggle"
+            [ "$(json_len history)" -ge 1 ] \
+                && pass "and the same cast put a row in the ledger this section will clear" \
+                || fail "the player is playing but the ledger has $(json_len history) rows — the two writers disagree"
+
+            # **Let the player finish reporting first.** The first draft of these rows asked
+            # for `true` after `set-subtitle-show=1` and went green — green for nothing: mpv
+            # reports every observed property once when the observer is installed
+            # (`set_observe`), and subtitles are visible by default, so the table was about
+            # to say `true` no matter what any request did. A mutant that inverted the
+            # toggle reddened only the *second* row, which is how the vacuous first one got
+            # found (§4.13's 「不提问的检查」, in a section written this round).
+            #
+            # Measured with a timeline probe (`/private/tmp/subtitle_probe.py`, this round):
+            # the boot echo lands **about 0.4–1.0 s after `PLAYING`**, so a hide sent at
+            # t+0.05 is overwritten by the player's own initial `true` — and that is the
+            # reference's shape too (`macast_renderer/mpv.py:404-414` installs the observers
+            # and then answers whatever arrives, and §4.8's `set_observe` race is the same
+            # window). Nothing to fix in the product; **the row has to wait for the state it
+            # is about to move** — §4.2's 「等那个账本，不要抓一瞬间」 for the third shape of it.
+            SETTLED=""
+            for _ in $(seq 1 40); do
+                api_probe "$S30_BASE?query=status"
+                case "$(json_ask media.DisplayCurrentSubtitle)" in
+                    true|false) SETTLED=1; break ;;
+                esac
+                sleep 0.25
+            done
+            [ -n "$SETTLED" ] \
+                && pass "the player's own first report of sub-visibility has landed (the table holds a bool, not the \
+                    settings-file text \"1\") — now a toggle can be the only thing that moves it" \
+                || fail "DisplayCurrentSubtitle never became a bool on its own: last read '$(json_ask media.DisplayCurrentSubtitle)' — the observer never reported, so nothing below can be attributed to a toggle"
+            # Start from a known side rather than from whatever the default happened to be:
+            # hide first, so every later row is a transition only a request can cause.
+            api_post "$S30_BASE" "set-subtitle-show=0"
+            [ "$API_CODE" = "0" ] && [ "$API_MSG" = "success" ] \
+                && pass "the subtitle door answers success in the reference's two fields" \
+                || fail "the subtitle POST answered: HTTP $API_STATUS code='$API_CODE' msg='$API_MSG'"
+            SUB_HIDDEN_FIRST=""
+            for _ in $(seq 1 40); do
+                api_probe "$S30_BASE?query=status"
+                [ "$(json_ask media.DisplayCurrentSubtitle)" = "false" ] && { SUB_HIDDEN_FIRST=1; break; }
+                sleep 0.25
+            done
+            [ -n "$SUB_HIDDEN_FIRST" ] \
+                && pass "hiding moved the state table — because mpv reported its own property, not because the face wrote it" \
+                || fail "DisplayCurrentSubtitle never became false after set-subtitle-show=0: last read '$(json_ask media.DisplayCurrentSubtitle)'"
+
+            api_post "$S30_BASE" "set-subtitle-show=1"
+            SUB_SHOWN=""
+            for _ in $(seq 1 40); do
+                api_probe "$S30_BASE?query=status"
+                [ "$(json_ask media.DisplayCurrentSubtitle)" = "true" ] && { SUB_SHOWN=1; break; }
+                sleep 0.25
+            done
+            [ -n "$SUB_SHOWN" ] \
+                && pass "and showing again comes back through the same echo, from a state only a request could have left" \
+                || fail "DisplayCurrentSubtitle never became true after set-subtitle-show=1: last read '$(json_ask media.DisplayCurrentSubtitle)'"
+
+            # `--data-urlencode` percent-encodes the trailing space, so this is exactly the
+            # body a form with one stray space in it sends.
+            api_post "$S30_BASE" "set-subtitle-show=1 "
+            [ "$API_CODE" = "0" ] \
+                && pass "a padded yes-word is served, not rejected (the reference answers 0 for a value it does not recognise)" \
+                || fail "the padded POST answered code='$API_CODE' msg='$API_MSG'"
+            SUB_HIDDEN=""
+            for _ in $(seq 1 40); do
+                api_probe "$S30_BASE?query=status"
+                [ "$(json_ask media.DisplayCurrentSubtitle)" = "false" ] && { SUB_HIDDEN=1; break; }
+                sleep 0.25
+            done
+            [ -n "$SUB_HIDDEN" ] \
+                && pass "and \"1 \" **hides** them: this field is not stripped, so the space ends the word" \
+                || fail "\"1 \" did not hide the subtitles (last read '$(json_ask media.DisplayCurrentSubtitle)') — the door is stripping, or the echo is not landing"
+
+            # A refusal must not act. Management-gated, so a LAN caller without the token
+            # is out — and the player must not have heard anything. Captured from the
+            # **hidden** state the padded row above just produced, so the comparison below
+            # has a direction: an inverted or ignoring door shows here instead of silently
+            # agreeing with itself.
+            api_probe "$S30_BASE?query=status"
+            SUB_BEFORE=$(json_ask media.DisplayCurrentSubtitle)
+            [ "$SUB_BEFORE" = "false" ] \
+                && pass "the state is hidden before the refused toggle, which is what makes the next comparison a question" \
+                || fail "expected to be hiding before the refused POST, read '$SUB_BEFORE'"
+            api_post "http://$LAN:$S30_PORT/api" "set-subtitle-show=1"
+            [ "$API_CODE" = "403" ] \
+                && pass "a LAN caller with no token is refused the toggle" \
+                || fail "a LAN caller toggled the subtitles: code '$API_CODE'"
+            sleep 1
+            api_probe "$S30_BASE?query=status"
+            [ "$(json_ask media.DisplayCurrentSubtitle)" = "$SUB_BEFORE" ] \
+                && pass "and the refused POST moved nothing: the property still reads $SUB_BEFORE" \
+                || fail "the refused POST reached the player ($SUB_BEFORE -> $(json_ask media.DisplayCurrentSubtitle))"
+
+            # ---- the ledger
+            S30_MD5_BEFORE=$(md5 -q "$S30_SDIR/macast_setting.json")
+            api_post "$S30_BASE" "clear-play-history=1"
+            [ "$API_CODE" = "0" ] && [ "$API_MSG" = "success" ] \
+                && pass "the clear answers success, in the same two fields as the reference" \
+                || fail "clear-play-history answered code='$API_CODE' msg='$API_MSG'"
+            api_probe "$S30_BASE?query=status"
+            [ "$(json_len history)" = "0" ] \
+                && pass "and the page's own read now has no rows" \
+                || fail "the ledger still has $(json_len history) row(s) after the clear"
+            S30_HIST=$(python3 - "$S30_SDIR/macast_setting.json" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1])).get("Play_History", "ABSENT")
+print("EMPTY-LIST" if row == [] else ("ABSENT" if row == "ABSENT" else "OTHER"))
+PYEOF
+)
+            # 「清空」 writes an empty list rather than deleting the key (the reference's
+            # `Setting.set(Play_History, [])`, §16 第 22 条's rule that a cleared thing stays
+            # present so the boot log can tell 清空过 from 从未投过东西).
+            [ "$S30_HIST" = "EMPTY-LIST" ] \
+                && pass "and the file says the same thing: Play_History is an empty list, not a deleted key" \
+                || fail "the file's Play_History reads $S30_HIST after the clear"
+            S30_MD5_AFTER=$(md5 -q "$S30_SDIR/macast_setting.json")
+            [ "$S30_MD5_BEFORE" != "$S30_MD5_AFTER" ] \
+                && pass "the clear reached the disk — the ledger is not a display-only list" \
+                || fail "the settings file is byte-identical after the clear (nothing was persisted)"
+
+            # The writer still works. A clear that broke the append path would look exactly
+            # like the two rows above until someone cast something again.
+            api_probe "$S30_BASE?query=cast&url=$MEDIA_URL&title=Rust-Ledger-After&token=$S30_TOKEN"
+            AGAIN=""
+            for _ in $(seq 1 40); do
+                api_probe "$S30_BASE?query=status"
+                [ "$(json_len history)" = "1" ] && { AGAIN=1; break; }
+                sleep 0.25
+            done
+            [ -n "$AGAIN" ] \
+                && pass "and casting after a clear puts exactly one row back — it emptied the ledger, it did not break it" \
+                || fail "history reads $(json_len history) row(s) after a fresh cast; the clear left the writer broken"
+
+            # Both 清空 buttons in one request: the reference's row 21 runs and row 22 never
+            # does. The answer shape says which — `clear-log`'s document carries a `removed`
+            # count, the ledger's does not.
+            api_post "$S30_BASE" "clear-play-history=1&clear-log=1"
+            [ "$API_CODE" = "0" ] \
+                && pass "one request carrying both 清空 fields is served without a fuss" \
+                || fail "the two-field request answered code='$API_CODE'"
+            api_probe "$S30_BASE?query=status"
+            [ "$(json_len history)" = "0" ] \
+                && pass "and the earlier row is the one that ran: the ledger is empty again" \
+                || fail "the later row ran first: history holds $(json_len history) row(s)"
+        fi
+    fi
+
+    kill -9 "$S30_PID" 2>/dev/null
+    pkill -9 -f "$S30_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S30_SDIR (macast.log, logs/MPV.log, macast_setting.json)"
+    else
+        rm -rf "$S30_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

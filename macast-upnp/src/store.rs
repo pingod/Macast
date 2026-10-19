@@ -164,6 +164,27 @@ pub trait StateStore: Send + Sync {
     /// is recorded in `docs/Rust-Port-Design.md` rather than papered over by reading
     /// a settings key this shell never writes.
     fn play_history(&self) -> Vec<(String, String, i64)>;
+
+    /// `Protocol.clear_play_history` (`protocol.py:1220-1226`): the ledger becomes an
+    /// **empty list**, and on disk as well as in memory — the reference writes
+    /// `Setting[Play_History] = []` rather than deleting the key, which is the same
+    /// rule 模块设置 follows for a scalar it clears (§16 第 22 条: a page that reads
+    /// 「清空过」 and a page that reads 「从未投过东西」 need not be the same page, but
+    /// the key's presence is what makes the boot log say the right one).
+    ///
+    /// The reference wraps the write in `try/except` and answers
+    /// `{'code': 1, 'message': 'clear failed'}`. **That arm has no shape here** and the
+    /// reason is recorded rather than hidden: `Setting::save` swallows the same I/O
+    /// errors Python would raise and logs them where they happen, so a `clear failed`
+    /// sentence would be a document for a state nothing can reach (§16 第 34 条's
+    /// mirror-switch reasoning, same shape).
+    ///
+    /// This is the **one** ledger write the HTTP face performs. State variables stay
+    /// SOAP's alone (AGENTS.md §5's ownership rule, and [`crate::http::Face`]'s `store`
+    /// field says so); `Play_History` is not a state variable — it is the list the
+    /// 「播放历史」 card prints, and in Python the same page button writes it through the
+    /// same door.
+    fn clear_history(&self);
 }
 
 /// The thing that actually plays. Implemented over `src-tauri`'s `Player`.

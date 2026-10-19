@@ -173,6 +173,15 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// `set-subtitle-show=<anything truthy>`: tell the player to show or hide subtitles
+    /// (`_post_set_subtitle_show`, `protocol.py:2699-2703`). The answer is
+    /// `{code, message}` and nothing else: Python publishes to the renderer and answers
+    /// success whether or not a player is running, so the face owns that sentence and
+    /// the seam returns nothing.
+    SetSubtitleShow,
+    /// `clear-play-history=<anything>`: empty the 「播放历史」 ledger, in memory **and on
+    /// disk** (`_post_clear_play_history`, `protocol.py:3083-3089`).
+    ClearPlayHistory,
     ResolvePage,
     CastResolved,
     CastUrl,
@@ -220,6 +229,11 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // never reaches the later). Management-gated, not code-gated: this writes one bool
     // that decides which host the *browser* fetches next.
     PostRoute { field: "set-github-mirror", gate: "management", action: PostAction::SetGithubMirror },
+    // `set-subtitle-show` is row 14 of the reference (`protocol.py:2309`), one row ahead
+    // of `cast-uri` (row 15). Trivial while both are management-gated, and kept in place
+    // for the same reason every row here is ordered: a request carrying both action
+    // fields runs the earlier one and never reaches the later.
+    PostRoute { field: "set-subtitle-show", gate: "management", action: PostAction::SetSubtitleShow },
     PostRoute { field: "cast-uri",        gate: "management", action: PostAction::CastUrl },
     PostRoute { field: "resolve-page",    gate: "management", action: PostAction::ResolvePage },
     PostRoute { field: "cast-resolved",   gate: "management", action: PostAction::CastResolved },
@@ -233,6 +247,10 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     PostRoute { field: "resolve-cookies",       gate: "management", action: PostAction::SaveCookies },
     PostRoute { field: "resolve-cookies-clear", gate: "management", action: PostAction::ClearCookies },
     PostRoute { field: "resolve-cookie-browser", gate: "management", action: PostAction::SetCookieBrowser },
+    // Row 21 of the reference (`protocol.py:2328`), directly ahead of `clear-log`
+    // (row 22): the two 清空 buttons, and the order decides which one a request carrying
+    // both fields runs.
+    PostRoute { field: "clear-play-history", gate: "management", action: PostAction::ClearPlayHistory },
     // `clear-log` is a POST in the reference and must stay one: the GET flavour
     // would be triggerable by any page's `<img src=…&clear-log=1>`, which is
     // AGENTS.md §4.10's explicit red line for this endpoint ("清空走 POST").
@@ -1449,6 +1467,25 @@ pub trait Management: Send + Sync {
     /// lowercased text, `:3058`) and unset the key rather than storing `false`
     /// — §4.2's rule that a disabled setting is *absent*, not `False`.
     fn set_cookie_browser(&self, text: &str) -> Answer;
+
+    /// 「字幕显示」 — the page's toggle, and the only thing this seam is asked to do.
+    ///
+    /// Python's handler (`protocol.py:2699-2703`) publishes `set_media_sub_show` on the
+    /// engine bus and answers `{'code': 0, 'message': 'success'}` **without looking at
+    /// what came back**: with no renderer running the publish reaches nobody and the
+    /// answer is still success. So this seam returns nothing and the face owns the
+    /// sentence. A port that instead reported "the player refused" would be answering a
+    /// question the reference never asks, and a card that branched on it would be reading
+    /// a difference that does not exist in the app users know.
+    ///
+    /// That is not the same as "nothing observable happens". In the shipped app the
+    /// player reports its own property back (`macast_renderer/mpv.py:329-332`:
+    /// `ObserveProperty.sub` → `set_state_subtitle` → `DisplayCurrentSubtitle`), and this
+    /// port has the same echo (`macast-mpv/src/state.rs:182`, `Signal::Subtitle` →
+    /// `StateCall::Subtitle`). So `query=status`'s media block changes **because mpv said
+    /// so**, not because the HTTP face wrote a state variable — AGENTS.md §5's ownership
+    /// rule intact, with §30 as that chain's witness on a real player.
+    fn set_sub_show(&self, show: bool);
 }
 
 /// One name in [`GET_MANAGEMENT_ROUTES`]'s `gate` column, read at check time.
@@ -2565,6 +2602,22 @@ impl Face {
                 // must not answer it differently from the app's own panel.
                 PostAction::ClearLog => self.clear_log_answer(req),
                 PostAction::SetModuleSetting => self.set_module_setting_answer(req),
+                // The reference reads the field's **own value** with the four-word rule
+                // and no `strip()`, so `" on "` means *hide* here — the same asymmetry
+                // §29 measures through the mirror door, and the opposite of `?refresh=`,
+                // which does strip (`query_flag`, and the reason those two spellings of
+                // "yes" have two owners).
+                PostAction::SetSubtitleShow => {
+                    let show = macast_core::pyops::form_flag_is_true(
+                        &param_value(req, "set-subtitle-show").unwrap_or_default(),
+                    );
+                    self.management.set_sub_show(show);
+                    json_answer(200, 0, "success")
+                }
+                PostAction::ClearPlayHistory => {
+                    self.store.clear_history();
+                    json_answer(200, 0, "success")
+                }
                 PostAction::SetGithubMirror => json_value_response(
                     &macast_core::plugin_repo::set_mirror_answer(
                         &self.setting,
@@ -2585,11 +2638,15 @@ impl Face {
     /// AGENTS.md §4.7c carries the same correction — the "16" it once quoted was the
     /// count on the day that section was written, and a `>= 16` floor cannot see seven
     /// rows arriving);
-    /// [`POST_MANAGEMENT_ROUTES`] carries the nine this port has implemented, so a field
-    /// Python knows and this port has not ported yet (`set-interface`, `plugin-enable`,
-    /// `set-renderer`, `toggle-protocol`, `app-action`, `mirror-action`,
-    /// `set-subtitle-show`, `clear-play-history`, `install-plugin`,
-    /// `install-webrtc-extras`, …) lands here and is echoed as 不认识字段. That is
+    /// [`POST_MANAGEMENT_ROUTES`] carries the eleven this port has implemented, so a
+    /// field Python knows and this port has not ported yet (`set-interface`,
+    /// `plugin-enable`, `plugin-disable`, `plugin-uninstall`, `set-renderer`,
+    /// `toggle-protocol`, `app-action`, `mirror-action`, `save-launch-param`,
+    /// `install-plugin`, `install-webrtc-extras`, `uninstall-webrtc-extras`) lands here
+    /// and is echoed as 不认识字段 — the twelve that remain are exactly the twelve whose
+    /// backing does not exist in this shell yet (the plugin subsystem, the mirror face,
+    /// the "re-bind the NIC" seam, and a restart), which is what makes the count worth
+    /// writing down. That is
     /// the honest half of a partial port: a page button whose backend does not
     /// exist yet must not read as "saved", and §4.7c's original bug was exactly
     /// `{'code': 0, 'message': 'success'}` on an unrecognised field.
@@ -3094,6 +3151,16 @@ pub fn subscribers_document(
 /// which is Python's `except Exception: media[name] = None` reading, not an error.
 /// Trimming the list to "names we happen to write" would move a key off the page
 /// rather than leave it blank, and the page reads by name.
+///
+/// Two of those three still have no writer anywhere in this shell (`CurrentURI` is a
+/// `res` attribute the reference never stores; `CurrentPlayMode` has no control point
+/// asking for it yet). The third changed on 2026-10-20: `DisplayCurrentSubtitle` is
+/// written when **mpv reports its own `sub-visibility`** — which the page can now set in
+/// motion through `POST set-subtitle-show` (row 14 of the reference's table,
+/// [`Face::post_api`]), so on a machine with a player that value is a bool and on an idle
+/// one it is still `null`. The face never writes it itself, and
+/// `set_subtitle_show_reaches_the_player_with_the_four_words_and_no_strip` is the witness
+/// that it does not.
 pub const STATUS_MEDIA_NAMES: [&str; 16] = [
     "CurrentURI",
     "CurrentTrackURI",
@@ -3875,6 +3942,18 @@ mod tests {
             })
         }
 
+        /// A cast this table remembers, for the tests that need a ledger to clear.
+        /// Separate from [`StateStore::add_history`] (which stays a no-op below)
+        /// because the routes under test never cast — they read and empty the list —
+        /// and a seeding helper that also had to satisfy the writer's dedupe rules
+        /// would make the seed a second thing to verify.
+        fn add_row(&self, title: &str, uri: &str, at: i64) {
+            self.history
+                .lock()
+                .expect("history")
+                .push((title.to_string(), uri.to_string(), at));
+        }
+
         fn put(&self, name: &str, value: Value) {
             self.state
                 .lock()
@@ -3924,6 +4003,14 @@ mod tests {
 
         fn play_history(&self) -> Vec<(String, String, i64)> {
             self.history.lock().expect("history").clone()
+        }
+
+        /// Clears the rows this double keeps, so a test can ask the door to empty the
+        /// ledger and then read it back through the **other** door (`query=status`).
+        /// A no-op here would let the POST route look correct while the state it claims
+        /// to change never moved.
+        fn clear_history(&self) {
+            self.history.lock().expect("history").clear();
         }
     }
 
@@ -4305,6 +4392,7 @@ mod tests {
         save_cookies_calls: Mutex<Vec<String>>,
         clear_cookies_calls: AtomicUsize,
         browser_calls: Mutex<Vec<String>>,
+        sub_show_calls: Mutex<Vec<bool>>,
     }
 
     impl FakeManagement {
@@ -4320,6 +4408,7 @@ mod tests {
                 save_cookies_calls: Mutex::new(Vec::new()),
                 clear_cookies_calls: AtomicUsize::new(0),
                 browser_calls: Mutex::new(Vec::new()),
+                sub_show_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -4477,6 +4566,13 @@ mod tests {
         fn clear_cookies(&self) -> Answer {
             self.clear_cookies_calls.fetch_add(1, Ordering::SeqCst);
             Answer::ok("本机没有保存过 cookie 文件")
+        }
+
+        fn set_sub_show(&self, show: bool) {
+            self.sub_show_calls
+                .lock()
+                .expect("sub show calls")
+                .push(show);
         }
 
         fn set_cookie_browser(&self, text: &str) -> Answer {
@@ -5996,14 +6092,14 @@ mod tests {
         // agree with anything. Same two questions, same reason: unique field names
         // (a duplicate would shadow the later one forever) and a gate every row can
         // actually be parsed to.
-        // **9, not ">= 8"** — the same correction the GET table got: a floor that trails
+        // **11, not ">= 10"** — the same correction the GET table got: a floor that trails
         // the size by one row cannot see a row being deleted, and the rows cheapest to
-        // lose here are the two nobody polls (`set-module-setting` and
-        // `set-github-mirror` answer nothing until the page posts them). The number is a
-        // count, taken from the table, not from a plan — and the reference's own table is
-        // **23** rows (`protocol.py:2287-2331`, measured), so this is a port in progress
-        // and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 9, "the POST table changed size");
+        // lose here are the ones nobody polls (`set-module-setting`, `set-github-mirror`
+        // and `clear-play-history` answer nothing until the page posts them). The number
+        // is a count taken from the table, not from a plan — and the reference's own table
+        // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
+        // in progress and the count is the progress.
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 11, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is
@@ -6036,6 +6132,10 @@ mod tests {
             PostAction::ClearCookies,
             PostAction::SetCookieBrowser,
             PostAction::ClearLog,
+            PostAction::SetSubtitleShow,
+            PostAction::ClearPlayHistory,
+            PostAction::SetGithubMirror,
+            PostAction::SetModuleSetting,
         ] {
             assert_eq!(
                 POST_MANAGEMENT_ROUTES
@@ -6070,6 +6170,13 @@ mod tests {
             ("cast-resolved", "resolve-cookies"),
             ("resolve-cookies", "resolve-cookies-clear"),
             ("resolve-cookies-clear", "resolve-cookie-browser"),
+            // The two rows added on 2026-10-20, each where `protocol.py` puts it:
+            // `set-subtitle-show` is row 14 (ahead of `cast-uri`'s 15) and
+            // `clear-play-history` is row 21 (ahead of `clear-log`'s 22). The second pair
+            // is the one with a real consequence — both are 清空 buttons in one request,
+            // and only the earlier may run.
+            ("set-subtitle-show", "cast-uri"),
+            ("clear-play-history", "clear-log"),
         ] {
             assert!(
                 index(earlier) < index(later),
@@ -8478,6 +8585,205 @@ mod tests {
         assert!(
             face.setting.has(macast_core::Key::GithubCnMirror),
             "the earlier row was selected but never executed"
+        );
+    }
+
+    /// `set-subtitle-show` is the door a person uses when the subtitles are on and they
+    /// want them off, so the two claims that matter are that the flag is read with the
+    /// reference's **four words without a strip** (`" on "` means *hide*, and this is the
+    /// opposite of `?refresh=`, which strips), and that the answer is the reference's
+    /// `{code, message}` — not a report about the player. Python publishes to the engine
+    /// bus and answers success even when no renderer is subscribed (`protocol.py:2699-2703`);
+    /// a port that returned "the player refused" would teach the card a third state the
+    /// shipped app never produces.
+    #[test]
+    fn set_subtitle_show_reaches_the_player_with_the_four_words_and_no_strip() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("subtitle-show");
+        let opening = face.answer(&get_api("/api?query=status", LOCAL));
+        let opening_doc: serde_json::Value =
+            serde_json::from_slice(&opening.body).expect("object");
+        let before_media = opening_doc["media"].clone();
+        for (posted, want) in [
+            ("1", true),
+            ("true", true),
+            ("TRUE", true),
+            ("Yes", true),
+            ("on", true),
+            ("0", false),
+            ("", false),
+            ("false", false),
+            ("no", false),
+            // The two that separate this rule from `query_flag`'s: the reference strips
+            // for `?refresh=` and does **not** strip here.
+            (" on ", false),
+            ("1 ", false),
+        ] {
+            let response = face.answer(&post_form(
+                "/api",
+                &format!("set-subtitle-show={posted}"),
+                LOCAL,
+                &[],
+            ));
+            let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("object");
+            assert_eq!(
+                doc["code"],
+                json!(0),
+                "set-subtitle-show={posted:?} was not served: {doc:?}"
+            );
+            assert_eq!(doc["message"], json!("success"));
+            assert_eq!(
+                doc.as_object().expect("object").keys().collect::<Vec<_>>(),
+                vec!["code", "message"],
+                "the reference's two-key answer, and nothing about the player"
+            );
+        }
+        // And the ownership half of §5: the door told the player, it did **not** write
+        // `DisplayCurrentSubtitle` itself. In the shipped app that variable changes only
+        // when mpv reports its own property (`macast_renderer/mpv.py:329-332`), so a face
+        // that also wrote it would make the status page agree with the *request* rather
+        // than with the *player* — the difference between "the toggle worked" and "the
+        // toggle was sent", and on a machine with no player those two come apart. Asserted
+        // as **equality between the two reads**, not against a value: the table's own
+        // default belongs to whoever owns it (`src-tauri`'s `StateTable` seeds raw `"1"`,
+        // `host.rs:226-230`), and a HTTP-side test that re-typed that default would be a
+        // second owner of it.
+        let after = face.answer(&get_api("/api?query=status", LOCAL));
+        let doc: serde_json::Value = serde_json::from_slice(&after.body).expect("object");
+        assert_eq!(
+            doc["media"], before_media,
+            "the POST wrote a state variable instead of leaving it to the player"
+        );
+
+        let heard = management.sub_show_calls.lock().expect("sub calls").clone();
+        assert_eq!(
+            heard,
+            vec![true, true, true, true, true, false, false, false, false, false, false],
+            "the player heard something other than what the four words say: {heard:?}"
+        );
+    }
+
+    /// A refused action must not act. The generic table loop already asks "403 and the
+    /// route did not run" for every row; this one asks the *specific* thing a LAN attacker
+    /// would care about: subtitles the user can still see, because the door closed before
+    /// the bus publish.
+    #[test]
+    fn a_refused_subtitle_post_never_reaches_the_player() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("subtitle-refused");
+        let refused = face.answer(&post_form(
+            "/api",
+            "set-subtitle-show=0",
+            "10.0.0.7",
+            &[("X-Forwarded-For", "10.0.0.7")],
+        ));
+        assert_eq!(refused.status, 200, "a POST refusal is a 200 with a body code");
+        let doc: serde_json::Value = serde_json::from_slice(&refused.body).expect("object");
+        assert_eq!(doc["code"], json!(403));
+        assert_eq!(doc["message"], json!(MANAGEMENT_REFUSAL));
+        assert!(
+            management.sub_show_calls.lock().expect("sub calls").is_empty(),
+            "a refused POST still told the player to change subtitles"
+        );
+        store_token(&face.setting, Some(SECRET));
+        face.answer(&post_form(
+            "/api",
+            &format!("set-subtitle-show=1&token={SECRET}"),
+            "10.0.0.7",
+            &[],
+        ));
+        assert_eq!(
+            *management.sub_show_calls.lock().expect("sub calls"),
+            vec![true],
+            "the tokened LAN caller was not served either"
+        );
+    }
+
+    /// `clear-play-history` empties the **same ledger** `query=status` prints, and it is
+    /// the one write this HTTP face performs to the store. That is worth its own test
+    /// because the face's `store` field is documented read-only for *state variables*
+    /// (AGENTS.md §5): `Play_History` is not one of those 16 — it is the list the
+    /// 「播放历史」 card shows, and in Python the page's own button clears it through the
+    /// same door (`protocol.py:3083-3089` → `clear_play_history`). So: seed a row through
+    /// the ledger's own writer, read it back through the door that prints it, clear it
+    /// through the POST, and ask **both** again.
+    #[test]
+    fn clear_play_history_empties_the_ledger_both_readers_print() {
+        crate::pin_test_dir();
+        let setting = fresh_setting("clear-history");
+        let store = TestStore::new();
+        let face = Face::new(
+            Arc::new(FakeControl::soap_ok()),
+            Arc::new(FakeSubscription::new()),
+            Arc::new(FakeManagement::new()) as Arc<dyn Management>,
+            setting,
+            Arc::clone(&store) as SharedStore,
+        )
+        .expect("face builds");
+        store.add_row("Rick Astley", "http://127.0.0.1:59999/clip.mp4", 1_700_000_000);
+        store.add_row("Second", "http://127.0.0.1:59999/other.mp4", 1_700_000_001);
+        assert_eq!(crate::store::StateStore::play_history(&*store).len(), 2, "the seed did not take");
+
+        let before = face.answer(&get_api("/api?query=status", LOCAL));
+        let doc: serde_json::Value = serde_json::from_slice(&before.body).expect("object");
+        assert_eq!(doc["history"].as_array().expect("history").len(), 2);
+
+        let cleared = face.answer(&post_form("/api", "clear-play-history=1", LOCAL, &[]));
+        let answer: serde_json::Value = serde_json::from_slice(&cleared.body).expect("object");
+        assert_eq!(answer["code"], json!(0));
+        assert_eq!(answer["message"], json!("success"));
+        assert_eq!(
+            answer.as_object().expect("object").keys().collect::<Vec<_>>(),
+            vec!["code", "message"],
+            "the reference's answer is two keys — a `removed` count would be this port inventing a field"
+        );
+
+        let after = face.answer(&get_api("/api?query=status", LOCAL));
+        let doc: serde_json::Value = serde_json::from_slice(&after.body).expect("object");
+        assert_eq!(doc["history"].as_array().expect("history").len(), 0);
+        assert!(
+            crate::store::StateStore::play_history(&*store).is_empty(),
+            "the ledger still holds rows"
+        );
+
+        // Idempotent, and still a success: the reference writes `[]` unconditionally.
+        let again = face.answer(&post_form("/api", "clear-play-history=1", LOCAL, &[]));
+        let doc: serde_json::Value = serde_json::from_slice(&again.body).expect("object");
+        assert_eq!(doc["code"], json!(0), "clearing an empty ledger is not a failure");
+    }
+
+    /// Both 清空 buttons in one request: the earlier row runs and the later never does
+    /// (§4.7c's precedence, which is invisible until a request carries two fields). The
+    /// answer shape tells which one ran — `clear-play-history` returns `{code, message}`,
+    /// while `clear-log` returns `{code, message, removed}` — so this asserts the pair,
+    /// not just "no crash".
+    #[test]
+    fn clear_play_history_precedes_clear_log_in_one_request() {
+        crate::pin_test_dir();
+        let (face, _) = harness_management("two-clears");
+        let response = face.answer(&post_form(
+            "/api",
+            "clear-play-history=1&clear-log=1",
+            LOCAL,
+            &[],
+        ));
+        let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("object");
+        assert_eq!(doc["code"], json!(0), "{doc:?}");
+        assert!(
+            doc.get("removed").is_none(),
+            "the later row ran too: a `removed` count is clear-log's document, not the ledger's"
+        );
+        // `set-subtitle-show` ahead of `cast-uri`: the hide happens, nothing plays.
+        let response = face.answer(&post_form(
+            "/api",
+            "set-subtitle-show=1&cast-uri=http%3A%2F%2Fexample.invalid%2Fa.mp4",
+            LOCAL,
+            &[],
+        ));
+        let doc: serde_json::Value = serde_json::from_slice(&response.body).expect("object");
+        assert!(
+            doc.get("url").is_none(),
+            "the cast ran even though the earlier row answered: {doc:?}"
         );
     }
 

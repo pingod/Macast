@@ -582,6 +582,14 @@ impl macast_upnp::StateStore for StateTable {
         // the inherent method, so this is a forward, not the trait calling itself.
         StateTable::play_history(self)
     }
+
+    /// Same shape as [`StateStore::play_history`]: the trait method forwards to the
+    /// inherent one, which is the only place that knows how to mirror the rows into the
+    /// settings file. A second `persist_history` call written here would be the second
+    /// owner of "what cleared history costs on disk".
+    fn clear_history(&self) {
+        StateTable::clear_history(self)
+    }
 }
 
 /// The `Renderer` seam, which is the player wearing a second face.
@@ -2049,6 +2057,23 @@ impl macast_upnp::http::Management for ShellManagement {
     /// The two refusals are ordered as the reference orders them, and the second
     /// one says which half failed: a user who typed `vivaldi:C:\Users\…` and hears
     /// "I don't know that browser" goes looking for a browser by that name.
+    /// `set_media_sub_show` on the engine bus (`protocol.py:2702`), which in the shipped
+    /// app lands on `MPVRenderer.set_media_sub_show` (`macast_renderer/mpv.py:235-236`)
+    /// and becomes `set_property sub-visibility yes|no`. The value arrives here already
+    /// reduced to a bool, exactly as Python reduces it in the handler — the four-word
+    /// form rule lives in `macast-core::pyops`, not at this call site.
+    ///
+    /// Nothing is written to the state table from this method, and that is the point:
+    /// `DisplayCurrentSubtitle` changes because **mpv reports the property back**
+    /// (`macast-mpv/src/state.rs:182` → `Signal::Subtitle` → [`StateCall::Subtitle`]
+    /// below), which is how Python's DLNA state ends up matching the player rather than
+    /// matching the request. A player that is not running means a property that never
+    /// echoes, and a status page that keeps the last value it was told — which is what
+    /// the reference does too, and §30 measures the whole chain on a real mpv.
+    fn set_sub_show(&self, show: bool) {
+        self.player.set_media_sub_show(&json!(show));
+    }
+
     fn set_cookie_browser(&self, text: &str) -> Answer {
         let text = text.trim();
         if ["", "0", "off", "none", "关闭", "不用"].contains(&text.to_lowercase().as_str()) {

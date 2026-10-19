@@ -1583,6 +1583,13 @@ mod tests {
                 .map(|(title, uri)| (title.clone(), uri.clone(), 0))
                 .collect()
         }
+
+        fn clear_history(&self) {
+            self.history
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+        }
     }
 
     #[derive(Default)]

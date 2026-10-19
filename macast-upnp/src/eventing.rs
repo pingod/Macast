@@ -799,6 +799,8 @@ mod tests {
         fn play_history(&self) -> Vec<(String, String, i64)> {
             Vec::new()
         }
+
+        fn clear_history(&self) {}
     }
 
     struct Collector {

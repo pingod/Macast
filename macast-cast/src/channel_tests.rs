@@ -56,6 +56,11 @@ impl StateStore for RecordingStore {
     fn play_history(&self) -> Vec<(String, String, i64)> {
         Vec::new()
     }
+
+    /// Nothing in this module's tests posts `clear-play-history` — that door is
+    /// `macast-upnp`'s, and its own tests read the ledger back through `query=status`.
+    /// An empty body here is a double of a table this fake already refuses to fill.
+    fn clear_history(&self) {}
 }
 
 struct RecordingRenderer {
