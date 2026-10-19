@@ -2684,6 +2684,75 @@ mod tests {
     ///
     /// Recorded as a limitation rather than written as coverage: the two assertions
     /// in this test are not equally armed.
+    /// The shell's own startup summary belongs in **`macast.log`**, and this row is the
+    /// witness: the reference's `server.py` / `protocol_cast.py` / `protocol_airplay.py`
+    /// lines all propagate to the root handler (only **plugins** are claimed —
+    /// `macast.py:336` / `:905`), while this port claims four core names as a recorded
+    /// divergence (§8). Getting the routing wrong is not cosmetic: a reader following
+    /// AGENTS.md §5 greps `macast.log`, and these lines used to ride the **player's**
+    /// logger — measured, when a probe of mine looked in `macast.log` and found nothing
+    /// while the sentence sat in `logs/MPV.log` (§16 第 29 条 ④).
+    ///
+    /// Two questions, because either alone is weak: the **text** says which logger each
+    /// sentence names, and the **logger table** says where the root logger actually
+    /// writes. A sentence routed to `root()` that the table had claimed somewhere else
+    /// would pass the first and fail the meaning.
+    #[test]
+    fn the_shells_own_summary_speaks_through_the_root_log() {
+        // First statement, by the crate's own audit (`every_test_in_this_crate_pins_the_
+        // log_directory_first`): every test here writes through a logger, so the pin has
+        // to happen before the first line that could touch a path.
+        pin_test_dir();
+        let main = include_str!("main.rs");
+        assert_eq!(
+            main.matches("let app_log = macast_core::logging::root();").count(),
+            1,
+            "the shell's summary logger is not defined exactly once"
+        );
+        for sentence in [
+            "\"receiver: HTTP {} on port {}, SSDP {}\"",
+            "\"Cast receiver: 8009 listening on {port}\"",
+            "\"setup face: {text}\"",
+            "\"renderer log: {}\"",
+            "\"AirPlay RTSP: listening on {port} as",
+            "\"AirPlay RTSP: not listening",
+            "\"AirPlay is switched off (Macast_Protocols)",
+        ] {
+            let at = main.find(sentence).unwrap_or_else(|| panic!("sentence gone: {sentence}"));
+            // Look **backwards** for the logger call that owns it: the call opens on the
+            // line (or two) before the format string.
+            let window = &main[at.saturating_sub(220)..at];
+            assert!(
+                window.contains("app_log."),
+                "this sentence still rides another logger: {sentence}"
+            );
+        }
+        // The player's own sentences stay in the player's file — the routing is a split,
+        // not a migration.
+        for sentence in ["\"mpv candidate: {} (socket {}, {} scripts dir {})\"", "\"no mpv found on PATH"] {
+            let at = main.find(sentence).unwrap_or_else(|| panic!("sentence gone: {sentence}"));
+            let window = &main[at.saturating_sub(220)..at];
+            assert!(
+                !window.contains("app_log."),
+                "a player sentence moved into the shell's log: {sentence}"
+            );
+        }
+        // …and **nothing in the product claims that name**. This used to assert
+        // `!root.is_claimed()` and went red only when the whole suite ran: `Logger::named`
+        // remembers by name, and another test in this file claims `"Macast"` for its own
+        // purposes — so the assertion was reading the test scheduler, not the product
+        // (§4.2's shared-fixture family, in its logger form). The product question is
+        // whether `main.rs` claims the root name, and that is answerable from the source:
+        assert!(
+            !main.contains("logging::root().claim()")
+                && !main.contains("app_log.claim()"),
+            "the shell claims the root logger, which moves every summary sentence out of macast.log"
+        );
+        // The name itself, so a rename of `root()` cannot silently point at a different
+        // file than the one AGENTS.md §5 tells a user to read.
+        assert_eq!(macast_core::logging::root().name(), "Macast");
+    }
+
     #[test]
     fn every_cast_face_is_behind_the_gate() {
         pin_test_dir();
@@ -2726,14 +2795,26 @@ mod tests {
                  would be behind the gate only by accident"
             );
         }
-        // Two announcers, no more: one per service type this shell announces. A third
-        // would be a face nobody gated, and the per-service counts above would still
-        // read 1 each — which is exactly the blind spot this line is here to close.
+        // **One** announcer, because one socket announces every type (§16 第 32 条): the
+        // per-service shape cost unicast queriers a coin flip on which of two sockets
+        // received their query, measured on two kernels. The count that matters now is
+        // the other side of the same fact — the **service builders** are still one per
+        // door, so a face cannot be announced without its gate having produced a service:
         assert_eq!(
             main.matches("announce::Announcer::new(").count(),
-            2,
-            "the announcer is constructed at {} sites; the two doors above own one each",
+            1,
+            "the announcer is constructed at {} sites; one socket owns every service",
             main.matches("announce::Announcer::new(").count()
+        );
+        assert_eq!(
+            main.matches("announce::Service::from_setting(").count(),
+            1,
+            "the Chromecast service is built more than once"
+        );
+        assert_eq!(
+            main.matches("announce::Service::airplay_from_setting(").count(),
+            1,
+            "the AirPlay service is built more than once"
         );
         // Exactly one read, so no two faces can consult a *different* answer to the
         // same question — and so that a stale entry says 「Skipping unknown protocol」

@@ -2124,6 +2124,31 @@ echo "== 22: another implementation reads the announcement this shell broadcasts
 # announcer's summary now lives in `logs/Discovery.log`, beside the
 # 「mDNS advertised …」 line the module itself writes, and this grep is the witness
 # that the destination is the one the section claims (§27 set the rule).
+# ---- where the shell's own sentences live (AGENTS.md §5's recipe)
+#
+# The reference propagates every core module's lines to the root handler — only
+# **plugins** are claimed (`macast.py:336` / `:905`) — so a reader following §5's
+# `grep ... macast.log` finds the startup summary. This port claims four core names as
+# a recorded divergence (§8), and these lines used to ride the **player's** logger:
+# measured once, when my own probe grepped `macast.log`, found nothing, and the sentence
+# turned out to be in `logs/MPV.log` (§16 第 29 条 ④). Read **by file name**, because a
+# grep over every log cannot tell a correct destination from a wrong one (§27's rule).
+if grep -aqF 'receiver: HTTP ' "$SDIR/macast.log"; then
+    pass "the shell's startup summary is in macast.log, where AGENTS.md §5 tells a reader to look"
+else
+    fail "no 'receiver: HTTP' line in macast.log — the summary moved files again"
+fi
+if grep -aqF 'receiver: HTTP ' "$SDIR/logs/MPV.log"; then
+    fail "the shell's summary is riding the player's log (logs/MPV.log)"
+else
+    pass "and it is not in the player's log"
+fi
+if grep -aqF 'mpv candidate: ' "$SDIR/logs/MPV.log"; then
+    pass "while the player's own sentences stayed in logs/MPV.log — a split, not a migration"
+else
+    fail "the player's startup line left logs/MPV.log"
+fi
+
 MDNS_LINE=$(grep -ahF 'mDNS: announcing ' "$SDIR/logs/Discovery.log" 2>/dev/null \
     | grep -F '_googlecast._tcp.local.' | tail -1)
 # The type filter is not decoration. `tail -1` alone picked **the last** announcing
@@ -3407,7 +3432,7 @@ run whose Cast door is shut" ;;
         esac
     fi
 
-    if [ -n "$AP_MDNS_LINE" ] && printf '%s' "$AP_MDNS_LINE" | grep -qF 'it announces only'; then
+    if [ -n "$AP_MDNS_LINE" ] && printf '%s' "$AP_MDNS_LINE" | grep -qF 'does not answer it'; then
         pass "and the line says in words that this type is announced but not answered, so a \
 reader is not sent to fix a responder that was never asked to run"
     else

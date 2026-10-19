@@ -621,8 +621,7 @@ fn the_run_function_goodbyes_even_when_the_flag_is_already_down() {
         let mut no_unicast = |_bytes: &[u8], _peer: std::net::SocketAddr| Ok(());
         let mut no_recv = || Ok(None);
         run(
-            &service,
-            true,
+            std::slice::from_ref(&service),
             &mut send,
             &mut no_unicast,
             &mut no_recv,
@@ -860,7 +859,10 @@ fn no_advertisable_address_says_which_half_failed() {
     crate::pin_test_dir();
     let logger = Logger::named(LOGGER_NAME);
     let path = logger.claim();
-    let announcer = Announcer::new(service("Macast", 8009, Vec::new()), Arc::clone(&logger));
+    let announcer = Announcer::new(
+        vec![service("Macast", 8009, Vec::new())],
+        Arc::clone(&logger),
+    );
     let outcome = announcer.start();
     assert!(outcome.is_err(), "an empty address list must not pretend to announce");
     assert!(!announcer.is_running());
@@ -905,7 +907,7 @@ fn an_airplay_refusal_names_airplay_and_never_blames_the_chromecast() {
         "11:22:33:44:55:66",
     );
     assert_eq!(airplay.service_type, crate::airplay::AIRPLAY_SERVICE);
-    let announcer = Announcer::new(airplay, Arc::clone(&logger));
+    let announcer = Announcer::new(vec![airplay], Arc::clone(&logger));
     let outcome = announcer.start();
     assert!(
         outcome.is_err(),
@@ -941,27 +943,33 @@ fn an_airplay_refusal_names_airplay_and_never_blames_the_chromecast() {
 fn the_answering_half_is_derived_not_written() {
     crate::pin_test_dir();
     let src = include_str!("announce.rs");
+    // **The derivation moved with the merge**, and this row moved with it — a check
+    // that keeps looking for a line that no longer exists is a green that agrees with
+    // anything. The predicate is now asked **per service inside the loop**
+    // (`answering`), because one socket carries every type; `start()` no longer
+    // computes a single flag. So the audit asks the two places that would have to be
+    // wrong together for a type to start answering without being measured:
     let at = src
-        .find("pub fn start(self: &Arc<Self>)")
-        .expect("start exists");
-    let body = &src[at..at + 1500];
+        .find("let answering: Vec<&Service> = services.iter()")
+        .expect("the answering set is derived somewhere");
+    let body = &src[at..at + 300];
     assert!(
-        body.contains("let answers = self.service.responder_answers();"),
-        "start() no longer derives the answering half from the predicate"
+        body.contains(".filter(|s| s.responder_answers())"),
+        "the answering set is no longer filtered by the predicate"
+    );
+    // …and no literal `responder_answers()` replacement: `serve` must be reached only
+    // through that set. Asked as "the loop's call site names the set", not as "no
+    // `true` appears in the file".
+    let loop_at = src.find("for service in &answering {").expect("the loop exists");
+    let loop_body = &src[loop_at..loop_at + 600];
+    assert!(
+        loop_body.contains("serve(&data, peer, service, send, unicast, log)"),
+        "the loop no longer serves through the answering set"
     );
     assert!(
-        body.contains("bind_engine(&self.service.addresses, &self.log, answers)"),
-        "start() passes something other than the derived flag to the engine"
+        !src.contains("bind_engine(&self.service.addresses, &self.log, true)"),
+        "a hardcoded answering flag came back at bind time"
     );
-    for hardcoded in [
-        "bind_engine(&self.service.addresses, &self.log, true)",
-        "bind_engine(&self.service.addresses, &self.log, false)",
-    ] {
-        assert!(
-            !body.contains(hardcoded),
-            "start() hardcodes the answering half: {hardcoded}"
-        );
-    }
 }
 
 #[test]
@@ -1234,8 +1242,7 @@ fn e7_the_loop_answers_between_bursts_and_survives_a_failed_read() {
             }
         };
         run(
-            &service,
-            true,
+            std::slice::from_ref(&service),
             &mut send,
             &mut unicast,
             &mut recv,
@@ -1274,7 +1281,7 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
     // and answers it to a real querier.
     let logger = Logger::named(LOGGER_NAME);
     let service = fixture_service();
-    let engine = match bind_engine(&[V4::LOCALHOST], &logger, true) {
+    let engine = match bind_engine(&[V4::LOCALHOST], &logger) {
         Ok(engine) => engine,
         // Not a skip. Binding 5353 with the reuse options *is* the product's path,
         // and "we could not try it" must never read as "it works" (§4.2's
@@ -1372,14 +1379,17 @@ fn e8_a_query_on_loopback_gets_an_answer_back_from_the_real_socket() {
 /// The queue is the only clock: when it runs dry the loop's flag goes down, so a
 /// test never waits on `REANNOUNCE` to reach its assertions.
 fn drive(service: &Service, logger: &Logger, packets: Vec<(Vec<u8>, SocketAddr)>) {
-    drive_answering(service, true, logger, packets);
+    drive_services(&[service.clone()], logger, packets);
 }
 
-/// `drive` with the responder's mode spelled out, because one of this module's
-/// jobs is the send-only shape.
-fn drive_answering(
-    service: &Service,
-    answers: bool,
+/// The same drive over **several** services, which is the shape the product now uses:
+/// one socket announces every type, and whether a type answers is asked of the service
+/// itself (`responder_answers()`), not passed in as a mode. There is no `answers`
+/// parameter any more on purpose — the first version of this helper had one, and a
+/// caller could then ask the loop to answer for a service whose predicate says no,
+/// which is a state the product can no longer be in.
+fn drive_services(
+    services: &[Service],
     logger: &Logger,
     packets: Vec<(Vec<u8>, SocketAddr)>,
 ) {
@@ -1395,13 +1405,187 @@ fn drive_answering(
         }
     };
     run(
-        service,
-        answers,
+        services,
         &mut send,
         &mut unicast,
         &mut recv,
         &running,
         logger,
+    );
+}
+
+/// **One socket, two service types, one of which answers.**
+///
+/// This is the merged engine's whole point, and the shape the reference has: one
+/// `Zeroconf` registers both services, so a querier's datagram reaches **one** socket
+/// and the answer comes from the service whose type the question names. Before the
+/// merge the two types lived on two sockets, and the measured unicast rule (one socket
+/// gets the whole stream, which one varies) made "will the answering socket see this
+/// query" a coin flip.
+///
+/// Both halves are asserted on the same run: a `_googlecast._tcp` PTR query is answered
+/// (the 17-row corpus covers that type), and a `_airplay._tcp` PTR query is **read and
+/// not answered** — read, because the log line proves the datagram arrived; not
+/// answered, because the predicate says the decision table was never measured for it.
+/// **Every** service announces, not just the first. This row exists because a mutant
+/// that kept only the first service's burst went **0 red** (measured 2026-10-19): the
+/// merged witness above looks at answers and at the AirPlay *question*, and neither
+/// notices that the AirPlay *announcement* was never sent — which is the one thing an
+/// iPhone list is built from. Asked by decoding, not by byte-identity, so the row says
+/// **which** type went missing.
+#[test]
+fn every_service_in_the_engine_gets_its_own_burst() {
+    crate::pin_test_dir();
+    let logger = Logger::named("Discovery-BurstAll");
+    let cast = fixture_service();
+    let (_instance, _server, port, address, txt) = airplay_inputs();
+    let airplay = airplay_service(&txt, port, address);
+    // `true` until the first read: a flag that is **already down** truncates the opening
+    // burst (its sleeps check the flag), which is what the goodbye test relies on and
+    // what made this row see an empty list in its first version. Here the burst has to
+    // run to completion, so the flag goes down from `recv` — the same clock `drive` uses.
+    let running = AtomicBool::new(true);
+    let sent: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&sent);
+    let mut send = move |bytes: &[u8]| {
+        sink.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    };
+    let mut unicast = |_b: &[u8], _p: SocketAddr| Ok(());
+    let mut recv = || {
+        running.store(false, Ordering::SeqCst);
+        Ok(None)
+    };
+    run(&[cast, airplay], &mut send, &mut unicast, &mut recv, &running, &logger);
+    let wrote = sent.lock().unwrap();
+    // **Announcements only**: `ttl > 0` excludes the goodbye, which the stop path sends
+    // for every service and which satisfied this assertion in its first version — the
+    // mutant that announced only the first service still passed, because the AirPlay
+    // name appeared in a packet with TTL 0. A check that cannot tell "announced" from
+    // "said goodbye" is the shape this branch keeps finding (§16 第 30 条的 same family).
+    let types: Vec<String> = wrote
+        .iter()
+        .filter_map(|bytes| crate::mdns::parse_message(bytes, "test", &logger))
+        .flat_map(|doc| {
+            doc.records
+                .into_iter()
+                .filter(|r| r.ttl > 0)
+                .map(|r| r.name)
+        })
+        .filter(|name| name.contains("._tcp.local."))
+        .collect();
+    assert!(
+        types.iter().any(|n| n.contains("_googlecast")),
+        "no Chromecast burst went out: {types:?}"
+    );
+    assert!(
+        types.iter().any(|n| n.contains("_airplay")),
+        "the AirPlay service is in the engine and never announced: {types:?}"
+    );
+}
+
+/// The join list is the **union** of what every service publishes, and this row exists
+/// because a mutant that took only the first service's addresses went **0 red**
+/// (measured 2026-10-19): on this machine both services publish the same one address, so
+/// the behavior cannot tell the two implementations apart. That is the same shape as
+/// §22's "the two lists differ here, so the count comparison says something" — the
+/// assertion has to be given two **different** sets to be able to answer.
+#[test]
+fn the_join_list_is_the_union_of_every_service_and_not_the_first_one() {
+    crate::pin_test_dir();
+    let logger = Logger::named("Discovery-JoinUnion");
+    let first = service("Macast", 8009, vec![V4::new(192, 0, 2, 1)]);
+    let second = service("Macast", 7001, vec![V4::new(192, 0, 2, 2), V4::new(192, 0, 2, 1)]);
+    let announcer = Announcer::new(vec![first, second], Arc::clone(&logger));
+    let joined = announcer.join_addresses();
+    assert_eq!(
+        joined,
+        vec![V4::new(192, 0, 2, 1), V4::new(192, 0, 2, 2)],
+        "the join list is not the union: {joined:?}"
+    );
+    // …and the union is deduplicated, because `join_multicast_v4` twice on the same
+    // interface is at best a wasted syscall and at worst an error that reads like a
+    // broken interface.
+    assert_eq!(joined.len(), 2);
+}
+
+#[test]
+fn one_socket_answers_the_measured_type_and_stays_silent_for_the_other() {
+    crate::pin_test_dir();
+    let logger = Logger::named("Discovery-Merged");
+    let path = logger.claim();
+    let (_instance, _server, port, address, txt) = airplay_inputs();
+    let cast = fixture_service();
+    let airplay = airplay_service(&txt, port, address);
+    assert!(cast.responder_answers(), "the fixture's Cast service must be the answering one");
+    assert!(!airplay.responder_answers(), "the AirPlay service must not be the answering one");
+
+    let running = AtomicBool::new(true);
+    let sent: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&sent);
+    let mut send = move |bytes: &[u8]| {
+        sink.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    };
+    let mut unicast = |_bytes: &[u8], _peer: SocketAddr| Ok(());
+    let mut queue = std::collections::VecDeque::from(vec![
+        (ptr_query(SERVICE_TYPE), peer(MDNS_PORT)),
+        (ptr_query(crate::airplay::AIRPLAY_SERVICE), peer(MDNS_PORT)),
+    ]);
+    let mut recv = || match queue.pop_front() {
+        Some((bytes, peer)) => Ok(Some((bytes, peer))),
+        None => {
+            running.store(false, Ordering::SeqCst);
+            Ok(None)
+        }
+    };
+    {
+        let _debug = crate::DebugWindow::armed();
+        run(&[cast.clone(), airplay.clone()], &mut send, &mut unicast, &mut recv, &running, &logger);
+    }
+    let wrote = sent.lock().unwrap();
+    // Every packet this run put on the wire: two announcement bursts (3 each), then the
+    // answers, then two goodbyes (3 each). The answers are the packets that are not one
+    // of those six fixed datagrams.
+    let cast_announce = cast.announcement();
+    let airplay_announce = airplay.announcement();
+    let cast_goodbye = cast.goodbye();
+    let airplay_goodbye = airplay.goodbye();
+    let answers: Vec<&Vec<u8>> = wrote
+        .iter()
+        .filter(|b| {
+            **b != cast_announce
+                && **b != airplay_announce
+                && **b != cast_goodbye
+                && **b != airplay_goodbye
+        })
+        .collect();
+    assert!(!answers.is_empty(), "the measured type's query went unanswered: {wrote:?}");
+    // The answer must be a **Cast** answer: decoding it is the only way to say whose it
+    // is, and a byte-identity check would pass for the AirPlay reply of a run that
+    // answered the wrong question.
+    let parsed = crate::mdns::parse_message(answers[0], "test", &logger).expect("an answer");
+    assert!(
+        parsed.records.iter().any(|r| r.name.contains("_googlecast")),
+        "the answer does not name the Cast type: {:?}",
+        parsed.records.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+    assert!(
+        !answers.iter().any(|b| crate::mdns::parse_message(b, "test", &logger)
+            .map(|doc| doc.records.iter().any(|r| r.name.contains("_airplay")))
+            .unwrap_or(false)),
+        "something answered the AirPlay query, whose table was never measured"
+    );
+    // …and the AirPlay query was **delivered**: the receiving sentence fires for a query
+    // that is ours, and "ours" is asked per service inside the merged loop.
+    let text = read_tail(&path, 400).text;
+    assert!(
+        text.contains("asking Ptr _airplay._tcp.local."),
+        "the merged socket did not even report hearing the AirPlay question: {text}"
+    );
+    assert!(
+        text.contains("mDNS answered its first query"),
+        "the answering half never fired for the measured type: {text}"
     );
 }
 
@@ -1824,9 +2008,13 @@ fn the_airplay_service_is_announced_and_never_answered() {
         // The one-time "I am not answering" line is DEBUG, so without the window
         // this assertion would be about the scheduler rather than the product.
         let _debug = crate::DebugWindow::armed();
+        // The service here is the **AirPlay** one: what this test asks is that a
+        // service whose predicate says "not measured" is announced and never answered.
+        // Before the merge it fed the Cast service with an explicit `false`, which
+        // tested the flag but not the decision — and after the merge that state is
+        // unreachable from the product, so the test now walks the state that is.
         run(
-            &cast,
-            false,
+            std::slice::from_ref(&airplay),
             &mut send,
             &mut unicast,
             &mut recv,

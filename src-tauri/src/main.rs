@@ -141,20 +141,14 @@ struct Runtime {
     /// `docs/Rust-Port-Design.md` §15 is where that is recorded. The RTSP face is
     /// what §26 of the acceptance script drives.
     airplay: Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>,
-    /// The `_airplay._tcp` announcement, started only once the RTSP listener has a
-    /// port. `None` covers three cases and the log tells them apart: the protocol is
-    /// switched off, the bind failed, or `Announcer::start` refused (no advertisable
-    /// address) — each of which has its own sentence in `macast.log` or
-    /// `logs/Discovery.log`.
-    ///
-    /// This announcer **announces and does not answer**. The responder's 17-row
-    /// corpus is measurements of the reference answering queries about
-    /// `_googlecast._tcp`; nothing has been asked of it about an AirPlay question,
-    /// so guessing that table would be this port inventing a protocol rule.
-    /// `Service::responder_answers` is the one line that decides it, and
-    /// `announce_tests::the_airplay_service_is_announced_and_never_answered` is the
-    /// witness that both halves — the decision and the obeying — are real.
-    airplay_announce: Option<Arc<announce::Announcer>>,
+    // (The `airplay_announce` field is gone with the merge: `announce` owns **one**
+    // socket for every service, so there is nothing left for a second field to stop.
+    // What survives of its doc is the part that is still a rule: a service type is
+    // **announced but not answered** when `Service::responder_answers()` says the
+    // decision table was not measured for it — and now that the two services share a
+    // socket, that predicate is asked per service inside the loop rather than per
+    // socket at bind time. `announce_tests::the_airplay_service_is_announced_and_never_answered`
+    // is still the witness that both halves — the decision and the obeying — are real.)
 }
 
 impl Runtime {
@@ -239,9 +233,6 @@ impl Runtime {
         // flag is lowered first, then the serving thread is joined, because
         // "switched off" has to mean **the port is free** — the accept loop polls,
         // so this is milliseconds rather than "whenever the next iPhone connects".
-        if let Some(announcer) = self.airplay_announce.as_ref() {
-            announcer.stop();
-        }
         if let Some((receiver, handle)) = self
             .airplay
             .lock()
@@ -878,6 +869,18 @@ pub fn run() {
             // rows out of the shared macast.log — the same split the Python app
             // makes (macast/logsplit.py), and the reason `Host::log` exists.
             let log_path = log.claim();
+            // The shell's own startup summary speaks through the **root** logger, i.e.
+            // `macast.log` — which is where the reference puts it: `server.py`'s
+            // 「receiver: …」, `protocol_cast.py`'s receiver line and
+            // `protocol_airplay.py`'s listening line all propagate to the root handler,
+            // because `logsplit.claim` is only ever called for **plugins**
+            // (`macast.py:336` / `:905`). This port claims four core names as a
+            // deliberate divergence (§8), and the cost of getting the routing wrong is
+            // that a reader following AGENTS.md §5's troubleshooting recipe greps a file
+            // that does not hold the sentence — measured once already, when these lines
+            // were riding the player's logger and §28's instrument looked in the wrong
+            // file (§16 第 29 条 ④).
+            let app_log = macast_core::logging::root();
             // The state table speaks through its **own** module log, not the
             // player's: `protocol.py:30` is `logging.getLogger("Protocol")` and
             // `logsplit` gives it `logs/Protocol.log`. Handing the table the `MPV`
@@ -1096,7 +1099,7 @@ pub fn run() {
             let cast_on = faces.cast;
             let airplay_on = faces.airplay;
             if !cast_on {
-                log.info(
+                app_log.info(
                     "Chromecast is switched off (Macast_Protocols): not starting 8009, 8008/8443, \
                      or the mDNS announcement",
                 );
@@ -1207,43 +1210,16 @@ pub fn run() {
             // bind failed, which puts a device in a menu that cannot be cast to
             // (AGENTS.md §4.1's first symptom row), and `announce`'s module header
             // records that as a deliberate divergence rather than a silent one.
-            let announcer = match cast_channel.as_ref() {
+            // The service, not the announcer: **one socket announces every type** this
+            // machine serves (see `Announcer`'s field comment — the per-service socket
+            // shape cost unicast queriers a coin flip, measured on two kernels). So the
+            // two blocks below only build `Service`s; the single `start()` after them
+            // binds once.
+            let cast_service = match cast_channel.as_ref() {
                 Some(channel) => {
                     let service =
                         announce::Service::from_setting(&setting, channel.port(), &discovery_log);
-                    let instance = service.instance.clone();
-                    let port = service.port;
-                    // The list, not just the count: §22 of the acceptance script
-                    // compares what the announcer decided to publish against what
-                    // a second stack reads off the wire, and "3 interfaces" cannot
-                    // be compared to a set of addresses. This is also the line a
-                    // human reads when a phone picks an unreachable address — the
-                    // §4.1 first row, which is a wrong-list bug and shows up here.
-                    let published = service
-                        .addresses
-                        .iter()
-                        .map(|a| a.to_string())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    let announcer = announce::Announcer::new(service, Arc::clone(&discovery_log));
-                    // `start` logged its own reason on `Discovery.log`; the
-                    // summary line here answers "did it" for whoever reads the
-                    // startup log, and a refusal keeps `None` so `stop_services`
-                    // never joins a thread that did not exist.
-                    if announcer.start().is_err() {
-                        discovery_log.warning(&format!(
-                            "mDNS: not announcing {instance} — see {}",
-                            discovery_log_path.display()
-                        ));
-                        None
-                    } else {
-                        discovery_log.info(&format!(
-                            "mDNS: announcing {instance} on port {port} over [{published}]; \
-                             re-announcing every {} s",
-                            announce::REANNOUNCE.as_secs()
-                        ));
-                        Some(announcer)
-                    }
+                    Some(service)
                 }
                 None => {
                     discovery_log.info(
@@ -1262,7 +1238,7 @@ pub fn run() {
             // port it got rather than the one it was asked for (`protocol_airplay.py`
             // says the same thing in its own comment).
             let airplay_started = if !airplay_on {
-                log.info(
+                app_log.info(
                     "AirPlay is switched off (Macast_Protocols): not listening on 7000, \
                      and an iPhone will not be pointed at a port nobody serves",
                 );
@@ -1293,7 +1269,7 @@ pub fn run() {
                         };
                         match served {
                             Ok(handle) => {
-                                log.info(&format!(
+                                app_log.info(&format!(
                                     "AirPlay RTSP: listening on {port} as \"{}\" — the \
                                      number this run actually bound, which is not \
                                      necessarily 7000",
@@ -1302,7 +1278,7 @@ pub fn run() {
                                 Some((receiver, handle))
                             }
                             Err(e) => {
-                                log.warning(&format!(
+                                app_log.warning(&format!(
                                     "AirPlay RTSP could not start its serving thread: {e} — \
                                      {port} is bound but nobody reads it"
                                 ));
@@ -1314,7 +1290,7 @@ pub fn run() {
                     // here is for the reader of the startup summary, who asks
                     // "is this Mac an AirPlay target or not".
                     Err(e) => {
-                        log.warning(&format!(
+                        app_log.warning(&format!(
                             "AirPlay RTSP: not listening — no free port in the range \
                              after 7000 ({e}); macOS's own AirPlay Receiver is the usual \
                              reason, and turning it off in 系统设置 is the way to give \
@@ -1331,45 +1307,76 @@ pub fn run() {
             // machine's answer is often 7001 and a sender told 7000 would reach
             // Apple's receiver, not ours), and the **deviceid** is the receiver's
             // own, so the TXT record and `GET /info` name the same device.
-            let (airplay, airplay_announce) = match airplay_started {
+            let (airplay, airplay_service) = match airplay_started {
                 Some((recv, handle)) => {
                     let receiver = Arc::clone(&recv);
-                    let announcer = {
-                        let service = announce::Service::airplay_from_setting(
-                            &setting,
-                            receiver.port(),
-                            receiver.device_id(),
-                            &discovery_log,
-                        );
-                        let instance = service.instance.clone();
-                        let published = service
-                            .addresses
-                            .iter()
-                            .map(|a| a.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let announcer =
-                            announce::Announcer::new(service, Arc::clone(&discovery_log));
-                        if announcer.start().is_err() {
-                            discovery_log.warning(&format!(
-                                "mDNS: not announcing {instance} — see {}",
-                                discovery_log_path.display()
-                            ));
-                            None
-                        } else {
-                            discovery_log.info(&format!(
-                                "mDNS: announcing {instance} on port {} over [{published}]; \
-                                 it announces only — queries about this type are not answered, \
-                                 because the responder's table was measured for \
-                                 _googlecast._tcp",
-                                receiver.port()
-                            ));
-                            Some(announcer)
-                        }
-                    };
-                    (Some((recv, handle)), announcer)
+                    let service = announce::Service::airplay_from_setting(
+                        &setting,
+                        receiver.port(),
+                        receiver.device_id(),
+                        &discovery_log,
+                    );
+                    (Some((recv, handle)), Some(service))
                 }
                 None => (None, None),
+            };
+
+            // **One announcer, one socket, every service.** The reference's
+            // `discover()` is a singleton and both protocols register into it, so this
+            // is the shipped shape rather than an optimisation: with one socket there is
+            // no competing reader for 5353's unicast traffic, and the answering half is
+            // per service type (`responder_answers()`), not per socket.
+            let services: Vec<announce::Service> =
+                [cast_service, airplay_service].into_iter().flatten().collect();
+            let announcer = if services.is_empty() {
+                None
+            } else {
+                let summaries: Vec<(String, u16, String, &'static str)> = services
+                    .iter()
+                    .map(|service| {
+                        (
+                            service.instance.clone(),
+                            service.port,
+                            // The list, not just the count: §22 compares what the
+                            // announcer decided to publish against what a second stack
+                            // reads off the wire, and "3 interfaces" cannot be compared
+                            // to a set of addresses.
+                            service
+                                .addresses
+                                .iter()
+                                .map(|a| a.to_string())
+                                .collect::<Vec<_>>()
+                                .join(","),
+                            if service.responder_answers() {
+                                "it answers queries for this type"
+                            } else {
+                                "it announces this type and does not answer it — the responder table was measured for _googlecast._tcp"
+                            },
+                        )
+                    })
+                    .collect();
+                let announcer = announce::Announcer::new(services, Arc::clone(&discovery_log));
+                // `start` logged its own reason on `Discovery.log`; the summary lines
+                // here answer "did it" for whoever reads the startup log, and a refusal
+                // keeps `None` so `stop_services` never joins a thread that did not exist.
+                if announcer.start().is_err() {
+                    for (instance, _, _, _) in &summaries {
+                        discovery_log.warning(&format!(
+                            "mDNS: not announcing {instance} — see {}",
+                            discovery_log_path.display()
+                        ));
+                    }
+                    None
+                } else {
+                    for (instance, port, published, mode) in &summaries {
+                        discovery_log.info(&format!(
+                            "mDNS: announcing {instance} on port {port} over [{published}]; \
+                             {mode}; re-announcing every {} s",
+                            announce::REANNOUNCE.as_secs()
+                        ));
+                    }
+                    Some(announcer)
+                }
             };
 
             // Managed before anything is started, and this ordering is load-bearing
@@ -1398,7 +1405,6 @@ pub fn run() {
                 setup,
                 announce: announcer,
                 airplay: Mutex::new(airplay),
-                airplay_announce,
             });
 
             player.start();
@@ -1412,7 +1418,7 @@ pub fn run() {
             // the server it owns. The GENA thread is not reported: it has no query to
             // ask, and a line saying "started" for a thread that could have failed to
             // spawn is the kind of unasked claim this port keeps refusing.
-            log.info(&format!(
+            app_log.info(&format!(
                 "receiver: HTTP {} on port {}, SSDP {}",
                 if http.is_running() { "listening" } else { "did not start" },
                 http.bound_port(),
@@ -1427,7 +1433,7 @@ pub fn run() {
                 // line inside `start()`; this is the shell's answer to "did it",
                 // phrased the way the HTTP and SSDP lines above are — the bound
                 // number, or the reason there is none.
-                Some(port) => log.info(&format!("Cast receiver: 8009 listening on {port}")),
+                Some(port) => app_log.info(&format!("Cast receiver: 8009 listening on {port}")),
                 None => log.info(if cast_on {
                     "Cast receiver: not listening — no certificate to wrap 8009 with \
                      (the setup face says the same about 8443)"
@@ -1444,14 +1450,14 @@ pub fn run() {
                 }),
             }
             match &setup_report {
-                Some(text) => log.info(&format!("setup face: {text}")),
+                Some(text) => app_log.info(&format!("setup face: {text}")),
                 None => log.info(if cast_on {
                     "setup face: not listening on 8008"
                 } else {
                     "setup face: not starting — Chromecast is switched off"
                 }),
             }
-            log.info(&format!("renderer log: {}", log_path.display()));
+            app_log.info(&format!("renderer log: {}", log_path.display()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

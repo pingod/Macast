@@ -926,24 +926,59 @@ fn interrupted_sleep(for_: Duration, abort: Option<&AtomicBool>) {
 /// Owns nothing about playback and nothing about a Cast session: it is a
 /// broadcaster, started and stopped with the receiver.
 pub struct Announcer {
-    service: Service,
+    /// **All** the services this machine announces, on **one** socket.
+    ///
+    /// This used to be one `Service` per `Announcer`, i.e. one bound, joined socket on
+    /// 5353 per service type. The reference does not work that way: `discovery.py`'s
+    /// `discover()` is a singleton and both protocols register into it, so the Python
+    /// app holds one announcing socket no matter how many services it advertises. The
+    /// cost of the per-service shape was measured, not guessed
+    /// (`scripts/mdns_reuseport_probe.py`, two kernels): multicast is duplicated to
+    /// every joined socket, but **a unicast datagram goes to exactly one of them, and
+    /// which one varies with the flow** — so a third competing socket made "the socket
+    /// that answers" a coin flip for unicast queriers. One socket, N services removes
+    /// the competition and is the reference's own shape.
+    services: Vec<Service>,
     log: Arc<Logger>,
     running: Arc<AtomicBool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Announcer {
-    pub fn new(service: Service, log: Arc<Logger>) -> Arc<Announcer> {
+    pub fn new(services: Vec<Service>, log: Arc<Logger>) -> Arc<Announcer> {
         Arc::new(Announcer {
-            service,
+            services,
             log,
             running: Arc::new(AtomicBool::new(false)),
             handle: Mutex::new(None),
         })
     }
 
-    pub fn service(&self) -> &Service {
-        &self.service
+    pub fn services(&self) -> &[Service] {
+        &self.services
+    }
+
+    /// The service of one type, for the shell's summary lines and for tests that ask
+    /// "did *this* one get announced".
+    pub fn service_for(&self, service_type: &str) -> Option<&Service> {
+        self.services.iter().find(|s| s.service_type == service_type)
+    }
+
+    /// The interfaces to join: every address any service publishes, deduplicated.
+    ///
+    /// All of them, because the socket must hear a query about *any* service it
+    /// answers; the narrow set is already applied per service by [`advertisable`], so
+    /// this union cannot widen what a sender is told.
+    fn join_addresses(&self) -> Vec<Ipv4Addr> {
+        let mut out: Vec<Ipv4Addr> = Vec::new();
+        for service in &self.services {
+            for address in &service.addresses {
+                if !out.contains(address) {
+                    out.push(*address);
+                }
+            }
+        }
+        out
     }
 
     pub fn is_running(&self) -> bool {
@@ -964,24 +999,35 @@ impl Announcer {
     /// 「日志指错嫌疑人比不指更贵」, one layer down: the sentence has to name the thing
     /// that actually failed.
     pub fn start(self: &Arc<Self>) -> Result<(), String> {
-        if self.service.addresses.is_empty() {
-            // Not a comment about the network: this is the case where the receiver is
-            // up on its own port and **no sender can learn it**, so the sentence says
-            // which half failed.
+        let addresses = self.join_addresses();
+        if addresses.is_empty() {
+            // Not a comment about the network: this is the case where the receivers are
+            // up on their own ports and **no sender can learn any of them**, so the
+            // sentence names every type that lost its announcement.
+            let types: Vec<&str> = self
+                .services
+                .iter()
+                .map(|s| s.service_type.as_str())
+                .collect();
             self.log.warning(&format!(
                 "mDNS unavailable, {} will not be discoverable: \
                  no advertisable address to publish",
-                self.service.service_type,
+                types.join(", "),
             ));
             return Err("no advertisable address to publish".to_string());
         }
-        let answers = self.service.responder_answers();
-        let engine = match bind_engine(&self.service.addresses, &self.log, answers) {
+        let engine = match bind_engine(&addresses, &self.log) {
             Ok(sock) => sock,
             Err(e) => {
+                let types: Vec<&str> = self
+                    .services
+                    .iter()
+                    .map(|s| s.service_type.as_str())
+                    .collect();
                 self.log.error(&format!(
                     "mDNS unavailable, {} will not be discoverable: {}",
-                    self.service.service_type, e
+                    types.join(", "),
+                    e
                 ));
                 return Err(e.to_string());
             }
@@ -989,7 +1035,7 @@ impl Announcer {
         self.running.store(true, Ordering::SeqCst);
         let running = Arc::clone(&self.running);
         let log = Arc::clone(&self.log);
-        let service = self.service.clone();
+        let services = self.services.clone();
         let started = thread::Builder::new()
             .name("MDNS_KEEPALIVE".to_string())
             .spawn(move || {
@@ -1017,8 +1063,7 @@ impl Announcer {
                     Err(e) => Err(e),
                 };
                 run(
-                    &service,
-                    answers,
+                    &services,
                     &mut send,
                     &mut unicast,
                     &mut recv,
@@ -1031,11 +1076,15 @@ impl Announcer {
                 *self.handle.lock().unwrap() = Some(handle);
                 // `discovery.py:294`: 「mDNS advertised %s on port %d」 — and
                 // `protocol_cast.py:415`'s 「ChromecastProtocol started on port
-                // %s」 is the channel's own line, not this thread's.
-                self.log.info(&format!(
-                    "mDNS advertised {} on port {}",
-                    self.service.instance, self.service.port
-                ));
+                // %s」 is the channel's own line, not this thread's. One line per
+                // service: the shell's summary already names them, and a reader asking
+                // "which port did AirPlay get" must not have to parse a list.
+                for service in &self.services {
+                    self.log.info(&format!(
+                        "mDNS advertised {} on port {}",
+                        service.instance, service.port
+                    ));
+                }
                 Ok(())
             }
             Err(e) => {
@@ -1082,7 +1131,7 @@ impl Announcer {
 /// is allowed to name (`advertised_addresses`, not the browser's superset, which is
 /// §22's product bug). A querier that can reach us is on one of these; joining
 /// elsewhere would only hear traffic we cannot answer on.
-fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger, answers: bool) -> io::Result<Engine> {
+fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger) -> io::Result<Engine> {
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     crate::mdns::set_reuse_for_mdns(&sock, log);
     sock.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).into())?;
@@ -1131,11 +1180,7 @@ fn bind_engine(interfaces: &[Ipv4Addr], log: &Logger, answers: bool) -> io::Resu
         joined,
         interfaces.len(),
         took.join(", "),
-        if answers {
-            "it will answer queries if that number is not zero"
-        } else {
-            "it announces only, because the responder knows one service type"
-        }
+        "it answers queries for every service type registered on it"
     ));
     Ok(Engine {
         sock,
@@ -1403,25 +1448,38 @@ pub fn serve(
 /// it" reads like a network problem (`channel.rs`'s 「读不得跨阻塞持锁」 is the same
 /// thing one layer down, where the lock was the casualty rather than the schedule).
 fn run(
-    service: &Service,
-    answers: bool,
+    services: &[Service],
     send: &mut dyn FnMut(&[u8]) -> io::Result<()>,
     unicast: &mut dyn FnMut(&[u8], SocketAddr) -> io::Result<()>,
     recv: &mut dyn FnMut() -> io::Result<Option<(Vec<u8>, SocketAddr)>>,
     running: &AtomicBool,
     log: &Logger,
 ) {
-    let bytes = service.announcement();
-    report(
-        log,
-        &burst(send, &bytes, REGISTER_GAP, Some(running)),
-        "announcement",
-    );
+    // One burst per service, the reference's own registration order (Cast first, then
+    // AirPlay — the order the shell builds them in). Each burst is three packets, and
+    // the gaps are the measured ones; sending them back to back is what the Python
+    // engine does when two services are registered in the same `Zeroconf`.
+    let mut bytes_per_service: Vec<Vec<u8>> = Vec::with_capacity(services.len());
+    for service in services {
+        let bytes = service.announcement();
+        report(
+            log,
+            &burst(send, &bytes, REGISTER_GAP, Some(running)),
+            "announcement",
+        );
+        bytes_per_service.push(bytes);
+    }
     let mut next = Instant::now() + REANNOUNCE;
     let mut served = Served::default();
     let mut heard = 0usize;
     let mut other_heard = 0usize;
-    let mut silent_notice = !answers;
+    // The service types this socket is allowed to answer. It is **not** "all of them":
+    // `responder_answers()` is the one line that says which types the decision table was
+    // measured for, and the merged socket keeps that distinction instead of quietly
+    // widening it. A type that is not in this list still appears in every burst above —
+    // announced, never answered, which is the shape §26 pins on the wire.
+    let answering: Vec<&Service> = services.iter().filter(|s| s.responder_answers()).collect();
+    let mut silent_notice = answering.is_empty();
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -1429,25 +1487,38 @@ fn run(
         match recv() {
             Ok(Some((data, peer))) => {
                 // The one place this loop can put a packet on the wire **in reply to
-                // somebody else**. With `answers` false the datagram is still read —
-                // a joined socket that is never read is the shape
-                // `scripts/mdns_reuseport_probe.py` measured as a queue nobody
-                // drains — it is simply not answered, because the rules below it
-                // were measured for one service type only. See
-                // [`Service::responder_answers`].
-                let one = if answers {
-                    serve(&data, peer, service, send, unicast, log)
-                } else {
+                // somebody else**. Every answering service gets the same datagram and
+                // filters it by its own shape, so a query about `_airplay._tcp` finds
+                // the AirPlay service and a query about `_googlecast._tcp` finds the
+                // Cast one; `respond::concerns` is the shared matcher, not a second
+                // name rule. With **no** answering service the datagram is still read
+                // (a joined socket that is never read is the queue nobody drains that
+                // `mdns_reuseport_probe.py` measured) and simply not answered.
+                let mut one = Served::default();
+                for service in &answering {
+                    let part = serve(&data, peer, service, send, unicast, log);
+                    one.queries += part.queries;
+                    one.group += part.group;
+                    one.direct += part.direct;
+                    one.absorbed += part.absorbed;
+                    one.for_us |= part.for_us;
+                    if part.asking.len() > one.asking.len() {
+                        // The sentence a human reads: the **widest** question set seen,
+                        // because two services parse the same bytes and the longer
+                        // description is the one that names every question asked.
+                        one.asking = part.asking.clone();
+                    }
+                }
+                if answering.is_empty() {
                     if silent_notice {
                         silent_notice = false;
                         log.debug(
                             "mDNS engine received a datagram and did not answer it: \
-                             this socket announces only, and the responder's table is \
-                             for one service type",
+                             this socket announces only, and no service type it carries \
+                             has a measured responder table",
                         );
                     }
-                    Served::default()
-                };
+                }
                 if one.queries > 0 && one.for_us && heard < HEARD_SENTENCES {
                     // The **receiving** question, asked separately from the answering
                     // one. "It never answered" has two causes and only this process can
@@ -1531,11 +1602,18 @@ fn run(
             }
         }
         if Instant::now() >= next {
-            report(
-                log,
-                &burst(send, &bytes, REGISTER_GAP, Some(running)),
-                "re-announcement",
-            );
+            // Every service re-announces on the same tick: one timer for the socket,
+            // which is what "one engine, N registrations" means. The reference's
+            // `Zeroconf` re-sends each registered service on its own schedule, and the
+            // 60-second cadence is ours to choose (measured in §22: the initial burst is
+            // what a cold browser needs, the keepalive is for listeners that never ask).
+            for bytes in &bytes_per_service {
+                report(
+                    log,
+                    &burst(send, bytes, REGISTER_GAP, Some(running)),
+                    "re-announcement",
+                );
+            }
             next = Instant::now() + REANNOUNCE;
         }
     }
@@ -1545,8 +1623,10 @@ fn run(
             served.queries, served.group, served.direct, served.absorbed
         ));
     }
-    let goodbye = service.goodbye();
-    report(log, &burst(send, &goodbye, GOODBYE_GAP, None), "goodbye");
+    for service in services {
+        let goodbye = service.goodbye();
+        report(log, &burst(send, &goodbye, GOODBYE_GAP, None), "goodbye");
+    }
     log.info("mDNS announcement stopped");
 }
 
