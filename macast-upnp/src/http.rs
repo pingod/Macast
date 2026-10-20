@@ -177,6 +177,9 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// `save-launch-param=<json>` (`_post_save_launch_param`, `protocol.py:2640-2648`,
+    /// row **10**).
+    SaveLaunchParam,
     /// `set-renderer=<title>` (`_set_renderer`, `protocol.py:2385-2392`, row **6**).
     SetRenderer,
     /// `app-action=<verb>` (`_app_action`, `protocol.py:2404-2414`, row **8**).
@@ -268,6 +271,9 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // really ends this process, and the answer is written before the exit so the page
     // can show it.
     PostRoute { field: "app-action", gate: "management", action: PostAction::AppAction },
+    // Row 10 of the reference (`protocol.py:2299`), straight after `app-action`: it
+    // replaces the whole settings file and restarts, so it is **code-gated**.
+    PostRoute { field: "save-launch-param", gate: "code-execution", action: PostAction::SaveLaunchParam },
     // `set-subtitle-show` is row 14 of the reference (`protocol.py:2309`), one row ahead
     // of `cast-uri` (row 15). Trivial while both are management-gated, and kept in place
     // for the same reason every row here is ordered: a request carrying both action
@@ -1431,6 +1437,13 @@ pub trait Management: Send + Sync {
     /// reference's `未找到播放器：{title}` — and the accepted one does what the
     /// reference's does: persist the canonical title and reload the player.
     fn set_renderer(&self, title: &str) -> Answer;
+
+    /// `save-launch-param=<json>`: replace the **whole** settings table from one JSON
+    /// object and restart the app (`_post_save_launch_param`, `protocol.py:2640-2648`,
+    /// row **10**). The reference's parse failure sentence is `json format error`, and
+    /// a non-object is refused with it too (this port checks, the reference crashes on
+    /// the next read — §8 row).
+    fn save_launch_param(&self, raw: &str) -> Answer;
 
     /// `app-action=<verb>`: the handful of app-level buttons the page may press
     /// (`_app_action`, `protocol.py:2404-2414`, row **8** of the reference's table).
@@ -2734,6 +2747,12 @@ impl Face {
                     &self
                         .management
                         .toggle_protocol(&param_value(req, "toggle-protocol").unwrap_or_default()),
+                ),
+                PostAction::SaveLaunchParam => answer_response(
+                    200,
+                    &self
+                        .management
+                        .save_launch_param(&param_value(req, "save-launch-param").unwrap_or_default()),
                 ),
                 PostAction::AppAction => answer_response(
                     200,
@@ -4614,6 +4633,13 @@ mod tests {
             }
         }
 
+        fn save_launch_param(&self, raw: &str) -> Answer {
+            match raw.trim().parse::<serde_json::Value>() {
+                Ok(serde_json::Value::Object(_)) => Answer::ok("success"),
+                _ => Answer::fail("json format error"),
+            }
+        }
+
         fn app_action(&self, action: &str) -> Answer {
             self.app_calls.lock().expect("app calls").push(action.to_string());
             match action.trim() {
@@ -6370,7 +6396,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 15, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 16, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is
@@ -6381,7 +6407,7 @@ mod tests {
             .filter(|r| r.gate == "code-execution")
             .map(|r| r.field)
             .collect();
-        assert_eq!(code_gated, vec!["set-module-setting"], "gate column drifted: {code_gated:?}");
+        assert_eq!(code_gated, vec!["save-launch-param", "set-module-setting"], "gate column drifted: {code_gated:?}");
         let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
         fields.sort_unstable();
         fields.dedup();

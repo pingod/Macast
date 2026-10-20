@@ -1581,6 +1581,38 @@ impl macast_upnp::http::Management for ShellManagement {
     /// (`macast.py`'s `set_renderer` handler). Refusing everything else is the honest
     /// half: a switch that pretends to find a plugin this build does not have is the
     /// document-only control this port keeps refusing.
+    /// `_post_save_launch_param` (`protocol.py:2640-2648`): the whole table, then a
+    /// restart — **answer first**, the §35 shape, or the reply dies with the process it
+    /// is telling you about. `json format error` is the reference's own sentence, and a
+    /// non-object is refused with it (the reference accepts one and breaks on the next
+    /// read; §8 records that divergence).
+    fn save_launch_param(&self, raw: &str) -> macast_upnp::http::Answer {
+        let parsed: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(_) => return macast_upnp::http::Answer::fail("json format error"),
+        };
+        let map = match parsed {
+            serde_json::Value::Object(map) => map,
+            _ => return macast_upnp::http::Answer::fail("json format error"),
+        };
+        self.host.setting.replace_all(map);
+        let log = self.host.log.clone();
+        let app = self.host.app.clone();
+        let spawned = std::thread::Builder::new()
+            .name("MACAST_RESTART".to_string())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                log.info("launch param saved; restarting the app");
+                app.restart();
+            });
+        if spawned.is_err() {
+            return macast_upnp::http::Answer::fail(
+                "设置已保存，但重启线程起不来；重启 Macast 之后新设置才会全面生效",
+            );
+        }
+        macast_upnp::http::Answer::ok("success")
+    }
+
     fn set_renderer(&self, title: &str) -> macast_upnp::http::Answer {
         let current = renderer_title(&self.host.setting);
         if title.trim() != current {
