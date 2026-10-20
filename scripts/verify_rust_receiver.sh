@@ -3295,7 +3295,7 @@ QUERYEOF
                     if [ -n "$HEARD" ]; then
                         fail "the engine read a query ($HEARD) and answered none while $WIRE — that is the responder's own question, not this machine's"
                     else
-                        skip "this binary was handed nothing on 5353 while $WIRE, and a joined python socket on the same port receives the same traffic; the subject-named receiving sentence never fired, and the DEBUG half of it is silent too — proven instead by announce_tests e8, e9 and e10 and by the loopback path"
+                        skip "this binary was handed nothing on 5353 while $WIRE (the probe asks from this same Mac; a sender on another machine DID get answers — design doc §16 第 48 条), and a joined python socket on the same port receives the same traffic; the subject-named receiving sentence never fired, and the DEBUG half of it is silent too — proven instead by announce_tests e8, e9 and e10 and by the loopback path"
                     fi
                 fi
                 ;;
