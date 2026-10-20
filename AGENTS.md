@@ -2743,7 +2743,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 **Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
 `macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
 `ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
-真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **29**）：
+真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **30**）：
 
 * **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
   于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
@@ -2798,7 +2798,22 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   "这测试干嘛挡我写注释"（§16 第 19 条那条 CORS 检查的教训同一形状）。
   **第一版这条判据是 0 红的**：它只问后端发不发 `known`，不问页面读不读 —— 把死分支贴回去它照样绿。
   补成"扫页面读的键"之后，同一支变异体红 1 条并逐字点名 `known`。
-* 读数：`macast-upnp` **369**、`macast-tauri` **29**（两台仪器一致：`--list` 与整跑），
+* **窗口第一次能自己走完「网页地址投屏」**：四条命令（`resolve_page` / `resolve_status` /
+  `cast_resolved` / `cast_targets`）全部经过**同一个** `Arc<dyn Management>` —— 它的 `Arc` 在
+  `main.rs` 里有了名字，`Face::new` 与 `Runtime` 各拿一份 clone。第二份会是**第二张 job 表**，
+  于是窗口起的解析在 `curl` 的轮询里看不见。页面的每一格都读后端交回的数（`step_label`、
+  `scraped`/`from_ytdlp`/`measured`/`rejected`/`hidden_silent`、候选行的 `mode`/`merged`/`relay`），
+  一个数都不在页面里另算。
+  **第一个 bug 只有点击才现形**：轮询结束那一支把 `resolveJob` 清空，而"投第 N 条"读的也是它 ⇒
+  一张**填满的**卡片点下去发的是 `job: null`，后端答 `success`（那条路只读候选表）。真机读数是
+  `{job: null, candidate: "1", target: "uuid:tv"}`；修法是两个变量（`resolveJob` 管轮询、
+  `finishedJob` 管这张卡是哪一次解析）。**渲染层完全看不见这个 bug** —— 面板满、按钮活、无报错。
+  判据：真机 HTTP 面把 `resolve-status` 的**十七键**逐名读回、两种空分得开（`status: null` +
+  「没有这个解析任务」）、下拉第一行是**后端插的**本机；真浏览器用**同一个实例的真答复**渲染 ⇒
+  两条候选各自的理由、零 JS 报错、零格停在加载中；点击路径发出 `{job: "J1", candidate: "1",
+  target: "uuid:tv"}`。常驻的是三条静态守卫（含"四命令必须真的被 invoke"与三类键名 ——
+  它当场抓到我漏渲染 `c.relay`，也就是那条解释"为什么这一条能投"的句子）。
+* 读数：`macast-upnp` **369**、`macast-tauri` **30**（两台仪器一致：`--list` 与整跑），
   单元合计 **1409 passed / 0 failed**（`cargo test --workspace`：cast 735 + core 128 + mpv 149 +
   tauri 28 + upnp 369）；真机脚本 **42 节**，整跑 **446 PASS / 0 FAIL / 2 SKIP，退出码 2**，
   其中 §39 自己是 **8/8**。那两条 SKIP 是本机的环境事实（§25 的送达那一格、§32 的"这张机器只有

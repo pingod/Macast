@@ -3581,18 +3581,77 @@ mod tests {
             assert!(tail.get(key).is_some(), "the page reads log_view().{key}: {tail}");
         }
 
-        // …and the page really is reading them: a renderer that stopped touching a key
-        // would make the assertions above vacuous. Cheap to ask, and it is what makes
-        // this test about the page rather than about the backend.
+        // The four new commands must be reachable from the page at all: a card with no
+        // `invoke` is the "document-only knob" shape this port keeps refusing.
+        for command in ["resolve_page", "resolve_status", "cast_resolved", "cast_targets"] {
+            assert!(
+                page.contains(&format!("invoke('{command}'")),
+                "the page never calls {command} — the card is a picture of a feature"
+            );
+        }
+
+        // …and every name the web-address card reads must still be in the page. These come
+        // from `macast-cast`'s builders (pinned by that crate's own tests); what this half
+        // adds is "the page and those builders still agree on the names".
         for needle in ["m.main", "m.modules", "group.title", "group.keys", "item.key",
                        "item.label", "item.hint", "item.present", "item.type", "item.editable",
-                       "d.logs", "d.truncated", "d.lines", "d.size"] {
+                       "d.logs", "d.truncated", "d.lines", "d.size",
+                       // the resolved job's counters
+                       "st.step_label", "st.step_seconds", "st.seconds", "st.scraped",
+                       "st.from_ytdlp", "st.measured", "st.rejected", "st.hidden_silent",
+                       "st.candidates", "st.needs_cookies", "st.error", "st.note", "st.done",
+                       // one candidate row, key for key
+                       "c.title", "c.label", "c.container", "c.width", "c.height",
+                       "c.duration", "c.mode", "c.video_codec", "c.audio_codec",
+                       "c.merged", "c.last_resort", "c.relay",
+                       // the device dropdown, whose first row is inserted by the backend
+                       "state.items", "state.searching", "state.known", "row.kind", "row.id",
+                       "row.name", "row.address"] {
             assert!(
                 page.contains(needle),
                 "the page no longer reads {needle} — either the renderer is gone (see the id \
                  test) or this assertion has gone stale"
             );
         }
+    }
+
+    /// **The card's job id must survive the end of polling.**
+    ///
+    /// Measured on the live instance: with one variable doing both jobs, the poll's
+    /// "finished" branch cleared it, so clicking 投第 N 条 on a completed card sent
+    /// `job: null` — and the backend answered `success`, because that path only reads the
+    /// candidate list. The symptom is "the button does nothing" on a card that looks
+    /// perfectly filled in, which is the class the other two page guards were written for.
+    ///
+    /// A static question, because the defect is a **variable's lifetime** and the page has
+    /// no unit harness: two names, one meaning "keep polling" and one meaning "the id this
+    /// card was built from", and the cast call must read the second.
+    #[test]
+    fn the_cast_button_sends_the_job_the_card_was_built_from() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        let script = page
+            .split_once("<script>")
+            .map(|(_, rest)| rest)
+            .unwrap_or(page);
+        assert!(
+            script.contains("let finishedJob = null;"),
+            "the card no longer keeps a job id separate from the polling flag — that is the \
+             `job: null` defect of 2026-10-20"
+        );
+        let call = script
+            .find("invoke('cast_resolved'")
+            .unwrap_or_else(|| panic!("the card never casts a resolved candidate"));
+        let window = &script[call..(call + 260).min(script.len())];
+        assert!(
+            window.contains("job: finishedJob"),
+            "cast_resolved is not handed the durable job id: {}",
+            &window[..window.len().min(200)]
+        );
+        assert!(
+            !window.contains("job: resolveJob"),
+            "cast_resolved reads the polling flag again — it is cleared when the poll ends"
+        );
     }
 
     /// The ids that *are* written must be written by the startup path, not only by a

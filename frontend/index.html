@@ -190,6 +190,24 @@
       </section>
 
       <section class="card">
+        <h2>网页地址投屏</h2>
+        <p class="muted">贴一个网页地址（或手机 App 复制的整段分享文案）。解析在本机后台跑，
+          候选表出来之后选一条投出去 —— 直链走中转的反向转发，HLS/DASH 走 ffmpeg 转封装，
+          <strong>电视永远拿不到页面上那个签名地址</strong>（AGENTS.md §4.14）。</p>
+        <label for="page-url">网页地址</label>
+        <input id="page-url" placeholder="https://www.bilibili.com/video/BV…" />
+        <button id="resolve-go">解析</button>
+        <button id="resolve-stop">停止轮询</button>
+        <p class="muted" id="resolve-meta">（还没解析过）</p>
+        <div id="resolve-rows"></div>
+
+        <label for="cast-target">投给</label>
+        <select id="cast-target"></select>
+        <button id="targets-refresh">重新搜索设备</button>
+        <p class="muted" id="targets-note">第一行永远是本机：它交给我们自己那个渲染器，不经过插件。</p>
+      </section>
+
+      <section class="card">
         <h2>模块设置</h2>
         <p class="muted">与 HTTP 的 `query=module-settings` / `set-module-setting` 同一张归属表。只读的格子不给输入框。</p>
         <div id="mods"></div>
@@ -721,6 +739,179 @@
       // 重绘由 `renderLogModules` 自己的签名门挡住，长度没变就不会碰选择器。
       services().catch((e) => note('读取服务状态失败：' + e));
       subscribers().catch((e) => note('读取订阅客户端失败：' + e));
+      // —— 网页地址投屏 ——
+      // 形状照 `ResolveJob.status()` 那十七个键（`macast-cast/src/resolve.rs`），
+      // 候选行照 `describe()`。**两处都不在这里另算**：进度用后端交回的 `step_label`，
+      // 徽标用 `describe()` 已经交回的 `audio_codec` 与 `merged` —— 页面自己拼一句
+      // "有声/无声"就是 AGENTS.md §4.8 那条「两处答案不一致」的第四个形状。
+      // **两个变量，不是一个**：`resolveJob` 是"还要不要再轮询"，`finishedJob` 是"这张卡片现在
+      // 列的是哪一次解析的结果"。合成一个会造出一个只有真机点得出来的 bug —— 轮询一结束就把它
+      // 清空，于是**候选表还在、点"投第 N 条"发出去的 job 是 null**（本机实测：`{job: null,
+      // candidate: "1", target: "uuid:tv"}`，而回答是 success，因为后端那条路径只看候选表）。
+      // 参考实现在这一点上没有歧义：`cast-resolved` 读的是页面手里的 job id，与轮询状态无关。
+      let resolveJob = null;
+      let finishedJob = null;
+      let resolveTimer = null;
+
+      function fmtSeconds(v) {
+        return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(1)} 秒` : '—';
+      }
+
+      function stopResolvePolling() {
+        if (resolveTimer) { clearTimeout(resolveTimer); resolveTimer = null; }
+      }
+
+      // 候选行：一个地址一条，**用 createElement + textContent**（标题与地址都来自那一页，
+      // 与日志面板同一个 XSS 边界，AGENTS.md §4.10）。
+      function renderCandidates(candidates) {
+        lastCandidates = candidates || [];
+        const box = document.querySelector('#resolve-rows');
+        box.textContent = '';
+        if (!lastCandidates.length) {
+          const p = document.createElement('p');
+          p.className = 'muted';
+          p.textContent = '（这次没有可用候选；上面那句说的是哪一种没有）';
+          box.appendChild(p);
+          return;
+        }
+        lastCandidates.forEach((c, index) => {
+          const row = document.createElement('div');
+          row.className = 'sub';
+          const title = document.createElement('span');
+          title.className = 'hist-title';
+          title.textContent = c.title || '（没有名字）';
+          const meta = document.createElement('span');
+          meta.className = 'sub-meta';
+          // 这一行的每个数是后端算的：`mode` 是 plan() 的判决（proxy / remux），
+          // `relay` 是它给出的一句话理由，`merged` 说明音画是两条地址合并来的。
+          const bits = [c.label, c.container, `${c.width}x${c.height}`,
+                        fmtSeconds(c.duration), c.mode];
+          if (c.video_codec) bits.push(c.video_codec + (c.audio_codec ? '+' + c.audio_codec : ''));
+          if (c.merged) bits.push('音画合并');
+          if (c.last_resort) bits.push('未度量');
+          meta.textContent = bits.filter(Boolean).join(' · ');
+          // `relay` 是后端给的一句话**理由**（"带请求头反向转发" / "转封装：写完之前没有可信
+          // 长度，拖动要等它写完"）。卡片必须把它说出来：用户选这一条还是下一条，靠的就是这句
+          // —— 而它只有一个主人（`relay_reason()`），页面不许自己再拼一句同义的话。
+          const why = document.createElement('span');
+          why.className = 'reason';
+          why.textContent = c.relay || '';
+          const button = document.createElement('button');
+          button.textContent = `投第 ${index + 1} 条`;
+          button.addEventListener('click', async () => {
+            try {
+              const target = document.querySelector('#cast-target').value || '';
+              const answer = await invoke('cast_resolved', {
+                job: finishedJob, candidate: String(index), target,
+              });
+              note(`投屏 → code ${answer.code}: ${answer.message}`);
+            } catch (e) {
+              note(`投屏失败：${e}`);
+            }
+            await snapshot();
+          });
+          row.appendChild(title);
+          row.appendChild(meta);
+          row.appendChild(why);
+          row.appendChild(button);
+          box.appendChild(row);
+        });
+      }
+
+      async function pollResolve() {
+        resolveTimer = null;
+        if (!resolveJob) return;
+        let doc;
+        try {
+          doc = await invoke('resolve_status', { job: resolveJob });
+        } catch (e) {
+          out('resolve-meta', `轮询失败：${e}`);
+          return;
+        }
+        // 两种空是两句话：没有这个任务（`status: null`，超时或已重启）与还在跑。
+        // 把前者继续当"解析中"轮下去，会让一张卡永远转圈到 TTL 结束。
+        if (doc.code !== 0 || !doc.status) {
+          out('resolve-meta', `${doc.message || '没有这个解析任务'}（已停止轮询）`);
+          resolveJob = null;
+          return;
+        }
+        const st = doc.status;
+        const head = `${st.step_label || st.step} · ${fmtSeconds(st.seconds)}`
+          + `（这一步 ${fmtSeconds(st.step_seconds)}）· 页面 ${st.scraped} 条`
+          + ` · 引擎 ${st.from_ytdlp} 条 · 已度量 ${st.measured} 条`
+          + ` · 剔除 ${st.rejected} 条 · 藏起无声 ${st.hidden_silent} 条`;
+        out('resolve-meta', st.done ? `${head} · 完成` : head);
+        if (st.error) note(`解析出错：${st.error}`);
+        if (st.note) note(`解析备注：${st.note}`);
+        if (st.needs_cookies) note('这通常是站点要会话 cookie：卡片下方是两条给它凭据的路（本壳还没有那一面）');
+        renderCandidates(st.candidates);
+        if (!st.done) resolveTimer = setTimeout(pollResolve, 700);
+        else resolveJob = null;
+      }
+
+      document.querySelector('#resolve-go').addEventListener('click', async () => {
+        const text = document.querySelector('#page-url').value.trim();
+        if (!text) { note('解析：没有地址，后端不会动'); return; }
+        stopResolvePolling();
+        let answer;
+        try {
+          answer = await invoke('resolve_page', { text });
+        } catch (e) {
+          out('resolve-meta', `解析没能开始：${e}`);
+          return;
+        }
+        if (answer.code !== 0) {
+          out('resolve-meta', answer.message || '解析被拒绝');
+          renderCandidates([]);
+          return;
+        }
+        resolveJob = answer.job;
+        finishedJob = answer.job;
+        out('resolve-meta', `已开始解析 ${answer.url}${answer.note ? `（${answer.note}）` : ''}`);
+        renderCandidates([]);
+        pollResolve();
+      });
+      document.querySelector('#resolve-stop').addEventListener('click', () => {
+        stopResolvePolling();
+        resolveJob = null;
+        out('resolve-meta', '已停止轮询（后台那一次解析仍在跑完，只是这一格不再看它）');
+      });
+
+      // 设备下拉：第一行是**后端插的**本机（`_local_target`），页面不许自己塞一个 ——
+      // 塞了就出现两个"本机"，而它们的 id 都是 `local`。
+      async function loadTargets(refresh) {
+        let doc;
+        try {
+          doc = await invoke('cast_targets', { refresh: !!refresh });
+        } catch (e) {
+          out('targets-note', `读设备列表失败：${e}`);
+          return;
+        }
+        const state = (doc && doc.targets) || {};
+        const sel = document.querySelector('#cast-target');
+        const previous = sel.value;
+        sel.textContent = '';
+        for (const row of state.items || []) {
+          const opt = document.createElement('option');
+          opt.value = row.id;
+          opt.textContent = row.kind === 'local'
+            ? `本机 · ${row.name}`
+            : `${row.name}${row.address ? ` · ${row.address}` : ''}`;
+          sel.appendChild(opt);
+        }
+        sel.value = previous;
+        if (![...sel.options].some((o) => o.value === previous)) sel.value = 'local';
+        // `searching` 在一台发现不到设备的机器上可能一直是 true（设计如此，见 §16 第 8 条），
+        // 所以这一行说的是"搜索还在不在"，不是"有没有设备"。
+        const count = (state.items || []).length;
+        out('targets-note', `${count} 行（含本机）· ${state.searching ? '搜索还在跑' : '搜索已停'}`
+          + `${state.known ? '' : ' · 还没有拿到过完整一轮结果'}`);
+      }
+      document.querySelector('#targets-refresh').addEventListener('click', () => {
+        loadTargets(true);
+      });
+      loadTargets(false).catch(() => {});
+
       loadLogModules().catch((e) => note('读取日志清单失败：' + e));
       setInterval(() => {
         services().catch(() => {});

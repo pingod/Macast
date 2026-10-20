@@ -1960,7 +1960,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 
 49. **POST 表齐了：`mirror-action` 是最后一行，而它的答案与两个 GET 门读同一个常量**（2026-10-20，
     `macast-upnp/src/http.rs` 的第 23 行 + `MIRROR_ABSENT_MESSAGE` + `ShellManagement::mirror_action`
-    + 真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **29**）：
+    + 真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **30**）：
     *为什么这一行不能写成 `management`*：启动一块桌面的采集不是"本机来的就可以"的事 ——
     任何网页都能向 127.0.0.1 发 POST，这正是 §4.7b 写下的那一课。参考实现自己在那一行上面就这么说，
     所以这里照抄门、不重新推理（`Gate::parse` 不认识门名就拒绝，fail closed）。
@@ -1984,7 +1984,41 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     本节的东西（§25 的送达那一格：这台机器上的另一个进程发出的查询没交到这个 binary 手里；
     §32 的"这台机器只有一块可用网卡"，所以钉住与不钉住在行为上分不开）。它们**照旧计败**，
     所以"全绿"这句话在这里仍然说不出口。§39 自己是 **8/8**。
-    **本分支从未推送 ⇒ 这 369 + 29 条与 §39 那 8 条读数没有任何 CI 见证过。**
+    **本分支从未推送 ⇒ 这 369 + 30 条与 §39 那 8 条读数没有任何 CI 见证过。**
+
+51. **窗口第一次能自己走完「网页地址投屏」那条链，而它的第一个 bug 只有点击才现形**
+    （2026-10-20，`src-tauri/src/main.rs` 的四条命令 `resolve_page` / `resolve_status` /
+    `cast_resolved` / `cast_targets` + `frontend/index.html` 的一张卡 + `macast-tauri` 30 条）：
+    *接的是什么*：后端这条路早就完整（`ShellManagement` 的四个 seam、`resolve::ResolveJob`、
+    `relay`），缺的只是窗口那一半 —— 和 §16 第 35 条同一形状（**"壳先于库"的反面**：这次线在，
+    面板不在）。四条命令全部经过**同一个** `Arc<dyn Management>` —— 它的 `Arc` 现在在 `main.rs` 里
+    有了名字（`let management: …`），`Face::new` 与 `Runtime` 各拿一份 clone。理由不是整齐：
+    第二份 `ShellManagement` 会是**第二张 job 表**，于是窗口起的解析在 `curl` 的轮询里看不见。
+    *页面那一半*：进度条的每一格都读后端交回的 `step_label` / `seconds` / `step_seconds` /
+    `scraped` / `from_ytdlp` / `measured` / `rejected` / `hidden_silent`，候选行读 `describe()`
+    的 `title`/`label`/`container`/`mode`/`merged`/`last_relay` —— **一个数都不在页面里另算**
+    （§4.8「两处答案不一致比没有数字更糟」的又一个形状）。候选行还用 `textContent` 建，
+    标题与地址都来自那一页，与日志面板同一个 XSS 边界（§4.10）。
+    *第一个 bug 只有点击现形*：轮询结束那一支把 `resolveJob` 清空，而"投第 N 条"读的也是它 ⇒
+    一张**填满的**卡片点下去发的是 `job: null`，而后端答 `success`（那条路只读候选表）。
+    真机读数是点完之后从 `invoke` 抓的 `{job: null, candidate: "1", target: "uuid:tv"}`。
+    修法是**两个变量**：`resolveJob` 管"还要不要轮询"，`finishedJob` 管"这张卡是哪一次解析"。
+    这个 bug 在**渲染层完全看不见** —— 面板是满的、按钮是活的、没有报错，只有点它才知道。
+    *判据三层*：① 真机 HTTP 面（`/tmp/pagecheck/card_probe.js`，对着自带实例）——
+    `resolve-page` 的五键、`resolve-status` 的**十七键**逐名读回、两种空分得开
+    （`nosuchjob` 回 `code: 1` + `status: null` + 「没有这个解析任务（超时或已重启）」）、
+    `cast-targets` 的三键与**第一行是后端插的本机**（`{id:"local",kind:"local",name:"MPV"}`）；
+    ② 真浏览器渲染（同一个实例的**真答复**喂进假 `window.__TAURI__`）：进度行、
+    两条候选各自的**理由**、下拉两行（`本机 · MPV` / `Philips 43PFS5301 · 192.168.1.13`）、
+    零 JS 报错、零格停在「加载中…」；③ 点击路径：`selectOption('uuid:tv')` 之后点第 2 条 ⇒
+    `{job: "J1", candidate: "1", target: "uuid:tv"}` 与「投屏 → code 0: success」。
+    *常驻判据三条*（`macast-tauri` 里，都不依赖浏览器）：`the_cast_button_sends_the_job_the_card_
+    was_built_from`（两个变量名 + 调用点读的是持久那个；把 `finishedJob` 换回 `resolveJob` ⇒ 红 1）、
+    `the_keys_the_page_reads_…` 里新增的"四命令必须真的被 `invoke`"与候选/设备/状态三类键名
+    （少一个就红 —— 它当场抓到我漏渲染 `c.relay`，也就是那条**解释为什么这一条能投**的句子）。
+    *仍然欠着*：cookie 面板与 `mirror-action` 的 UI 没有；`cast_resolved` 的设备臂在这个局域网里
+    没有真设备可投（§16 第 1 条），所以**成功那一路**只有单元与假设备见证；候选行的"投"在真机上
+    只验到本机那一路。**本分支从未推送 ⇒ 这 30 条与上面三次探针读数没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：

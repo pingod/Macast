@@ -6534,7 +6534,7 @@ mod tests {
     #[test]
     fn the_plugin_rows_refuse_honestly_and_code_rows_are_behind_the_token() {
         crate::pin_test_dir();
-        let (face, management) = harness_management("plugin-rows");
+        let (face, _management) = harness_management("plugin-rows");
         for field in ["plugin-enable", "plugin-disable", "plugin-uninstall"] {
             let answer = face.answer(&post_form("/api", &format!("{field}=1"), LOCAL, &[]));
             let doc: serde_json::Value =

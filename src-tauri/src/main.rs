@@ -119,6 +119,13 @@ struct Runtime {
     discovery: Arc<Discovery>,
     eventing: Arc<Eventing>,
     relay: Arc<relay::RelayStore>,
+    /// The **same** management object the HTTP face holds: `resolve-page`,
+    /// `resolve-status`, `cast-resolved` and `cast-targets` are one implementation with
+    /// two doors (the page's four commands below, and `/api?query=…`). It also carries
+    /// the one job table and the one device cache, so a parse started from the window is
+    /// pollable by `curl` and vice versa — the reason this is a field rather than a
+    /// second `Arc::new(ShellManagement{…})` next to the commands.
+    management: Arc<dyn macast_upnp::http::Management>,
 }
 
 impl Runtime {
@@ -309,6 +316,71 @@ fn player_snapshot(runtime: State<'_, Runtime>) -> Value {
 fn clear_play_history(runtime: State<'_, Runtime>) -> Value {
     runtime.table.clear_history();
     json!({ "history": [] })
+}
+
+/// `POST resolve-page=<page url or share text>` — start a background parse
+/// (`_post_resolve_page` → `_resolve_page`, `macast/protocol.py:2828-2867`).
+///
+/// The answer is the seam's whole document: `code`, `message`, `job`, `url`, `note`.
+/// The **`job` id is the page's only handle** on the parse, so the card keeps it and
+/// polls [`resolve_status`]; nothing else identifies the work.
+///
+/// A refusal here is not a crashed parse — every "this is not an address" sentence comes
+/// back with `code: 1` and the reason in `message` (a bare host would otherwise be handed
+/// to the engine as a *search*; AGENTS.md §4.14's second red line).
+#[tauri::command]
+fn resolve_page(runtime: State<'_, Runtime>, text: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.resolve_page(&text))
+}
+
+/// The poll half: `GET ?query=resolve-status&job=<id>`
+/// (`_resolve_status`, `macast/protocol.py:2890-2899`).
+///
+/// Two shapes are the contract, and the card must tell them apart: an unknown job answers
+/// `code: 1` with `job: ""` and `status: null` （超时或已重启）, while a live job answers
+/// `code: 0` with the **seventeen-key** status object. Rendering `null` as "still
+/// parsing" would leave a dead job spinning for the whole TTL.
+#[tauri::command]
+fn resolve_status(runtime: State<'_, Runtime>, job: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.resolve_status(&job))
+}
+
+/// `POST cast-resolved=1&job=<id>&candidate=<index>[&target=<id>]` — cast one candidate
+/// through the relay (`_post_cast_resolved`, `macast/protocol.py:2904-2948`).
+///
+/// `candidate` travels as the **raw string** the page happened to send, not as a number:
+/// the seam owns the 「没有这个候选项」 refusal for anything that is not an index into the
+/// finished job's list, and a page that parsed it first would answer that sentence itself —
+/// two owners for one refusal.
+///
+/// `target` empty or `local` means this machine's own renderer; anything else is a device
+/// row from [`cast_targets`], and **that half does not touch our playback state** (the
+/// reference's own rule: a card may push to the TV while another player is playing here,
+/// and two owners of "what is playing" would make the status page answer for both).
+#[tauri::command]
+fn cast_resolved(
+    runtime: State<'_, Runtime>,
+    job: String,
+    candidate: String,
+    target: Option<String>,
+) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.cast_resolved(
+        &job,
+        &candidate,
+        target.as_deref().unwrap_or(""),
+    ))
+}
+
+/// `GET ?query=cast-targets[&refresh=1]` — the device dropdown's one read.
+///
+/// The first row is **always 本机** and it is inserted by the seam, not by the page: the
+/// reference appends `_local_target()` itself, and a page that prepended its own would show
+/// two entries for one renderer. `refresh=1` *starts* a discovery and answers from the
+/// caches — a synchronous SSDP+mDNS round trip would hold a worker for three seconds to say
+/// what the next poll says anyway.
+#[tauri::command]
+fn cast_targets(runtime: State<'_, Runtime>, refresh: Option<bool>) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.cast_targets(refresh.unwrap_or(false)))
 }
 
 /// `query=status` (`macast/protocol.py:1998-2029`): the service's own identity,
@@ -1711,6 +1783,23 @@ pub fn run() {
             // "which listener is running" is how a switch ends up reported but not
             // performed. `SsdpPlugin::new` only registers devices and logs one line;
             // it binds nothing until `start()` near the bottom of this closure.
+            // One handle, two doors: the HTTP face answers `/api?query=resolve-page`
+            // through it, and the window's four commands (resolve/status/cast/targets)
+            // go through **the same object** — AGENTS.md §4.8's 「两处答案不一致比没有
+            // 数字更糟」 refused structurally rather than by memory. A second
+            // `ShellManagement` here would also mean a second job table, so a parse
+            // started from the window would be invisible to a `curl` poll.
+            let management: Arc<dyn macast_upnp::http::Management> =
+                Arc::new(host::ShellManagement {
+                    host: host.clone(),
+                    player: player.clone(),
+                    store: relay_store.clone(),
+                    temp_dir: relay_temp,
+                    port: relay_port,
+                    jobs: Arc::clone(&resolve_jobs),
+                    targets: device_table,
+                    discovery: Arc::clone(&discovery),
+                });
             let face = Face::new(
                 Arc::new(soap) as Arc<dyn Control>,
                 eventing.clone() as Arc<dyn Subscription>,
@@ -1721,16 +1810,7 @@ pub fn run() {
                 // the hand on the relay and the job table, because `resolve_page`
                 // and `cast_resolved` are the same trait's other methods and the
                 // page polls them through this one object.
-                Arc::new(host::ShellManagement {
-                    host: host.clone(),
-                    player: player.clone(),
-                    store: relay_store.clone(),
-                    temp_dir: relay_temp,
-                    port: relay_port,
-                    jobs: Arc::clone(&resolve_jobs),
-                    targets: device_table,
-                    discovery: Arc::clone(&discovery),
-                }) as Arc<dyn macast_upnp::http::Management>,
+                Arc::clone(&management),
                 setting.clone(),
                 // The same table SOAP writes and GENA reads — `query=status`'s
                 // `media` block reads it through this face, so the page and a control
@@ -1852,6 +1932,7 @@ pub fn run() {
                 discovery: Arc::clone(&discovery),
                 eventing: eventing.clone(),
                 relay: relay_store,
+                management: Arc::clone(&management),
             });
 
             player.start();
@@ -1929,6 +2010,10 @@ pub fn run() {
             clear_log,
             log_modules,
             subscriber_snapshot,
+            resolve_page,
+            resolve_status,
+            cast_resolved,
+            cast_targets,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Macast Tauri application");
