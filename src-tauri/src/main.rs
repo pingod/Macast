@@ -403,6 +403,38 @@ fn service_snapshot(runtime: State<'_, Runtime>) -> Value {
 /// the old name until restart. `SsdpPlugin::update_ip()` is **not** the fix —
 /// SSDP payloads carry the USN and the LOCATION, not the friend name. The reply
 /// says so instead of pretending the change is fully live.
+/// `query=interfaces` for the page's picker: every row the HTTP face reports, from
+/// the same table (`net::network_interfaces`), so the two doors cannot disagree about
+/// which cards exist.
+#[tauri::command]
+fn interfaces_snapshot(runtime: State<'_, Runtime>) -> Value {
+    let rows: Vec<Value> = macast_core::net::network_interfaces(&runtime.setting)
+        .into_iter()
+        .map(|row| json!({ "name": row.name, "ip": row.ip, "usable": row.usable }))
+        .collect();
+    json!({ "code": 0, "interfaces": rows })
+}
+
+/// `query=module-settings`, the same builder the HTTP face calls.
+#[tauri::command]
+fn module_settings_snapshot(runtime: State<'_, Runtime>) -> Value {
+    macast_core::module_settings::payload(&runtime.setting.snapshot())
+}
+
+/// `set-module-setting` — one owner (`module_settings::set_value`), two doors. The
+/// window's door is **not** gated the way the HTTP one is: it is a command only this
+/// process can invoke through its own webview, which is the boundary the GATE_CODE
+/// rule protects on the wire (`AGENTS.md` §4.7b).
+#[tauri::command]
+fn set_module_setting(
+    runtime: State<'_, Runtime>,
+    key: String,
+    value: String,
+    remove: bool,
+) -> Value {
+    macast_core::module_settings::set_value(&runtime.setting, Some(&key), &value, remove)
+}
+
 /// The protocol switch, for the page's own checkboxes. The HTTP face has the same
 /// implementation (`Discovery::toggle_protocol`); this is the window's door on it.
 #[tauri::command]
@@ -1890,6 +1922,9 @@ pub fn run() {
             set_network_interface,
             toggle_protocol,
             app_action,
+            interfaces_snapshot,
+            module_settings_snapshot,
+            set_module_setting,
             log_view,
             clear_log,
             log_modules,

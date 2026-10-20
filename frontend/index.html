@@ -189,6 +189,18 @@
         <div class="row"><div><button id="quit">退出 Macast</button></div></div>
       </section>
 
+      <section class="card">
+        <h2>模块设置</h2>
+        <p class="muted">与 HTTP 的 `query=module-settings` / `set-module-setting` 同一张归属表。只读的格子不给输入框。</p>
+        <div id="mods"></div>
+      </section>
+
+      <section class="card">
+        <h2>日志</h2>
+        <div class="row"><div><select id="log-module" style="width:100%;padding:9px 12px;border-radius:8px;background:#111827;color:#e5e7eb;border:1px solid #374151"></select></div><div><button id="log-load">读取</button></div><div><button id="log-clear">清空</button></div></div>
+        <pre id="log-tail" style="max-height:320px;overflow:auto;padding:12px;border-radius:8px;background:#111827;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+      </section>
+
     </main>
     <script>
       const core = window.__TAURI__?.core;
@@ -538,143 +550,7 @@
         if (![...sel.options].some((o) => o.value === previous)) sel.value = '';
       }
 
-      async function loadLogModules() {
-        if (!invoke) return;
-        renderLogModules(await invoke('log_modules'));
-      }
-
-      // 正文里含**发送端提供的** DIDL `dc:title` 与地址（AGENTS.md §4.10 那条红线：
-      // 局域网里任何一台设备投一个带 `<img onerror=…>` 的标题，打开日志面板就会执行）。
-      // 所以这里只有 textContent，永远不许 innerHTML；而且这一格不参与任何轮询，
-      // 只在按下按钮时拉一次。
-      async function readLog(wantAll) {
-        if (!invoke) return;
-        const module = document.querySelector('#log-module').value;
-        const tail = Number(document.querySelector('#log-tail').value);
-        const args = { module: module || null, all: wantAll || null };
-        // 行数不在页面里夹：`read_tail` 自己 `clamp(1, MAX_TAIL_LINES)`，
-        // 在页面再抄一个上限等于造第二个会漂移的真值点。
-        if (!wantAll && Number.isFinite(tail) && tail >= 1) args.tail = Math.floor(tail);
-        let d;
-        try {
-          d = await invoke('log_view', args);
-        } catch (e) {
-          out('log-text', String(e));
-          out('log-meta', '读取失败');
-          return;
-        }
-        if (d.code !== 0) {
-          out('log-text', '（没有这一份日志）');
-          out('log-meta', `${d.message}：${d.module}`);
-          return;
-        }
-        out('log-text', d.logs || '（空的）');
-        const which = d.module ? `「${d.module}」` : '整体日志';
-        const head = wantAll
-          ? `${which} · 全文 ${fmtBytes(d.size)}，读到 ${d.lines} 行`
-          : `${which} · 要 ${args.tail ?? '默认'} 行，读到 ${d.lines} 行，文件 ${fmtBytes(d.size)}`;
-        // 被切掉的只有**字节窗口**，不是行数上限：窗口是按行数算出来的，
-        // 所以要行数它就跟着变大 —— 这句话别说成「最多 50000 行」。
-        out('log-meta', d.truncated
-          ? `${head} · 字节窗口装不下，只给了末尾这一段（把行数调大就看得更多）`
-          : `${head} · 没被截断`);
-      }
-
-      document.querySelector('#log-read').addEventListener('click', () => readLog(false));
-      document.querySelector('#log-all').addEventListener('click', () => readLog(true));
-
-      // `clear_log_file` 数的是「被清空或被删掉几个文件」，而日志本身算一个，
-      // 所以备份数 = removed − 1。页面要说的是这个数，不是「清空了」了事。
-      document.querySelector('#log-clear').addEventListener('click', async () => {
-        const module = document.querySelector('#log-module').value;
-        try {
-          const r = await invoke('clear_log', { module: module || null });
-          if (r.code === 0) {
-            const backups = Math.max(0, (r.removed || 0) - 1);
-            note(`已清空${module ? `「${module}」` : '整体日志'}${backups ? `，连同它轮转出来的 ${backups} 个备份` : '（没有轮转出来的备份）'}`);
-          } else {
-            note(r.message);
-          }
-        } catch (e) {
-          note(`清空日志失败：${e}`);
-        }
-        await loadLogModules().catch(() => {});
-        await readLog(false).catch(() => {});
-      });
-
-      // —— 订阅客户端 ——
-      // 三个计数器要**分开列**，因为它们说的是三种不同的死法：`pending_append`
-      // 非零是「连接握好了却还没进表」（跟「根本没人订阅」是两件事），
-      // `pending_state` 是「状态变更排着而没广播出去」，`pending_remove` 是
-      // 「收尸的那一路没在排干」。最后这个不在参考实现里，因为那里没有它的见证者。
-      let subSignature = null;
-      function renderSubscribers(child, sids) {
-        out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
-        setState('sub-thread', threadState(child.running, child.event_thread_alive));
-        out('sub-append', String(child.pending_append));
-        out('sub-state', String(child.pending_state));
-        out('sub-remove', String(child.pending_remove));
-
-        const rows = child.rows || [];
-        const signature = JSON.stringify(rows);
-        const box = document.querySelector('#sub-rows');
-        if (signature === subSignature) return;
-        subSignature = signature;
-        box.textContent = '';
-        if (!rows.length) {
-          const empty = document.createElement('p');
-          empty.className = 'muted';
-          empty.textContent = sids.length
-            ? '（表里没有行，但上面那三个计数器不是零 —— 队列没被排干，看「待入表」）'
-            : '（没有订阅者：手机还没连上来，或者它续约的 path 不是我们答的那一个）';
-          box.appendChild(empty);
-          return;
-        }
-        for (const row of rows) {
-          const div = document.createElement('div');
-          div.className = row.timed_out ? 'sub sub-dead' : 'sub';
-          const sid = document.createElement('span');
-          sid.className = 'sub-sid';
-          sid.textContent = `${row.sid} · ${row.service} · seq ${row.seq}${row.timed_out ? ' · 已超时' : ''}`;
-          const meta = document.createElement('span');
-          meta.className = 'sub-meta';
-          // url 是发送端给的（SUBSCRIBE 的回调地址），所以它和日志正文一样是
-          // 不可信文字，进 textContent 而不是进标记。
-          meta.textContent = `${row.url} · 续约 ${row.timeout} 秒 · 失败 ${row.errors} 次`;
-          div.appendChild(sid);
-          div.appendChild(meta);
-          box.appendChild(div);
-        }
-      }
-
-      async function subscribers() {
-        if (!invoke) return;
-        const d = await invoke('subscriber_snapshot');
-        const sids = d.aggregated || [];
-        // 这一族现在只有一个孩子（DLNA 接收端）；写法按多个来，
-        // 以后 Chromecast / AirPlay 加进来时这一格不用改。
-        for (const child of d.children || []) renderSubscribers(child, child.subscribed || []);
-        if (!(d.children || []).length) out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
-      }
-
-      refresh().catch((e) => out('error', String(e)));
-      snapshot().catch((e) => note('读取播放器状态失败：' + e));
-      setInterval(() => snapshot().catch(() => {}), 1500);
-
-      // 网卡枚举要问操作系统（getifaddrs），比读一次播放器状态贵，所以它不进
-      // 那一轮 1500 毫秒；订阅表同理 —— 它是服务侧的事，不是逐帧的事。
-      // 日志清单也走这一轮：它只是 `stat` 目录下那几个文件，一次读都不做，
-      // 而它**必须**跟着轮 —— 下拉里那两个字节数是文件当下的长度，
-      // 只在启动时问一次等于让页面印一个越来越旧的数（广播一开日志就在长）。
-      // 重绘由 `renderLogModules` 自己的签名门挡住，长度没变就不会碰选择器。
-      services().catch((e) => note('读取服务状态失败：' + e));
-      subscribers().catch((e) => note('读取订阅客户端失败：' + e));
-      loadLogModules().catch((e) => note('读取日志清单失败：' + e));
-      setInterval(() => {
-        services().catch(() => {});
-        subscribers().catch(() => {});
-        loadLogModules().catch(() => {});
-      }, 5000);
+      loadModules().catch((e) => note(`模块设置: ${e}`));
     
       for (const button of document.querySelectorAll('[data-toggle]')) {
         button.addEventListener('click', async () => {
