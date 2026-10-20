@@ -2740,6 +2740,55 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 * 仍然欠着：`set-renderer`（只有一个渲染器）、插件子系统那 10 行、`save-launch-param` 的重启语义。
   **本分支从未推送 ⇒ 这 365 条与 §35 那 9 条读数没有任何 CI 见证过。**
 
+**Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
+`macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
+`ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
+真机 §39 的 **7** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **28**）：
+
+* **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
+  于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
+  `target/debug/build/macast-tauri-*/out/tauri-codegen-assets/*.html` 用 `zlib.brotliDecompressSync`
+  解出来（tauri 对页面做 brotli），当前构建那一份解出 **33,748 字节、与 `frontend/index.html`
+  逐字节相同**，连上一轮刚加的那句 `[boot] script started` 都在。**坏的是文件本身**：
+  `40a9b25` 删"我自己加重的两张重复卡"时，把 `refresh()` / `snapshot()` / `services()` /
+  `subscribers()` / `loadLogModules()` 那一整段启动、两个 `setInterval` 轮询器、以及日志与订阅客户端
+  两个渲染器**一起删掉了**，而它们对应的四张卡还留在标记里 —— 于是每一格永远停在「加载中…」，
+  而页面**语法完全合法**（`node --check` 通过），窗口里没有任何一条控制台报错能指向缺失的那一段。
+  这是 §4.13「不提问的检查」在**前端**的第一次现形：没有一条断言在读"某个格子是否被填过"。
+* **资产是否过期，要问二进制，不要问直觉**：解 `tauri-codegen-assets` 下那一份、与仓库文件逐字节比，
+  是一个三十秒就能做完的判据；而"窗口里没看见横幅，所以资产是旧的"这条推理链**每一步都成立而结论是错的**
+  —— 横幅没出现是因为**脚本从没跑到那一行**（整段启动没了），不是因为它是旧页面。
+  下一次遇到"界面全空"，先做这个对拍再动代码。
+* **常驻判据补了两条，都不依赖浏览器**（`src-tauri/src/host.rs` 的 `mod tests`）：
+  ① `every_element_the_page_declares_is_also_one_its_script_touches` —— 标记里每个 `id=` 都必须被
+  页面自己的脚本提到，唯一豁免 `proto-hint`（静态散文，没有任何写者），豁免**按名字列并写明理由**，
+  同时先断言"扫到 ≥40 个 id"（空扫描与"全部通过"是同一句话）；
+  ② `the_page_boots_by_asking_the_backend_five_questions` —— 六条启动调用必须以 `.catch(` 的形状在场，
+  因为一个未处理的 rejection 会把后面整段初始化一起带走，这正是"少一个函数"读成"五张卡都坏了"的机理。
+  **牙齿是按原样重放那次删除量出来的**：删"渲染器 + 启动段"共 142 行 ⇒ ① 红并逐字点名十二个没人写的
+  格子（`log-tail`、`log-sub-*` 那一族）；只删启动段、留渲染器 ⇒ ① **绿**（渲染器还在提那些名字）、
+  ② 红 —— **两条各管一半，缺一条就有一半没人问**。
+* **`mirror-action` 是 POST 表最后一行，也是全表唯一门是 `token` 的一行**（`protocol.py:2296-2298`：
+  任何网页都能向 127.0.0.1 发 POST，"开始录这块桌面"不是即兴访问能问的；`query=cast` 是它在 GET 面的
+  对应物）。表到 **23 / 23 与参考实现齐平**，其中八行的答复是"这个构建做不了"（插件/镜像宿主不在）——
+  **齐平指的是行数，不是能力**。答案用**一个常量三个读者**（`MIRROR_ABSENT_MESSAGE`：两个 GET 门 + 这个
+  POST 门），因为三种问法是同一个事实；§39 不比"都有镜像二字"，它比 **POST 的答复逐字包含 GET 那整句**。
+* **一个只有真机能问的顺序**：参考实现先找 console surface、再校验 `mirror-args`，所以没有镜像面的构建
+  对**坏 JSON** 答的是"没有镜像面"而不是"mirror-args 不合法"。§39 因此故意带 `mirror-args=not-json`
+  发过去 —— 别的输入下两种顺序给出同一个答案，这一格是唯一能把它们分开的形状。
+* **两条仪器自己的错，都长得像产品坏了**：① §39 第一版拿 GET 门的**信封**当 POST 门的：GET 拒绝是
+  `HTTP 403` + 正文 `code: 1`，POST 是 `HTTP 200` + 正文 `code: 403`（`Answer::denied` 从不设状态码）。
+  对着一台正确的机器红了之后才回头读 `Face::gate_refusal`，所以判据现在**两半都问**（状态码与正文）；
+  ② `scripts/verify_rust_receiver.sh:1624` 有一处 `"…$SPEC，…"` —— bash 把全角逗号的头一个字节当成变量名的
+  一部分，`set -u` 当场把整趟验收入**中途**掐断（EXIT 非零而输出停在第 18 节），于是 19–39 节一句读数
+  都没有。修法 `${SPEC}`，而**这一类只有一条正则扫得出来** —— 问"一个变量名后面紧跟一个非 ASCII 字节"：
+  `grep -nP '\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])' scripts/verify_rust_receiver.sh`
+  （本轮量过：命中的只有那一处）。中文散文里插变量是这套脚本的常态，而 `bash -n` 对着它一律说 OK。
+* 读数：`macast-upnp` **369**、`macast-tauri` **28**（两台仪器一致：`--list` 与整跑），
+  真机脚本 **42 节**；本分支从未推送 ⇒ **这些读数没有任何 CI 见证过**。重跑一次真机整跑时本机的两条
+  SKIP（§25 的送达那一格、§32 的"这张机器没有第二块可用网卡"）照旧计败，所以"全绿"这句话在这里
+  仍然说不出口 —— 那两条的原因与本节无关。
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

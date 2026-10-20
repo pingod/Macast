@@ -196,6 +196,28 @@ enum PostAction {
     SetRenderer,
     /// `app-action=<verb>` (`_app_action`, `protocol.py:2404-2414`, row **8**).
     AppAction,
+    /// `mirror-action=<verb>` plus `mirror-args=<json>`: the 电脑投屏 console
+    /// (`_mirror_action`, `protocol.py:1866-1889`, row **9** of the reference's
+    /// table — the only row whose gate is `token` rather than management).
+    ///
+    /// The gate is copied, not reasoned about: starting a capture of the user's
+    /// desktop is not something a page may ask for from loopback (`protocol.py`'s
+    /// own comment above that row), and `mirror-state`/`mirror-snapshot` on the GET
+    /// side are gated the same way for the same reason — one hands back the devices
+    /// on the LAN, the other an actual frame of the desktop.
+    ///
+    /// **This build has no mirror face** (design doc §18), so the answer is the
+    /// same shape `mirror-state` gives: `code: 1` and a sentence naming the missing
+    /// piece. A `{'code': 0, 'message': 'success'}` here would be the
+    /// 「只动文档的旋钮」 this port keeps refusing — a page would show 「已开始镜像」
+    /// over an ffmpeg that does not exist.
+    ///
+    /// The `mirror-args` JSON is **not parsed here**, and that is the reference's
+    /// own order: it validates the args only after the console surface was found
+    /// (`_mirror_action` asks `_mirror_setting()` first), so a bad JSON body on a
+    /// build with no mirror answers 「没有镜像面」 rather than 「mirror-args 不是合法的
+    /// JSON」. Both are refusals; only one of them names the thing the user can act on.
+    MirrorAction,
     /// `toggle-protocol=<title>`: switch one protocol on or off (`_toggle_protocol`,
     /// `protocol.py:2394-2402`, row **7** of the reference's table).
     ///
@@ -290,6 +312,13 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // really ends this process, and the answer is written before the exit so the page
     // can show it.
     PostRoute { field: "app-action", gate: "management", action: PostAction::AppAction },
+    // Row **9** of the reference (`protocol.py:2298`), between `app-action` and
+    // `save-launch-param`: the 电脑投屏 console, and the only row in this table whose
+    // gate is **`token`** — loopback is not evidence of intent for "start capturing this
+    // desktop", exactly as it is not for `query=cast`. Position matters like every other
+    // row: a request carrying `mirror-action` and `save-launch-param` starts a (refused)
+    // mirror and never rewrites the settings file.
+    PostRoute { field: "mirror-action", gate: "token", action: PostAction::MirrorAction },
     // Row 10 of the reference (`protocol.py:2299`), straight after `app-action`: it
     // replaces the whole settings file and restarts, so it is **code-gated**.
     PostRoute { field: "save-launch-param", gate: "code-execution", action: PostAction::SaveLaunchParam },
@@ -1491,6 +1520,24 @@ pub trait Management: Send + Sync {
     /// renders verbatim.
     fn app_action(&self, action: &str) -> Answer;
 
+    /// `mirror-action=<verb>` (+ `mirror-args=<json>`): the 电脑投屏 console
+    /// (`_mirror_action`, `protocol.py:1866-1889`, row **9**, gate **token**).
+    ///
+    /// **This build has no mirror face**, so the answer is the same document
+    /// `mirror-state` gives: `code: 1` and a sentence naming the missing piece. The
+    /// sentence is the implementer's because "does this build own a screen-mirror
+    /// plugin" is a fact about the shell, not about the HTTP face — and the one thing
+    /// this method must never do is answer `success` for a capture nobody started
+    /// (`protocol.py:1724` makes the same distinction for the two reasons a face can
+    /// be missing: still booting vs. switched off).
+    ///
+    /// Note that a build **with** a face would answer here rather than in this crate:
+    /// the verb vocabulary (`start`/`stop`/`probe`/`preview`/`webrtc`…) and every
+    /// argument in `mirror-args` belong to whoever runs the ffmpeg. That is also why
+    /// `mirror-args` is not parsed by the caller: Python validates it only after it
+    /// found a surface, so a bad body on a faceless build hears 「没有镜像面」.
+    fn mirror_action(&self, action: &str) -> Answer;
+
     /// Switch one protocol on or off, persist the list, and cycle the faces the
     /// switch names. Reads "is it currently on" from the same table the boot gate
     /// reads (`host::enabled_protocols` is the shell's owner of that question), so
@@ -1723,6 +1770,27 @@ pub struct Face {
     /// means.
     description: Vec<u8>,
     mtime: MtimeProbe,
+}
+
+/// The one sentence this build says about the mirror face, wherever it is asked.
+///
+/// Three doors ask: `query=mirror-state`, `query=mirror-snapshot`
+/// ([`Face::mirror_absent_entry`]) and `POST mirror-action` (the [`Management`] seam).
+/// They must answer the same words — AGENTS.md §4.8's 「两处答案不一致比没有数字更糟」
+/// applies verbatim to a refusal, because a user who reads two different explanations
+/// concludes two different things are broken. So one constant, three readers.
+pub const MIRROR_ABSENT_MESSAGE: &str = "这台设备还没有镜像面：屏幕镜像插件不在这个 Rust 壳里\
+                                         （mirror-state / mirror-snapshot / mirror-action 由它提供）";
+
+/// The refusal document all three mirror doors answer with.
+///
+/// `code: 1` + the sentence, not a 404 and not `{}`: the shape `cast-targets` settled
+/// (§16 第 23 条) — a card that polls a read has to be told something it can stop on.
+pub fn mirror_absent_response() -> Response {
+    json_value_response(&object(&[
+        ("code", Value::Number(1.into())),
+        ("message", Value::String(MIRROR_ABSENT_MESSAGE.to_string())),
+    ]))
 }
 
 impl Face {
@@ -2236,17 +2304,7 @@ impl Face {
     /// app is broken". The gate is the reference's `token` (see the route rows), so this
     /// sentence only reaches a caller who already holds the management token.
     fn mirror_absent_entry(&self) -> Response {
-        json_value_response(&object(&[
-            ("code", Value::Number(1.into())),
-            (
-                "message",
-                Value::String(
-                    "这台设备还没有镜像面：屏幕镜像插件不在这个 Rust 壳里（\
-                     mirror-state / mirror-snapshot 由它提供）"
-                        .to_string(),
-                ),
-            ),
-        ]))
+        mirror_absent_response()
     }
 
     /// `query=log` — the panel's tail of one log file.
@@ -2815,6 +2873,18 @@ impl Face {
                     &self
                         .management
                         .app_action(&param_value(req, "app-action").unwrap_or_default()),
+                ),
+                // One verb in, one document out — and the document is the implementer's,
+                // because "is there a mirror face in this build" is not a fact about this
+                // file. `mirror-args` is **not** read here: the reference validates it
+                // only after it has a console surface to hand it to (`protocol.py:1866`),
+                // so on a build with no face the answer names the missing piece rather
+                // than complaining about a JSON body nothing would have consumed.
+                PostAction::MirrorAction => answer_response(
+                    200,
+                    &self
+                        .management
+                        .mirror_action(&param_value(req, "mirror-action").unwrap_or_default()),
                 ),
             });
         }
@@ -4593,6 +4663,7 @@ mod tests {
         browser_calls: Mutex<Vec<String>>,
         sub_show_calls: Mutex<Vec<bool>>,
         interface_calls: Mutex<Vec<String>>,
+        mirror_calls: Mutex<Vec<String>>,
     }
 
     impl FakeManagement {
@@ -4613,6 +4684,7 @@ mod tests {
                 browser_calls: Mutex::new(Vec::new()),
                 sub_show_calls: Mutex::new(Vec::new()),
                 interface_calls: Mutex::new(Vec::new()),
+                mirror_calls: Mutex::new(Vec::new()),
             }
         }
 
@@ -4666,6 +4738,10 @@ mod tests {
             self.interface_calls.lock().expect("interface calls").clone()
         }
 
+        fn mirror_calls(&self) -> Vec<String> {
+            self.mirror_calls.lock().expect("mirror calls").clone()
+        }
+
         fn protocol_calls(&self) -> Vec<String> {
             self.protocol_calls.lock().expect("protocol calls").clone()
         }
@@ -4698,6 +4774,17 @@ mod tests {
                 Ok(serde_json::Value::Object(_)) => Answer::ok("success"),
                 _ => Answer::fail("json format error"),
             }
+        }
+
+        /// The shell's own answer for a build with no mirror face: `code: 1` and the
+        /// one sentence all three doors share, with the verb echoed so a test can
+        /// tell which request produced it.
+        fn mirror_action(&self, action: &str) -> Answer {
+            self.mirror_calls
+                .lock()
+                .expect("mirror calls")
+                .push(action.to_string());
+            Answer::fail(MIRROR_ABSENT_MESSAGE.to_string())
         }
 
         fn app_action(&self, action: &str) -> Answer {
@@ -6470,6 +6557,124 @@ mod tests {
         assert!(management_saw_no_install(), "the gate refused and the shell still ran");
     }
 
+    /// `mirror-action` is row 9 of the reference's table and the **only** POST row
+    /// whose gate is `token` (`protocol.py:2296-2298`). Three things are asked here,
+    /// and the third is the one that would rot silently:
+    ///
+    /// 1. loopback **without** the token is refused — the whole reason that row is not
+    ///    `management`: any page the user visits can POST to 127.0.0.1, and "start
+    ///    capturing this desktop" is not something a drive-by may ask for;
+    /// 2. with the token it reaches the shell, which answers the **same sentence** the
+    ///    two GET doors answer (`MIRROR_ABSENT_MESSAGE`, one constant, three readers);
+    /// 3. the refusal happens **before** `mirror-args` is judged — the reference asks
+    ///    for a console surface first (`protocol.py:1866`), so a build with no face
+    ///    reports the missing face rather than complaining about a JSON body nothing
+    ///    would have consumed. A test that only sent well-formed args could not tell
+    ///    the two orders apart.
+    #[test]
+    fn the_mirror_row_is_token_gated_and_names_the_missing_face() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("mirror-action");
+        // Nothing, from this machine, with no token.
+        let refused = face.answer(&post_form("/api", "mirror-action=start", LOCAL, &[]));
+        assert_eq!(refused.status, 200, "refusals keep the shipped envelope");
+        let doc: serde_json::Value = serde_json::from_slice(&refused.body).expect("object");
+        assert_eq!(doc["code"], json!(403), "loopback must not exempt this row: {doc:?}");
+        assert!(
+            management.mirror_calls().is_empty(),
+            "the gate refused and the shell ran anyway"
+        );
+
+        // Same request, same address, with the token: the shell is reached and the
+        // answer is the shared sentence rather than a copy of it.
+        store_token(&face.setting, Some(SECRET));
+        let allowed = face.answer(&post_form(
+            "/api",
+            &format!("mirror-action=start&mirror-args=not-json&token={SECRET}"),
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(allowed.status, 200);
+        let doc: serde_json::Value = serde_json::from_slice(&allowed.body).expect("object");
+        assert_eq!(doc["code"], json!(1), "{doc:?}");
+        assert_eq!(
+            doc["message"].as_str().unwrap_or_default(),
+            MIRROR_ABSENT_MESSAGE,
+            "the POST door and the two GET doors must say the same thing"
+        );
+        assert_eq!(
+            management.mirror_calls(),
+            vec!["start".to_string()],
+            "the verb is handed over even when the answer does not depend on it"
+        );
+
+        // And the GET doors use the same constant — otherwise "same thing" is a claim
+        // about two literals that happen to match today.
+        for query in ["mirror-state", "mirror-snapshot"] {
+            let seen = face.answer(&get_api(
+                &format!("/api?query={query}&token={SECRET}"),
+                LOCAL,
+            ));
+            let doc: serde_json::Value = serde_json::from_slice(&seen.body).expect("object");
+            assert_eq!(doc["message"].as_str().unwrap_or_default(), MIRROR_ABSENT_MESSAGE);
+        }
+    }
+
+    /// The row's position is semantics (§4.7c), and **both** of its neighbours are
+    /// asserted here rather than one, because they fail in opposite directions:
+    ///
+    /// * `app-action` is row **8**, *ahead* of `mirror-action`'s 9 — so a request that
+    ///   carries both quits the app and never starts a capture. (Written the other way
+    ///   round first, this test failed on an empty call list: the row order it assumed
+    ///   was the reverse of the reference's.)
+    /// * `save-launch-param` is row **10**, *behind* it — so the same request starts a
+    ///   (refused) capture and never rewrites-and-restarts the settings file.
+    #[test]
+    fn the_mirror_row_sits_between_the_quit_and_the_restart() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("mirror-precedence");
+        store_token(&face.setting, Some(SECRET));
+
+        // Row 8 wins over row 9.
+        let quit_first = face.answer(&post_form(
+            "/api",
+            &format!("app-action=quit&mirror-action=start&token={SECRET}"),
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(quit_first.status, 200);
+        assert_eq!(
+            management.app_calls(),
+            vec!["quit".to_string()],
+            "app-action is row 8 and must be served"
+        );
+        assert!(
+            management.mirror_calls().is_empty(),
+            "the later mirror row ran too — precedence is not honoured"
+        );
+
+        // Row 9 wins over row 10.
+        let (face, management) = harness_management("mirror-precedence-2");
+        store_token(&face.setting, Some(SECRET));
+        let mirror_first = face.answer(&post_form(
+            "/api",
+            &format!("mirror-action=start&save-launch-param=%7B%7D&token={SECRET}"),
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(mirror_first.status, 200);
+        assert_eq!(management.mirror_calls(), vec!["start".to_string()]);
+        // The **answer** is the second half of the proposition: if the restart row had
+        // run, the body would be `success` (`save-launch-param`'s own reply) even though
+        // the mirror was the row that got selected. Comparing the document rather than
+        // only the call list is what makes "never reaches row 10" observable — the fake
+        // does not record that call, and a test that cannot see it would pass for the
+        // wrong reason.
+        let doc: serde_json::Value =
+            serde_json::from_slice(&mirror_first.body).expect("object");
+        assert_eq!(doc["message"].as_str().unwrap_or_default(), MIRROR_ABSENT_MESSAGE);
+    }
+
     fn management_saw_no_install() -> bool {
         // The fake records nothing for installs; the question here is only that the
         // refusal came from the gate (checked by the status above), so this stays true
@@ -6486,19 +6691,24 @@ mod tests {
         // agree with anything. Same two questions, same reason: unique field names
         // (a duplicate would shadow the later one forever) and a gate every row can
         // actually be parsed to.
-        // **11, not ">= 10"** — the same correction the GET table got: a floor that trails
-        // the size by one row cannot see a row being deleted, and the rows cheapest to
-        // lose here are the ones nobody polls (`set-module-setting`, `set-github-mirror`
-        // and `clear-play-history` answer nothing until the page posts them). The number
-        // is a count taken from the table, not from a plan — and the reference's own table
-        // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
-        // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 22, "the POST table changed size");
+        // **Exactly 23**, which is the reference's own row count (`protocol.py:2287-2331`,
+        // counted 2026-10-20) — so this number is no longer "the progress of a port", it
+        // is **parity**, and an `==` is the right instrument for parity: a floor that
+        // trails the size cannot see a row being deleted, and the rows cheapest to lose
+        // here are the ones nobody polls (`set-module-setting`, `set-github-mirror` and
+        // `clear-play-history` answer nothing until the page posts them).
+        assert_eq!(
+            POST_MANAGEMENT_ROUTES.len(),
+            23,
+            "the POST table changed size — it is at parity with the reference's 23 rows"
+        );
         // …and **which** rows carry which gate, because the security distinction this port
-        // keeps making is "can this field make the machine run something". Exactly one
-        // row is code-gated today; a second one appearing is fine **only** if this count is
-        // moved on purpose, and a code-gated row silently downgraded to `management`
-        // (loopback-trusted) is the shape AGENTS.md §4.7b was written to prevent.
+        // keeps making is "can this field make the machine run something". A second row
+        // appearing is fine **only** if this list is moved on purpose, and a gated row
+        // silently downgraded to `management` (loopback-trusted) is the shape AGENTS.md
+        // §4.7b was written to prevent. `mirror-action` is the one **token** row and it is
+        // asserted separately below, because "stricter than management" is the whole of
+        // that row's design (`protocol.py`'s own comment above it).
         let code_gated: Vec<&str> = POST_MANAGEMENT_ROUTES
             .iter()
             .filter(|r| r.gate == "code-execution")
@@ -6515,6 +6725,18 @@ mod tests {
             ],
             "gate column drifted: {code_gated:?}"
         );
+        // The **token** rows of *this* table — exactly one. `mirror-action` is the only
+        // POST that starts capturing this desktop (`protocol.py:2296-2298`); its GET
+        // counterpart is `query=cast`, which lives in the other table. Both refuse
+        // loopback, which is the sentence this assertion exists to keep true: a row moved
+        // to `management` here would read as a gate and behave as "any page the user
+        // visits may start a screen capture" (AGENTS.md §4.7b).
+        let token_gated: Vec<&str> = POST_MANAGEMENT_ROUTES
+            .iter()
+            .filter(|r| r.gate == "token")
+            .map(|r| r.field)
+            .collect();
+        assert_eq!(token_gated, vec!["mirror-action"], "the token rows drifted: {token_gated:?}");
         let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
         fields.sort_unstable();
         fields.dedup();
@@ -6541,6 +6763,14 @@ mod tests {
             PostAction::ClearPlayHistory,
             PostAction::SetGithubMirror,
             PostAction::SetModuleSetting,
+            PostAction::SetRenderer,
+            PostAction::ToggleProtocol,
+            PostAction::AppAction,
+            PostAction::MirrorAction,
+            PostAction::SaveLaunchParam,
+            PostAction::InstallPlugin,
+            PostAction::InstallExtras,
+            PostAction::UninstallExtras,
         ] {
             assert_eq!(
                 POST_MANAGEMENT_ROUTES
@@ -6592,6 +6822,15 @@ mod tests {
             ("set-interface", "set-github-mirror"),
             ("set-interface", "cast-uri"),
             ("set-interface", "set-module-setting"),
+            // `mirror-action` is row **9**, between `app-action` (8) and
+            // `save-launch-param` (10). Both halves have teeth that are not symmetric:
+            // earlier than `app-action` a request carrying both would start a (refused)
+            // capture instead of quitting, and later than `save-launch-param` it would
+            // rewrite the settings file — and restart the app — instead of refusing a
+            // mirror. Neither is a single-field request, which is why the table is
+            // compared rather than the routes exercised one at a time.
+            ("app-action", "mirror-action"),
+            ("mirror-action", "save-launch-param"),
         ] {
             assert!(
                 index(earlier) < index(later),

@@ -1570,6 +1570,35 @@ impl macast_upnp::http::Management for ShellManagement {
         self.discovery.app_action(action)
     }
 
+    /// `_mirror_action` (`protocol.py:1866-1889`), row **9** of the POST table, and the
+    /// only row whose gate is `token` rather than management.
+    ///
+    /// **This build has no mirror face**: the screen-mirror plugin is one of the fifteen
+    /// first-party plugins that live in `macast/plugins/`, and this shell has no plugin
+    /// host at all (design doc §18). So the answer is the same sentence the two GET
+    /// doors give ([`macast_upnp::http::MIRROR_ABSENT_MESSAGE`]) — one owner, three
+    /// readers, because two different explanations of one absence read to a user as two
+    /// different breakages (AGENTS.md §4.8).
+    ///
+    /// The verb is **echoed** rather than dropped, which is the reference's own shape
+    /// for an unknown action: it hands whatever it got to `console_action` and the
+    /// plugin answers with `未知操作：{action}`. Keeping that shape matters for the same
+    /// reason the route's gate is copied rather than reasoned about — the day a host
+    /// arrives, this surface already names what was asked for, so nothing has to be
+    /// re-decided while an ffmpeg is running.
+    fn mirror_action(&self, action: &str) -> macast_upnp::http::Answer {
+        let verb = action.trim();
+        macast_upnp::http::Answer::fail(if verb.is_empty() {
+            macast_upnp::http::MIRROR_ABSENT_MESSAGE.to_string()
+        } else {
+            format!(
+                "{}（收到的是「{}」）",
+                macast_upnp::http::MIRROR_ABSENT_MESSAGE,
+                verb
+            )
+        })
+    }
+
     /// `_set_renderer` (`protocol.py:2385-2392`): match the raw trimmed title against
     /// the renderer list and refuse with the reference's sentence when nothing matches.
     ///
@@ -3380,6 +3409,108 @@ mod tests {
     /// Same discipline as the library crates: a test added without the pin would
     /// write into the user's configuration directory, so the count is checked
     /// rather than trusted.
+    /// **Every `id=` the page's markup declares is mentioned by the page's own script.**
+    ///
+    /// This is the browser-free guard for the defect of 2026-10-20: `40a9b25` deleted the
+    /// whole boot block (`refresh()`, `snapshot()`, `services()`, `subscribers()`,
+    /// `loadLogModules()`, both pollers, and the log/subscriber renderers) while leaving
+    /// the four cards that those functions filled. Every cell then sat at 「加载中…」
+    /// forever — and the page was **syntactically perfect** (`node --check` passes), so
+    /// nothing in a console could point at the missing piece. The user-visible symptom was
+    /// "the window is blank", which no assertion was reading.
+    ///
+    /// The rule this test encodes is the shape of that bug: a declared container with no
+    /// reader is a promise nobody keeps. It is deliberately **shallow** — "the name appears
+    /// somewhere in the script" — because anything stricter would have to parse JavaScript.
+    /// Shallow still catches the whole family that bit us: a card whose renderer was
+    /// deleted mentions none of its ids.
+    ///
+    /// Two ids are exempt, and they are listed **by name with a reason** rather than
+    /// filtered by a pattern (an over-broad exemption is how a guard stops guarding):
+    /// * `h1`-style headings and the `events`/`fatal` boxes are *not* exempt — the first is
+    ///   written by `note()`, the second by `showFatal()`, so both must stay in the check.
+    /// * `proto-hint` is static prose in the markup ("DLNA 的 HTTP 面承载这一页，所以它会被
+    ///   拒绝停用"). It is a sentence, not a cell: nothing ever writes it, so requiring a
+    ///   writer would force a meaningless assignment into the script.
+    #[test]
+    fn every_element_the_page_declares_is_also_one_its_script_touches() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        // The split is load-bearing: an `id="…"` that only appears inside the script (a
+        // string built at runtime) is not a declaration, and counting it would let a card
+        // vanish from the markup unnoticed.
+        let (markup, script) = page
+            .split_once("<script>")
+            .unwrap_or_else(|| panic!("the page has no <script> section"));
+        assert!(
+            script.len() > 4_000,
+            "the script section is {} bytes — this test would pass over an empty page",
+            script.len()
+        );
+        let mut declared = Vec::new();
+        for (index, _) in markup.match_indices("id=\"") {
+            let rest = &markup[index + 4..];
+            let end = rest.find('"').expect("an unterminated id attribute");
+            declared.push(rest[..end].to_string());
+        }
+        assert!(
+            declared.len() >= 40,
+            "only {} ids were found — the markup scan is broken, not the page",
+            declared.len()
+        );
+        let exempt = ["proto-hint"];
+        let orphans: Vec<&String> = declared
+            .iter()
+            .filter(|id| !exempt.contains(&id.as_str()))
+            .filter(|id| !script.contains(id.as_str()))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these ids are declared but never mentioned by the page's script, so whatever \
+             was meant to fill them is gone (the 2026-10-20 blank-window bug): {orphans:?}"
+        );
+    }
+
+    /// The ids that *are* written must be written by the startup path, not only by a
+    /// click handler: the bug above would also fire if `refresh()`/`services()`/…
+    /// existed but nothing ever called them at boot.
+    ///
+    /// Asked as "the five boot calls appear as calls", which is a text question this
+    /// crate can answer without a browser. It cannot prove they *succeed* — that is what
+    /// the one-off browser probe did (16 cells filled, `stillLoading: 0`) — but it does
+    /// pin the shape whose deletion caused the blank window.
+    #[test]
+    fn the_page_boots_by_asking_the_backend_five_questions() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        let script = page
+            .split_once("<script>")
+            .map(|(_, rest)| rest)
+            .expect("the page has a script");
+        for call in [
+            "refresh().catch(",
+            "snapshot().catch(",
+            "services().catch(",
+            "subscribers().catch(",
+            "loadLogModules().catch(",
+            "loadModules().catch(",
+        ] {
+            assert!(
+                script.contains(call),
+                "the boot sequence no longer calls {call} — that is the 2026-10-20 blank-window \
+                 shape: the cards stay at their 「加载中…」 placeholders"
+            );
+        }
+        // …and each of them is *caught*: an unhandled rejection in the boot block takes the
+        // rest of the initialisation with it, which is how one missing function reads as
+        // five broken cards.
+        let boot_calls = script.matches(".catch(").count();
+        assert!(
+            boot_calls >= 6,
+            "only {boot_calls} guarded calls in the script — the boot block is not catching"
+        );
+    }
+
     #[test]
     fn every_test_in_this_crate_pins_the_log_directory_first() {
         pin_test_dir();

@@ -1621,7 +1621,7 @@ else
     [ "$API_CODE" = "0" ] \
         && pass "a browser with a data directory is accepted, not just a bare name" \
         || fail "spec refused: $API_MSG"
-    [ "$API_MSG" = "已设为 $SPEC，但本机存过 cookie 文件，解析仍以文件为准（清除文件后才会用浏览器）" ] \
+    [ "$API_MSG" = "已设为 ${SPEC}，但本机存过 cookie 文件，解析仍以文件为准（清除文件后才会用浏览器）" ] \
         && pass "and says out loud that the file still outranks it in argv" \
         || fail "override wording: $API_MSG"
     [ "$(stored_setting Resolve_Cookie_Browser)" = "$SPEC" ] \
@@ -5957,6 +5957,110 @@ else
         echo "  MACAST_VERIFY_KEEP: kept $S38_SDIR"
     else
         rm -rf "$S38_SDIR"
+    fi
+fi
+
+echo "== 39: mirror-action is token-gated, and the three mirror doors say one sentence =="
+# The row landed 2026-10-20 as the 23rd and last of the reference's POST table
+# (protocol.py:2288-2331), and it is the only POST whose gate is `token` rather than
+# `management`: a page may not ask this machine to start capturing the desktop just
+# because the request came from loopback. Two things this section asks that the unit
+# tests cannot: the gate is paid on a real socket, and the POST door quotes the same
+# sentence the two GET doors answer — they read one constant, and a second literal
+# creeping in is the "two answers for one fact" failure AGENTS.md §4.8 keeps naming.
+S39_SDIR=$(mktemp -d /tmp/macast-rust-mirror.XXXXXX)
+S39_PORT=$((PORT + 19))
+S39_TOK="fedcba9876543210fedcba9876543210"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Mirror", "Api_Token": "%s"}' \
+    "$S39_PORT" "$S39_TOK" > "$S39_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S39_SDIR" MACAST_MPV_SOCKET="$S39_SDIR/mpvsocket" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S39_SDIR/stdout.log" 2>&1 &
+S39_PID=$!
+disown "$S39_PID" 2>/dev/null || true
+S39_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S39_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S39_PID" ]; then
+        S39_READY=1; break
+    fi
+    sleep 0.25
+done
+if [ -z "$S39_READY" ]; then
+    fail "the mirror instance never became the listener on $S39_PORT"
+    kill -9 "$S39_PID" 2>/dev/null
+    rm -rf "$S39_SDIR"
+else
+    s39_msg() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null; }
+    # The file's digest **before** any request, so the "nothing moved" check below has
+    # something to compare against (a digest compared to itself asks nothing).
+    S39_MD5=$(md5 -q "$S39_SDIR/macast_setting.json")
+    # 1. Loopback without the token: refused. This is the whole reason the row is not
+    #    management-gated -- the very next request is the same one with a token, and it
+    #    is served.
+    S39_NOTOK=$(curl -s --max-time 6 -X POST -d "mirror-action=start" \
+        "http://127.0.0.1:$S39_PORT/api" | s39_msg)
+    case "$S39_NOTOK" in
+        "403 | "*) pass "mirror-action from loopback without the token hears the token gate" ;;
+        *) fail "mirror-action without a token answered: $S39_NOTOK" ;;
+    esac
+    # 2. With the token: the shell is reached, and the answer names the missing face
+    #    instead of pretending a capture started.
+    S39_WITH=$(curl -s --max-time 6 -X POST -d "mirror-action=start&token=$S39_TOK" \
+        "http://127.0.0.1:$S39_PORT/api" | s39_msg)
+    case "$S39_WITH" in
+        "1 | "*镜像面*) pass "with the token it is still refused: this build has no mirror face" ;;
+        *) fail "mirror-action with a token answered: $S39_WITH" ;;
+    esac
+    # 3. The two GET doors answer one document, and the POST door quotes it.
+    S39_GET_STATE=$(curl -s --max-time 5 \
+        "http://127.0.0.1:$S39_PORT/api?query=mirror-state&token=$S39_TOK" | s39_msg)
+    S39_GET_SNAP=$(curl -s --max-time 5 \
+        "http://127.0.0.1:$S39_PORT/api?query=mirror-snapshot&token=$S39_TOK" | s39_msg)
+    [ "$S39_GET_STATE" = "$S39_GET_SNAP" ] \
+        && pass "mirror-state and mirror-snapshot answer one document, not two" \
+        || fail "the two GET mirror doors disagree: $S39_GET_STATE vs $S39_GET_SNAP"
+    case "$S39_GET_STATE" in
+        "1 | "*镜像面*)
+            S39_SHARED=${S39_GET_STATE#1 | }
+            case "$S39_WITH" in
+                *"$S39_SHARED"*) pass "the POST door quotes the same sentence the GET doors answer" ;;
+                *) fail "mirror-action words its refusal differently: $S39_WITH vs $S39_SHARED" ;;
+            esac
+            ;;
+        *) fail "mirror-state answered: $S39_GET_STATE" ;;
+    esac
+    # 4. The same gate on the read side, on a real socket -- the request a drive-by page
+    #    would actually send first. **The envelope is the GET one, not the POST one**:
+    #    a GET refusal is `HTTP 403` with `code: 1` in the body (`Face::gate_refusal`'s
+    #    GET shape, `protocol.py:2518`'s POST shape is the 200 one). Both halves are
+    #    asserted, because reading only the body would pass for a 200 -- and the status
+    #    is the half a browser acts on.
+    S39_GETNOTOK_STATUS=$(curl -s --max-time 5 -o "$S39_SDIR/getnotok.json" -w '%{http_code}' \
+        "http://127.0.0.1:$S39_PORT/api?query=mirror-state")
+    S39_GETNOTOK=$(s39_msg < "$S39_SDIR/getnotok.json")
+    [ "$S39_GETNOTOK_STATUS" = "403" ] \
+        && pass "query=mirror-state without the token is an HTTP 403 from loopback too" \
+        || fail "query=mirror-state without a token answered HTTP $S39_GETNOTOK_STATUS"
+    case "$S39_GETNOTOK" in
+        "1 | "*token*) pass "…and its body carries the token sentence, not the sentence for a LAN caller" ;;
+        *) fail "query=mirror-state without a token answered: $S39_GETNOTOK" ;;
+    esac
+    # 5. A refused mirror moved nothing: no rewrite, and no capture process anywhere.
+    [ "$S39_MD5" = "$(md5 -q "$S39_SDIR/macast_setting.json")" ] \
+        && pass "the refused mirror left the settings file byte-for-byte as it was" \
+        || fail "a refused mirror rewrote the settings file"
+    if pgrep -x ffmpeg >/dev/null 2>&1; then
+        skip "an ffmpeg is already running on this machine, so this run cannot claim the refusal spawned none"
+    else
+        pass "and no ffmpeg is running for it"
+    fi
+    kill -9 "$S39_PID" 2>/dev/null
+    pkill -9 -f "$S39_SDIR" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S39_SDIR"
+    else
+        rm -rf "$S39_SDIR"
     fi
 fi
 

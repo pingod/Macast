@@ -950,7 +950,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 "读到的**别人的**记录喂设备账本"：今天非查询的数据报只进 `Served::absorbed` 一个计数器，所以 
 §8/§16 那条"合并"结论只合并了 socket，没有合并两张表。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
-| 插件那七行（`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file`、`install/uninstall-webrtc-extras`） | **已交付答复**（2026-10-20，§18 的设计）：POST 表 16 → **22** 行 + `plugin-file` 的文件路由；六行表单端点以 `code: 1` 回答并点名"这个构建没有插件宿主/没有安装器"，`plugin-file` 在**读正文之前**就被拒；四行 code-execution 的门照抄（`install-plugin` / 两个 extras / `set-module-setting` / `save-launch-param` 共五行） | 判据：`macast-upnp` 1 条（三种开关的原话、局域网不带令牌的 install 被门拒）+ 表循环 + **真机 §38 共 7 条**：答复原话、局域网只听见门、带令牌仍是拒绝、`plugin-file` 同句、设置文件字节不变、设置目录下没有任何 `.py`、`plugin-info` 仍是空列表。**插件本身装不了**是这一行的结论，不是缺陷 |
+| 插件那七行（`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file`、`install/uninstall-webrtc-extras`） | **已交付答复**（2026-10-20，§18 的设计）：POST 表 16 → **22** 行（次日又一行 `mirror-action` ⇒ **23**，见本表下面那一行）+ `plugin-file` 的文件路由；六行表单端点以 `code: 1` 回答并点名"这个构建没有插件宿主/没有安装器"，`plugin-file` 在**读正文之前**就被拒；四行 code-execution 的门照抄（`install-plugin` / 两个 extras / `set-module-setting` / `save-launch-param` 共五行） | 判据：`macast-upnp` 1 条（三种开关的原话、局域网不带令牌的 install 被门拒）+ 表循环 + **真机 §38 共 7 条**：答复原话、局域网只听见门、带令牌仍是拒绝、`plugin-file` 同句、设置文件字节不变、设置目录下没有任何 `.py`、`plugin-info` 仍是空列表。**插件本身装不了**是这一行的结论，不是缺陷 |
 | 管理面的 `save-launch-param`（整份设置替换 + 重启） | **已交付**（2026-10-20）：POST 表 **16** 行（参考实现第 10 行，门 **code-execution**，排在 `app-action` 之后）；`Setting::replace_all`（已有的"高级设置"写入口）整表替换并落盘，答复 **先走**、`MACAST_RESTART` 线程 250 ms 后 `app.restart()`。坏 JSON 与非对象都回参考实现原话 `json format error` | 判据：`macast-upnp` 1 条（表 16 行、code-execution 恰好两行、字段原样）+ **真机 §37 共 8 条**：两种坏输入都回同一句且**文件与进程都不动**；好输入回 `success`、旧 pid 消失、新 pid 在同一端口监听、新文件里的友好名生效 |
 | 管理面的 `set-renderer`（页面上的播放器切换） | **已交付**（2026-10-20）：POST 表 **15** 行（参考实现第 6 行，插在 `toggle-protocol` 之前）；`host::renderer_title` 是名字的**唯一**主人（下拉那一行与这一行读同一个函数），接受时落盘并把播放器 reload，其它回参考实现的拒绝句 | 判据：`macast-tauri` 1 条（空 → MPV、存了名字 → 用它、前后空白不算另一个渲染器）+ `macast-upnp` 1 条（字段原样交出去、两种答复透传）+ 表循环 + **真机 §36 共 5 条**：不存在的名字被拒且不写盘、`MPV` 被接受并写进文件、HTTP 面照旧 |
 | 管理面的 `app-action`（页面上的退出按钮真的退出） | **quit 已交付**（2026-10-20）：POST 表 **14** 行（参考实现第 8 行，插在 `toggle-protocol` 之后）；`Discovery::app_action` 先答复再在自己那根 `MACAST_QUIT` 线程里 250 ms 后 `app.exit(0)`，退出钩子照旧走 `stop_services`（byebye + goodbye + 关面 + 停播放器）。`check-update` 诚实拒绝（§8 那一行），未知动词回参考实现的「未知应用操作：{}」 | 判据：`macast-upnp` 1 条（字段原样交给 shell、三种答复透传）+ 表循环 + **真机 §35 共 9 条**：未知动词与 check-update 都**不动进程**、quit 的答复先到、进程在数秒内消失、应用端口与 8009/8008 全部空、日志里有那句 quit 与 SSDP 的 byebye |
@@ -965,6 +965,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | 管理面的 `plugin-info` 与两张 mirror 读 | **已交付答复**（2026-10-20；同一天的下一轮把 `plugin_repo` 那半句**翻面了**，见下面那一行）：`plugin-info` 是真数据（platform / version / 空的插件列表 / **真坐标**）；`mirror-state` 与 `mirror-snapshot` 是"这个壳没有镜像面"的完整文档，门是 **token**（loopback 也不例外，照参考实现） | 判据：单元 4 条 + 表循环（每行的门都被无令牌局域网与带令牌各打一遍）+ 真机 §23 的 5 条 + 真机 §29 的整节。`plugins` 仍然是**空列表而不是拒绝**（"从这个构建里装不了东西"是答案）。见 §16 第 33 条与第 34 条 |
 | `macast/plugin_repo.py`（插件仓库坐标、「启用国内镜像地址」那一个开关、extras 的命名与地址规则） | **坐标与开关已交付**（2026-10-20，`macast-core/src/plugin_repo.rs`）：`mirror_enabled` / `set_mirror_enabled` / `to_mirror_url` / `index_urls` / `describe` / `extras_describe` / `extras_asset_name` / `extras_urls`；GET 面 `plugin-info` 交回 `describe()`，POST 表第 1 行 `set-github-mirror`（门 management，照参考实现的行序排在 `cast-uri` 之前）。**插件管理器与 extras 安装器仍未做** —— `plugins` 因此是空的，`extras_urls` 与 `extras_asset_name` 今天是**纯规则 + 用例**，没有产品读者（先中再壳，与 `targets.rs` 那条同一形状） | 判据：单元 14 条（三行的新鲜顺序、镜像开时**三行塌成两行**、jsDelivr 永不加前缀、关是**键消失**而不是存 `false`、读不造键、资产名四洞按序、开关的四词表）+ 单元 3 条 HTTP（两个读者读同一个键必须同答、门的三种来源、表序优先）+ **真机 §29**：把 `macast/plugin_repo.py` **按文件路径** load 进来（它模块级就 `from .utils import Setting`，所以要一个假父包；而桩 `Setting` 读的是**实例自己写的那份文件**），两个开关状态各逐格对拍一次；十一种拼写的"是"打给**参考实现自己的表达式**比；`Github_CN_Mirror` 从 HTTP 面与「模块设置」面各问一次。见 §16 第 34 条 |
 | 管理面的两行 POST：`set-subtitle-show` 与 `clear-play-history`（页面上那两个按钮真的动东西） | **已交付**（2026-10-20）：POST 表 9 → **11** 行，两行都按参考实现的相对位置插入（`set-subtitle-show` 是第 14 行 ⇒ 排在 `cast-uri` 之前；`clear-play-history` 是第 21 行 ⇒ 排在 `clear-log` 之前 —— 两个"清空"按钮在同一个请求里时只有前者跑）；门都是 management（与 `set-module-setting` 那道码门不是同一种）；`StateStore` 多一个 `clear_history`（四份实现：壳的表、soap 的双、eventing 的双、HTTP 的双），`Management` 多一个 `set_sub_show` | 判据：单元 5 条（四种拼写的"是/否"表逐格比、**门不许写状态变量**——比较两次 `media` 读数的相等而不是比一个字面值、被拒的 POST 一次都不许到达播放器、清空之后 `query=status` 与账本自己同读为空、两字段同请求的先后）+ **真机 §30 共 18 条**（自带一台实例，因为 §24 故意杀掉了主实例）：真 mpv 在 PLAYING、播放器的**首次回声**落进表之后才开始动它、`"1 "` 必须**隐藏**（这一格把 §29 在镜像开关上量的"不 strip"在第二扇门上再问一遍）、文件里 `Play_History` 是空列表而不是被删、清空之后再一次投屏仍然恰好回填一行、两个清空字段的先后在线上再验一次。见 §16 第 35 条 |
+| 管理面的 `mirror-action`（电脑投屏的控制面，POST 表第 9 行） | **已交付答复**（2026-10-20）：POST 表 **22 → 23** 行 —— **与参考实现的表齐了**。这是全表唯一门是 **token** 的一行（`protocol.py:2296-2298`：任何网页都能向 127.0.0.1 发 POST，"开始录这块桌面"不是即兴访问能问的），插在 `app-action`（第 8 行）与 `save-launch-param`（第 10 行）之间。`ShellManagement::mirror_action` 答**同一句话**：`MIRROR_ABSENT_MESSAGE` 是**一个常量、三个读者**（两个 GET 门 + 这一个 POST 门），因为这三种问法是"这台设备有没有镜像面"的同一个事实。 | 判据：单元 2 条（`the_mirror_row_is_token_gated_and_names_the_missing_face`：本机无令牌被拒且 seam 一次都没被问过、带令牌时**POST 门的答复逐字包含两个 GET 门的句子**、verb 原样交给 seam 即使答案不依赖它；`the_mirror_row_sits_between_the_quit_and_the_restart`：**两个邻居各问一遍**——`app-action` 在前所以同一个请求只退出不录屏，`save-launch-param` 在后所以只答"没有镜像面"而不重写并重启）+ 表断言（`== 23` 是**齐平**而不是"进度"，另加 `token` 列恰好 `["mirror-action"]`）+ **真机 §39 共 7 条**：本机无令牌 403、带令牌仍拒绝且句子里有「镜像面」、两个 GET 门答同一份文档、POST 门的句子**包含**那句共享的话、GET 无令牌也 403、设置文件逐字节不变、没有 ffmpeg 被拉起。**这一格的形状**：参考实现先找 console surface 再校验 `mirror-args`，所以一个没有镜像面的构建对坏 JSON 答的是"没有镜像面"而不是"mirror-args 不合法"——§39 故意带一个坏 `mirror-args` 发过去，两种顺序才分得开 |
 | `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 || AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting`，由**同一个** announcer 与 Cast 一起广播 —— 2026-10-19 合并成一个 5353 socket，见 §16 第 32 条）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**"会广播 ≠ 会答问"这一格在合并之后变了一半**：判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门），合并后的 socket 对**每个** `responder_answers()` 为真的 service 才答问 —— 所以 AirPlay 的查询**今天有答案**，那是参考实现的行为（一个引擎答所有注册类型），而它的单元见证是 `one_socket_answers_the_measured_type_and_stays_silent_for_the_other`。**没有真机见证者**：§25 的送达那一格在本机仍 SKIP，§26 的 browse 从突发就能成功，它既证不了答问也证不了不答问。announcer 自己那一行日志仍然明说这件事（`it announces this type and does not answer it — the responder table was measured for _googlecast._tcp`），§26 有一条问它在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
 
@@ -1558,7 +1559,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     ⑯ **把第二份 truthiness 规则体抄回 `macast-cast/src/resolve.rs`**（行为逐字等价，委托与本地体答同一个问题）→ **1** 红，而且**只有那条整棵树的扫描问得到**：这一支就是 §7 那两句"副本会替被杀那一份答话"的具体形状 —— 传统电池在这一格上结构性失明，因为被杀的那一份没有任何用例专属地读它。
     **本轮没有一支 0 红。**
     *仪器的错一支，而且伪装成"干净跑"*：那趟"收尾的全量跑"我加了 `--no-build`，而上一支变异体（⑨）改的是 `macast-upnp` 的产品码 —— 源文件已经按 md5 还原，**产物没有重新构建**，于是那 12 条 §29 红**全是真的**，只是真的在一份变异的二进制上。这是 Python 侧那条"等长还原留下一份有效的旧 `.pyc`"的 Rust 版本，方向也一样：**还原之后必须重新构建再跑**，`--no-build` 只在你确认过产物与源码同时钟的时候才是省时间的。判据换成先 `cargo build` 再跑，重跑读数 **350 / 0 / 1**。
-    *仍然欠着的*：① **插件子系统本身** —— 管理器、热插拔、`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file` 上传、`save-launch-param`，以及 extras 的**安装器**（`extras_urls` / `extras_asset_name` 今天是纯规则加用例，没有产品读者）；② POST 表 **9 / 23 行**（参考实现那 23 行是 2026-10-20 数出来的，不是抄的）；③ §29 的对拍是**坐标文档**，不是"有人真去拉了那份索引"。
+    *仍然欠着的*：① **插件子系统本身** —— 管理器、热插拔、`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file` 上传、`save-launch-param`，以及 extras 的**安装器**（`extras_urls` / `extras_asset_name` 今天是纯规则加用例，没有产品读者）；② POST 表当时 **9 / 23 行**，今天 **23 / 23**（`mirror-action` 是最后一行，见第 49 条 —— 齐平指的是**行数**，其中八行的答复是"这个构建做不了"，那是答案而不是实现）；③ §29 的对拍是**坐标文档**，不是"有人真去拉了那份索引"。
     *计数*（两台仪器一致：`--list` 与整跑读数；`macast-cast` 那台扫描仪器说 **702**）：`macast-core` 107 → **128**（+14 坐标 / +6 `pyops` 的表与扫描 / +1 开关的 bool 规则）、`macast-upnp` 355 → **358**、`macast-mpv` **149**（委托之后一条不少：它的表继续通过本模块的名字问这条规则）、`macast-cast` **702**、`macast-tauri` **19**；POST 表 8 → **9** 行（`the_post_route_table_is_well_formed` 的 `== 9`），GET 表仍是 **16** 行；真机脚本 31 → **32** 节，**350 PASS / 0 FAIL / 1 SKIP，退出码 1**（那一条 SKIP 仍是 §25 的送达那一格；§29 一节 **27 条**，上一轮那份 323 是 §29 之前的数）。
     顺手补了一格**落后的地板**：`macast-cast` 的 `TESTS_IN_THIS_CRATE` 停在 699 而两台仪器都说 702 —— 上一轮我在散文里写了 702，没有回来改这个常量，而它的判据是 `>=`，**低 3 不会红**（§4.13「一个没被机器问过的数字」在地板上的形状）。现在按量出来的 702 钉住。
 
@@ -1570,12 +1571,18 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *"不 strip"在第二扇门上*：§29 在镜像开关那里量到参考实现不 `strip()`；`set-subtitle-show` 是同一位主人的第三个读者（`remove` 是第二个），而 `?refresh=` **要** `strip()` —— 两种拼法两个主人这件事已经写进 `pyops` 的头。线上那一格用的是 `"1 "`（表单里一个多余的空格）：它必须**隐藏**字幕。N2（面改成先 trim）红单元 1 + 真机 1。
     *电池：7 支，逐支读数*（一支一条命令、`/tmp/bat30/` 备份 + 还原 + md5 回到基线，并且**先证明那一处真的改了**）：N1 清空只答成功不碰账本 → 单元 1 红，**真机 4 红**（账本还剩 1 行、文件读成 OTHER、md5 没动、两个清空字段的先后也塌）；N2 门改成 strip → 1 + 1；N3 面自己写状态变量 → 1；N4 壳把布尔转发的方向反了 → **单元 0 红 / 真机 4 红**；N5 把 `set-subtitle-show` 挪到 `cast-uri` 之后 → 2；N6 那行的门从 management 升成 code-execution → 2；N7 成功文档多长一个 `removed` 键 → 1。
     **N4 那一支是本轮最该留下的一格**：`src-tauri` 那 19 条单元用例一条都不会红 —— 壳里那一行 `self.player.set_media_sub_show(&json!(show))` 的唯一主张就是"这个布尔原样到播放器"，而 mpv 侧"布尔→`yes`/`no`"已经有 `macast-mpv/src/player.rs:3917` 在问，真机上"到不到"只有 §30 那四行问得出。这不是覆盖洞要补，而是**一句话的转发的见证本来就在它两端**；写在这里是因为下一次有人看到"单元 0 红"就想加一条断言，那条断言只会把 `json!(show)` 再抄一遍。
-    *还欠的*：POST 表 当时 **11 / 23**。其中 `set-interface` **已在 2026-10-20 同日关掉**（第 39 条 ——
-    它欠的就是那句"重新广播"，而写键不重新绑口正是这条记录当时拒绝把它算作完成的原因）；
-    剩下 11 行里，`set-renderer` / `toggle-protocol` / `plugin-enable·disable·uninstall` /
-    `install-plugin` / `plugin-file` / `install-webrtc-extras` / `uninstall-webrtc-extras` 都要等
-    插件子系统；`save-launch-param` 要等重启语义；`app-action` 的 `quit` 能做，`check-update`
-    在这个壳里没有对应物。**本分支从未推送 ⇒ 本轮 128 + 362 条单元与那 368 条真机读数没有任何 CI 见证过。**
+    *还欠的（2026-10-20 晚更新：这一句当时写的 11 行已经全部关掉，只剩下面那一条）*：
+    POST 表今天 **23 / 23**，与参考实现齐平（`mirror-action` 是最后一行，见第 49 条）。
+    这一行保留下来是为了记**当时**欠的是哪 11 行，以及它们各自欠的是什么：
+    `set-interface` 欠"重新广播"（写键不重新绑口 —— 第 39 条已关）；
+    `set-renderer` / `toggle-protocol` / `plugin-enable·disable·uninstall` / `install-plugin` /
+    `plugin-file` / `install-webrtc-extras` / `uninstall-webrtc-extras` 等插件子系统
+    （第 44/42/46 条已关，其中插件那七行**只关到"诚实答复"**：答复在、门在、宿主不在）；
+    `save-launch-param` 等重启语义（第 45 条已关）；`app-action` 的 `quit` 能做、
+    `check-update` 在这个壳里没有对应物（第 43 条已关）。**表齐了不等于功能齐了**：
+    八行插件/镜像相关的回复是"这个构建做不了"，那是**答案**而不是实现，
+    它们要等一个宿主（§18 说清了为什么不引脚本宿主）。
+    **本分支从未推送 ⇒ 这一节的读数没有任何 CI 见证过。**
 
 36. **聚合队列先量再做：四行读数，其中一行把"参考实现的防洪是从听见自己学到的"这件事说破了**（2026-10-20，`scripts/mdns_responder_probe.py` 加 4 个 `queue` 用例；产品代码一个字节没改）：
     *为什么要量*：`respond::timing()` 已经冻过（17 行判决语料里那 15 个延迟读数），但它只答"这条记录属于哪一桶"；本壳今天**没有桶** —— `announce::serve` 拿到什么都立刻发。要不要建一个队列，不能从 `_handlers/multicast_outgoing_queue.py` 读出来：合并判据是 `send_after(new) <= send_after(last_group)`，而两个 `send_after` 各自带一个新的 `randint(20, 120)` —— **答案是概率性的**，而那个包又恰好有 Cython 构建（§4.2 那句"包发的是编译产物，答案在字节里"）。
@@ -1915,7 +1922,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 "这个构建里没有可安装的插件"——`plugin-info` 已经在这么说（§15 那一行）。
 
 46. **插件那七行落地：先答"不能"，再答"为什么"**（2026-10-20，§18 的设计 + POST 表 16 → **22** 行 +
-`plugin-file` 的文件路由 + 真机 §38 的 **7** 条；`macast-upnp` 366 → **367**）：六行表单端点各自
+`plugin-file` 的文件路由 + 真机 §38 的 **7** 条；`macast-upnp` 366 → **367**；**那一轮的 22 是当时的行数，今天 23**（`mirror-action` 见第 49 条））：六行表单端点各自
 `code: 1` 并点名按钮；`plugin-file` 走**文件**路由但同样在**读正文之前**拒绝，门是
 `code-execution`；四行在参考实现里会落代码的门一行没降。整跑 **450 PASS / 0 FAIL / 1 SKIP，
 退出码 1**。**这一格最贵的一条**不是代码，是环境的第二次同一个坑：§38 第一次跑被一台我留下的
@@ -1950,6 +1957,64 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     **Windows 那一半（§16 第 39 条的 `pin_multicast_if` 空操作）仍然没量**：.68 的 22 端口
     `Connection refused`，这台 CachyOS 是同一 IP 的另一台机器；要量它得等 Windows 那台的
     sshd 回来。**本分支从未推送 ⇒ 无 CI 见证。**
+
+49. **POST 表齐了：`mirror-action` 是最后一行，而它的答案与两个 GET 门读同一个常量**（2026-10-20，
+    `macast-upnp/src/http.rs` 的第 23 行 + `MIRROR_ABSENT_MESSAGE` + `ShellManagement::mirror_action`
+    + 真机 §39 的 **7** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **28**）：
+    *为什么这一行不能写成 `management`*：启动一块桌面的采集不是"本机来的就可以"的事 ——
+    任何网页都能向 127.0.0.1 发 POST，这正是 §4.7b 写下的那一课。参考实现自己在那一行上面就这么说，
+    所以这里照抄门、不重新推理（`Gate::parse` 不认识门名就拒绝，fail closed）。
+    *为什么答案是一句话而不是三句*：`mirror-state`、`mirror-snapshot`（两个 GET 门）与这个 POST 门
+    问的是同一个事实 ——"这台设备有没有镜像面"。三处各写一句，用户读到两种解释就会以为坏了两样东西
+    （§4.8 那条「两处答案不一致比没有数字更糟」）。所以 `MIRROR_ABSENT_MESSAGE` 是**一个常量、三个读者**，
+    而 §39 不比"都有镜像二字"，它比**POST 的答复逐字包含 GET 的那整句**。
+    *一个只有真机能问的顺序*：参考实现先找 console surface、再校验 `mirror-args`，所以没有镜像面的构建
+    对坏 JSON 答的是"没有镜像面"而不是"mirror-args 不合法"。§39 因此**故意**带 `mirror-args=not-json`
+    发过去 —— 两种顺序在别的输入下给出同一个答案，这一格是唯一能把它们分开的形状。
+    *电池（定点，`/tmp/mut_mirror/http.rs.bak` 还原、md5 回到 `70342345088b1d5ae32b5aa53c475219`）*：
+    ① 门从 `token` 降成 `management` → **单元 2 红**（令牌那一格 + `token` 列断言）；
+    ② 把那一行删掉 → **单元 3 红**（表长度、令牌列、两个邻居的先后）；
+    ③ 答复改成 `Answer::ok("success")` → **1 红**（"只动文档的旋钮"这一格）；
+    ④ 两个 GET 门各写一份字面量而不是读共享常量 → **1 红**（§39 的"逐字包含"那一问；
+    单元那条也只能在 POST 与 GET 同时被问时红 —— 所以它同时是"三个门读同一个常量"的见证）。
+    *一处仍然欠着的*：`ShellManagement::mirror_action` 自己那几行**没有单元用例**（`TauriHost`
+    要一个 `AppHandle`），它的见证全在 §39。这与 §16 第 35 条 N4 那一格同一形状：
+    一句话的转发，它的两端各有见证者（HTTP 面的"答复形状"与真机上的"答复原话"）。
+    **本分支从未推送 ⇒ 这 369 + 28 条与 §39 那 7 条读数没有任何 CI 见证过。**
+
+50. **页面的病不是"资产过期"，是"那一段被删掉而卡片留着"**（2026-10-20，`frontend/index.html`
+    + `src-tauri/src/host.rs` 的两条静态守卫；上一轮把它记成"嵌进窗口的页面不是当前的"并留了一条
+    "先用 Web Inspector 定性"的待办）：
+    *上一轮那句读错了，而读错的方式值得留下*：先把嵌进二进制的资产解出来对拍 —— 用
+    `zlib.brotliDecompressSync` 解 `target/debug/build/macast-tauri-*/out/tauri-codegen-assets/*.html`，
+    当前构建那一份（`d3aec53f…`）**解出来 33,748 字节、与 `frontend/index.html` 逐字节相同**，
+    连上一轮刚加的 `[boot] script started` 都在。资产是当前的，**坏的是文件本身**。
+    *真因*：`40a9b25` 在删"我自己加重的两张重复卡"时，把 `refresh()` / `snapshot()` / `services()` /
+    `subscribers()` / `loadLogModules()` 那一整段启动、两个 `setInterval` 轮询器、以及日志与订阅客户端
+    两个渲染器**一起删掉了**，而它们对应的四张卡还留在标记里 —— 于是每一格永远停在「加载中…」，
+    而页面语法**完全合法**（`node --check` 通过），窗口里没有任何一条控制台报错能指向缺失的那一段。
+    这是 §4.13「不提问的检查」在**前端**的形状：没有一条断言在读"某个格子是否被填过"。
+    *修法*：把那一整段接回来（每条 boot 调用各带 `catch` 把原因写进事件框，好让下一次"少一段"能自己
+    说话），并删掉我上一轮那张重复日志卡 —— 它与原有那张撞了三个 id（`log-module` / `log-tail` /
+    `log-clear`），而 `querySelector` 只命中第一个，所以**两张里有一张的按钮永远是死的**。
+    *常驻判据（这一轮补的，不依赖浏览器）*：
+    ① `every_element_the_page_declares_is_also_one_its_script_touches` —— 标记里每个 `id=` 都必须被
+    页面自己的脚本提到（唯一豁免 `proto-hint`，它是静态散文、没有任何写者，列**按名字**并写明理由，
+    而不是用模式过滤 —— 过宽的豁免就是守卫不再守卫的方式）；它还先断言"扫到 ≥40 个 id"，
+    因为空扫描与"全部通过"是同一句话。
+    ② `the_page_boots_by_asking_the_backend_five_questions` —— 六条启动调用必须以 `.catch(` 的形状
+    在场（未处理的 rejection 会把后面整段初始化一起带走，这正是"少一个函数"读成"五张卡都坏了"的机理）。
+    *牙齿*：把 40a9b25 的删除**原样重放**（渲染器 + 启动段共 142 行）⇒ 第 ① 条当场红，并逐字点名那
+    十二个没人写的格子（`log-tail`、`log-read`、`log-all`、`log-clear`、`log-meta`、`log-text`、
+    `sub-aggregated`、`sub-thread`、`sub-append`、`sub-state`、`sub-remove`、`sub-rows`）；
+    只删启动段、留着渲染器 ⇒ 第 ① 条**绿**（那时渲染器还在提那些名字），第 ② 条红 ——
+    **两条各管一半，缺一条就有一半没人问**。
+    *那一次性的真浏览器探针*（playwright 缓存里的 Firefox + 一个按 `main.rs` 返回值形状造的假
+    `window.__TAURI__`，把仓库里那份页面真加载一遍）读数：`stillLoading: 0`、16 个格子都有值、
+    日志下拉三个选项（含「Protocol（还没有内容）」那种空盒子）、历史 1 行、模块设置 1 组 1 个输入框、
+    **零 JS 报错**。它**没有入库**（`/tmp/pagecheck/page_probe.js`），所以"页面填过没有"这一格
+    今天的常驻见证是上面那两条静态检查，而不是浏览器。
+    **本分支从未推送 ⇒ 这 28 条与那次探针读数没有任何 CI 见证过。**
 
 ---
 
@@ -2019,7 +2084,10 @@ grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**�
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
 grep -c '"queue": True' scripts/mdns_responder_probe.py                     # 期望 **4**（聚合行；判决语料必须把它们排除在外，
 #   而排除是数过的：不是 4 条探针就退出 1 —— 这一行是那个数在文档里的对应物）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **41**（§38 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **42**（§39 是最后一节：
+#   `mirror-action` —— POST 表的第 23 行，也是唯一门是 `token` 的一行；它问的是"本机无令牌
+#   也被拒"、"带令牌仍答'没有镜像面'"、以及 POST 门与两个 GET 门**读同一句话**（§16 第 48b 条）。
+#   §38 是它前面那一节：
 #   插件那七行：六行表单端点回答"这个构建没有宿主"，`plugin-file` 在读正文之前就被拒，
 #   四行 code-execution 的门照抄（§18 的设计、§16 第 46 条）。§37 是它前面那一节：
 #   整份设置替换 + 重启：两种坏输入不写盘也不动进程、好输入先答复再重启、新 pid 在同一端口
