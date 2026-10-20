@@ -5737,6 +5737,71 @@ else
     fi
 fi
 
+echo "== 36: set-renderer accepts the one renderer this build has, and says so =="
+# Row 6 of the reference's POST table. This shell ships **one** renderer, so the only
+# accepted title is the one already in force (`host::renderer_title`: the stored
+# `Macast_Renderer` or `MPV`), and accepting it still does what the reference's switch
+# does — persists the canonical title and reloads the player. Everything else is the
+# reference's own refusal (`未找到播放器：{title}`), which is the honest half: a list with
+# one entry must not pretend to find a plugin that is not in this build.
+S36_SDIR=$(mktemp -d /tmp/macast-rust-renderer.XXXXXX)
+S36_PORT=$((PORT + 16))
+S36_SOCK="$S36_SDIR/mpvsocket"
+S36_TOK="0123456789abcdef0123456789abcdef"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Renderer", "Api_Token": "%s"}' \
+    "$S36_PORT" "$S36_TOK" > "$S36_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S36_SDIR" MACAST_MPV_SOCKET="$S36_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S36_SDIR/stdout.log" 2>&1 &
+S36_PID=$!
+disown "$S36_PID" 2>/dev/null || true
+S36_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S36_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S36_PID" ]; then
+        S36_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S36_READY" ]; then
+    fail "the renderer instance never became the listener on $S36_PORT"
+    kill -9 "$S36_PID" 2>/dev/null
+    rm -rf "$S36_SDIR"
+else
+    S36_MD5=$(md5 -q "$S36_SDIR/macast_setting.json" 2>/dev/null)
+    S36_NO=$(curl -s --max-time 8 -X POST -d "set-renderer=IINA&token=$S36_TOK" \
+        "http://127.0.0.1:$S36_PORT/api" 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+    [ "$S36_NO" = "1 | 未找到播放器：IINA" ] \
+        && pass "a renderer this build does not have is refused in the reference's words" \
+        || fail "set-renderer=IINA answered '$S36_NO'"
+    [ "$S36_MD5" = "$(md5 -q "$S36_SDIR/macast_setting.json" 2>/dev/null)" ] \
+        && pass "…and the refusal wrote nothing" \
+        || fail "a refused renderer switch rewrote the settings file"
+    S36_YES=$(curl -s --max-time 8 -X POST -d "set-renderer=%20MPV%20&token=$S36_TOK" \
+        "http://127.0.0.1:$S36_PORT/api" 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+    [ "$S36_YES" = "0 | 播放器已切换为 MPV" ] \
+        && pass "the one renderer this build has is accepted, and the answer names it" \
+        || fail "set-renderer=MPV answered '$S36_YES'"
+    grep -aq '"Macast_Renderer": "MPV"' "$S36_SDIR/macast_setting.json" \
+        && pass "the canonical title is now in the settings file (a fresh install's '' became MPV)" \
+        || fail "the accepted switch did not persist Macast_Renderer: $(cat "$S36_SDIR/macast_setting.json")"
+    [ "$(lsof -nP -iTCP:"$S36_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S36_PID" ] \
+        && pass "the app is still serving after the switch (the reload is the player's, not the receiver's)" \
+        || fail "the renderer switch cost the app its HTTP face"
+    # The reload's visible half needs media to reload, so it is **not asked here**: a
+    # `pass` that only narrates what this section does not check is the "不提问的检查"
+    # this repository keeps deleting (§4.13). The playing half belongs to §13/§14's
+    # witnesses; this section stops at the answer and the file.
+    kill -9 "$S36_PID" 2>/dev/null
+    pkill -9 -f "$S36_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S36_SDIR (macast.log, logs/, macast_setting.json)"
+    else
+        rm -rf "$S36_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

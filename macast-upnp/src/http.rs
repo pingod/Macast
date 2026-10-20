@@ -177,6 +177,8 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// `set-renderer=<title>` (`_set_renderer`, `protocol.py:2385-2392`, row **6**).
+    SetRenderer,
     /// `app-action=<verb>` (`_app_action`, `protocol.py:2404-2414`, row **8**).
     AppAction,
     /// `toggle-protocol=<title>`: switch one protocol on or off (`_toggle_protocol`,
@@ -256,9 +258,11 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // never reaches the later). Management-gated, not code-gated: this writes one bool
     // that decides which host the *browser* fetches next.
     PostRoute { field: "set-github-mirror", gate: "management", action: PostAction::SetGithubMirror },
-    // Row 7 of the reference (`protocol.py:2294`), right after `set-renderer` (row 6,
-    // not ported: this shell has one renderer, and a switch that accepts only the name
-    // already in force is the document-only control this port keeps refusing).
+    // Row 6 of the reference (`protocol.py:2293`), ahead of the protocol switch: the
+    // renderer this shell has is one, so the accepted value is the name already in force
+    // and the refusal is the reference's own sentence (`未找到播放器：…`).
+    PostRoute { field: "set-renderer", gate: "management", action: PostAction::SetRenderer },
+    // Row 7 of the reference (`protocol.py:2294`).
     PostRoute { field: "toggle-protocol", gate: "management", action: PostAction::ToggleProtocol },
     // Row 8 of the reference (`protocol.py:2295`), straight after the switch: `quit`
     // really ends this process, and the answer is written before the exit so the page
@@ -1418,6 +1422,15 @@ pub trait Management: Send + Sync {
     fn set_interface(&self, name: &str) -> Answer;
 
     fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String>;
+
+    /// `set-renderer=<title>`: switch the player driver (`_set_renderer`,
+    /// `protocol.py:2385-2392`, row **6** of the reference's table).
+    ///
+    /// This crate has no renderer list; it hands the field over and renders the answer.
+    /// The shell's list has one entry, so an unknown title is refused with the
+    /// reference's `未找到播放器：{title}` — and the accepted one does what the
+    /// reference's does: persist the canonical title and reload the player.
+    fn set_renderer(&self, title: &str) -> Answer;
 
     /// `app-action=<verb>`: the handful of app-level buttons the page may press
     /// (`_app_action`, `protocol.py:2404-2414`, row **8** of the reference's table).
@@ -2709,6 +2722,12 @@ impl Face {
                         &self.setting,
                         &param_value(req, "set-github-mirror").unwrap_or_default(),
                     ),
+                ),
+                PostAction::SetRenderer => answer_response(
+                    200,
+                    &self
+                        .management
+                        .set_renderer(&param_value(req, "set-renderer").unwrap_or_default()),
                 ),
                 PostAction::ToggleProtocol => answer_response(
                     200,
@@ -4492,6 +4511,7 @@ mod tests {
         cookie_state_calls: AtomicUsize,
         protocol_calls: Mutex<Vec<String>>,
         app_calls: Mutex<Vec<String>>,
+        renderer_calls: Mutex<Vec<String>>,
         targets_calls: Mutex<Vec<bool>>,
         save_cookies_calls: Mutex<Vec<String>>,
         clear_cookies_calls: AtomicUsize,
@@ -4511,6 +4531,7 @@ mod tests {
                 cookie_state_calls: AtomicUsize::new(0),
                 protocol_calls: Mutex::new(Vec::new()),
                 app_calls: Mutex::new(Vec::new()),
+                renderer_calls: Mutex::new(Vec::new()),
                 targets_calls: Mutex::new(Vec::new()),
                 save_cookies_calls: Mutex::new(Vec::new()),
                 clear_cookies_calls: AtomicUsize::new(0),
@@ -4574,12 +4595,25 @@ mod tests {
             self.protocol_calls.lock().expect("protocol calls").clone()
         }
 
+        fn renderer_calls(&self) -> Vec<String> {
+            self.renderer_calls.lock().expect("renderer calls").clone()
+        }
+
         fn app_calls(&self) -> Vec<String> {
             self.app_calls.lock().expect("app calls").clone()
         }
     }
 
     impl Management for FakeManagement {
+        fn set_renderer(&self, title: &str) -> Answer {
+            self.renderer_calls.lock().expect("renderer calls").push(title.to_string());
+            if title.trim() == "MPV" {
+                Answer::ok("播放器已切换为 MPV".to_string())
+            } else {
+                Answer::fail(format!("未找到播放器：{}", title))
+            }
+        }
+
         fn app_action(&self, action: &str) -> Answer {
             self.app_calls.lock().expect("app calls").push(action.to_string());
             match action.trim() {
@@ -6298,6 +6332,29 @@ mod tests {
         );
     }
 
+    /// The renderer row hands the field over **raw** and renders the shell's answer: the
+    /// shell's list is the one name in force, so `MPV` is accepted and a plugin this
+    /// build does not have is refused with the reference's sentence.
+    #[test]
+    fn a_renderer_switch_reaches_the_shell_and_its_refusal_is_the_reference_sentence() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("renderer-row");
+        let ok = face.answer(&post_form("/api", "set-renderer=%20MPV%20", LOCAL, &[]));
+        let ok_doc: serde_json::Value = serde_json::from_slice(&ok.body).expect("object");
+        assert_eq!(ok_doc["code"], json!(0), "{ok_doc:?}");
+        assert_eq!(ok_doc["message"], json!("播放器已切换为 MPV"));
+        let missing = face.answer(&post_form("/api", "set-renderer=IINA", LOCAL, &[]));
+        let missing_doc: serde_json::Value =
+            serde_json::from_slice(&missing.body).expect("object");
+        assert_eq!(missing_doc["code"], json!(1));
+        assert_eq!(missing_doc["message"], json!("未找到播放器：IINA"));
+        assert_eq!(
+            management.renderer_calls(),
+            vec![" MPV ".to_string(), "IINA".to_string()],
+            "the face trimmed a title that only the shell may interpret"
+        );
+    }
+
     #[test]
     fn the_post_route_table_is_well_formed() {
         crate::pin_test_dir();
@@ -6313,7 +6370,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 14, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 15, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is

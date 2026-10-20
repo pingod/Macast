@@ -1570,6 +1570,29 @@ impl macast_upnp::http::Management for ShellManagement {
         self.discovery.app_action(action)
     }
 
+    /// `_set_renderer` (`protocol.py:2385-2392`): match the raw trimmed title against
+    /// the renderer list and refuse with the reference's sentence when nothing matches.
+    ///
+    /// The list here has one entry ([`renderer_title`]) because this shell ships one
+    /// renderer — so the **only** accepted request is the name already in force, and
+    /// accepting it still does something real: it persists the canonical title (a fresh
+    /// install's `''` becomes `MPV`, which is what the dropdown shows) and reloads the
+    /// player, which is the reference's stop/start of the selected renderer
+    /// (`macast.py`'s `set_renderer` handler). Refusing everything else is the honest
+    /// half: a switch that pretends to find a plugin this build does not have is the
+    /// document-only control this port keeps refusing.
+    fn set_renderer(&self, title: &str) -> macast_upnp::http::Answer {
+        let current = renderer_title(&self.host.setting);
+        if title.trim() != current {
+            return macast_upnp::http::Answer::fail(format!("未找到播放器：{}", title));
+        }
+        self.host
+            .setting
+            .set(Key::MacastRenderer, json!(current));
+        self.player.reload();
+        macast_upnp::http::Answer::ok(format!("播放器已切换为 {}", current))
+    }
+
     /// `_cast_url` (`macast/protocol.py:1674-1695`).
     ///
     /// The `Err` half is deliberately not the reason: Python catches every
@@ -2412,6 +2435,24 @@ pub struct Faces {
     /// The AirPlay RTSP receiver on 7000. Separate key in the user's list, so a
     /// "Chromecast off" run must not keep answering iPhones on the old port.
     pub airplay: bool,
+}
+
+/// The **one** title this shell's renderer answers to: the stored
+/// `Macast_Renderer`, or `MPV` when the key is empty (a fresh install).
+///
+/// One owner, because three readers ask the same question — the settings page's device
+/// dropdown (`_local_target`'s row name), `set-renderer`'s match, and anything that
+/// reports "what is driving the player". The reference derives it from its plugin list;
+/// this shell has one built-in renderer, so the list is this name and the switch below
+/// accepts exactly it.
+pub fn renderer_title(setting: &Setting) -> String {
+    let stored = setting.get_str(Key::MacastRenderer, "");
+    let trimmed = stored.trim();
+    if trimmed.is_empty() {
+        "MPV".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub fn faces_enabled(setting: &Setting, log: &Logger) -> Faces {
@@ -3518,6 +3559,20 @@ mod tests {
             text.contains("without a settings file"),
             "the degradation is real, so it must be readable: {text}"
         );
+    }
+
+    /// The renderer's name has **one** owner and it is the one the dropdown shows: a
+    /// fresh install answers `MPV`, a stored name is honoured, and whitespace is not a
+    /// different renderer.
+    #[test]
+    fn the_renderer_title_is_the_one_the_dropdown_shows() {
+        pin_test_dir();
+        let dir = setting("renderer-title");
+        assert_eq!(renderer_title(&dir), "MPV", "a fresh install's default");
+        dir.set(Key::MacastRenderer, json!("  IINA  "));
+        assert_eq!(renderer_title(&dir), "IINA", "the stored name, trimmed");
+        dir.set(Key::MacastRenderer, json!(""));
+        assert_eq!(renderer_title(&dir), "MPV", "empty falls back, as the dropdown does");
     }
 
     // ---- the write side of the protocol table (toggle-protocol) ----------------
