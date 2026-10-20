@@ -2743,7 +2743,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 **Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
 `macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
 `ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
-真机 §39 的 **7** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **28**）：
+真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **28**）：
 
 * **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
   于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
@@ -2785,9 +2785,11 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   `grep -nP '\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])' scripts/verify_rust_receiver.sh`
   （本轮量过：命中的只有那一处）。中文散文里插变量是这套脚本的常态，而 `bash -n` 对着它一律说 OK。
 * 读数：`macast-upnp` **369**、`macast-tauri` **28**（两台仪器一致：`--list` 与整跑），
-  真机脚本 **42 节**；本分支从未推送 ⇒ **这些读数没有任何 CI 见证过**。重跑一次真机整跑时本机的两条
-  SKIP（§25 的送达那一格、§32 的"这张机器没有第二块可用网卡"）照旧计败，所以"全绿"这句话在这里
-  仍然说不出口 —— 那两条的原因与本节无关。
+  单元合计 **1409 passed / 0 failed**（`cargo test --workspace`：cast 735 + core 128 + mpv 149 +
+  tauri 28 + upnp 369）；真机脚本 **42 节**，整跑 **446 PASS / 0 FAIL / 2 SKIP，退出码 2**，
+  其中 §39 自己是 **8/8**。那两条 SKIP 是本机的环境事实（§25 的送达那一格、§32 的"这张机器只有
+  一块可用网卡"），**照旧计败**，所以"全绿"这句话在这里仍然说不出口 —— 它们与本节无关。
+  本分支从未推送 ⇒ **这些读数没有任何 CI 见证过**。
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
