@@ -203,6 +203,34 @@
 
     </main>
     <script>
+      // Any runtime error of this page lands in the visible events box, including the
+      // ones that stop the script before its later handlers exist. Installed first, on
+      // purpose: the bug that made every card sit at 「加载中…」 threw somewhere below.
+      window.addEventListener('error', (event) => {
+        const box = document.querySelector('#events');
+        if (!box) return;
+        box.textContent = `[JS error] ${event.message} @ ${event.filename}:${event.lineno}:${event.colno}\n` + box.textContent;
+        document.title = `JS error: ${event.message}`;
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        const box = document.querySelector('#events');
+        if (!box) return;
+        box.textContent = `[JS rejection] ${String(event.reason)}\n` + box.textContent;
+        document.title = `JS rejection: ${String(event.reason)}`;
+      });
+      function showFatal(text) {
+        let bar = document.querySelector('#fatal');
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.id = 'fatal';
+          bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;padding:12px;background:#7f1d1d;color:#fff;font:13px ui-monospace,monospace;white-space:pre-wrap;';
+          document.body.appendChild(bar);
+        }
+        bar.textContent += text + '\n';
+      }
+      window.addEventListener('error', (e) => showFatal(`[JS error] ${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`));
+      window.addEventListener('unhandledrejection', (e) => showFatal(`[JS rejection] ${String(e.reason)}`));
+      showFatal('[boot] script started');
       const core = window.__TAURI__?.core;
       const invoke = core?.invoke;
       const listen = window.__TAURI__?.event?.listen;
