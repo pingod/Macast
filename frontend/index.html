@@ -176,6 +176,19 @@
         </div>
         <div id="sub-rows"></div>
       </section>
+      <section class="card">
+        <h2>协议开关</h2>
+        <p class="muted">每一项都是管理面同一条 POST（`toggle-protocol`）：关掉的那一项会在同一个进程里停掉它的脸（8009/setup/广播，或 7000），再开回来。</p>
+        <div class="row">
+          <div><button data-toggle="DLNA Protocol">DLNA Protocol</button></div>
+          <div><button data-toggle="Chromecast Protocol">Chromecast Protocol</button></div>
+          <div><button data-toggle="AirPlay Protocol">AirPlay Protocol</button></div>
+        </div>
+        <p class="muted" id="proto-hint">DLNA 的 HTTP 面承载这一页，所以它会被拒绝停用。</p>
+        <h2 style="margin-top: 24px">退出</h2>
+        <div class="row"><div><button id="quit">退出 Macast</button></div></div>
+      </section>
+
     </main>
     <script>
       const core = window.__TAURI__?.core;
@@ -662,6 +675,18 @@
         subscribers().catch(() => {});
         loadLogModules().catch(() => {});
       }, 5000);
+    
+      for (const button of document.querySelectorAll('[data-toggle]')) {
+        button.addEventListener('click', async () => {
+          const title = button.getAttribute('data-toggle');
+          const answer = await invoke('toggle_protocol', { title });
+          note(`协议 ${title} → code ${answer.code}: ${answer.message}`);
+        });
+      }
+      document.querySelector('#quit').addEventListener('click', async () => {
+        const answer = await invoke('app_action', { action: 'quit' });
+        note(`退出 → code ${answer.code}: ${answer.message}`);
+      });
     </script>
   </body>
 </html>

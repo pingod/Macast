@@ -403,6 +403,21 @@ fn service_snapshot(runtime: State<'_, Runtime>) -> Value {
 /// the old name until restart. `SsdpPlugin::update_ip()` is **not** the fix —
 /// SSDP payloads carry the USN and the LOCATION, not the friend name. The reply
 /// says so instead of pretending the change is fully live.
+/// The protocol switch, for the page's own checkboxes. The HTTP face has the same
+/// implementation (`Discovery::toggle_protocol`); this is the window's door on it.
+#[tauri::command]
+fn toggle_protocol(runtime: State<'_, Runtime>, title: String) -> Value {
+    let answer = runtime.discovery.toggle_protocol(&title);
+    json!({ "code": answer.code, "message": answer.message })
+}
+
+/// `quit` and `check-update` from the page. Same implementation as the HTTP row.
+#[tauri::command]
+fn app_action(runtime: State<'_, Runtime>, action: String) -> Value {
+    let answer = runtime.discovery.app_action(&action);
+    json!({ "code": answer.code, "message": answer.message })
+}
+
 #[tauri::command]
 fn set_friendly_name(runtime: State<'_, Runtime>, name: String) -> Value {
     runtime.setting.set(Key::DlnaFriendlyName, Value::String(name.clone()));
@@ -1873,6 +1888,8 @@ pub fn run() {
             service_snapshot,
             set_friendly_name,
             set_network_interface,
+            toggle_protocol,
+            app_action,
             log_view,
             clear_log,
             log_modules,
