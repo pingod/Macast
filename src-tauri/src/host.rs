@@ -1586,6 +1586,24 @@ impl macast_upnp::http::Management for ShellManagement {
     /// is telling you about. `json format error` is the reference's own sentence, and a
     /// non-object is refused with it (the reference accepts one and breaks on the next
     /// read; §8 records that divergence).
+    /// Design doc §18: no plugin host. Each answer names the button and says what this
+    /// build cannot do — never "success" for something nobody can inspect.
+    fn plugin_refusal(&self, field: &str) -> macast_upnp::http::Answer {
+        let sentence = match field {
+            "plugin-enable" => "这个构建里没有可启用的插件：内建播放器不经过插件表",
+            "plugin-disable" => "这个构建里没有可停用的插件：内建播放器不经过插件表",
+            "plugin-uninstall" => "这个构建里没有可卸载的插件：内建播放器是壳的一部分",
+            "install-plugin" => {
+                "这个构建没有插件宿主：装进来的 .py 不会被加载，也没有地方运行它"
+            }
+            "install-webrtc-extras" | "uninstall-webrtc-extras" => {
+                "这个构建没有 WebRTC 依赖安装器：extras 的地址规则在，安装器不在"
+            }
+            other => return macast_upnp::http::Answer::fail(format!("未知插件操作：{}", other)),
+        };
+        macast_upnp::http::Answer::fail(sentence)
+    }
+
     fn save_launch_param(&self, raw: &str) -> macast_upnp::http::Answer {
         let parsed: serde_json::Value = match serde_json::from_str(raw) {
             Ok(value) => value,

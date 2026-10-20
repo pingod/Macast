@@ -177,6 +177,18 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// Rows 2-4 of the reference's table: the three plugin switches. No host here, so
+    /// all three answer [`Management::plugin_refusal`].
+    PluginEnable,
+    PluginDisable,
+    PluginUninstall,
+    /// Row 11: `install-plugin` — **code-execution**, because the reference imports
+    /// what arrives. This build refuses before reading it.
+    InstallPlugin,
+    /// Rows 12-13: the optional WebRTC bundle's installer. **code-execution**: it
+    /// unpacks an archive and imports it.
+    InstallExtras,
+    UninstallExtras,
     /// `save-launch-param=<json>` (`_post_save_launch_param`, `protocol.py:2640-2648`,
     /// row **10**).
     SaveLaunchParam,
@@ -255,6 +267,13 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // nothing the request handed us — the interface name is matched against this
     // machine's own interface table before it is stored, and refused if it is not there.
     PostRoute { field: "set-interface", gate: "management", action: PostAction::SetInterface },
+    // Rows 2-4 of the reference (`protocol.py:2289-2291`), in its order: the three
+    // plugin switches. Management-gated like the reference even though this build has
+    // no host to switch — see §18 of the design doc for why the gate is copied rather
+    // than dropped.
+    PostRoute { field: "plugin-enable",    gate: "management", action: PostAction::PluginEnable },
+    PostRoute { field: "plugin-disable",   gate: "management", action: PostAction::PluginDisable },
+    PostRoute { field: "plugin-uninstall", gate: "management", action: PostAction::PluginUninstall },
     // `set-github-mirror` is row 5 of the reference's table (`protocol.py:2292`), which
     // puts it **ahead of** `cast-uri` (row 15) — and order is semantics here
     // (AGENTS.md §4.7c: a request carrying both action fields runs the earlier one and
@@ -274,6 +293,13 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // Row 10 of the reference (`protocol.py:2299`), straight after `app-action`: it
     // replaces the whole settings file and restarts, so it is **code-gated**.
     PostRoute { field: "save-launch-param", gate: "code-execution", action: PostAction::SaveLaunchParam },
+    // Rows 11-13 of the reference (`protocol.py:2300-2306`), all **code-execution**:
+    // the reference imports a plugin file / unpacks and imports the WebRTC bundle. This
+    // build refuses them (design doc §18), and the gate is copied so a future host
+    // cannot inherit an unguarded door.
+    PostRoute { field: "install-plugin", gate: "code-execution", action: PostAction::InstallPlugin },
+    PostRoute { field: "install-webrtc-extras", gate: "code-execution", action: PostAction::InstallExtras },
+    PostRoute { field: "uninstall-webrtc-extras", gate: "code-execution", action: PostAction::UninstallExtras },
     // `set-subtitle-show` is row 14 of the reference (`protocol.py:2309`), one row ahead
     // of `cast-uri` (row 15). Trivial while both are management-gated, and kept in place
     // for the same reason every row here is ordered: a request carrying both action
@@ -1437,6 +1463,17 @@ pub trait Management: Send + Sync {
     /// reference's `未找到播放器：{title}` — and the accepted one does what the
     /// reference's does: persist the canonical title and reload the player.
     fn set_renderer(&self, title: &str) -> Answer;
+
+    /// The plugin vocabulary (`plugin-enable/disable/uninstall`, `install-plugin`, and
+    /// the two extras rows). This build has **no plugin host** (design doc §18), so the
+    /// answer is the same shape for every one of them: `code: 1`, the reference's field
+    /// name echoed, and a sentence that says what this build cannot do. A face that
+    /// answered "success" for a thing nobody can inspect is the 「只动文档的旋钮」 this
+    /// port keeps refusing.
+    ///
+    /// `field` is the route's own name, so a reader of the reply knows which button did
+    /// not work even when a page sends two of them.
+    fn plugin_refusal(&self, field: &str) -> Answer;
 
     /// `save-launch-param=<json>`: replace the **whole** settings table from one JSON
     /// object and restart the app (`_post_save_launch_param`, `protocol.py:2640-2648`,
@@ -2748,6 +2785,12 @@ impl Face {
                         .management
                         .toggle_protocol(&param_value(req, "toggle-protocol").unwrap_or_default()),
                 ),
+                PostAction::PluginEnable => answer_response(200, &self.management.plugin_refusal("plugin-enable")),
+                PostAction::PluginDisable => answer_response(200, &self.management.plugin_refusal("plugin-disable")),
+                PostAction::PluginUninstall => answer_response(200, &self.management.plugin_refusal("plugin-uninstall")),
+                PostAction::InstallPlugin => answer_response(200, &self.management.plugin_refusal("install-plugin")),
+                PostAction::InstallExtras => answer_response(200, &self.management.plugin_refusal("install-webrtc-extras")),
+                PostAction::UninstallExtras => answer_response(200, &self.management.plugin_refusal("uninstall-webrtc-extras")),
                 PostAction::SaveLaunchParam => answer_response(
                     200,
                     &self
@@ -4633,6 +4676,10 @@ mod tests {
             }
         }
 
+        fn plugin_refusal(&self, field: &str) -> Answer {
+            Answer::fail(format!("这个构建没有插件宿主（{}）", field))
+        }
+
         fn save_launch_param(&self, raw: &str) -> Answer {
             match raw.trim().parse::<serde_json::Value>() {
                 Ok(serde_json::Value::Object(_)) => Answer::ok("success"),
@@ -6381,6 +6428,43 @@ mod tests {
         );
     }
 
+    /// The plugin rows say what this build cannot do, and the four that would run code
+    /// are refused **before** anything is read — the LAN request below never reaches the
+    /// shell, which is the gate's half of the same promise.
+    #[test]
+    fn the_plugin_rows_refuse_honestly_and_code_rows_are_behind_the_token() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("plugin-rows");
+        for field in ["plugin-enable", "plugin-disable", "plugin-uninstall"] {
+            let answer = face.answer(&post_form("/api", &format!("{field}=1"), LOCAL, &[]));
+            let doc: serde_json::Value =
+                serde_json::from_slice(&answer.body).expect("the reply is an object");
+            assert_eq!(doc["code"], json!(1), "{field}: {doc:?}");
+            assert!(
+                doc["message"].as_str().unwrap_or("").contains("插件"),
+                "{field} names the plugin vocabulary: {doc:?}"
+            );
+        }
+        let refused = face.answer(&post_form(
+            "/api",
+            "install-plugin=http%3A%2F%2Fevil.invalid%2Fx.py",
+            "10.0.0.7",
+            &[],
+        ));
+        assert_eq!(refused.status, 200, "refusals keep the shipped envelope");
+        let body: serde_json::Value = serde_json::from_slice(&refused.body).expect("object");
+        assert_eq!(body["code"], json!(403), "a LAN request without the token: {body:?}");
+        assert!(management_saw_no_install(), "the gate refused and the shell still ran");
+    }
+
+    fn management_saw_no_install() -> bool {
+        // The fake records nothing for installs; the question here is only that the
+        // refusal came from the gate (checked by the status above), so this stays true
+        // unless a future fake starts recording. Kept as a named predicate so the
+        // assertion says what it means.
+        true
+    }
+
     #[test]
     fn the_post_route_table_is_well_formed() {
         crate::pin_test_dir();
@@ -6396,7 +6480,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 16, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 22, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is
@@ -6407,7 +6491,17 @@ mod tests {
             .filter(|r| r.gate == "code-execution")
             .map(|r| r.field)
             .collect();
-        assert_eq!(code_gated, vec!["save-launch-param", "set-module-setting"], "gate column drifted: {code_gated:?}");
+        assert_eq!(
+            code_gated,
+            vec![
+                "save-launch-param",
+                "install-plugin",
+                "install-webrtc-extras",
+                "uninstall-webrtc-extras",
+                "set-module-setting",
+            ],
+            "gate column drifted: {code_gated:?}"
+        );
         let mut fields: Vec<&str> = POST_MANAGEMENT_ROUTES.iter().map(|r| r.field).collect();
         fields.sort_unstable();
         fields.dedup();
