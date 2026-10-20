@@ -177,6 +177,20 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// `toggle-protocol=<title>`: switch one protocol on or off (`_toggle_protocol`,
+    /// `protocol.py:2394-2402`, row **7** of the reference's table).
+    ///
+    /// A **toggle**, not a set: the request says which protocol, and the current
+    /// list decides the direction — the reference's `enabled = title not in
+    /// manager.enabled_protocol_titles()`. The answer's message uses the caller's own
+    /// spelling (`{title}已启用` / `{title}已停用`), while the stored list uses the
+    /// canonical title; a page that sends `chromecast` gets its own word back and the
+    /// file gets the name every reader agrees on.
+    ///
+    /// The implementer owns the write, the "keep at least one" refusal and — the half
+    /// that makes this a control rather than a document — cycling the faces the switch
+    /// names. `macast-upnp` can bind neither 8009 nor 7000, so it cannot.
+    ToggleProtocol,
     /// `set-subtitle-show=<anything truthy>`: tell the player to show or hide subtitles
     /// (`_post_set_subtitle_show`, `protocol.py:2699-2703`). The answer is
     /// `{code, message}` and nothing else: Python publishes to the renderer and answers
@@ -240,6 +254,10 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // never reaches the later). Management-gated, not code-gated: this writes one bool
     // that decides which host the *browser* fetches next.
     PostRoute { field: "set-github-mirror", gate: "management", action: PostAction::SetGithubMirror },
+    // Row 7 of the reference (`protocol.py:2294`), right after `set-renderer` (row 6,
+    // not ported: this shell has one renderer, and a switch that accepts only the name
+    // already in force is the document-only control this port keeps refusing).
+    PostRoute { field: "toggle-protocol", gate: "management", action: PostAction::ToggleProtocol },
     // `set-subtitle-show` is row 14 of the reference (`protocol.py:2309`), one row ahead
     // of `cast-uri` (row 15). Trivial while both are management-gated, and kept in place
     // for the same reason every row here is ordered: a request carrying both action
@@ -1394,6 +1412,17 @@ pub trait Management: Send + Sync {
     fn set_interface(&self, name: &str) -> Answer;
 
     fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String>;
+
+    /// Switch one protocol on or off, persist the list, and cycle the faces the
+    /// switch names. Reads "is it currently on" from the same table the boot gate
+    /// reads (`host::enabled_protocols` is the shell's owner of that question), so
+    /// the switch and the gate cannot disagree about what is enabled.
+    ///
+    /// Refusals this method returns are the reference's own sentences: an unknown
+    /// title is dropped and succeeds, disabling something absent changes nothing and
+    /// succeeds, and disabling the **last** enabled protocol fails with
+    /// `至少要保留一个启用的协议`.
+    fn toggle_protocol(&self, title: &str) -> Answer;
 
     /// Start a background parse of the page (or share text) in `text`.
     ///
@@ -2665,6 +2694,12 @@ impl Face {
                         &self.setting,
                         &param_value(req, "set-github-mirror").unwrap_or_default(),
                     ),
+                ),
+                PostAction::ToggleProtocol => answer_response(
+                    200,
+                    &self
+                        .management
+                        .toggle_protocol(&param_value(req, "toggle-protocol").unwrap_or_default()),
                 ),
             });
         }
@@ -4434,6 +4469,7 @@ mod tests {
         status_calls: Mutex<Vec<String>>,
         cast_resolved_calls: Mutex<Vec<(String, String, String)>>,
         cookie_state_calls: AtomicUsize,
+        protocol_calls: Mutex<Vec<String>>,
         targets_calls: Mutex<Vec<bool>>,
         save_cookies_calls: Mutex<Vec<String>>,
         clear_cookies_calls: AtomicUsize,
@@ -4451,6 +4487,7 @@ mod tests {
                 status_calls: Mutex::new(Vec::new()),
                 cast_resolved_calls: Mutex::new(Vec::new()),
                 cookie_state_calls: AtomicUsize::new(0),
+                protocol_calls: Mutex::new(Vec::new()),
                 targets_calls: Mutex::new(Vec::new()),
                 save_cookies_calls: Mutex::new(Vec::new()),
                 clear_cookies_calls: AtomicUsize::new(0),
@@ -4509,9 +4546,24 @@ mod tests {
         fn interface_calls(&self) -> Vec<String> {
             self.interface_calls.lock().expect("interface calls").clone()
         }
+
+        fn protocol_calls(&self) -> Vec<String> {
+            self.protocol_calls.lock().expect("protocol calls").clone()
+        }
     }
 
     impl Management for FakeManagement {
+        fn toggle_protocol(&self, title: &str) -> Answer {
+            self.protocol_calls
+                .lock()
+                .expect("protocol calls")
+                .push(title.to_string());
+            if title.trim().is_empty() {
+                return Answer::fail("未知协议：".to_string());
+            }
+            Answer::ok(format!("{}已启用", title))
+        }
+
         fn set_interface(&self, name: &str) -> Answer {
             self.interface_calls
                 .lock()
@@ -6154,6 +6206,38 @@ mod tests {
         );
     }
 
+    /// `toggle-protocol` is a **toggle**, so the face must hand the caller's own word
+    /// through unchanged: the direction is decided by the shell, which is the only
+    /// place that can read the enabled list, and the reply echoes the request's
+    /// spelling (`chromecast` comes back as `chromecast已启用`, not as the stored
+    /// title). A face that "helpfully" trimmed or canonicalised here would leave the
+    /// caller unable to tell which of the two forms it had actually switched.
+    #[test]
+    fn a_protocol_toggle_reaches_the_shell_with_the_callers_own_spelling() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("protocol-row");
+        let padded = face.answer(&post_form(
+            "/api",
+            "toggle-protocol=%20Chromecast%20",
+            LOCAL,
+            &[],
+        ));
+        assert_eq!(padded.status, 200, "POST answers keep the shipped envelope");
+        let doc: serde_json::Value =
+            serde_json::from_slice(&padded.body).expect("the reply is an object");
+        assert_eq!(doc["code"], json!(0), "the shell's answer is passed through: {doc:?}");
+        assert_eq!(
+            doc["message"],
+            json!(" Chromecast 已启用"),
+            "the message is the shell's, and it echoes the caller's own spelling"
+        );
+        assert_eq!(
+            management.protocol_calls(),
+            vec![" Chromecast ".to_string()],
+            "the face trimmed or canonicalised a field only the shell may interpret"
+        );
+    }
+
     #[test]
     fn the_post_route_table_is_well_formed() {
         crate::pin_test_dir();
@@ -6169,7 +6253,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 12, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 13, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is

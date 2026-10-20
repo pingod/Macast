@@ -2703,6 +2703,30 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   记这条偏离，本机给不出价，需要第二台真机器）；5353 上仍是两个 socket（浏览器 + 引擎），
   §16 第 13 条的另一半没做。**以及本分支从未推送 ⇒ 这一轮的 734 条与 §33 那 8 条读数没有任何 CI 见证过。**
 
+**Rust 侧把协议开关接进管理面时量到的事**（2026-10-20，`src-tauri/src/host.rs` 的 `set_protocol_enabled` 与 `Discovery::toggle_protocol` / `apply_protocols` / `{start,stop}_{cast,airplay}` + `macast-upnp` POST 表第 **13** 行 + 真机 §34 的 **24** 条；`macast-tauri` 22 → **25**、`macast-upnp` 363 → **364**，整跑 **421 PASS / 0 FAIL / 1 SKIP，退出码 1**）：
+
+* **形状**：参考实现的 `_toggle_protocol`（`protocol.py:2394-2402`）用「标题不在启用表里」定方向，写侧
+  `set_protocol_enabled`（`macast.py:429-453`）四条规则逐行照抄；本壳把 **boot 与开关收成同一批构造函数**
+  （`Discovery::start_cast` 拥有 8009 → 8008 的顺序、证书与每句拒绝），于是"只有启动进程才能开脸"
+  这条形状没了。`apply_protocols` 读一次 `faces_enabled`、按它开关、再 `restart` 广播。**DLNA 那一格
+  拒绝**（§8 新增那一行）：参考实现的用户还有菜单栏，本壳的页面就住在 DLNA 的 HTTP 面上。
+* **这一轮最贵的读数**：重构之后 §24 的「关掉 Chromecast 的实例上 8009/8008 仍在答」**红了 7 条**
+  —— boot 那次 `discovery.start_cast()` 漏了 `if cast_on`。三条结构审计（每张脸一个构造点、`run()`
+  里门在调用之前、文件级恰好两处读门）**一条都没响**：构造点没变，只是不再被 if 包住。抓到它的是
+  **真机读数**（§24 那条「门必须是真机判据，单元判据只能问读法」的第一次反向现形 —— 这次不是单元
+  测不到，是**审计的形状与破坏的形状不同**）。修法一行，并补一条 `apply_protocols` 的"先读门再开关"。
+* **§34 自己有三条是测试的错**：① "只有幸存的协议重新广播"用绝对行数比，而 boot 已印过两条 —— 改成
+  步骤前后的增量；② 那个计数器本身也错：`announcing .*_googlecast` 会命中 **AirPlay 那一行**（它的
+  句子末尾拿 `_googlecast._tcp` 当宾语），与 §4.14「扫描器数到自己的文档」同一族，改成按**被公告的名字**
+  匹配；③ 小写标题那格拿字节比中文，而正文是 `ensure_ascii` 的 `\uXXXX`（§9.3 那个后果的又一次）。
+* **验证侧的一次事故**：§34 第一次跑被一台**我自己留在场上的冒烟实例**污染（它占着 8009/8008 并广播
+  `Macast-Rust-Toggle`），于是 §24/§25/§26/§34 一起红。脚本只拒绝自己的 `ApplicationPort` 被占，
+  **不拒绝 8009/8008 被别人占**（后者是每个 Macast 实例共用的固定口）—— 收尾必须按 pid 杀掉自己的
+  实例（§4.2「起新实例前先杀干净」在验证侧的同一条）。
+* **仍然欠着**：`set-renderer` 没移植（本壳只有一个渲染器，接受一个已在位的名字就是"只动文档的
+  旋钮"）；"关掉最后一个协议"只有单元见证（活实例读内存里的表，改文件不影响它）；`app-action` 的
+  `quit` 可做、`check-update` 没有对应物。**本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

@@ -5451,6 +5451,200 @@ else
     fi
 fi
 
+echo "== 34: the protocol switch closes a face and brings it back, in the same process =="
+# `toggle-protocol` is row 7 of the reference's POST table and its handler is
+# `_toggle_protocol` -> `set_protocol_enabled` (`macast.py:429-453`), which the shell now
+# owns in `host::set_protocol_enabled`. §24 could only ask the **gate** half, by starting
+# a second instance with a hand-written list; this section asks the **switch**: a POST
+# closes 8009/8008 and the Cast announcement, and a second POST brings all three back in
+# the same process. That is the difference between a document and a control.
+#
+# Measured here on 2026-10-20 before the section was written: off -> 8009/8008 gone, the
+# file reads [DLNA, AirPlay], Discovery.log says 「protocol switch applied; mDNS
+# re-announced」 and only the AirPlay line is re-announced; on -> both ports bind again,
+# the Cast line returns, the file reads all three. Two refusals share the section: DLNA
+# cannot be switched off in this build (the settings page lives on its HTTP face, §8's
+# row), and an unknown title is dropped-with-a-warning while the answer still says
+# 「已启用」 — the reference's own oddity, ported rather than improved.
+S34_SDIR=$(mktemp -d /tmp/macast-rust-toggle.XXXXXX)
+S34_PORT=$((PORT + 14))
+S34_SOCK="$S34_SDIR/mpvsocket"
+S34_DLOG="$S34_SDIR/logs/Discovery.log"
+S34_TOK="0123456789abcdef0123456789abcdef"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Toggle", "Api_Token": "%s"}' \
+    "$S34_PORT" "$S34_TOK" > "$S34_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S34_SDIR" MACAST_MPV_SOCKET="$S34_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S34_SDIR/stdout.log" 2>&1 &
+S34_PID=$!
+disown "$S34_PID" 2>/dev/null || true
+S34_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S34_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S34_PID" ]; then
+        S34_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S34_READY" ]; then
+    fail "the toggle instance never became the listener on $S34_PORT"
+    kill -9 "$S34_PID" 2>/dev/null
+    rm -rf "$S34_SDIR"
+else
+    s34_8009() { lsof -nP -iTCP:8009 -sTCP:LISTEN -t 2>/dev/null | head -1; }
+    s34_8008() { lsof -nP -iTCP:8008 -sTCP:LISTEN -t 2>/dev/null | head -1; }
+    S34_LINE0=""
+    for _ in $(seq 1 20); do
+        S34_LINE0=$(grep -ahF 'mDNS: announcing ' "$S34_DLOG" 2>/dev/null | grep -aF '_googlecast._tcp' | tail -1)
+        [ -n "$S34_LINE0" ] && break
+        sleep 0.5
+    done
+    if [ -z "$S34_LINE0" ]; then
+        fail "no Cast announcement from the toggle instance, so there is nothing to switch off"
+    else
+        [ "$(s34_8009)" = "$S34_PID" ] \
+            && pass "before the switch: 8009 is this process's" \
+            || fail "8009 is not bound by the toggle instance before the switch: $(s34_8009)"
+        [ "$(s34_8008)" = "$S34_PID" ] \
+            && pass "and so is 8008" \
+            || fail "8008 is not bound by the toggle instance: $(s34_8008)"
+
+        # A LAN request with no token must hear the management sentence, not this field.
+        # The address is read from the instance's own status document rather than typed
+        # (`server.ip` is the `/`-joined advertised list; the first is what a sender on
+        # this segment would use), and an instance that publishes none skips this check
+        # instead of posting at a guess.
+        S34_IP=$(curl -s --max-time 5 "http://127.0.0.1:$S34_PORT/api?query=status&token=$S34_TOK" 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("server") or {}).get("ip") or "").split("/")[0])' 2>/dev/null)
+        if [ -z "$S34_IP" ]; then
+            skip "the instance publishes no address, so the LAN-shaped refusal cannot be asked here"
+        else
+            S34_LAN=$(curl -s --max-time 5 -X POST -d "toggle-protocol=Chromecast Protocol" \
+                "http://$S34_IP:$S34_PORT/api" 2>/dev/null | tr -d '\n' | head -c 220)
+            case "$S34_LAN" in
+                *'"code": 403'*|*'"code":403'*) pass "a LAN POST without the token is refused" ;;
+                *) fail "a LAN POST without the token was not refused: $S34_LAN" ;;
+            esac
+        fi
+        [ "$(s34_8009)" = "$S34_PID" ] \
+            && pass "…and 8009 is still up after the refusal" \
+            || fail "a refused toggle cost the receiver its port"
+
+        # ---- off ---------------------------------------------------------------
+        S34_LIS0=$(grep -ac 'announcing [^ ]*_googlecast\._tcp\.local\.' "$S34_DLOG" 2>/dev/null)
+        S34_LIA0=$(grep -ac 'announcing [^ ]*_airplay\._tcp\.local\.' "$S34_DLOG" 2>/dev/null)
+        S34_OFF=$(curl -s --max-time 8 -X POST -d "toggle-protocol=Chromecast Protocol&token=$S34_TOK" \
+            "http://127.0.0.1:$S34_PORT/api" 2>/dev/null)
+        S34_OFF_MSG=$(printf '%s' "$S34_OFF" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+        [ "$S34_OFF_MSG" = "0 | Chromecast Protocol已停用" ] \
+            && pass "the switch answers the reference's sentence: ${S34_OFF_MSG#*| }" \
+            || fail "toggle off answered '$S34_OFF_MSG'"
+        sleep 1
+        [ -z "$(s34_8009)" ] \
+            && pass "8009 is closed" \
+            || fail "8009 is still bound by pid $(s34_8009) after switching Chromecast off"
+        [ -z "$(s34_8008)" ] \
+            && pass "and the setup face closed with it (they are one protocol)" \
+            || fail "8008 is still bound by pid $(s34_8008) after being switched off"
+        case "$(grep -ahF 'protocol switch applied' "$S34_DLOG" 2>/dev/null | tail -1)" in
+            *"mDNS re-announced"*) pass "the announcement was rebuilt, not left pointing at a closed port" ;;
+            *) fail "no 'protocol switch applied' sentence in $S34_DLOG" ;;
+        esac
+        # Counts **since this step**, not since boot: a boot that already announced both
+        # types would otherwise make "one type dropped" look like either outcome. The
+        # file-level truth is the settings list below; this row asks the wire's sentence.
+        sleep 1
+        S34_LIS=$(grep -ac 'announcing [^ ]*_googlecast\._tcp\.local\.' "$S34_DLOG" 2>/dev/null)
+        S34_LIA=$(grep -ac 'announcing [^ ]*_airplay\._tcp\.local\.' "$S34_DLOG" 2>/dev/null)
+        [ "$S34_LIS" = "$S34_LIS0" ] && [ "$S34_LIA" -gt "$S34_LIA0" ] \
+            && pass "only the surviving protocol re-announced (cast $S34_LIS0 -> $S34_LIS, airplay $S34_LIA0 -> $S34_LIA)" \
+            || fail "the re-announcement counts do not show one type dropped (cast $S34_LIS0 -> $S34_LIS, airplay $S34_LIA0 -> $S34_LIA)"
+        S34_LIST=$(python3 -c "import json;print(json.load(open('$S34_SDIR/macast_setting.json')).get('Macast_Protocols'))")
+        [ "$S34_LIST" = "['DLNA Protocol', 'AirPlay Protocol']" ] \
+            && pass "the list on disk is the two that survived, in the canonical order" \
+            || fail "the file reads $S34_LIST"
+        curl -s --max-time 5 "http://127.0.0.1:$S34_PORT/description.xml" 2>/dev/null | grep -aq "Macast" \
+            && pass "…and DLNA kept its HTTP face, which is where this page lives" \
+            || fail "the settings page's own HTTP face stopped with the switch"
+
+        # ---- back on -----------------------------------------------------------
+        S34_ON=$(curl -s --max-time 8 -X POST -d "toggle-protocol=Chromecast Protocol&token=$S34_TOK" \
+            "http://127.0.0.1:$S34_PORT/api" 2>/dev/null)
+        S34_ON_MSG=$(printf '%s' "$S34_ON" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+        [ "$S34_ON_MSG" = "0 | Chromecast Protocol已启用" ] \
+            && pass "and back on with the same sentence shape: ${S34_ON_MSG#*| }" \
+            || fail "toggle on answered '$S34_ON_MSG'"
+        sleep 1
+        [ "$(s34_8009)" = "$S34_PID" ] \
+            && pass "8009 is bound again by the same process" \
+            || fail "8009 did not come back: $(s34_8009)"
+        [ "$(s34_8008)" = "$S34_PID" ] \
+            && pass "and so is 8008" \
+            || fail "8008 did not come back: $(s34_8008)"
+        S34_LIS2=$(grep -ac 'announcing [^ ]*_googlecast\._tcp\.local\.' "$S34_DLOG" 2>/dev/null)
+        [ "$S34_LIS2" -gt "$S34_LIS" ] \
+            && pass "the Cast announcement is back (cast lines $S34_LIS -> $S34_LIS2)" \
+            || fail "no new Cast announcement after switching it back on ($S34_LIS -> $S34_LIS2)"
+        S34_LIST2=$(python3 -c "import json;print(json.load(open('$S34_SDIR/macast_setting.json')).get('Macast_Protocols'))")
+        [ "$S34_LIST2" = "['DLNA Protocol', 'Chromecast Protocol', 'AirPlay Protocol']" ] \
+            && pass "the file is back to all three in the canonical order" \
+            || fail "after switching back on the file reads $S34_LIST2"
+
+        # ---- the two refusals --------------------------------------------------
+        S34_MD5=$(md5 -q "$S34_SDIR/macast_setting.json" 2>/dev/null)
+        S34_DLNA=$(curl -s --max-time 8 -X POST -d "toggle-protocol=DLNA Protocol&token=$S34_TOK" \
+            "http://127.0.0.1:$S34_PORT/api" 2>/dev/null)
+        case "$S34_DLNA" in
+            *'"code": 1'*|*'"code":1'*)
+                case "$S34_DLNA" in
+                    *"DLNA"*) pass "switching DLNA off is refused, and the refusal names why (this build's page lives there)" ;;
+                    *) fail "the DLNA refusal does not name DLNA: $S34_DLNA" ;;
+                esac ;;
+            *) fail "DLNA could be switched off, which would take the page with it: $S34_DLNA" ;;
+        esac
+        [ "$S34_MD5" = "$(md5 -q "$S34_SDIR/macast_setting.json" 2>/dev/null)" ] \
+            && pass "…and it wrote nothing" \
+            || fail "a refused DLNA toggle rewrote the settings file"
+        S34_GHOST=$(curl -s --max-time 8 -X POST -d "toggle-protocol=Ghost Protocol&token=$S34_TOK" \
+            "http://127.0.0.1:$S34_PORT/api" 2>/dev/null)
+        case "$S34_GHOST" in
+            *'"code": 0'*|*'"code":0'*)
+                pass "an unknown title still answers success — the reference's own oddity, ported" ;;
+            *) fail "an unknown title answered $S34_GHOST" ;;
+        esac
+        case "$(tail -20 "$S34_SDIR/macast.log" 2>/dev/null | grep -aF 'Skipping unknown protocol: Ghost Protocol')" in
+            *Ghost*) pass "…while the log says which name was dropped, because the answer will not" ;;
+            *) fail "no warning for the dropped unknown title" ;;
+        esac
+        [ "$S34_MD5" = "$(md5 -q "$S34_SDIR/macast_setting.json" 2>/dev/null)" ] \
+            && pass "and the ghost is not in the file either" \
+            || fail "the unknown title reached the settings file"
+        [ "$(s34_8009)" = "$S34_PID" ] \
+            && pass "8009 survived both refusals" \
+            || fail "one of the refusals cost the receiver its port"
+        # The reference's raw comparison, ported: a lowercase name is 'not in' the list
+        # of canonical titles, so it reads as **enable**; the canonical title is already
+        # there, so the file does not change and the answer echoes the caller's spelling.
+        S34_LOWER=$(curl -s --max-time 8 -X POST -d "toggle-protocol=chromecast&token=$S34_TOK" \
+            "http://127.0.0.1:$S34_PORT/api" 2>/dev/null)
+        S34_LOWER_MSG=$(printf '%s' "$S34_LOWER" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+        [ "$S34_LOWER_MSG" = "0 | chromecast已启用" ] \
+            && pass "a lowercase name is read as enable and echoed back as typed (the reference compares the raw string)" \
+            || fail "the lowercase toggle answered '$S34_LOWER_MSG'"
+        [ "$S34_MD5" = "$(md5 -q "$S34_SDIR/macast_setting.json" 2>/dev/null)" ] \
+            && pass "…and enabling something already on changes nothing" \
+            || fail "the lowercase toggle rewrote the file"
+    fi
+    kill -9 "$S34_PID" 2>/dev/null
+    pkill -9 -f "$S34_SOCK" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S34_SDIR (macast.log, logs/Discovery.log, macast_setting.json)"
+    else
+        rm -rf "$S34_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

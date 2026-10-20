@@ -119,11 +119,6 @@ struct Runtime {
     discovery: Arc<Discovery>,
     eventing: Arc<Eventing>,
     relay: Arc<relay::RelayStore>,
-    /// The Chromecast setup face (8008, and 8443 when a certificate came up).
-    /// `Option` because the plain listener may be refused (someone else holds
-    /// 8008) and `SetupServer` itself already carries "is 8443 up" in
-    /// `https_port`; the outer `Option` is only "did this run get a face at all".
-    setup: Mutex<Option<setup::SetupServer>>,
 }
 
 impl Runtime {
@@ -180,49 +175,12 @@ impl Runtime {
         if let Some(announcer) = self.discovery.take_announcer() {
             announcer.stop();
         }
-        if let Some(owned) = self.discovery.cast() {
-            owned.stop();
-            self.host.clear_cast();
-            self.host
-                .log
-                .info(&format!("Cast receiver on {} stopped", owned.port()));
-        }
-        // The setup face closes with the other two HTTP faces rather than first:
-        // a sender that already read `eureka_info` has our USN and 8009 for the
-        // length of its cache, and there is no goodbye to send on this face — it
-        // is a document, not an announcement. The SSDP `byebye` above is the one
-        // that actually tells the LAN we are gone.
-        if let Some(mut server) = self
-            .setup
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-        {
-            let port = server.port;
-            server.shutdown();
-            self.host
-                .log
-                .info(&format!("setup face on {port} closed; 8443 goes with it"));
-        }
-        // AirPlay goes with the rest of the listeners, and the order is the
-        // reference's (`stop()` closes the RTSP server after the advertiser): the
-        // flag is lowered first, then the serving thread is joined, because
-        // "switched off" has to mean **the port is free** — the accept loop polls,
-        // so this is milliseconds rather than "whenever the next iPhone connects".
-        if let Some((receiver, handle)) = self.discovery.take_airplay() {
-            let port = receiver.port();
-            receiver.stop();
-            match handle.join() {
-                Ok(()) => self
-                    .host
-                    .log
-                    .info(&format!("AirPlay RTSP on {port} stopped and the port is free")),
-                Err(_) => self.host.log.warning(&format!(
-                    "AirPlay RTSP on {port}: its serving thread panicked; the port may \
-                     still be bound until this process exits"
-                )),
-            }
-        }
+        // One owner for closing them: `Discovery::stop_cast` closes 8009 **and** the
+        // setup faces (they are one protocol), and `stop_airplay` joins the serving
+        // thread. The host's own slot is cleared here because a status read that kept
+        // pointing at a stopped channel would report a receiver that cannot answer.
+        self.discovery.stop_cast();
+        self.discovery.stop_airplay();
         self.eventing.stop();
         self.host.log.info(
             "receiver stopped (relay emptied, SSDP byebye, HTTP face closed, AirPlay RTSP \
@@ -495,6 +453,34 @@ pub struct Discovery {
     cast: Arc<Mutex<Option<Arc<macast_cast::CastChannel>>>>,
     airplay: Arc<Mutex<Option<(Arc<airplay::AirPlayReceiver>, thread::JoinHandle<()>)>>>,
     announce: Arc<Mutex<Option<Arc<announce::Announcer>>>>,
+    /// The 8008/8443 face. It lives here rather than in `Runtime` since
+    /// `toggle-protocol` has to close it with 8009: the two are one protocol, and a
+    /// switch that stopped the receiver while leaving the identity face answering
+    /// is the shape `host::Faces`'s doc refuses.
+    setup: Arc<Mutex<Option<setup::SetupServer>>>,
+    app_log: Arc<Logger>,
+    /// The five handles a *starting* face needs, attached once by boot. A slot rather
+    /// than fields for the same reason `cast`/`airplay` are: `Discovery` is built
+    /// before the player, the table and the host exist, and a unit test has none of
+    /// them. Empty means "this discovery cannot open faces" — every starter says so
+    /// instead of panicking.
+    faces: Arc<Mutex<Option<FaceParts>>>,
+}
+
+/// See [`Discovery::faces`]. One struct rather than five slots so "is this wired" has
+/// exactly one answer.
+#[derive(Clone)]
+pub struct FaceParts {
+    pub table: Arc<StateTable>,
+    pub renderer: SharedRenderer,
+    pub shell_renderer: Arc<host::ShellRenderer>,
+    pub cast_log: Arc<Logger>,
+    /// The host's own receiver slot is published/cleared with the channel. Two slots
+    /// (`Discovery::cast` and the host's) exist because they mean different things:
+    /// the first is "may the announcement read a port", the second is "an inbound
+    /// `StateCall` may fan out to it" — and the handover path (`host.rs:1065`) asks
+    /// the second before releasing the previous protocol.
+    pub host: host::TauriHost,
 }
 
 fn slot<T>() -> Arc<Mutex<Option<T>>> {
@@ -502,14 +488,23 @@ fn slot<T>() -> Arc<Mutex<Option<T>>> {
 }
 
 impl Discovery {
-    pub fn new(setting: Arc<Setting>, ssdp: Arc<SsdpPlugin>) -> Arc<Discovery> {
+    pub fn new(setting: Arc<Setting>, ssdp: Arc<SsdpPlugin>, app_log: Arc<Logger>) -> Arc<Discovery> {
         Arc::new(Discovery {
             setting,
             ssdp,
             cast: slot(),
             airplay: slot(),
             announce: slot(),
+            setup: slot(),
+            app_log,
+            faces: slot(),
         })
+    }
+
+    /// Attach the plumbing boot owns. Called once, from `.setup()`, before any face
+    /// starts.
+    pub fn wire(&self, parts: FaceParts) {
+        *self.faces.lock().unwrap() = Some(parts);
     }
 
     /// Register the 8009 receiver once it has bound, so a later re-advertisement can
@@ -536,6 +531,22 @@ impl Discovery {
     /// which must answer "is 8009 up" from the same slot the announcement reads.
     pub fn cast(&self) -> Option<Arc<macast_cast::CastChannel>> {
         self.cast.lock().unwrap().clone()
+    }
+
+    /// The setup face's bound numbers, for the boot summary and for a reader who wants
+    /// to know whether 8443 is there. A string rather than the numbers because the two
+    /// callers print the same sentence and only one of them has the `SetupServer`.
+    pub fn setup_report(&self) -> Option<String> {
+        self.setup.lock().unwrap().as_ref().map(|face| {
+            format!(
+                "HTTP on {}, HTTPS {}",
+                face.port,
+                match face.https_port {
+                    Some(port) => port.to_string(),
+                    None => "not started".to_string(),
+                }
+            )
+        })
     }
 
     /// Take the announcer, leaving nothing behind. `take`, not `as_ref`: stopping it
@@ -587,6 +598,264 @@ impl Discovery {
     /// every service type), so cycling means exactly these three moves. The Cast and
     /// AirPlay receivers keep their sockets — the ports did not change, and a sender
     /// already connected to 8009 would have been dropped for nothing.
+    /// Open 8009 and the two setup faces, or say why not. The **one** constructor of
+    /// the Chromecast protocol's sockets: boot calls it, and so does the protocol
+    /// switch — a second copy is how a toggled-on receiver ends up with a different
+    /// order than a booted one (8009 before 8008 is load-bearing; see `setup.rs`'s
+    /// header), or with a certificate that was never asked for.
+    ///
+    /// Idempotent: a call when the receiver is already registered answers `true`
+    /// without touching a socket, which is what lets `apply_protocols` run on every
+    /// switch instead of tracking what changed.
+    pub fn start_cast(&self) -> bool {
+        if self.cast.lock().unwrap().is_some() {
+            return true;
+        }
+        // The certificate is asked for **here**, behind the protocol's door: generating
+        // one writes two files into the settings directory, and a protocol the user
+        // switched off should not leave key material behind (§24's rule).
+        let parts = match self.faces.lock().unwrap().clone() {
+            Some(parts) => parts,
+            None => {
+                self.app_log.error(
+                    "start_cast: no faces are wired into this discovery (boot attaches \
+                     them; a test does not), so 8009 cannot start",
+                );
+                return false;
+            }
+        };
+        let pair = match macast_cast::cert::ensure_in_setting_dir(&parts.cast_log) {
+            Ok(pair) => Some(pair),
+            Err(e) => {
+                parts.cast_log.warning(&format!(
+                    "Cast certificate unavailable ({}) — neither 8009 nor 8443 can start; 8008 still answers",
+                    e.message()
+                ));
+                None
+            }
+        };
+        let channel = macast_cast::CastChannel::new(
+            Arc::clone(&parts.cast_log),
+            parts.table.clone() as SharedStore,
+            Arc::clone(&parts.renderer),
+        );
+        // Registered **before** it starts: a `StateCall` that arrives in between should
+        // fan out to a receiver that has not bound yet rather than be dropped.
+        self.set_cast(Arc::clone(&channel));
+        parts.host.set_cast(Arc::clone(&channel));
+        let started = match &pair {
+            Some(pair) => match channel.start(pair) {
+                Ok(()) => true,
+                Err(e) => {
+                    parts.cast_log.warning(&format!(
+                        "Cast channel could not start: {e} — senders will find no 8009 here"
+                    ));
+                    false
+                }
+            },
+            // `start` needs a certificate to wrap connections with; the refusal above
+            // already said which ports that costs.
+            None => false,
+        };
+        if !started {
+            self.stop_cast();
+            return false;
+        }
+        let config = match &pair {
+            Some(pair) => match pair.server_config() {
+                Ok(config) => Some(config),
+                Err(e) => {
+                    parts.cast_log.warning(&format!(
+                        "Cast HTTPS setup: the certificate will not load ({}); answering over 8008 only",
+                        e.message()
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        match setup::SetupServer::start(
+            Arc::clone(&self.setting),
+            Arc::clone(&parts.cast_log),
+            config,
+        ) {
+            Ok(server) => *self.setup.lock().unwrap() = Some(server),
+            Err(e) => parts.cast_log.warning(&format!(
+                "Cast setup face did not start: {e} — senders that probe 8008 will get nothing"
+            )),
+        }
+        true
+    }
+
+    /// Close 8009 and the setup faces, in the reference's order (`channel::stop` logs
+    /// its own sentence). The announcer is **not** touched here: it is rebuilt from the
+    /// slots by [`Discovery::restart`], and doing it twice would send a goodbye twice.
+    pub fn stop_cast(&self) {
+        if let Some(parts) = self.faces.lock().unwrap().as_ref() {
+            parts.host.clear_cast();
+        }
+        if let Some(channel) = self.cast.lock().unwrap().take() {
+            channel.stop();
+            self.app_log
+                .info(&format!("Cast receiver on {} stopped", channel.port()));
+        }
+        if let Some(mut server) = self.setup.lock().unwrap().take() {
+            let port = server.port;
+            server.shutdown();
+            self.app_log
+                .info(&format!("setup face on {port} closed; 8443 goes with it"));
+        }
+    }
+
+    /// The RTSP receiver and its serving thread, or a sentence about why neither.
+    /// Same idempotence contract as [`Discovery::start_cast`].
+    pub fn start_airplay(&self) -> bool {
+        if self.airplay.lock().unwrap().is_some() {
+            return true;
+        }
+        let parts = match self.faces.lock().unwrap().clone() {
+            Some(parts) => parts,
+            None => {
+                self.app_log.error(
+                    "start_airplay: no faces are wired into this discovery (boot attaches \
+                     them; a test does not), so 7000 cannot start",
+                );
+                return false;
+            }
+        };
+        let mut receiver = airplay::AirPlayReceiver::new(self.setting.friendly_name());
+        match receiver.start() {
+            Ok(port) => {
+                let receiver = Arc::new(receiver);
+                let served = {
+                    let receiver = Arc::clone(&receiver);
+                    let serve_log = Arc::clone(&self.app_log);
+                    let sink =
+                        Arc::clone(&parts.shell_renderer) as Arc<dyn airplay::RendererCallback>;
+                    // The reference's own thread name, typo included (`AIRPLAY_RSTP`).
+                    thread::Builder::new()
+                        .name("AIRPLAY_RSTP".to_string())
+                        .spawn(move || {
+                            if let Err(e) = receiver.serve(sink) {
+                                serve_log.warning(&format!(
+                                    "AirPlay RTSP serve loop ended: {e} — 7000 answers no more"
+                                ));
+                            }
+                        })
+                };
+                match served {
+                    Ok(handle) => {
+                        self.app_log.info(&format!(
+                            "AirPlay RTSP: listening on {port} as \"{}\" — the number this run \
+                             actually bound, which is not necessarily 7000",
+                            self.setting.friendly_name()
+                        ));
+                        self.set_airplay(receiver, handle);
+                        true
+                    }
+                    Err(e) => {
+                        self.app_log.warning(&format!(
+                            "AirPlay RTSP could not start its serving thread: {e} — {port} is \
+                             bound but nobody reads it"
+                        ));
+                        false
+                    }
+                }
+            }
+            // `start` has already said which ports it tried; this sentence is for the
+            // reader of the startup summary.
+            Err(e) => {
+                self.app_log.warning(&format!(
+                    "AirPlay RTSP: not listening — no free port in the range after 7000 ({e}); \
+                     macOS's own AirPlay Receiver is the usual reason, and turning it off in \
+                     系统设置 is the way to give this to Macast instead"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Stop the RTSP receiver and **join** its thread: "switched off" has to mean the
+    /// port is free, and the accept loop polls, so this is milliseconds.
+    pub fn stop_airplay(&self) {
+        if let Some((receiver, handle)) = self.take_airplay() {
+            let port = receiver.port();
+            receiver.stop();
+            match handle.join() {
+                Ok(()) => self
+                    .app_log
+                    .info(&format!("AirPlay RTSP on {port} stopped and the port is free")),
+                Err(_) => self.app_log.warning(&format!(
+                    "AirPlay RTSP on {port}: its serving thread panicked; the port may still be held"
+                )),
+            }
+        }
+    }
+
+    /// Cycle every face the enabled list names, then re-advertise. The reference's
+    /// `plugins_changed` handler does the same thing (`macast.py:1048-1051`): read the
+    /// list again, apply it to the running service, rebuild the menu.
+    ///
+    /// The **DLNA** face is deliberately not cycled: it carries the settings page and
+    /// the management API, so closing it would take away the place the switch lives in
+    /// (`docs/Rust-Port-Design.md` §16 第 12 条, and §8's row about it).
+    pub fn apply_protocols(&self) -> host::Faces {
+        let faces = host::faces_enabled(&self.setting, &self.app_log);
+        if faces.cast {
+            self.start_cast();
+        } else {
+            self.stop_cast();
+        }
+        if faces.airplay {
+            self.start_airplay();
+        } else {
+            self.stop_airplay();
+        }
+        let discovery_log = Logger::named(announce::LOGGER_NAME);
+        let discovery_log_path = discovery_log.claim();
+        let (stopping, up) = self.restart(&discovery_log, &discovery_log_path);
+        discovery_log.info(&format!(
+            "protocol switch applied; mDNS {}",
+            announcement_change(stopping, up)
+        ));
+        faces
+    }
+
+    /// `_toggle_protocol` (`protocol.py:2394-2402`) with the write in
+    /// [`host::set_protocol_enabled`]. The direction is the reference's: a title that
+    /// is **not** in the enabled list is the one being switched on, compared raw —
+    /// which is why `chromecast` (lowercase) reports 「已启用」 while changing nothing
+    /// but its own spelling on the way out.
+    ///
+    /// One divergence, and it is the page's lifeline: switching **DLNA** off is
+    /// refused here. The reference would stop that protocol's handler with the rest of
+    /// the service — and that handler is where this settings page and every management
+    /// route live, so the switch would take away the only place that can switch it back
+    /// (`docs/Rust-Port-Design.md` §8 records the row).
+    pub fn toggle_protocol(&self, raw: &str) -> macast_upnp::http::Answer {
+        let titles = host::enabled_protocols(&self.setting, &self.app_log);
+        let enabling = !titles.iter().any(|held| held == raw);
+        if let Some(real) = host::resolve_title(raw, &host::available_titles()) {
+            if real == host::DLNA_TITLE && !enabling {
+                return macast_upnp::http::Answer::fail(
+                    "不能停用 DLNA：这台设备的设置页与管理接口都住在它的 HTTP 面上，\
+                     关掉它就没有页面能把它开回来了",
+                );
+            }
+        }
+        match host::set_protocol_enabled(&self.setting, &self.app_log, raw, enabling) {
+            Ok(_) => {
+                self.apply_protocols();
+                macast_upnp::http::Answer::ok(format!(
+                    "{}{}",
+                    raw,
+                    if enabling { "已启用" } else { "已停用" }
+                ))
+            }
+            Err(refusal) => macast_upnp::http::Answer::fail(refusal),
+        }
+    }
+
     fn restart(&self, discovery_log: &Arc<Logger>, discovery_log_path: &std::path::Path) -> (bool, bool) {
         let old = self.take_announcer();
         let stopping = old.is_some();
@@ -1322,7 +1591,18 @@ pub fn run() {
             // One handle for the two doors that can switch the interface. Its receiver
             // slots are filled as boot binds each face, and it is read — never cloned
             // into a second copy — by `ShellManagement` and `Runtime`.
-            let discovery = Discovery::new(setting.clone(), Arc::clone(&ssdp));
+            let discovery = Discovery::new(
+                setting.clone(),
+                Arc::clone(&ssdp),
+                app_log.clone(),
+            );
+            discovery.wire(FaceParts {
+                table: table.clone(),
+                renderer: Arc::clone(&renderer),
+                shell_renderer: Arc::clone(&shell_renderer),
+                cast_log: Arc::clone(&cast_log),
+                host: host.clone(),
+            });
             // Built here rather than next to the other listeners because the
             // management face below takes the same `Arc` inside [`Discovery`]:
             // `set-interface` has to rebind SSDP and re-announce, and two copies of
@@ -1394,107 +1674,21 @@ pub fn run() {
             // including "a broken foreign pair is reported by name and left
             // alone"). No pair costs 8009 and 8443; the plain 8008 face needs no
             // certificate and still answers.
-            let cast_pair = if !cast_on {
-                None
-            } else {
-                match macast_cast::cert::ensure_in_setting_dir(&cast_log) {
-                    Ok(pair) => Some(pair),
-                    Err(e) => {
-                        cast_log.warning(&format!(
-                            "Cast certificate unavailable ({}) — neither 8009 nor 8443 can start; 8008 still answers",
-                            e.message()
-                        ));
-                        None
-                    }
-                }
-            };
-
-            let cast_channel = {
-                let channel = macast_cast::CastChannel::new(
-                    Arc::clone(&cast_log),
-                    table.clone() as SharedStore,
-                    Arc::clone(&renderer),
-                );
-                // Registered **before** it starts: a `StateCall` that arrives in
-                // between should fan out to a receiver that has not bound yet
-                // rather than be dropped, because the Cast ledger is only a record
-                // of what mpv says and a missed `PLAYING` is a wrong
-                // `MEDIA_STATUS` for the rest of that session.
-                host.set_cast(Arc::clone(&channel));
-                match &cast_pair {
-                    Some(pair) => match channel.start(pair) {
-                        Ok(()) => Some(channel),
-                        Err(e) => {
-                            cast_log.warning(&format!(
-                                "Cast channel could not start: {e} — senders will find no 8009 here"
-                            ));
-                            None
-                        }
-                    },
-                    // `start` needs a certificate to wrap connections with; the
-                    // refusal above already said which ports that costs.
-                    None => None,
-                }
-            };
-            let cast_report = cast_channel
-                .as_ref()
-                .map(|channel| channel.port().to_string());
-            // The same handle, in the slot the announcement reads. Registered here so
-            // a re-advertisement reports the port this run **actually** bound rather
-            // than the one `Setting` says to try — and so `Runtime` never holds a
-            // second copy of "is 8009 up" for the picker to disagree with.
-            if let Some(channel) = &cast_channel {
-                discovery.set_cast(Arc::clone(channel));
+            // Both faces, one constructor: [`Discovery::start_cast`] owns the order
+            // (8009 before 8008), the certificate, and the sentences for each refusal.
+            // **Behind the gate**, like every other face: the switch path asks
+            // `apply_protocols` for its own read, so a boot that skipped this `if`
+            // would open 8009 on a run whose list says Chromecast is off — which is
+            // exactly what §24 caught when this refactor first landed.
+            if cast_on {
+                discovery.start_cast();
             }
-            let setup_config = match &cast_pair {
-                Some(pair) => match pair.server_config() {
-                    Ok(config) => Some(config),
-                    Err(e) => {
-                        cast_log.warning(&format!(
-                            "Cast HTTPS setup: the certificate will not load ({}); answering over 8008 only",
-                            e.message()
-                        ));
-                        None
-                    }
-                },
-                None => None,
-            };
-            // **Behind the same door as 8009 and the announcement** — see the one
-            // `host::cast_enabled` read above. Before that gate existed this face
-            // started unconditionally, which is the state docs §16 item 12 was
-            // written to close: a user who switched Chromecast off in the page kept
-            // a listener on 8008 answering what the device is. What it answers is
-            // still deliberately nothing secret (name, USN, version), and the
-            // DLNA/HTTP face is **still** unconditional for the reason recorded
-            // there — that one carries the settings page, so gating it would take
-            // away the place the switch lives in.
-            let setup_server = if !cast_on {
-                None
-            } else {
-                match setup::SetupServer::start(setting.clone(), Arc::clone(&cast_log), setup_config) {
-                    Ok(server) => Some(server),
-                    Err(e) => {
-                        cast_log.warning(&format!(
-                            "Cast setup face did not start: {e} — senders that probe 8008 will get nothing"
-                        ));
-                        None
-                    }
-                }
-            };
-            // One summary line's worth of facts, taken **before** the handle moves
-            // into the managed `Runtime`: the answer has to be the bound numbers,
-            // and after the move there is nothing left here to ask.
-            let setup_report = setup_server.as_ref().map(|face| {
-                format!(
-                    "HTTP on {}, HTTPS {}",
-                    face.port,
-                    match face.https_port {
-                        Some(port) => port.to_string(),
-                        None => "not started".to_string(),
-                    }
-                )
-            });
-            let setup = Mutex::new(setup_server);
+            // The answer, not the ask: a receiver whose bind failed is `None` in the slot,
+            // and the summary lines below say the bound numbers.
+            let cast_report = discovery
+                .cast()
+                .map(|channel| channel.port().to_string());
+            let setup_report = discovery.setup_report();
             // The **announcement** is started below, after both receivers have bound,
             // by `Discovery::restart` — the same call `set-interface` makes when the
             // user moves to another 网卡. 8009 answers a sender that already knows our
@@ -1511,77 +1705,18 @@ pub fn run() {
             // reach is only known after the bind, and `start()` answers with the
             // port it got rather than the one it was asked for (`protocol_airplay.py`
             // says the same thing in its own comment).
-            let airplay_started = if !airplay_on {
+            if airplay_on {
+                // The receiver, its serving thread, the "listening on <bound port>" line
+                // and the slot registration are one function — the same one the protocol
+                // switch calls. An empty slot afterwards means the port range was taken
+                // (or the thread refused), and `Discovery` reads that as "do not announce
+                // _airplay._tcp".
+                discovery.start_airplay();
+            } else {
                 app_log.info(
                     "AirPlay is switched off (Macast_Protocols): not listening on 7000, \
                      and an iPhone will not be pointed at a port nobody serves",
                 );
-                None
-            } else {
-                let mut receiver = airplay::AirPlayReceiver::new(setting.friendly_name());
-                match receiver.start() {
-                    Ok(port) => {
-                        let receiver = Arc::new(receiver);
-                        let served = {
-                            let receiver = Arc::clone(&receiver);
-                            let serve_log = Arc::clone(&log);
-                            let sink =
-                                Arc::clone(&shell_renderer) as Arc<dyn airplay::RendererCallback>;
-                            // The reference's own thread name, typo included
-                            // (`name="AIRPLAY_RSTP"`): a reader who has seen a
-                            // Python log and a reader who has seen this one should
-                            // recognise the same line.
-                            thread::Builder::new()
-                                .name("AIRPLAY_RSTP".to_string())
-                                .spawn(move || {
-                                    if let Err(e) = receiver.serve(sink) {
-                                        serve_log.warning(&format!(
-                                            "AirPlay RTSP serve loop ended: {e} — 7000 answers no more"
-                                        ));
-                                    }
-                                })
-                        };
-                        match served {
-                            Ok(handle) => {
-                                app_log.info(&format!(
-                                    "AirPlay RTSP: listening on {port} as \"{}\" — the \
-                                     number this run actually bound, which is not \
-                                     necessarily 7000",
-                                    setting.friendly_name()
-                                ));
-                                Some((receiver, handle))
-                            }
-                            Err(e) => {
-                                app_log.warning(&format!(
-                                    "AirPlay RTSP could not start its serving thread: {e} — \
-                                     {port} is bound but nobody reads it"
-                                ));
-                                None
-                            }
-                        }
-                    }
-                    // `start` has already said which ports it tried; the sentence
-                    // here is for the reader of the startup summary, who asks
-                    // "is this Mac an AirPlay target or not".
-                    Err(e) => {
-                        app_log.warning(&format!(
-                            "AirPlay RTSP: not listening — no free port in the range \
-                             after 7000 ({e}); macOS's own AirPlay Receiver is the usual \
-                             reason, and turning it off in 系统设置 is the way to give \
-                             this to Macast instead"
-                        ));
-                        None
-                    }
-                }
-            };
-
-            match airplay_started {
-                Some((receiver, handle)) => discovery.set_airplay(receiver, handle),
-                // Either the protocol is switched off, or its port range was taken, or
-                // the serving thread refused to spawn — each of which said its own
-                // sentence above. `Discovery` reads an empty slot as "do not announce
-                // _airplay._tcp", which is the same answer the RTSP face gives.
-                None => {}
             }
 
             // **One announcer, one socket, every service**, started once for both
@@ -1615,7 +1750,6 @@ pub fn run() {
                 discovery: Arc::clone(&discovery),
                 eventing: eventing.clone(),
                 relay: relay_store,
-                setup,
             });
 
             player.start();

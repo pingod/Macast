@@ -1555,6 +1555,15 @@ impl macast_upnp::http::Management for ShellManagement {
         self.discovery.set_interface(name)
     }
 
+    /// The protocol switch is **the shell's**, not this face's: `Discovery` owns the
+    /// receivers, the announcement and the one read of the enabled list, so the write
+    /// and the cycling it asks for have to happen where those live. `macast-upnp` can
+    /// bind neither 8009 nor 7000 and must not pretend it knows what "switched off"
+    /// costs (see the trait doc).
+    fn toggle_protocol(&self, title: &str) -> macast_upnp::http::Answer {
+        self.discovery.toggle_protocol(title)
+    }
+
     /// `_cast_url` (`macast/protocol.py:1674-1695`).
     ///
     /// The `Err` half is deliberately not the reason: Python catches every
@@ -2407,6 +2416,77 @@ pub fn faces_enabled(setting: &Setting, log: &Logger) -> Faces {
     }
 }
 
+/// `MacastPluginManager.set_protocol_enabled` (`macast/macast.py:429-453`) — the
+/// **write** side of [`enabled_protocols`], and the only place `Macast_Protocols`
+/// is ever rewritten.
+///
+/// Four rules, each one a line of the reference rather than a preference:
+///
+/// * an **unknown** title is dropped from the list rather than refused, and
+///   `Ok(true)` says "the list is what it should be now". A plugin the user
+///   removed must not stay persisted forever; the reference's comment says the
+///   same and its answer is still a success. The one difference is the warning:
+///   this port says which name it dropped, because the caller's message is going
+///   to claim the protocol was enabled and a reader of the log is the only one
+///   who can tell them otherwise.
+/// * enabling something already present is a no-op that still **succeeds**
+///   (`Ok(true)`, list unchanged). The reference has the same shape, and the
+///   caller's toggle (`title not in enabled` first) is what normally prevents it —
+///   this function must not treat "already on" as an error, or a case-insensitive
+///   toggle (`chromecast`) would answer code 1 for a request that changed nothing
+///   because nothing needed changing.
+/// * disabling something absent is `Ok(false)`: the caller can tell "I did
+///   nothing" from "I removed it" without comparing lists, which is exactly the
+///   distinction the reference's bare `return False` encodes.
+/// * disabling the **last** enabled protocol is refused with the reference's own
+///   sentence (`至少要保留一个启用的协议`). With every protocol off the player
+///   stays up and nothing can reach it, which a user reads as "Macast is broken".
+///
+/// The stored order is [`available_titles`]'s order, because the reference sorts by
+/// its plugin list (`self.protocol_list`): a list built by clicking switches must
+/// not make the next read see a different order than a list that was never touched.
+pub fn set_protocol_enabled(
+    setting: &Setting,
+    log: &Logger,
+    title: &str,
+    enabled: bool,
+) -> Result<bool, String> {
+    let available = available_titles();
+    let mut titles = enabled_protocols(setting, log);
+    match resolve_title(title, &available) {
+        None => {
+            titles.retain(|held| held != title);
+            log.warning(&format!(
+                "Skipping unknown protocol: {} (nothing by that name is stored now)",
+                title
+            ));
+        }
+        Some(real) => {
+            if enabled {
+                if !titles.contains(&real) {
+                    titles.push(real);
+                }
+            } else {
+                if !titles.contains(&real) {
+                    return Ok(false);
+                }
+                if titles.len() <= 1 {
+                    return Err("至少要保留一个启用的协议".to_string());
+                }
+                titles.retain(|held| *held != real);
+            }
+        }
+    }
+    titles.sort_by_key(|held| {
+        available
+            .iter()
+            .position(|known| known == held)
+            .unwrap_or(available.len())
+    });
+    setting.set(Key::MacastProtocols, json!(titles));
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     //! The shell's own tests, the first ones in this crate.
@@ -2822,22 +2902,53 @@ mod tests {
         let gate = body
             .find("host::faces_enabled(")
             .expect("run() reads the gate");
+        assert_eq!(
+            body.matches("host::faces_enabled(").count(),
+            1,
+            "run() reads the enabled list more than once, so two faces can be opened \
+             by two different snapshots of a file the page can rewrite"
+        );
+        // Since the protocol switch landed, boot no longer constructs the receivers
+        // itself: `run()` opens them through `Discovery`, which is the **one**
+        // constructor the switch also calls. So the positional rule follows the calls
+        // the process makes — the gate must be read before each of them — and the
+        // construction points are counted separately below.
         for (needle, what) in [
-            ("CastChannel::new", "the 8009 receiver"),
-            ("setup::SetupServer::start", "the setup face"),
-            ("airplay::AirPlayReceiver::new", "the AirPlay receiver"),
-            // The two halves of the announcement, audited as *calls*: run() must not
-            // build a service table or start a socket before it knows which doors are
-            // open. Their one-owner-ness is asserted separately below, which is the
-            // reason the audited needles are the calls rather than `Announcer::new` —
-            // a second announcer would have to come through this helper or invent its
-            // own construction site, and both are counted.
+            ("discovery.start_cast(", "the 8009 receiver and its setup faces"),
+            ("discovery.start_airplay(", "the AirPlay receiver"),
+            // The announcement, audited as a *call*: run() must not build a service
+            // table or start a socket before it knows which doors are open.
             ("discovery.restart(", "the mDNS announcement"),
         ] {
             let at = body.find(needle).unwrap_or_else(|| panic!("no {} in run()", what));
             assert!(
                 gate < at,
                 "{} is opened before the gate is read",
+                what
+            );
+        }
+        // The switch path has the same rule: `apply_protocols` must ask the table
+        // **before** it opens or closes anything, or a toggle would apply a list the
+        // gate is about to disagree with.
+        let apply_at = main
+            .find("pub fn apply_protocols(")
+            .expect("Discovery::apply_protocols exists");
+        let apply_body = &main[apply_at..apply_at + 1200];
+        let apply_gate = apply_body
+            .find("host::faces_enabled(")
+            .expect("apply_protocols reads the gate");
+        for (needle, what) in [
+            ("self.start_cast(", "the 8009 receiver"),
+            ("self.stop_cast(", "closing 8009"),
+            ("self.start_airplay(", "the AirPlay receiver"),
+            ("self.stop_airplay(", "closing AirPlay"),
+        ] {
+            let at = apply_body
+                .find(needle)
+                .unwrap_or_else(|| panic!("no {} in apply_protocols", what));
+            assert!(
+                apply_gate < at,
+                "{} happens before the switch reads the list",
                 what
             );
         }
@@ -2888,21 +2999,25 @@ mod tests {
             1,
             "the announcement has more than one starter, so only one of them can be gated"
         );
-        // Two callers of one restart, and only two: boot's first start and the switch.
-        // A third is a face being announced by a path that never went through the door.
+        // Three callers of one restart, and only three: boot's first start, the
+        // interface switch, and the protocol switch. A fourth is a face being announced
+        // by a path that never went through the enabled list.
         assert_eq!(
             main.matches(".restart(").count(),
-            2,
-            "the announcer is restarted from {} sites; boot and the switch are the two              that may be, and a third would be gated only by accident",
+            3,
+            "the announcer is restarted from {} sites; boot, the interface switch and the \
+             protocol switch are the three, and a fourth would be gated only by accident",
             main.matches(".restart(").count()
         );
-        // Exactly one read, so no two faces can consult a *different* answer to the
-        // same question — and so that a stale entry says 「Skipping unknown protocol」
-        // once per run rather than once per door (§4.10's growth-by-repetition).
+        // **One read per path**, which the two bodies above already pin: `run()` reads it
+        // once and `apply_protocols` reads it once. The file-wide count is therefore two,
+        // and a third would be a path that decided for itself what is enabled — the
+        // failure `host::Faces`'s doc describes as two faces answering one question
+        // differently.
         assert_eq!(
             main.matches("host::faces_enabled(").count(),
-            1,
-            "the gate is read more than once, so the faces can disagree"
+            2,
+            "the gate is read from a third place, so some path can disagree with the others"
         );
         // The interface switch's two halves have one home each, for the same reason. The
         // validation is the half a second copy would silently widen: a call site that
@@ -2974,7 +3089,7 @@ mod tests {
     fn the_interface_switch_refuses_a_card_this_machine_does_not_have() {
         pin_test_dir();
         let setting = setting("iface-refusal");
-        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()));
+        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()), logger());
 
         let answer = discovery.set_interface("  nope9x  ");
         assert_eq!(answer.code, 1, "an unknown card must not be stored");
@@ -3025,7 +3140,7 @@ mod tests {
     fn the_interface_switch_answers_which_halves_moved_when_nothing_is_listening() {
         pin_test_dir();
         let setting = setting("iface-answer");
-        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()));
+        let discovery = Discovery::new(setting.clone(), ssdp_never_started(setting.clone()), logger());
         let log = Logger::named(macast_cast::announce::LOGGER_NAME);
         let path = log.claim();
 
@@ -3396,6 +3511,114 @@ mod tests {
         assert!(
             text.contains("without a settings file"),
             "the degradation is real, so it must be readable: {text}"
+        );
+    }
+
+    // ---- the write side of the protocol table (toggle-protocol) ----------------
+
+    /// The four rules of `set_protocol_enabled`, each asked as its own question:
+    /// disable removes, enable adds back **in the canonical order**, disabling
+    /// something absent answers "nothing happened", and the last one is refused
+    /// with the reference's sentence. Asked on the **file**, not on `enabled_protocols`
+    /// alone: `Setting::set` is where a missing persist would hide (the key would
+    /// read right in memory and be gone after a restart).
+    #[test]
+    fn toggling_a_protocol_rewrites_the_list_and_keeps_the_canonical_order() {
+        pin_test_dir();
+        let dir = setting("toggle");
+        let log = logger();
+        let all: Vec<String> = available_titles().iter().map(|t| (*t).to_string()).collect();
+        assert_eq!(enabled_protocols(&dir, &log), all, "a fresh file is all three");
+
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, false),
+            Ok(true),
+            "disabling a protocol that is on must report a change"
+        );
+        assert_eq!(
+            enabled_protocols(&dir, &log),
+            vec![DLNA_TITLE.to_string(), AIRPLAY_TITLE.to_string()],
+            "the canonical order survives a removal"
+        );
+        let on_disk = dir.get_str_list(Key::MacastProtocols);
+        assert_eq!(
+            on_disk,
+            vec![DLNA_TITLE.to_string(), AIRPLAY_TITLE.to_string()],
+            "the removal reached the file, not just the table"
+        );
+
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, true),
+            Ok(true),
+            "enabling it again is a change"
+        );
+        assert_eq!(
+            enabled_protocols(&dir, &log),
+            all,
+            "an added protocol is sorted back into the canonical position, not appended"
+        );
+
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, true),
+            Ok(true),
+            "already on is a success that changes nothing — the reference's toggle relies on it"
+        );
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, false),
+            Ok(true),
+            "and off still works afterwards"
+        );
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, false),
+            Ok(false),
+            "disabling something absent says so instead of inventing a change"
+        );
+    }
+
+    /// The last protocol may not be switched off, and the refusal is the
+    /// reference's own sentence — the page renders it verbatim.
+    #[test]
+    fn the_last_enabled_protocol_cannot_be_switched_off() {
+        pin_test_dir();
+        let dir = setting("last");
+        let log = logger();
+        dir.set(Key::MacastProtocols, json!([CAST_TITLE]));
+        assert_eq!(
+            set_protocol_enabled(&dir, &log, CAST_TITLE, false),
+            Err("至少要保留一个启用的协议".to_string())
+        );
+        assert_eq!(
+            dir.get_str_list(Key::MacastProtocols),
+            vec![CAST_TITLE.to_string()],
+            "a refused toggle must not write the file"
+        );
+    }
+
+    /// An unknown title is **dropped**, and the answer is the reference's success:
+    /// a removed plugin must not stay persisted, and the caller's message says
+    /// "enabled" — which is why the warning has to name what did not happen.
+    #[test]
+    fn an_unknown_protocol_is_dropped_with_a_warning_and_still_succeeds() {
+        pin_test_dir();
+        let dir = setting("unknown");
+        // The warning goes wherever the caller's logger points; this test gives it a
+        // file of its own so the assertion reads the sentence instead of a neighbour's.
+        let log = Logger::named(PROTOCOL_LOG);
+        let path = log.claim();
+        dir.set(
+            Key::MacastProtocols,
+            json!([DLNA_TITLE, "Ghost Protocol", CAST_TITLE]),
+        );
+        assert_eq!(set_protocol_enabled(&dir, &log, "Ghost Protocol", true), Ok(true));
+        assert_eq!(
+            enabled_protocols(&dir, &log),
+            vec![DLNA_TITLE.to_string(), CAST_TITLE.to_string()],
+            "the ghost is gone from the file"
+        );
+        let text = macast_core::logging::read_tail(&path, 200).text;
+        assert!(
+            text.contains("Ghost Protocol"),
+            "the drop has to be readable, because the page is about to say 'enabled': {text}"
         );
     }
 }
