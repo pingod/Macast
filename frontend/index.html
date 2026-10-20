@@ -550,6 +550,46 @@
         if (![...sel.options].some((o) => o.value === previous)) sel.value = '';
       }
 
+      async function loadModules() {
+        const doc = await invoke('module_settings_snapshot');
+        const box = document.querySelector('#mods');
+        box.textContent = '';
+        for (const group of doc.groups || []) {
+          const title = document.createElement('h3');
+          title.textContent = group.title;
+          title.style.margin = '18px 0 6px';
+          box.appendChild(title);
+          for (const item of group.keys || []) {
+            const line = document.createElement('div');
+            line.style.margin = '6px 0';
+            const label = document.createElement('label');
+            label.textContent = `${item.label}（${item.key}）`;
+            label.title = item.hint || '';
+            line.appendChild(label);
+            if (item.editable) {
+              const input = document.createElement('input');
+              input.value = item.present ? JSON.stringify(item.value) : '';
+              input.placeholder = item.type || '';
+              const save = document.createElement('button');
+              save.textContent = '保存';
+              save.addEventListener('click', async () => {
+                const answer = await invoke('set_module_setting', {
+                  key: item.key, value: input.value, remove: false,
+                });
+                note(`模块设置 ${item.key} → ${JSON.stringify(answer)}`);
+              });
+              line.appendChild(input);
+              line.appendChild(save);
+            } else {
+              const value = document.createElement('p');
+              value.className = 'muted';
+              value.textContent = item.present ? String(item.value) : '—';
+              line.appendChild(value);
+            }
+            box.appendChild(line);
+          }
+        }
+      }
       loadModules().catch((e) => note(`模块设置: ${e}`));
     
       for (const button of document.querySelectorAll('[data-toggle]')) {
