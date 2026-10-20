@@ -5881,6 +5881,85 @@ else
     fi
 fi
 
+echo "== 38: the plugin rows say no, and the code-gated ones are gated =="
+# Design doc §18: this build has no plugin host, so the seven rows answer code 1 with a
+# sentence that names what cannot happen; the four that would run code keep the
+# reference's `code-execution` gate. This section asks the three machine-level halves:
+# the answers arrive, the LAN hears the gate rather than the feature, and nothing lands
+# on disk.
+S38_SDIR=$(mktemp -d /tmp/macast-rust-plugins.XXXXXX)
+S38_PORT=$((PORT + 18))
+S38_TOK="0123456789abcdef0123456789abcdef"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Plugins", "Api_Token": "%s"}' \
+    "$S38_PORT" "$S38_TOK" > "$S38_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S38_SDIR" MACAST_MPV_SOCKET="$S38_SDIR/mpvsocket" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S38_SDIR/stdout.log" 2>&1 &
+S38_PID=$!
+disown "$S38_PID" 2>/dev/null || true
+S38_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S38_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S38_PID" ]; then
+        S38_READY=1; break
+    fi
+    sleep 0.25
+done
+if [ -z "$S38_READY" ]; then
+    fail "the plugin instance never became the listener on $S38_PORT"
+    kill -9 "$S38_PID" 2>/dev/null
+    rm -rf "$S38_SDIR"
+else
+    S38_MD5=$(md5 -q "$S38_SDIR/macast_setting.json")
+    s38_msg() { python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null; }
+    S38_EN=$(curl -s --max-time 6 -X POST -d "plugin-enable=1&token=$S38_TOK" "http://127.0.0.1:$S38_PORT/api" | s38_msg)
+    case "$S38_EN" in
+        "1 | "*插件*) pass "plugin-enable answers code 1 and names the plugin vocabulary" ;;
+        *) fail "plugin-enable answered '$S38_EN'" ;;
+    esac
+    S38_IP=$(curl -s --max-time 5 "http://127.0.0.1:$S38_PORT/api?query=status&token=$S38_TOK" 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("server") or {}).get("ip") or "").split("/")[0])' 2>/dev/null)
+    if [ -n "$S38_IP" ]; then
+        S38_LAN=$(curl -s --max-time 5 -X POST -d "install-plugin=http://evil.invalid/x.py" "http://$S38_IP:$S38_PORT/api" 2>/dev/null)
+        case "$S38_LAN" in
+            *'"code": 403'*|*'"code":403'*) pass "a LAN install without the token hears the gate, not the feature" ;;
+            *) fail "a LAN install answered $S38_LAN" ;;
+        esac
+    else
+        skip "the instance publishes no address, so the LAN-shaped refusal cannot be asked here"
+    fi
+    S38_IN=$(curl -s --max-time 6 -X POST --data-urlencode "install-plugin=http://evil.invalid/x.py" -d "token=$S38_TOK" "http://127.0.0.1:$S38_PORT/api" | s38_msg)
+    case "$S38_IN" in
+        "1 | "*宿主*) pass "with the token it is still refused: this build has no plugin host" ;;
+        *) fail "install-plugin answered '$S38_IN'" ;;
+    esac
+    S38_PF=$(curl -s --max-time 6 -X POST -d "plugin-file=x&token=$S38_TOK" "http://127.0.0.1:$S38_PORT/api" | s38_msg)
+    case "$S38_PF" in
+        "1 | "*宿主*) pass "plugin-file is refused on the same sentence (the body is never read)" ;;
+        *) fail "plugin-file answered '$S38_PF'" ;;
+    esac
+    [ "$S38_MD5" = "$(md5 -q "$S38_SDIR/macast_setting.json")" ] \
+        && pass "none of the four wrote the settings file" \
+        || fail "a refused plugin row rewrote the settings file"
+    if find "$S38_SDIR" -name '*.py' -print -quit | grep -q .; then
+        fail "a plugin file landed under the settings directory: $(find "$S38_SDIR" -name '*.py' | head -2)"
+    else
+        pass "and no .py was written anywhere under the settings directory"
+    fi
+    S38_PI=$(curl -s --max-time 5 "http://127.0.0.1:$S38_PORT/api?query=plugin-info&token=$S38_TOK" 2>/dev/null \
+        | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len((d.get("plugins") or [])))' 2>/dev/null)
+    [ "$S38_PI" = "0" ] \
+        && pass "plugin-info still lists zero plugins — the empty list is the answer, not a failure" \
+        || fail "plugin-info lists '$S38_PI' plugin(s)"
+    kill -9 "$S38_PID" 2>/dev/null
+    pkill -9 -f "$S38_SDIR" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S38_SDIR"
+    else
+        rm -rf "$S38_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

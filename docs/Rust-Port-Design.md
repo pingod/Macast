@@ -950,6 +950,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 "读到的**别人的**记录喂设备账本"：今天非查询的数据报只进 `Served::absorbed` 一个计数器，所以 
 §8/§16 那条"合并"结论只合并了 socket，没有合并两张表。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
+| 插件那七行（`plugin-enable/disable/uninstall`、`install-plugin`、`plugin-file`、`install/uninstall-webrtc-extras`） | **已交付答复**（2026-10-20，§18 的设计）：POST 表 16 → **22** 行 + `plugin-file` 的文件路由；六行表单端点以 `code: 1` 回答并点名"这个构建没有插件宿主/没有安装器"，`plugin-file` 在**读正文之前**就被拒；四行 code-execution 的门照抄（`install-plugin` / 两个 extras / `set-module-setting` / `save-launch-param` 共五行） | 判据：`macast-upnp` 1 条（三种开关的原话、局域网不带令牌的 install 被门拒）+ 表循环 + **真机 §38 共 7 条**：答复原话、局域网只听见门、带令牌仍是拒绝、`plugin-file` 同句、设置文件字节不变、设置目录下没有任何 `.py`、`plugin-info` 仍是空列表。**插件本身装不了**是这一行的结论，不是缺陷 |
 | 管理面的 `save-launch-param`（整份设置替换 + 重启） | **已交付**（2026-10-20）：POST 表 **16** 行（参考实现第 10 行，门 **code-execution**，排在 `app-action` 之后）；`Setting::replace_all`（已有的"高级设置"写入口）整表替换并落盘，答复 **先走**、`MACAST_RESTART` 线程 250 ms 后 `app.restart()`。坏 JSON 与非对象都回参考实现原话 `json format error` | 判据：`macast-upnp` 1 条（表 16 行、code-execution 恰好两行、字段原样）+ **真机 §37 共 8 条**：两种坏输入都回同一句且**文件与进程都不动**；好输入回 `success`、旧 pid 消失、新 pid 在同一端口监听、新文件里的友好名生效 |
 | 管理面的 `set-renderer`（页面上的播放器切换） | **已交付**（2026-10-20）：POST 表 **15** 行（参考实现第 6 行，插在 `toggle-protocol` 之前）；`host::renderer_title` 是名字的**唯一**主人（下拉那一行与这一行读同一个函数），接受时落盘并把播放器 reload，其它回参考实现的拒绝句 | 判据：`macast-tauri` 1 条（空 → MPV、存了名字 → 用它、前后空白不算另一个渲染器）+ `macast-upnp` 1 条（字段原样交出去、两种答复透传）+ 表循环 + **真机 §36 共 5 条**：不存在的名字被拒且不写盘、`MPV` 被接受并写进文件、HTTP 面照旧 |
 | 管理面的 `app-action`（页面上的退出按钮真的退出） | **quit 已交付**（2026-10-20）：POST 表 **14** 行（参考实现第 8 行，插在 `toggle-protocol` 之后）；`Discovery::app_action` 先答复再在自己那根 `MACAST_QUIT` 线程里 250 ms 后 `app.exit(0)`，退出钩子照旧走 `stop_services`（byebye + goodbye + 关面 + 停播放器）。`check-update` 诚实拒绝（§8 那一行），未知动词回参考实现的「未知应用操作：{}」 | 判据：`macast-upnp` 1 条（字段原样交给 shell、三种答复透传）+ 表循环 + **真机 §35 共 9 条**：未知动词与 check-update 都**不动进程**、quit 的答复先到、进程在数秒内消失、应用端口与 8009/8008 全部空、日志里有那句 quit 与 SSDP 的 byebye |
@@ -1913,6 +1914,14 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 **这一节的边界**：它只决定"答复什么、门放哪、怎么判"，不声称插件能装。页面上那张卡仍然显示
 "这个构建里没有可安装的插件"——`plugin-info` 已经在这么说（§15 那一行）。
 
+46. **插件那七行落地：先答"不能"，再答"为什么"**（2026-10-20，§18 的设计 + POST 表 16 → **22** 行 +
+`plugin-file` 的文件路由 + 真机 §38 的 **7** 条；`macast-upnp` 366 → **367**）：六行表单端点各自
+`code: 1` 并点名按钮；`plugin-file` 走**文件**路由但同样在**读正文之前**拒绝，门是
+`code-execution`；四行在参考实现里会落代码的门一行没降。整跑 **450 PASS / 0 FAIL / 1 SKIP，
+退出码 1**。**这一格最贵的一条**不是代码，是环境的第二次同一个坑：§38 第一次跑被一台我留下的
+实例污染（`Before` 那台，占着 8009/8008，§24/§26 一起红）—— 收尾杀实例是按 8009/8008 的 pid
+收的，不是按模式。**本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1981,7 +1990,9 @@ grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**�
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
 grep -c '"queue": True' scripts/mdns_responder_probe.py                     # 期望 **4**（聚合行；判决语料必须把它们排除在外，
 #   而排除是数过的：不是 4 条探针就退出 1 —— 这一行是那个数在文档里的对应物）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **40**（§37 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **41**（§38 是最后一节：
+#   插件那七行：六行表单端点回答"这个构建没有宿主"，`plugin-file` 在读正文之前就被拒，
+#   四行 code-execution 的门照抄（§18 的设计、§16 第 46 条）。§37 是它前面那一节：
 #   整份设置替换 + 重启：两种坏输入不写盘也不动进程、好输入先答复再重启、新 pid 在同一端口
 #   读新文件（§16 第 45 条）。§36 是它前面那一节：
 #   渲染器切换只接受这个构建真的有的那一个名字，拒绝的是参考实现的原话（§16 第 44 条）。
@@ -2123,7 +2134,7 @@ grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::faces_enabled(' src-tauri/src/main.rs                          # 期望 **2**（每条路径一次：boot 的 `run()` 与开关的 `apply_protocols`；一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
-grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **15**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **16**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
 #   §28 模块设置 + §29 插件坐标 + §30 字幕与清空 + §31 听见自己 + §32 网卡 + §33 单播 —— 每一个自带实例的
 #   一节都要给自己一个名字，否则它广播的是别人那台的名字，按名字匹配的检查就成了隔壁的证人），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
@@ -2152,13 +2163,13 @@ grep -cE 'pub fn (groups|payload)|fn is_claimed' macast-core/src/module_settings
 grep -rc 'fn header_emissions' macast-upnp/src/http.rs          # 期望 **1**（CORS 不变式的扫描器在这里，
 #   它扫的是三个 crate 的所有 `.rs`；`the_cors_scanner_answers_when_a_cors_header_exists` 是它的合成正控，
 #   删掉"注释行不算"那一支就会红 2 条 —— 见 §16 第 19 条）
-grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **16**（POST 表：`set-github-mirror` /
+grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **22**（POST 表：`set-github-mirror` /
 #   `install-*` 之外那批里已移植的 12 行，含 `clear-log`、`set-module-setting` 与 `set-interface`；
-#   同一形状的两条计数断言在 `the_post_route_table_is_well_formed` 里：`len() == 16`（`http.rs:6252`），
+#   同一形状的两条计数断言在 `the_post_route_table_is_well_formed` 里：`len() == 22`（`http.rs:6264`），
 #   加上"门那一列里 `code-execution` 恰好一行" —— 安全上的区分要能被数出来。
 #   参考实现那张表今天是 **23** 行（2026-10-20 逐行数出来的是 23，`protocol.py:2287-2331`；
 #   `AGENTS.md` §4.7c 原文那句"16 条"是它写下时的数，已在原地标注）—— 12 与 23 之间的 11 行都等插件子系统）
-grep -c 'gate: "code-execution"' macast-upnp/src/http.rs                  # 期望 **2**（`set-module-setting`
+grep -c 'gate: "code-execution"' macast-upnp/src/http.rs                  # 期望 **5**（`set-module-setting`
 #   与 `save-launch-param`：两件的输入都会改变"什么会被执行"——一个写钩子的键，一个整份替换设置；
 #   测试里那个"恰好两行"的断言在 `the_post_route_table_is_well_formed`）
 grep -c 'const CODE_REFUSAL' macast-upnp/src/http.rs                      # 期望 **1**（拒绝文案只有一个主人，

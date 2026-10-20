@@ -2672,6 +2672,19 @@ impl Face {
             // (`protocol.py:2518` — `_body` never sets a status).
             return Some(answer_response(200, &Answer::denied(refusal)));
         }
+        // `plugin-file` is a **file route**, not a row: the reference gates it as
+        // code-execution and imports what arrives. This build refuses before reading the
+        // body, and the gate is asked first so a LAN caller hears the gate's sentence
+        // rather than a hint about a feature (design doc §18).
+        if param_present(req, "plugin-file") {
+            if let Some(refusal) = self.post_gate_refusal("code-execution", req) {
+                return Some(refusal);
+            }
+            return Some(answer_response(
+                200,
+                &self.management.plugin_refusal("plugin-file"),
+            ));
+        }
         for route in POST_MANAGEMENT_ROUTES {
             // The route is selected by the **name**, whatever its value: Python
             // asks `if kwargs.get(name) is None: continue` (`:2535`). So

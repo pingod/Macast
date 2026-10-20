@@ -1593,6 +1593,9 @@ impl macast_upnp::http::Management for ShellManagement {
             "plugin-enable" => "这个构建里没有可启用的插件：内建播放器不经过插件表",
             "plugin-disable" => "这个构建里没有可停用的插件：内建播放器不经过插件表",
             "plugin-uninstall" => "这个构建里没有可卸载的插件：内建播放器是壳的一部分",
+            "plugin-file" => {
+                "这个构建没有插件宿主：上传的 .py 不会被加载，所以这一路上传在读取正文之前就被拒了"
+            }
             "install-plugin" => {
                 "这个构建没有插件宿主：装进来的 .py 不会被加载，也没有地方运行它"
             }
