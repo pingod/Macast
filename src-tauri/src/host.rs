@@ -3471,6 +3471,130 @@ mod tests {
         );
     }
 
+    /// **Every `x.key` the page reads out of a backend document exists in that document.**
+    ///
+    /// The guard above catches a card whose renderer was deleted. This one catches the
+    /// other half, which is quieter: a renderer that reads a key **nothing sends**. The
+    /// page shipped for a day reading `m.known` from `log_modules()` — a third field
+    /// invented while writing the UI ("files on disk ∪ names already claimed") that
+    /// `macast_core::logging::log_modules_document()` has never emitted, because the
+    /// reference's shape (`protocol.py:2120-2128`) has exactly two keys. `(m.known || [])`
+    /// made it silently empty, so the loop that was supposed to list "claimed but not yet
+    /// written" logs never ran once — and nothing failed, because reading a missing key
+    /// in JavaScript is `undefined`, not an error.
+    ///
+    /// The documents below are built by **the same functions the window's commands call**,
+    /// so this asks the live shape rather than a transcription of it. A key is only
+    /// required to exist when the page reads it as `something.<name>`, which is why the
+    /// list is written out per document instead of scraped: scraping would also pick up
+    /// `window.__TAURI__`, `document.querySelector` and every local object, and an
+    /// assertion that fires on those gets deleted rather than fixed.
+    #[test]
+    fn the_keys_the_page_reads_are_keys_the_backend_sends() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+
+        // `log_modules()` — the one that was wrong.
+        let modules = macast_core::logging::log_modules_document();
+        for key in ["main", "modules"] {
+            assert!(
+                modules.get(key).is_some(),
+                "the page reads log_modules().{key}, which this document does not carry: {modules}"
+            );
+        }
+        // **The half that actually catches the defect**: whatever the page reads off the
+        // log document must be in it. Written as a scan rather than a list of names,
+        // because a list is exactly what went stale — `known` was not on anybody's list.
+        // `m.<name>` is the page's own spelling for this document (see its renderer), and
+        // the scan is anchored on that binding so it cannot pick up unrelated objects.
+        let script = page.split_once("<script>").map(|(_, rest)| rest).unwrap_or(page);
+        // Comments are stripped before scanning, and that is a **feature, not tidiness**:
+        // this page explains the `known` defect in a comment right where the fix lives, and
+        // a scanner that fired on that sentence would be a scanner someone deletes — taking
+        // the rule with it (the lesson AGENTS.md §16 第 19 条 records for the CORS check).
+        let script: String = script
+            .lines()
+            .map(|line| match line.find("//") {
+                Some(at) if !line[..at].contains('"') && !line[..at].contains('\'') => &line[..at],
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let script = script.as_str();
+        let mut read_keys: Vec<&str> = Vec::new();
+        for (index, _) in script.match_indices("m.") {
+            // Word boundary: `item.editable` contains the substring `m.`, and counting it
+            // would make this test fail on a correct page — a test that cannot pass gets
+            // deleted, and the rule it guards goes with it.
+            let before = script[..index].chars().next_back();
+            if matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$') {
+                continue;
+            }
+            let rest = &script[index + 2..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            let name = &rest[..end];
+            if !name.is_empty() {
+                read_keys.push(name);
+            }
+        }
+        read_keys.sort_unstable();
+        read_keys.dedup();
+        assert!(
+            read_keys.len() >= 2,
+            "the page reads no `m.<key>` at all — the renderer is gone (see the id test) or this \
+             scan is broken; a scan that finds nothing agrees with everything"
+        );
+        for key in &read_keys {
+            assert!(
+                modules.get(*key).is_some(),
+                "the page reads log_modules().{key}, which the document does not carry \
+                 (known keys: {:?}) — this is the `known` defect of 2026-10-20: a key nothing \
+                 sends reads as `undefined`, so the branch silently never runs",
+                modules.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>())
+            );
+        }
+
+        // `module_settings_snapshot()` — a group row and one key row.
+        let mut stored = serde_json::Map::new();
+        stored.insert("Api_Token".into(), json!("tok"));
+        let settings = macast_core::module_settings::payload(&stored);
+        let group = settings["groups"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .unwrap_or_else(|| panic!("no groups in {settings}"));
+        for key in ["title", "keys"] {
+            assert!(group.get(key).is_some(), "the page reads group.{key}: {group}");
+        }
+        let row = group["keys"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .unwrap_or_else(|| panic!("no keys in {group}"));
+        for key in ["key", "label", "hint", "present", "type", "editable"] {
+            assert!(row.get(key).is_some(), "the page reads item.{key}: {row}");
+        }
+
+        // `log_view()` — the tail document.
+        let tail = macast_core::logging::log_view_document(None, 10, false);
+        for key in ["code", "logs", "truncated", "lines", "size"] {
+            assert!(tail.get(key).is_some(), "the page reads log_view().{key}: {tail}");
+        }
+
+        // …and the page really is reading them: a renderer that stopped touching a key
+        // would make the assertions above vacuous. Cheap to ask, and it is what makes
+        // this test about the page rather than about the backend.
+        for needle in ["m.main", "m.modules", "group.title", "group.keys", "item.key",
+                       "item.label", "item.hint", "item.present", "item.type", "item.editable",
+                       "d.logs", "d.truncated", "d.lines", "d.size"] {
+            assert!(
+                page.contains(needle),
+                "the page no longer reads {needle} — either the renderer is gone (see the id \
+                 test) or this assertion has gone stale"
+            );
+        }
+    }
+
     /// The ids that *are* written must be written by the startup path, not only by a
     /// click handler: the bug above would also fire if `refresh()`/`services()`/…
     /// existed but nothing ever called them at boot.

@@ -2743,7 +2743,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 **Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
 `macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
 `ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
-真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **28**）：
+真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **29**）：
 
 * **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
   于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
@@ -2784,7 +2784,21 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   都没有。修法 `${SPEC}`，而**这一类只有一条正则扫得出来** —— 问"一个变量名后面紧跟一个非 ASCII 字节"：
   `grep -nP '\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])' scripts/verify_rust_receiver.sh`
   （本轮量过：命中的只有那一处）。中文散文里插变量是这套脚本的常态，而 `bash -n` 对着它一律说 OK。
-* 读数：`macast-upnp` **369**、`macast-tauri` **28**（两台仪器一致：`--list` 与整跑），
+* **同一族的第三半：页面读过后端从来不发的键。** `renderLogModules` 读 `m.known`
+  （"在盘上的 ∪ 已被插件认领的"）—— 那是写 UI 时想出来的第三个字段，而
+  `log_modules_document()` 一直只发 `main` 与 `modules`（参考实现 `protocol.py:2120-2128`
+  与 `logsplit.list_logs()` 的形状）。于是 `(m.known || [])` 永远是空数组，
+  "认领了却还没写过 → 列出来但标明是空的"那段循环**一次都没跑过**，而且什么都不报错：
+  JavaScript 读一个不存在的键是 `undefined`，不是异常。删掉那个分支而**不是**给后端补一个键
+  （补上就是一条只被我们自己页面读的偏差）。
+  判据 `the_keys_the_page_reads_are_keys_the_backend_sends`：用**窗口命令自己调的建造者**
+  现造文档（`log_modules_document()` / `module_settings::payload()` / `log_view_document()`），
+  再把页面里所有 `m.<key>` 的读法扫出来要求逐个在场 —— 扫描**先剥注释**，
+  因为这个页面就在缺陷旁边的那段注释里写着 `m.known`，而一个会被散文点着的扫描器寿命是一次
+  "这测试干嘛挡我写注释"（§16 第 19 条那条 CORS 检查的教训同一形状）。
+  **第一版这条判据是 0 红的**：它只问后端发不发 `known`，不问页面读不读 —— 把死分支贴回去它照样绿。
+  补成"扫页面读的键"之后，同一支变异体红 1 条并逐字点名 `known`。
+* 读数：`macast-upnp` **369**、`macast-tauri` **29**（两台仪器一致：`--list` 与整跑），
   单元合计 **1409 passed / 0 failed**（`cargo test --workspace`：cast 735 + core 128 + mpv 149 +
   tauri 28 + upnp 369）；真机脚本 **42 节**，整跑 **446 PASS / 0 FAIL / 2 SKIP，退出码 2**，
   其中 §39 自己是 **8/8**。那两条 SKIP 是本机的环境事实（§25 的送达那一格、§32 的"这张机器只有

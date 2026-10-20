@@ -510,15 +510,22 @@
       });
 
       // —— 日志 ——
-      // `log_modules()` 交回来的是三样东西：磁盘上现在的文件（modules，新的在前）、
-      // 主日志的大小，以及 `known` = 在盘上的 ∪ 已被插件认领的。
-      // 后者里那些「认领了却还没写过」的名字**必须列**（空盒子也是这个功能该给的
-      // 一个答案），但要标明是空的，否则它们读起来像「有这份日志却打不开」。
+      // `log_modules()` 交回来的是**两个**键：主日志（`main` = size + mtime）与磁盘上
+      // 现在的模块文件（`modules`，每行 name/file/size/mtime，按名字排）。这是参考实现
+      // `protocol.py:2120-2128` 与 `logsplit.list_logs()` 的形状，本壳由
+      // `macast_core::logging::log_modules_document()` 一处产出、HTTP 面与这个窗口共用。
+      //
+      // **这一格曾经读过一个不存在的键**：`m.known`（"在盘上的 ∪ 已被插件认领的"），
+      // 那是写页面时想出来的第三个字段 —— 后端从来没发过它，于是 `(m.known || [])` 永远是空数组，
+      // 那段"空盒子也要列出来"的循环一次都没执行过。这正是 §4.13「不提问的检查」在前端的形状：
+      // 一个读不到的键既不报错也不显示，读起来像"这个功能还没内容"。
+      // 删掉而不是给后端补上：参考实现那一份只有两个键，而 `known_log_modules()` 在本壳里
+      // 是 `log_target()` 的校验集（内部用），不是线上的形状 —— 把它发出去就是一条
+      // 只被我们自己页面读的偏差。
       let logSignature = null;
       function renderLogModules(m) {
         const onDisk = m.modules || [];
-        const extras = (m.known || []).filter((n) => !onDisk.some((r) => r.name === n));
-        const signature = JSON.stringify([m.main, onDisk, extras]);
+        const signature = JSON.stringify([m.main, onDisk]);
         if (signature === logSignature) return;
         logSignature = signature;
         const sel = document.querySelector('#log-module');
@@ -532,12 +539,6 @@
           const opt = document.createElement('option');
           opt.value = row.name;
           opt.textContent = `${row.name} · ${fmtBytes(row.size)}`;
-          sel.appendChild(opt);
-        }
-        for (const name of extras) {
-          const opt = document.createElement('option');
-          opt.value = name;
-          opt.textContent = `${name}（还没有内容）`;
           sel.appendChild(opt);
         }
         sel.value = previous;
