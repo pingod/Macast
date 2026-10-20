@@ -358,6 +358,7 @@ truthiness 在 `macast-mpv/src/pyops.rs`、`macast-upnp` 的 `py_truthy`、`maca
 | `announce`（一个服务一个 socket，而参考实现是一个引擎两个服务） | **已合并**（2026-10-19）：本壳曾经有三个 5353 socket（浏览器 + 两个 announcer），现在与参考实现同形 —— `Announcer` 持有 `Vec<Service>`，一次 bind、一轮读、**按每个 service 的 `responder_answers()` 分派答问**，突发/重播/goodbye 逐 service 发 | 合并的理由是两台机器（macOS 与 CachyOS，`scripts/mdns_reuseport_probe.py`）量到的分发规则：**多播复制给每一个 socket，单播整条只交给一个，而交给谁随流变** —— 所以第三个竞争 socket 让"会答问的那个"变成一次抛硬币。合并之后剩下的两个（浏览器 + 引擎）与参考实现一致。判据：`one_socket_answers_the_measured_type_and_stays_silent_for_the_other`（同一个 socket 上 Cast 的查询被答、AirPlay 的查询被读到但不答，且答的那份报文按名字确认是 Cast 的）、`every_service_in_the_engine_gets_its_own_burst`（按 TTL>0 区分公告与 goodbye —— 第一版没区分，于是"只广播第一个 service"的变异体 0 红）、`the_join_list_is_the_union_of_every_service_and_not_the_first_one`（同样先 0 红：本机两个 service 地址相同，行为看不出来）。**仍然欠着**：`_airplay._tcp` 的查询现在会由合并后的 socket 按 shape 匹配应答 —— 这是参考实现的行为（一个引擎答所有注册类型），但本机的 `§25` 送达那一格仍是 SKIP，所以"iPhone 问一句能得到答案"没有真机见证者 |
 
 | `announce`（第二种 socket 只收不发） | 参考实现的 `new_respond_socket`（`_utils/net.py:415-455`）绑接口地址之后**既收也发**（zeroconf 用它发那份接口的突发）；本端口绑出来的第二只是 **receive-only** —— 突发与答复仍全部从那只通配组播 socket 出去 | 两件事是分开的：把出口钉住需要 `IP_MULTICAST_IF`（那是 §16 第 39 条那一格，已按地址形式量过），而把**单播答复的源地址**也变成"被问的那个地址"需要按地址各发一份，而那只 socket 一发就同时把答复多播出去了 —— 参考实现能一步做到是因为它本来就一口一 socket。今天这条偏离的**可见后果没有被计价**：`§33` 能证到"答复的源**端口**是 5353"（发送端按端口接受，这是它唯一必须对的字段），而"一台把回复目的地址绑到自己学到的那个接口上的发送端"本机测不出来，需要第二台真机器。**没测的就不写**：这一行只说我们少做了什么，不说因此坏什么 |
+| `save-launch-param`（非对象也被拒） | 参考实现把 `json.loads` 的结果直接赋给 `Setting.setting`；一个 JSON **数组**照样被存下去，下一次 `Setting.get` 在列表上崩溃。本壳对非对象也答 `json format error`（同一句），文件不动 | 一个"存进去然后把每个读者都绊倒"的值比一次响亮的拒绝更贵；拒绝的句子沿用参考实现自己的，所以网关的读者看不出多了一问 |
 | `set-renderer`（列表里只有一个名字） | 参考实现的渲染器列表来自插件管理器；本壳只有一个内建渲染器，所以列表恰好一项：`Macast_Renderer`（空则 `MPV`）。只有这个名字被接受（接受时**落盘并 reload 播放器**，等价于参考实现的 stop/start 同一渲染器），其它一律 `未找到播放器：{title}` | 一个只有一项的列表不许假装找得到不存在的插件；而"接受自己"这件事仍然有可观察的效果（新装的 `''` 变成 `MPV`，那就是下拉里显示的名字），所以它不是只改文件的旋钮。reload 的可观察那一半要有媒体在放，见 §16 第 44 条 |
 | `app-action`（`check-update` 被拒绝） | 参考实现把 `check-update` 交给它的发布者，答「正在检查更新」；本壳没有版本检查也没有更新器，答 **code 1** 并说明这一点 | 一个不存在的进度条比没有这个概念更糟（§4.8 那条「代价印在旁边」的反面）。`quit` 是照抄的：先答复、再在自己那根线程里退出（`protocol.py:2407-2409` 同一个形状），退出钩子负责 byebye/goodbye/关面/停播放器 |
 | `toggle-protocol`（DLNA 这一格被本壳拒绝） | 参考实现能把 DLNA 也关掉：`_apply_enabled_protocols` 重启整个 service，DLNA 的 handler 跟着消失。本壳对 `toggle-protocol=DLNA Protocol` 答 **code 1** 并且**不写文件**（`Discovery::toggle_protocol` 的那一句） | 参考实现的用户还有菜单栏能把服务开回来，本壳没有：DLNA 的 HTTP 面**就是**设置页与管理接口（§16 第 12 条那半句「故意不做」的同一件事），关掉它等于关掉唯一能把它开回来的地方 —— 与 `macast-core` 把设置页放在那个面上是同一条理由。答复点名原因（不能停用 DLNA：…），所以它不是静默的偏离；手改 `Macast_Protocols` 去掉 DLNA 的文件仍按读侧规则跑（DLNA HTTP 无条件起），两者的差别记在这里 |
@@ -949,6 +950,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 "读到的**别人的**记录喂设备账本"：今天非查询的数据报只进 `Served::absorbed` 一个计数器，所以 
 §8/§16 那条"合并"结论只合并了 socket，没有合并两张表。
 17 例答复规则冻在 `macast-cast/tests/golden/mdns_responder.jsonl`，包括抑制的严格 `>` 边界、PTR 相等含 alias、QU 仍走多播、单播源额外多播一份、`AAAA` 答 NSEC 而不是沉默、`*._dns-sd._udp` 那种星形写法参考实现根本不答。形状那半句**按本机与那台 Linux 的读数改过两轮**：原写「`SO_REUSEPORT` 只交给一个读者，所以 responder 必须与 `announce` 的发送 socket 合成一个」—— 多播在两台机器上都是**复制**，那句不成立；但**单播确实整条只交给一个 socket 且随流变**，所以"合并"这个结论**留着**，理由与位置都换了：落在**长期在场的那个 socket** 上（`announce` 的那个），它 join 且读。见 §8 的 `announce` 行与 §16 第 13 条 |
+| 管理面的 `save-launch-param`（整份设置替换 + 重启） | **已交付**（2026-10-20）：POST 表 **16** 行（参考实现第 10 行，门 **code-execution**，排在 `app-action` 之后）；`Setting::replace_all`（已有的"高级设置"写入口）整表替换并落盘，答复 **先走**、`MACAST_RESTART` 线程 250 ms 后 `app.restart()`。坏 JSON 与非对象都回参考实现原话 `json format error` | 判据：`macast-upnp` 1 条（表 16 行、code-execution 恰好两行、字段原样）+ **真机 §37 共 8 条**：两种坏输入都回同一句且**文件与进程都不动**；好输入回 `success`、旧 pid 消失、新 pid 在同一端口监听、新文件里的友好名生效 |
 | 管理面的 `set-renderer`（页面上的播放器切换） | **已交付**（2026-10-20）：POST 表 **15** 行（参考实现第 6 行，插在 `toggle-protocol` 之前）；`host::renderer_title` 是名字的**唯一**主人（下拉那一行与这一行读同一个函数），接受时落盘并把播放器 reload，其它回参考实现的拒绝句 | 判据：`macast-tauri` 1 条（空 → MPV、存了名字 → 用它、前后空白不算另一个渲染器）+ `macast-upnp` 1 条（字段原样交出去、两种答复透传）+ 表循环 + **真机 §36 共 5 条**：不存在的名字被拒且不写盘、`MPV` 被接受并写进文件、HTTP 面照旧 |
 | 管理面的 `app-action`（页面上的退出按钮真的退出） | **quit 已交付**（2026-10-20）：POST 表 **14** 行（参考实现第 8 行，插在 `toggle-protocol` 之后）；`Discovery::app_action` 先答复再在自己那根 `MACAST_QUIT` 线程里 250 ms 后 `app.exit(0)`，退出钩子照旧走 `stop_services`（byebye + goodbye + 关面 + 停播放器）。`check-update` 诚实拒绝（§8 那一行），未知动词回参考实现的「未知应用操作：{}」 | 判据：`macast-upnp` 1 条（字段原样交给 shell、三种答复透传）+ 表循环 + **真机 §35 共 9 条**：未知动词与 check-update 都**不动进程**、quit 的答复先到、进程在数秒内消失、应用端口与 8009/8008 全部空、日志里有那句 quit 与 SSDP 的 byebye |
 | 管理面的 `toggle-protocol`（协议开关真的关/开脸，不必重启进程） | **已交付**（2026-10-20）：POST 表 **13** 行（参考实现的第 7 行，插在 `set-github-mirror` 之后）；写侧 `host::set_protocol_enabled`（未知标题剔除并 warning、已在表里仍答成功、停用不在表里的答"没发生"、关掉最后一个以 `至少要保留一个启用的协议` 拒绝、按 `available_titles()` 排序落盘）；`Discovery::{start,stop}_{cast,airplay}` 是 boot 与开关**共用的**构造/拆除函数，`apply_protocols` 在两者之后重建广播 | 判据：`macast-tauri` 3 条（写侧四条规则对着**文件**问、最后一个协议拒绝且不写盘、未知标题被剔除并留下 warning）+ `macast-upnp` 2 条（行在位、字段**原样**交给 shell —— 方向由 shell 判，页码只转发）+ 表循环（每行的门都被无令牌局域网与带令牌各打一遍）+ **真机 §34 共 24 条**：同一个进程里关掉 Chromecast ⇒ 8009 与 8008 都关、文件变成 [DLNA, AirPlay]、只有幸存的协议重新广播、DLNA 的 `description.xml` 照旧 200；再开回来 ⇒ 两个口重新绑定、Cast 的广播行回来、文件回到三项；两处拒绝（DLNA、未知）各自不写盘。**最后一格只有单元见证**：在活着的实例上改文件不会改它内存里的表，所以"关掉最后一个"在真机上问不出来，这一点写进 §34 的开头 |
@@ -1859,6 +1861,20 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     那一节的输出里，而不是假装 pid 变过。读数填在 §15 那一行。**本分支从未推送 ⇒ 没有任何 CI
     见证过。**
 
+45. **整份设置替换 + 重启：这一格只有进程能回答"它有没有回来"**（2026-10-20，`Setting::replace_all`
+    + `ShellManagement::save_launch_param` + `macast-upnp` POST 表第 **16** 行 + 真机 §37 的 **8** 条；
+    `macast-upnp` 365 → **366**）：形状照 `_post_save_launch_param`（`protocol.py:2640-2648`），
+    答复与 §35 的 quit 同一条规矩——**先发出去、再重启**，否则那句 `success` 会和它描述的那个
+    进程一起消失。两处要知道的：`app.restart()`（Tauri 2 的 `AppHandle`）在编译期就答得出有没有；
+    而"新进程读的是新文件"只有真机能问——§37 用三个读数把它钉住（旧 pid 消失、同一个端口上换了一个
+    pid、文件里的友好名变成新值）。**非对象被拒**是比参考实现严的一位（§8 那一行）。电池与文档
+    见 §15 那一行。
+    *电池*（定点、对着活实例的同一形状；`/private/tmp/host41.bak` 还原、md5 回到原值）：M1 删掉
+    `replace_all`（整表写）→ 重启后文件里仍是旧名（`Before`），§37 最后一条会红 —— **一次真红**。
+    M2 删掉重启（答复照旧）→ 这一趟那个实例**没起来**（端口还被上一趟的实例占着），读数
+    `listener=` 空，**不构成判决**；"重启挪到答复之前"这一支的正确见证本是 §37 的第一句
+    （同步重启会让 `success` 根本不到），留待下一次干净端口上补测 —— 记在这里而不是算成一条红。
+
 ---
 
 ## 17. 提交与文档的规矩
@@ -1927,7 +1943,9 @@ grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**�
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
 grep -c '"queue": True' scripts/mdns_responder_probe.py                     # 期望 **4**（聚合行；判决语料必须把它们排除在外，
 #   而排除是数过的：不是 4 条探针就退出 1 —— 这一行是那个数在文档里的对应物）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **39**（§36 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **40**（§37 是最后一节：
+#   整份设置替换 + 重启：两种坏输入不写盘也不动进程、好输入先答复再重启、新 pid 在同一端口
+#   读新文件（§16 第 45 条）。§36 是它前面那一节：
 #   渲染器切换只接受这个构建真的有的那一个名字，拒绝的是参考实现的原话（§16 第 44 条）。
 #   §35 是它前面那一节：
 #   页面上的退出按钮真的退出：答复先到、进程随后消失、每个监听口都跟着走、SSDP 说了 byebye
@@ -2067,7 +2085,7 @@ grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::faces_enabled(' src-tauri/src/main.rs                          # 期望 **2**（每条路径一次：boot 的 `run()` 与开关的 `apply_protocols`；一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
-grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **13**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **14**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
 #   §28 模块设置 + §29 插件坐标 + §30 字幕与清空 + §31 听见自己 + §32 网卡 + §33 单播 —— 每一个自带实例的
 #   一节都要给自己一个名字，否则它广播的是别人那台的名字，按名字匹配的检查就成了隔壁的证人），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
@@ -2096,9 +2114,9 @@ grep -cE 'pub fn (groups|payload)|fn is_claimed' macast-core/src/module_settings
 grep -rc 'fn header_emissions' macast-upnp/src/http.rs          # 期望 **1**（CORS 不变式的扫描器在这里，
 #   它扫的是三个 crate 的所有 `.rs`；`the_cors_scanner_answers_when_a_cors_header_exists` 是它的合成正控，
 #   删掉"注释行不算"那一支就会红 2 条 —— 见 §16 第 19 条）
-grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **15**（POST 表：`set-github-mirror` /
+grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **16**（POST 表：`set-github-mirror` /
 #   `install-*` 之外那批里已移植的 12 行，含 `clear-log`、`set-module-setting` 与 `set-interface`；
-#   同一形状的两条计数断言在 `the_post_route_table_is_well_formed` 里：`len() == 15`（`http.rs:6240`），
+#   同一形状的两条计数断言在 `the_post_route_table_is_well_formed` 里：`len() == 16`（`http.rs:6252`），
 #   加上"门那一列里 `code-execution` 恰好一行" —— 安全上的区分要能被数出来。
 #   参考实现那张表今天是 **23** 行（2026-10-20 逐行数出来的是 23，`protocol.py:2287-2331`；
 #   `AGENTS.md` §4.7c 原文那句"16 条"是它写下时的数，已在原地标注）—— 12 与 23 之间的 11 行都等插件子系统）

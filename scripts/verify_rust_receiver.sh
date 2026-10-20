@@ -5802,6 +5802,85 @@ else
     fi
 fi
 
+echo "== 37: save-launch-param writes the whole file, answers first, and the app comes back =="
+# `_post_save_launch_param` (`protocol.py:2640-2648`): replace the whole settings table
+# from one JSON object, persist, restart, answer `success`. This section asks the three
+# things only a process can: a bad document changes nothing, a good one answers before
+# the process leaves, and the app comes back on the same port reading the new file.
+S37_SDIR=$(mktemp -d /tmp/macast-rust-launch.XXXXXX)
+S37_PORT=$((PORT + 17))
+S37_TOK="0123456789abcdef0123456789abcdef"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Launch", "Api_Token": "%s"}' \
+    "$S37_PORT" "$S37_TOK" > "$S37_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S37_SDIR" MACAST_MPV_SOCKET="$S37_SDIR/mpvsocket" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S37_SDIR/stdout.log" 2>&1 &
+S37_PID=$!
+disown "$S37_PID" 2>/dev/null || true
+S37_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S37_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S37_PID" ]; then
+        S37_READY=1; break
+    fi
+    sleep 0.25
+done
+if [ -z "$S37_READY" ]; then
+    fail "the launch-param instance never became the listener on $S37_PORT"
+    kill -9 "$S37_PID" 2>/dev/null
+    rm -rf "$S37_SDIR"
+else
+    s37_ask() {  # $1 = payload
+        curl -s --max-time 8 -X POST --data-urlencode "save-launch-param=$1" \
+            -d "token=$S37_TOK" "http://127.0.0.1:$S37_PORT/api" 2>/dev/null \
+            | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null
+    }
+    S37_MD5=$(md5 -q "$S37_SDIR/macast_setting.json")
+    [ "$(s37_ask '{not json')" = "1 | json format error" ] \
+        && pass "a document that does not parse answers the reference's sentence" \
+        || fail "bad JSON answered '$(s37_ask '{not json')'"
+    [ "$(s37_ask '[1,2,3]')" = "1 | json format error" ] \
+        && pass "and a non-object is refused with it too (this port checks; the reference crashes on the next read)" \
+        || fail "a non-object answered '$(s37_ask '[1,2,3]')'"
+    [ "$S37_MD5" = "$(md5 -q "$S37_SDIR/macast_setting.json")" ] \
+        && pass "…and neither refusal wrote the file" \
+        || fail "a refused launch param rewrote the settings file"
+    [ "$(lsof -nP -iTCP:"$S37_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S37_PID" ] \
+        && pass "…nor restarted the app" \
+        || fail "a refused launch param restarted the app"
+
+    S37_DOC=$(printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Relaunch", "Api_Token": "%s", "Macast_Protocols": ["DLNA Protocol"]}' "$S37_PORT" "$S37_TOK")
+    [ "$(s37_ask "$S37_DOC")" = "0 | success" ] \
+        && pass "a good document answers before the restart: success" \
+        || fail "a good document answered '$(s37_ask "$S37_DOC")'"
+    S37_NEW=""
+    for _ in $(seq 1 60); do
+        holder=$(lsof -nP -iTCP:"$S37_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)
+        if [ -n "$holder" ] && [ "$holder" != "$S37_PID" ]; then S37_NEW="$holder"; break; fi
+        sleep 0.25
+    done
+    [ -n "$S37_NEW" ] \
+        && pass "the app came back as a new process on the same port (pid $S37_PID -> $S37_NEW)" \
+        || fail "nothing is listening on $S37_PORT 15 s after the restart"
+    if [ -n "$S37_NEW" ]; then
+        kill -0 "$S37_PID" 2>/dev/null \
+            && fail "the old process ($S37_PID) is still alive next to $S37_NEW" \
+            || pass "and the old process is gone"
+        python3 -c "import json;d=json.load(open('$S37_SDIR/macast_setting.json'));print(d.get('DLNA_FriendlyName'))" \
+            | grep -qx 'Macast Rust Relaunch' \
+            && pass "the new file is what the new process reads (friendly name changed)" \
+            || fail "the restarted app reads '$(python3 -c "import json;print(json.load(open('$S37_SDIR/macast_setting.json')).get('DLNA_FriendlyName'))")'"
+        kill -9 "$S37_NEW" 2>/dev/null
+    fi
+    kill -9 "$S37_PID" 2>/dev/null
+    pkill -9 -f "$S37_SDIR" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S37_SDIR"
+    else
+        rm -rf "$S37_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="
