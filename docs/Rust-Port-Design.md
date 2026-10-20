@@ -2085,7 +2085,7 @@ grep -rc '^use log::' macast-core/src macast-mpv/src macast-upnp/src macast-cast
 #   带回族的教训是这条针眼曾经写成带点的 `_googlecast._tcp`，于是满组查询被数成 0（§14.6 ③④）
 grep -c 'host::faces_enabled(' src-tauri/src/main.rs                          # 期望 **2**（每条路径一次：boot 的 `run()` 与开关的 `apply_protocols`；一次读取管三张脸；
 #   写成两处就会被 `every_cast_face_is_behind_the_gate` 的计数断言拒绝，这条 grep 是它在文档里的对应物）
-grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **14**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
+grep -c '"DLNA_FriendlyName":' scripts/verify_rust_receiver.sh                # 期望 **15**（主实例 + §24 门 + §26 AirPlay + §27 历史 +
 #   §28 模块设置 + §29 插件坐标 + §30 字幕与清空 + §31 听见自己 + §32 网卡 + §33 单播 —— 每一个自带实例的
 #   一节都要给自己一个名字，否则它广播的是别人那台的名字，按名字匹配的检查就成了隔壁的证人），且下面这条 **0**：
 grep -c '"FriendlyName":' scripts/verify_rust_receiver.sh                     # 期望 **0**：那是**没有读者拥有的键**
@@ -2120,7 +2120,9 @@ grep -c 'PostRoute { field:' macast-upnp/src/http.rs            # 期望 **16**�
 #   加上"门那一列里 `code-execution` 恰好一行" —— 安全上的区分要能被数出来。
 #   参考实现那张表今天是 **23** 行（2026-10-20 逐行数出来的是 23，`protocol.py:2287-2331`；
 #   `AGENTS.md` §4.7c 原文那句"16 条"是它写下时的数，已在原地标注）—— 12 与 23 之间的 11 行都等插件子系统）
-grep -c 'gate: "code-execution"' macast-upnp/src/http.rs                  # 期望 **1**（表里那一行）
+grep -c 'gate: "code-execution"' macast-upnp/src/http.rs                  # 期望 **2**（`set-module-setting`
+#   与 `save-launch-param`：两件的输入都会改变"什么会被执行"——一个写钩子的键，一个整份替换设置；
+#   测试里那个"恰好两行"的断言在 `the_post_route_table_is_well_formed`）
 grep -c 'const CODE_REFUSAL' macast-upnp/src/http.rs                      # 期望 **1**（拒绝文案只有一个主人，
 #   §4.7c 那条「一条路由不能自己写拒绝文案」在这一行上是它的外部对应物）
 grep -c 'pub fn set_name\|pub fn remove_name' macast-core/src/setting.rs  # 期望 **2**：按名字的写与删，
