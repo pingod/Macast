@@ -966,6 +966,10 @@ impl Discovery {
         if rebound {
             self.rebind_ssdp();
         }
+        // The cached browse socket joined the old card (see `discover_cast`'s cache),
+        // so it is dropped here with the rest of the mDNS state — the reference's
+        // `network_interface_changed` cycles the protocols for the same reason.
+        macast_cast::mdns::forget_browser();
         // The mDNS half, which is the half a phone actually looks for. The reference
         // cycles the protocols for exactly this reason.
         let discovery_log = Logger::named(announce::LOGGER_NAME);

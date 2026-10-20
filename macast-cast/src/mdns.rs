@@ -96,7 +96,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use macast_core::logging::Logger;
@@ -1529,17 +1529,103 @@ impl Wire for Multicast {
 /// so the failure has to be reported and swallowed in the same place.
 pub fn discover_cast(setting: &Arc<Setting>, timeout: Duration) -> Vec<CastDevice> {
     let log = Logger::named(LOGGER_NAME);
-    let wire = match open(setting, &log) {
-        Some(wire) => wire,
-        None => return Vec::new(),
-    };
-    let mut wire = wire;
-    let devices = browse(&mut wire, SERVICE_TYPE, timeout, &log);
+    // One browse socket for the life of this process, not one per search: two searches
+    // a second apart used to open, join, and drop a socket each (measured 2026-10-20 —
+    // §16 第 47 条). `with_browser` also says what the cache costs: a datagram that
+    // arrives between two searches is still queued for the next read, which is the
+    // first half of "absorb what the engine hears" and the reason `browse` must be
+    // ready for a stale answer.
+    let cell = BROWSER.get_or_init(|| Mutex::new(None));
+    let devices = with_browser(
+        cell,
+        || open(setting, &log),
+        |wire| browse(wire, SERVICE_TYPE, timeout, &log),
+        Vec::new(),
+    );
     // `Setting.get_advertisable_ip()` for the Rust core is
     // `net::advertised_hosts` — the same superset, before discovery narrows it
     // to the interface carrying the default route (macast-core's `net.rs:610`).
     let ours = macast_core::net::advertised_hosts(setting);
     drop_ours(&devices, &ours)
+}
+
+/// The process-wide browse socket. Cleared by [`forget_browser`] when the network
+/// interface changes — a cached socket still belongs to the card it joined.
+static BROWSER: OnceLock<Mutex<Option<Multicast>>> = OnceLock::new();
+
+/// Drop the cached browser so the next search opens and joins afresh. Called by the
+/// interface switch (`Discovery::set_interface`), for the same reason the announcement
+/// is rebuilt there: the membership was taken on the old card.
+pub fn forget_browser() {
+    if let Some(cell) = BROWSER.get() {
+        *cell.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+}
+
+/// Run `use_it` over the cached value, opening it through `make` on the first call.
+///
+/// Split out from [`discover_cast`] so the caching rule has a witness that binds no
+/// socket and touches no wire: the test below counts `make` calls.
+fn with_browser<T>(
+    cell: &Mutex<Option<Multicast>>,
+    make: impl FnOnce() -> Option<Multicast>,
+    use_it: impl FnOnce(&mut Multicast) -> T,
+    when_none: T,
+) -> T {
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.is_none() {
+        *guard = make();
+    }
+    match guard.as_mut() {
+        Some(wire) => use_it(wire),
+        None => when_none,
+    }
+}
+
+#[cfg(test)]
+mod browser_cache_tests {
+    use super::*;
+
+    /// Two searches, one socket: the counter is the whole claim. Before this cache the
+    /// second `make` ran too, and nothing noticed — the search result is the same either
+    /// way, which is why this is asked of the opener rather than of the devices.
+    #[test]
+    fn the_browser_is_opened_once_and_reused() {
+        // The crate's rule: every test pins the settings/log directory first, even one
+        // that binds only loopback — the audit cannot know which tests log, and a test
+        // that skipped this would be the exception that turns the rule into decoration.
+        crate::pin_test_dir();
+        let cell: Mutex<Option<Multicast>> = Mutex::new(None);
+        let opens = std::sync::atomic::AtomicUsize::new(0);
+        let make = |opens: &std::sync::atomic::AtomicUsize| {
+            opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(Multicast {
+                sock: UdpSocket::bind("127.0.0.1:0").expect("a loopback socket"),
+                group: "224.0.0.251:5353".parse().expect("group"),
+                peer: "127.0.0.1:0".parse().expect("peer"),
+            })
+        };
+        let first = with_browser(&cell, || make(&opens), |_wire| 1, 0);
+        let second = with_browser(&cell, || make(&opens), |_wire| 2, 0);
+        assert_eq!((first, second), (1, 2), "the cached wire is handed to both calls");
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the opener ran more than once, so a search still pays a bind and a join"
+        );
+        forget_browser_like(&cell);
+        let third = with_browser(&cell, || make(&opens), |_wire| 3, 0);
+        assert_eq!(third, 3);
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "clearing the cache must make the next search open a fresh socket"
+        );
+    }
+
+    fn forget_browser_like(cell: &Mutex<Option<Multicast>>) {
+        *cell.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
 }
 
 /// Build the listening socket: options, bind, join, then hand it to std.

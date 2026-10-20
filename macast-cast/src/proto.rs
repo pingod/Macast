@@ -528,7 +528,9 @@ mod tests {
     /// no behavioural row in this crate can reach without announcing on a real card. **734**
     /// from `e13`, which is the only row that can see the engine's summary echoing the
     /// addresses it was *handed* instead of the sockets it *got*.
-    const TESTS_IN_THIS_CRATE: usize = 734;
+    /// 734 → **735** on 2026-10-20 with the browse-socket cache: its witness counts
+    /// `make` calls rather than sockets, so it binds loopback only (§16 第 47 条).
+    const TESTS_IN_THIS_CRATE: usize = 735;
 
     /// The frames below are `list(...)` output from the reference codec running
     /// in this repository's `.venv`, measured rather than transcribed from the
