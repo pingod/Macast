@@ -821,6 +821,57 @@ impl Discovery {
         faces
     }
 
+    /// `_app_action` (`protocol.py:2404-2414`). `quit` ends **this process**: the
+    /// answer is written first and the exit happens on its own thread, which is the
+    /// reference's shape too (`threading.Thread(... 'MACAST_QUIT').start()` at
+    /// `:2407-2409`) — a synchronous exit would drop the very reply that tells the
+    /// page what happened. The exit hook installed in `run()` does the rest: bye-bye on
+    /// SSDP, goodbye on mDNS, the HTTP face closed, the player stopped.
+    ///
+    /// `check-update` is refused rather than mimed: this build has no version check and
+    /// no updater, and answering 「正在检查更新」 would send the user to watch a
+    /// progress bar that does not exist. Registered as a divergence in
+    /// `docs/Rust-Port-Design.md` §8.
+    pub fn app_action(&self, raw: &str) -> macast_upnp::http::Answer {
+        let action = raw.trim();
+        match action {
+            "quit" => {
+                let parts = match self.faces.lock().unwrap().clone() {
+                    Some(parts) => parts,
+                    None => {
+                        return macast_upnp::http::Answer::fail(
+                            "退出失败：这个 discovery 没有接到应用句柄（boot 负责接上）",
+                        )
+                    }
+                };
+                let log = Arc::clone(&self.app_log);
+                let app = parts.host.app.clone();
+                let spawned = thread::Builder::new()
+                    .name("MACAST_QUIT".to_string())
+                    .spawn(move || {
+                        // Long enough for the reply to leave, short enough that a person
+                        // who pressed the button sees the app close at once.
+                        thread::sleep(std::time::Duration::from_millis(250));
+                        log.info(
+                            "quit requested from the settings page; stopping the receiver \
+                             and the player",
+                        );
+                        app.exit(0);
+                    });
+                if spawned.is_err() {
+                    return macast_upnp::http::Answer::fail(
+                        "退出失败：起不了退出线程，应用还在运行",
+                    );
+                }
+                macast_upnp::http::Answer::ok("Macast 正在退出")
+            }
+            "check-update" => macast_upnp::http::Answer::fail(
+                "这台设备的这个构建没有更新检查：它不联网查版本，也不会自己升级",
+            ),
+            other => macast_upnp::http::Answer::fail(format!("未知应用操作：{}", other)),
+        }
+    }
+
     /// `_toggle_protocol` (`protocol.py:2394-2402`) with the write in
     /// [`host::set_protocol_enabled`]. The direction is the reference's: a title that
     /// is **not** in the enabled list is the one being switched on, compared raw —

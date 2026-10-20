@@ -5645,6 +5645,98 @@ else
     fi
 fi
 
+echo "== 35: the page's quit button ends this process, after answering =="
+# `app-action` is row 8 of the reference's table (`protocol.py:2295`) and `_app_action`
+# (`:2404-2414`) starts a daemon thread for `quit` **before** it answers, so the reply
+# that says 「Macast 正在退出」 is written by a process that is already leaving. This
+# section asks three things only a real process can answer: the reply arrives, the
+# process is gone, and every listener went with it — plus the two verbs that must **not**
+# end anything (an unknown one and `check-update`, which this build refuses instead of
+# miming a progress bar).
+S35_SDIR=$(mktemp -d /tmp/macast-rust-quit.XXXXXX)
+S35_PORT=$((PORT + 15))
+S35_SOCK="$S35_SDIR/mpvsocket"
+S35_TOK="0123456789abcdef0123456789abcdef"
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Quit", "Api_Token": "%s"}' \
+    "$S35_PORT" "$S35_TOK" > "$S35_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S35_SDIR" MACAST_MPV_SOCKET="$S35_SOCK" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S35_SDIR/stdout.log" 2>&1 &
+S35_PID=$!
+disown "$S35_PID" 2>/dev/null || true
+S35_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S35_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S35_PID" ]; then
+        S35_READY=1
+        break
+    fi
+    sleep 0.25
+done
+if [ -z "$S35_READY" ]; then
+    fail "the quit instance never became the listener on $S35_PORT"
+    kill -9 "$S35_PID" 2>/dev/null
+    rm -rf "$S35_SDIR"
+else
+    s35_alive() { kill -0 "$S35_PID" 2>/dev/null; }
+    S35_GHOST=$(curl -s --max-time 5 -X POST -d "app-action=nope&token=$S35_TOK" \
+        "http://127.0.0.1:$S35_PORT/api" 2>/dev/null)
+    S35_GHOST_MSG=$(printf '%s' "$S35_GHOST" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+    [ "$S35_GHOST_MSG" = "1 | 未知应用操作：nope" ] \
+        && pass "an unknown verb answers the reference's sentence: ${S35_GHOST_MSG#*| }" \
+        || fail "an unknown verb answered '$S35_GHOST_MSG'"
+    s35_alive \
+        && pass "…and the app is still running (an unknown verb must not end anything)" \
+        || fail "an unknown verb killed the app"
+    S35_UPD=$(curl -s --max-time 5 -X POST -d "app-action=check-update&token=$S35_TOK" \
+        "http://127.0.0.1:$S35_PORT/api" 2>/dev/null)
+    case "$S35_UPD" in
+        *'"code": 1'*|*'"code":1'*)
+            pass "check-update is refused by this build instead of miming a progress bar" ;;
+        *) fail "check-update answered $S35_UPD" ;;
+    esac
+    s35_alive \
+        && pass "…and it did not end the app either" \
+        || fail "check-update killed the app"
+
+    # ---- quit ---------------------------------------------------------------
+    S35_QUIT=$(curl -s --max-time 8 -X POST -d "app-action=quit&token=$S35_TOK" \
+        "http://127.0.0.1:$S35_PORT/api" 2>/dev/null)
+    S35_QUIT_MSG=$(printf '%s' "$S35_QUIT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("code"),"|",d.get("message"))' 2>/dev/null)
+    [ "$S35_QUIT_MSG" = "0 | Macast 正在退出" ] \
+        && pass "quit answers before leaving: ${S35_QUIT_MSG#*| }" \
+        || fail "quit answered '$S35_QUIT_MSG'"
+    S35_GONE=""
+    for _ in $(seq 1 40); do
+        if ! s35_alive; then S35_GONE=1; break; fi
+        sleep 0.25
+    done
+    [ -n "$S35_GONE" ] \
+        && pass "and the process is gone" \
+        || fail "the process is still alive 10 s after quitting (pid $S35_PID)"
+    sleep 0.5
+    S35_LEFT=""
+    for port in "$S35_PORT" 8009 8008; do
+        holder=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
+        [ -z "$holder" ] || S35_LEFT="$S35_LEFT $port:$holder"
+    done
+    [ -z "$S35_LEFT" ] \
+        && pass "every listener went with it: the application port, 8009 and 8008 are free" \
+        || fail "a listener outlived the process:$S35_LEFT"
+    s35_grep() { grep -ahF "$1" "$S35_SDIR/macast.log" "$S35_SDIR/logs/"*.log 2>/dev/null; }
+    [ -n "$(s35_grep 'quit requested from the settings page')" ] \
+        && pass "the quit was logged before the exit, so the reason is on the record" \
+        || fail "no quit sentence in the instance's logs"
+    grep -aqi "byebye" "$S35_SDIR/macast.log" 2>/dev/null \
+        && pass "SSDP said byebye on the way out (the exit hook ran)" \
+        || fail "no SSDP byebye: the exit hook did not run, so the LAN keeps a dead device for its cache"
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S35_SDIR (macast.log, logs/)"
+    else
+        rm -rf "$S35_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

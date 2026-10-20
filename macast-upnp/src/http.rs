@@ -177,6 +177,8 @@ enum PostAction {
     /// the fresh coordinates in the same reply (`_set_github_mirror`,
     /// `protocol.py:2486-2501`).
     SetGithubMirror,
+    /// `app-action=<verb>` (`_app_action`, `protocol.py:2404-2414`, row **8**).
+    AppAction,
     /// `toggle-protocol=<title>`: switch one protocol on or off (`_toggle_protocol`,
     /// `protocol.py:2394-2402`, row **7** of the reference's table).
     ///
@@ -258,6 +260,10 @@ const POST_MANAGEMENT_ROUTES: &[PostRoute] = &[
     // not ported: this shell has one renderer, and a switch that accepts only the name
     // already in force is the document-only control this port keeps refusing).
     PostRoute { field: "toggle-protocol", gate: "management", action: PostAction::ToggleProtocol },
+    // Row 8 of the reference (`protocol.py:2295`), straight after the switch: `quit`
+    // really ends this process, and the answer is written before the exit so the page
+    // can show it.
+    PostRoute { field: "app-action", gate: "management", action: PostAction::AppAction },
     // `set-subtitle-show` is row 14 of the reference (`protocol.py:2309`), one row ahead
     // of `cast-uri` (row 15). Trivial while both are management-gated, and kept in place
     // for the same reason every row here is ordered: a request carrying both action
@@ -1412,6 +1418,15 @@ pub trait Management: Send + Sync {
     fn set_interface(&self, name: &str) -> Answer;
 
     fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String>;
+
+    /// `app-action=<verb>`: the handful of app-level buttons the page may press
+    /// (`_app_action`, `protocol.py:2404-2414`, row **8** of the reference's table).
+    ///
+    /// The implementer owns the verbs. This crate cannot exit a process, and it must not
+    /// pretend to start a version check it does not have, so both halves are seam work —
+    /// and the answer to an unknown verb is the reference's sentence, which the caller
+    /// renders verbatim.
+    fn app_action(&self, action: &str) -> Answer;
 
     /// Switch one protocol on or off, persist the list, and cycle the faces the
     /// switch names. Reads "is it currently on" from the same table the boot gate
@@ -2700,6 +2715,12 @@ impl Face {
                     &self
                         .management
                         .toggle_protocol(&param_value(req, "toggle-protocol").unwrap_or_default()),
+                ),
+                PostAction::AppAction => answer_response(
+                    200,
+                    &self
+                        .management
+                        .app_action(&param_value(req, "app-action").unwrap_or_default()),
                 ),
             });
         }
@@ -4470,6 +4491,7 @@ mod tests {
         cast_resolved_calls: Mutex<Vec<(String, String, String)>>,
         cookie_state_calls: AtomicUsize,
         protocol_calls: Mutex<Vec<String>>,
+        app_calls: Mutex<Vec<String>>,
         targets_calls: Mutex<Vec<bool>>,
         save_cookies_calls: Mutex<Vec<String>>,
         clear_cookies_calls: AtomicUsize,
@@ -4488,6 +4510,7 @@ mod tests {
                 cast_resolved_calls: Mutex::new(Vec::new()),
                 cookie_state_calls: AtomicUsize::new(0),
                 protocol_calls: Mutex::new(Vec::new()),
+                app_calls: Mutex::new(Vec::new()),
                 targets_calls: Mutex::new(Vec::new()),
                 save_cookies_calls: Mutex::new(Vec::new()),
                 clear_cookies_calls: AtomicUsize::new(0),
@@ -4550,9 +4573,22 @@ mod tests {
         fn protocol_calls(&self) -> Vec<String> {
             self.protocol_calls.lock().expect("protocol calls").clone()
         }
+
+        fn app_calls(&self) -> Vec<String> {
+            self.app_calls.lock().expect("app calls").clone()
+        }
     }
 
     impl Management for FakeManagement {
+        fn app_action(&self, action: &str) -> Answer {
+            self.app_calls.lock().expect("app calls").push(action.to_string());
+            match action.trim() {
+                "quit" => Answer::ok("Macast 正在退出"),
+                "check-update" => Answer::fail("这台设备的这个构建没有更新检查"),
+                other => Answer::fail(format!("未知应用操作：{}", other)),
+            }
+        }
+
         fn toggle_protocol(&self, title: &str) -> Answer {
             self.protocol_calls
                 .lock()
@@ -6238,6 +6274,30 @@ mod tests {
         );
     }
 
+    /// `app-action` hands the verb over **trimmed or not?** — not: the reference's
+    /// handler trims it itself (`str(action or '').strip()` at `protocol.py:2406`), and
+    /// this face must not decide which spellings are verbs. The answer, whatever it is,
+    /// is the shell's.
+    #[test]
+    fn an_app_action_reaches_the_shell_verbatim_and_its_answer_is_passed_through() {
+        crate::pin_test_dir();
+        let (face, management) = harness_management("app-row");
+        let quit = face.answer(&post_form("/api", "app-action=quit", LOCAL, &[]));
+        let doc: serde_json::Value =
+            serde_json::from_slice(&quit.body).expect("the reply is an object");
+        assert_eq!(doc["code"], json!(0), "{doc:?}");
+        assert_eq!(doc["message"], json!("Macast 正在退出"));
+        let ghost = face.answer(&post_form("/api", "app-action=%20nope%20", LOCAL, &[]));
+        let ghost_doc: serde_json::Value =
+            serde_json::from_slice(&ghost.body).expect("the reply is an object");
+        assert_eq!(ghost_doc["code"], json!(1));
+        assert_eq!(
+            management.app_calls(),
+            vec!["quit".to_string(), " nope ".to_string()],
+            "the face trimmed a verb, which only the shell may interpret"
+        );
+    }
+
     #[test]
     fn the_post_route_table_is_well_formed() {
         crate::pin_test_dir();
@@ -6253,7 +6313,7 @@ mod tests {
         // is a count taken from the table, not from a plan — and the reference's own table
         // is **23** rows (`protocol.py:2287-2331`, counted 2026-10-20), so this is a port
         // in progress and the count is the progress.
-        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 13, "the POST table changed size");
+        assert_eq!(POST_MANAGEMENT_ROUTES.len(), 14, "the POST table changed size");
         // …and **which** rows carry which gate, because the security distinction this port
         // keeps making is "can this field make the machine run something". Exactly one
         // row is code-gated today; a second one appearing is fine **only** if this count is

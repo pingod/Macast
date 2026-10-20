@@ -2727,6 +2727,19 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   旋钮"）；"关掉最后一个协议"只有单元见证（活实例读内存里的表，改文件不影响它）；`app-action` 的
   `quit` 可做、`check-update` 没有对应物。**本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
 
+**Rust 侧把退出按钮接进管理面时量到的事**（2026-10-20，`Discovery::app_action` + `macast-upnp` POST 表第 **14** 行 + 真机 §35 的 **9** 条；`macast-upnp` 364 → **365**，整跑 **430 PASS / 0 FAIL / 1 SKIP，退出码 1**）：
+
+* **形状是参考实现的**：`_app_action`（`protocol.py:2404-2414`）**先答复、再退出**，这里起同名
+  `MACAST_QUIT` 线程、250 ms 后 `app.exit(0)`；退出钩子照旧跑 `stop_services`，所以 byebye、
+  goodbye、关面、停播放器都还在。`check-update` 诚实拒绝（本构建没有更新器，答「正在检查更新」
+  是让人去看一个不存在的进度条；§8 记这一行）。
+* **判据里最有用的一条是"端口都空着"**：进程消失之后应用端口、8009、8008 三个都能被别人 bind
+  —— 这把"退出钩子真的跑了"从一句日志变成三个可被第三方占用的口。另外两条：未知动词与
+  `check-update` 都**不动进程**（`kill -0` 对着 pid 问），以及答复先到（curl 拿到了
+  「Macast 正在退出」而进程随后才消失）。
+* 仍然欠着：`set-renderer`（只有一个渲染器）、插件子系统那 10 行、`save-launch-param` 的重启语义。
+  **本分支从未推送 ⇒ 这 365 条与 §35 那 9 条读数没有任何 CI 见证过。**
+
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、
 `RESOLVE_JOBS_MAX = 4`（只数**在跑**的）、`RESOLVE_JOB_TTL = 30 分钟`（从**开始**算，完成的也不例外 ——

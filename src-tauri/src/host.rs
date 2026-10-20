@@ -1564,6 +1564,12 @@ impl macast_upnp::http::Management for ShellManagement {
         self.discovery.toggle_protocol(title)
     }
 
+    /// `quit` needs an `AppHandle`, so this lives in the shell for the same reason the
+    /// switch does: `macast-upnp` cannot end a process (`protocol.py:2404-2414`).
+    fn app_action(&self, action: &str) -> macast_upnp::http::Answer {
+        self.discovery.app_action(action)
+    }
+
     /// `_cast_url` (`macast/protocol.py:1674-1695`).
     ///
     /// The `Err` half is deliberately not the reason: Python catches every
