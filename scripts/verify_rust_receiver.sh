@@ -5502,6 +5502,12 @@ S34_DLOG="$S34_SDIR/logs/Discovery.log"
 S34_TOK="0123456789abcdef0123456789abcdef"
 printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Toggle", "Api_Token": "%s"}' \
     "$S34_PORT" "$S34_TOK" > "$S34_SDIR/macast_setting.json"
+# **This section needs 8009/8008 to itself, and they are fixed ports.** A sender hardcodes
+# them (`dial.py:25-26`), so §24's reasoning applies verbatim: while the main instance holds
+# them, "did the switch close the face" cannot be told apart from "someone else has the
+# port" — measured 2026-10-21, both instances' assertions went red (8 checks) and it read
+# like a broken switch. So the main instance stands down here and comes back after.
+kill -9 "$APP_PID" 2>/dev/null
 env MACAST_SETTING_DIR="$S34_SDIR" MACAST_MPV_SOCKET="$S34_SOCK" \
     MACAST_RESOURCE_DIR="$REPO/macast" \
     perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
@@ -5674,6 +5680,10 @@ else
     fi
 fi
 
+# Put it back, for §24's reason: §35/§36/§37 read `$BASE`, and a section that silently
+# talked to a closed port would report "the quit button did not work".
+start_main
+
 echo "== 35: the page's quit button ends this process, after answering =="
 # `app-action` is row 8 of the reference's table (`protocol.py:2295`) and `_app_action`
 # (`:2404-2414`) starts a daemon thread for `quit` **before** it answers, so the reply
@@ -5744,13 +5754,30 @@ else
         && pass "and the process is gone" \
         || fail "the process is still alive 10 s after quitting (pid $S35_PID)"
     sleep 0.5
+    # **"Went with it" means §35's own listeners, not "the ports are empty".** 8009/8008 are
+    # fixed (senders hardcode them, `dial.py:25-26`), so the main instance legitimately holds
+    # them again by now — an earlier version asserted the ports were free and reported *that*
+    # instance as an orphan (measured 2026-10-21: it named a pid `start_main` had just
+    # spawned, while §35's own process was already gone). The claim that matters is "the
+    # process that quit released what it held", which is a question about a pid.
     S35_LEFT=""
+    S35_OTHER=""
     for port in "$S35_PORT" 8009 8008; do
         holder=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)
-        [ -z "$holder" ] || S35_LEFT="$S35_LEFT $port:$holder"
+        [ -n "$holder" ] || continue
+        if [ "$holder" = "$S35_PID" ]; then
+            S35_LEFT="$S35_LEFT $port:$holder"
+        else
+            S35_OTHER="$S35_OTHER $port:$holder"
+        fi
     done
+    # The suffix is built into a variable first: a `${x:+word}` expansion whose word
+    # contains a quote, a semicolon or another `$` is parsed differently by bash 3.2, and
+    # this machine's /bin/bash is 3.2 — the first version broke the whole file's syntax.
+    S35_SUFFIX=""
+    [ -z "$S35_OTHER" ] || S35_SUFFIX=" plus$S35_OTHER, which belong to another instance"
     [ -z "$S35_LEFT" ] \
-        && pass "every listener went with it: the application port, 8009 and 8008 are free" \
+        && pass "the quitting process released every listener it held — application port, 8009, 8008$S35_SUFFIX" \
         || fail "a listener outlived the process:$S35_LEFT"
     s35_grep() { grep -ahF "$1" "$S35_SDIR/macast.log" "$S35_SDIR/logs/"*.log 2>/dev/null; }
     [ -n "$(s35_grep 'quit requested from the settings page')" ] \
