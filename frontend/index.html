@@ -247,6 +247,12 @@
         <h2 style="margin-top: 24px">高级设置（整份 JSON）</h2>
         <p class="muted">这是管理面同一条 <code>save-launch-param</code>：<strong>整表替换并重启</strong>。
           写坏一个对象就是写坏整份设置，所以先读取、再改、再提交。</p>
+        <p class="muted">四个自动化钩子也在这里：<code>Hook_On_Cast</code> / <code>Hook_On_Pause</code> /
+          <code>Hook_On_Resume</code> / <code>Hook_On_Stop</code>，值是一条 shell 命令。它拿到三个环境变量
+          <code>MACAST_EVENT</code>、<code>MACAST_URL</code>、<code>MACAST_TITLE</code> ——
+          <strong>地址只走环境变量，绝不拼进命令</strong>（拼进去就等于让任何投屏的网页在这台机器上执行命令）。
+          钩子是 spawn 出去的，不等人。写下一个钩子等于装一条会在下次投屏时跑的命令，所以 HTTP 面那一条是
+          <code>GATE_CODE</code>。</p>
         <button id="lp-load">读取当前整份设置</button>
         <textarea id="lp-text" rows="10" placeholder='{"DLNA_FriendlyName": "Macast"}'></textarea>
         <button id="lp-save">整份写入并重启</button>

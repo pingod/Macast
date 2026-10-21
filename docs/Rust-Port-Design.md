@@ -2111,6 +2111,36 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     修法是先把后缀算进一个变量。**这一类只有 `bash -n` 抓得住**，所以脚本改完必须跑它。
     **本分支从未推送 ⇒ 这次读数没有任何 CI 见证过。**
 
+55. **自动化钩子接上了执行侧 —— 这一格原来"门摆好、攻击面没接上"**（2026-10-21，
+    `macast-core/src/hooks.rs`（新，7 条用例）+ `ShellRenderer` 的四个转场 +
+    `cast_uri` 改走渲染器 + 真机 §41；`macast-core` 128 → **135**、`macast-tauri` 33 → **34**）：
+    *port 的是什么*：`macast/plugins/renderer/hooks.py` 的全部行为 —— 四个键、三个环境变量
+    （`MACAST_EVENT` / `MACAST_URL` / `MACAST_TITLE`）、spawn 不等待、stdin/stdout/stderr 全接
+    `/dev/null`。`macast/plugins/renderer/hooks.py` 的那句注释是整条安全论证的一半：
+    **命令来自用户自己的设置文件**（与他们 shell profile 同级信任），所以过 shell 是这个功能的
+    意义本身；而 **URL 来自网络**，所以它只走环境变量、绝不拼进命令串 —— 拼进去就是"任何网页
+    都能在这台机器上执行命令"。真机 §41 用一个含 `$(touch …)` 与反引号的地址投一次，
+    断言**没有被执行**。
+    *一处刻意的偏离*：参考实现用 `Setting.get(prop, '')`，**首次读会创建那个键**，它的注释说那是
+    故意的（菜单栏没法要输入，键出现在 JSON 编辑器里就是发现路径）。本端口用 `peek` 不创建：
+    这里的「高级设置」列的是文件里真有的东西，为一个用户从没碰过的功能凭空造四行空键是噪音。
+    发现路径改由页面那句提示承担（写明四个键名与三个变量）。
+    *接的时候量出一条真缺陷*：`cast_uri` 直接调 `player.set_media_url`，而钩子挂在渲染器上 ——
+    于是**`POST /api?cast-uri=`（以及页面上的「投屏」按钮）这一条路播得起来但一个钩子都不触发**，
+    而同一次投屏走 SOAP 就触发。参考实现第 5 步走的是 `self.renderer`（`protocol.py:1190`），
+    理由正是"渲染器就是钩子的住所"。修法是 `cast_uri` 收一个 `&dyn Renderer` 并用**它**做第 5 步
+    的两次调用（地址与名字）。
+    *这一格最该留下的是"我第一次的判据会放它过去"*：只断言签名里有 renderer 的测试，
+    对"收下句柄然后继续用 `player`"照样绿 —— 所以判据同时问**调用点**（`renderer.set_media_url(…);`
+    与 `renderer.set_media_title(…);` 必须在场，且两条 `player.` 版本必须不在场）。
+    顺带一条流程教训：第一版这个测试被 `edit` 插进了**另一个测试的函数体里**，
+    于是 `cargo test --list` 只有 33 条、跑它是 `0 passed; 33 filtered out`（**一条绿**）——
+    "过滤掉全部"与"通过了"在输出上只差一个数字，所以**加测试之后先数 `--list` 的条数**。
+    *仍然欠着*：`Hook_On_Pause` / `Hook_On_Resume` 在真机上没有单独的见证（它们与 cast/stop 同一条
+    代码路径，单元层各自有），因为 DLNA 的暂停要走 SOAP 控制点；`MACAST_TITLE` 在 `ShellRenderer`
+    里是空串（它没有状态表句柄，参考实现在读不到时也答 `''`）。
+    **本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
+
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：
     *发现方式*：把浏览器探针的假 `window.__TAURI__` 从"我照着 `main.rs` 打字"改成"照着**活实例的

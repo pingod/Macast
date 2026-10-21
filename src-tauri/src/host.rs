@@ -54,7 +54,7 @@ use macast_core::token;
 use macast_mpv::argv;
 use macast_mpv::player::{Host, Player, StateCall};
 use macast_upnp::http::Answer;
-use macast_upnp::store::SharedBroadcast;
+use macast_upnp::store::{SharedBroadcast, SharedRenderer};
 
 /// `DLNAProtocol.SERVICE_STATE_OBSERVED` for the two services this shell can
 /// reach (`macast/protocol.py:33-44`). The connection manager's three are listed
@@ -610,6 +610,42 @@ impl macast_upnp::StateStore for StateTable {
 /// mpv thread.
 pub struct ShellRenderer {
     pub player: Player,
+    /// The settings table the four 自动化钩子 keys live in, and the logger their start
+    /// lines go to. Both are `Option`-free `Arc`s: a renderer whose hooks could not be
+    /// consulted would be a second behaviour, and every caller already has these handles.
+    pub setting: Arc<Setting>,
+    pub hooks_log: Arc<Logger>,
+    /// The url the player was last handed, for the `stop` hook.
+    ///
+    /// The reference keeps the same field for the same reason (`hooks.py:111`'s
+    /// `self._current_url`), and its comment says why it matters: by the time the stop
+    /// hook runs, a new cast may already have replaced the url — so the hook must report
+    /// the one that was **playing**, not whatever is current when the thread starts.
+    pub current_url: Arc<Mutex<String>>,
+}
+
+impl ShellRenderer {
+    /// Fire the hook for one transition, if the user configured one.
+    ///
+    /// `spawn`-and-return: a hook that takes ten seconds must not stall the worker
+    /// answering the phone (`hooks.py`'s own note). The url goes into the **environment**,
+    /// never into the command — that half is `macast_core::hooks`' doc, and it is the
+    /// difference between a feature and a remote shell.
+    fn fire_hook(&self, event: &str, url: &str, title: &str) {
+        macast_core::hooks::run(&self.hooks_log, &self.setting, event, url, title);
+    }
+
+    /// The name the protocol reports for what is playing, or `""`.
+    ///
+    /// The reference reads `protocol.get_state_title()` through a `try/except` that
+    /// answers `''` (`hooks.py:114-118`) — a hook must not fail because the state table
+    /// had not caught up yet.
+    fn hook_title(&self) -> String {
+        // `ShellRenderer` has no handle on the state table; the two callers that need a
+        // title pass the one they already have. Empty is the honest answer here, and it
+        // matches what the reference does when its own read raises.
+        String::new()
+    }
 }
 
 impl macast_upnp::store::Renderer for ShellRenderer {
@@ -628,7 +664,12 @@ impl macast_upnp::store::Renderer for ShellRenderer {
     /// keeps the bare shape. Who had a position and who did not is the wire's
     /// answer, not this type's.
     fn set_media_url(&self, uri: &str, start: Option<&str>) {
+        // Remembered **before** the hand-off, for the `stop` hook: by the time that hook
+        // runs, a new cast may already have replaced the url, and it must report the one
+        // that was playing (`hooks.py:111-120`'s own reason).
+        *lock(&self.current_url) = uri.to_string();
         self.player.set_media_url(uri, start);
+        self.fire_hook("cast", uri, &self.hook_title());
     }
 
     fn set_media_title(&self, title: &str) {
@@ -651,14 +692,23 @@ impl macast_upnp::store::Renderer for ShellRenderer {
 
     fn set_media_pause(&self) {
         self.player.set_media_pause();
+        let url = lock(&self.current_url).clone();
+        self.fire_hook("pause", &url, &self.hook_title());
     }
 
     fn set_media_resume(&self) {
         self.player.set_media_resume();
+        let url = lock(&self.current_url).clone();
+        self.fire_hook("resume", &url, &self.hook_title());
     }
 
     fn set_media_stop(&self) {
         self.player.set_media_stop();
+        // The url read **before** clearing it, and cleared after: a stop that precedes a
+        // new cast must report what was playing, and the next cast sets its own.
+        let url = lock(&self.current_url).clone();
+        self.fire_hook("stop", &url, &self.hook_title());
+        lock(&self.current_url).clear();
     }
 
     /// The window title for an address that arrived with no title. This is the
@@ -688,7 +738,12 @@ impl macast_cast::airplay::RendererCallback for ShellRenderer {
     /// AirPlay's RTSP carries no start position, so `None` — the bare
     /// `loadfile <url> replace` shape, not a seek to zero.
     fn set_media_url(&self, url: &str) {
+        // The same four hooks fire for an AirPlay cast: the reference's renderer is the
+        // one that owns them, and AirPlay calls `self.renderer.…` directly
+        // (`protocol_airplay.py:251-280`), so a cast from an iPhone reaches them too.
+        *lock(&self.current_url) = url.to_string();
         self.player.set_media_url(url, None);
+        self.fire_hook("cast", url, &self.hook_title());
     }
 
     fn set_media_title(&self, title: &str) {
@@ -697,10 +752,15 @@ impl macast_cast::airplay::RendererCallback for ShellRenderer {
 
     fn set_media_pause(&self) {
         self.player.set_media_pause();
+        let url = lock(&self.current_url).clone();
+        self.fire_hook("pause", &url, &self.hook_title());
     }
 
     fn set_media_stop(&self) {
         self.player.set_media_stop();
+        let url = lock(&self.current_url).clone();
+        self.fire_hook("stop", &url, &self.hook_title());
+        lock(&self.current_url).clear();
     }
 
     /// The RTSP layer has already turned the sender's `volume:` body into the
@@ -1045,7 +1105,13 @@ fn transport(table: &StateTable, log: &Logger, state: &str) {
 /// sits at `pause=yes`, `time-pos` 0.0 — measured on this machine (2026-10-07)
 /// through this shell's page, and identical in the Python app. Left as-is on
 /// purpose: this port's contract is the reference's contract, not a better one.
-pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Result<Value, String> {
+pub fn cast_uri(
+    host: &TauriHost,
+    player: &Player,
+    renderer: &dyn macast_upnp::store::Renderer,
+    uri: &str,
+    title: &str,
+) -> Result<Value, String> {
     let given = title.trim().to_string();
     let uri = uri.trim();
     if uri.is_empty() {
@@ -1071,13 +1137,21 @@ pub fn cast_uri(host: &TauriHost, player: &Player, uri: &str, title: &str) -> Re
         .write("CurrentTrackURI", json!(uri), host.log.as_ref(), true);
 
     // 5. `renderer.set_media_url(uri)` then `set_media_title(...)`.
-    player.set_media_url(uri, None);
+    //
+    // **Through the renderer, not the player.** They are not the same call: the renderer
+    // is what fires the 自动化钩子 (`set_media_url` → the `cast` hook), and the reference
+    // routes this step through `self.renderer` for exactly that reason
+    // (`protocol.py:1190`). Handing the player the URL directly here was a real defect
+    // measured on 2026-10-21: a cast from this very route played, and no hook ran —
+    // the one cast path a `curl` or the settings page uses was the only one that skipped
+    // them.
+    renderer.set_media_url(uri, None);
     let name = if given.is_empty() {
         title_for_uri(uri)
     } else {
         given.clone()
     };
-    player.set_media_title(&name);
+    renderer.set_media_title(&name);
 
     // 6. `set_state('CurrentTrackTitle', given or media_resolve.title_for_uri(uri))`
     //    — the same expression, evaluated the same way, for the same reason: the
@@ -1509,6 +1583,11 @@ impl resolve::ResolveOps for PublishingOps {
 pub struct ShellManagement {
     pub host: TauriHost,
     pub player: Player,
+    /// The renderer `cast-uri` hands the address to. It is **not** the same handle as
+    /// `player`: the renderer is where the 自动化钩子 live, and the reference routes this
+    /// step through `self.renderer` (`protocol.py:1190`). Passing the player straight
+    /// through made this the one cast path that fired no hooks (measured 2026-10-21).
+    pub renderer: SharedRenderer,
     /// The store `/relay/<id>/media` is served from, and the same `Arc` the
     /// accept loop holds.
     pub store: Arc<relay::RelayStore>,
@@ -1690,7 +1769,7 @@ impl macast_upnp::http::Management for ShellManagement {
     /// said nothing. Not the name we derived for the player: that would make this
     /// route's answer depend on a fallback the caller never wrote.
     fn cast_url(&self, url: &str, title: Option<&str>) -> Result<Answer, String> {
-        match cast_uri(&self.host, &self.player, url, title.unwrap_or("")) {
+        match cast_uri(&self.host, &self.player, self.renderer.as_ref(), url, title.unwrap_or("")) {
             Ok(sent) => {
                 // `logger.info('cast url from web endpoint: %s', url)`, and only on
                 // this arm — the reference logs the success, not the attempt.
@@ -3630,6 +3709,11 @@ mod tests {
                        // the device dropdown, whose first row is inserted by the backend
                        "state.items", "state.searching", "state.known", "row.kind", "row.id",
                        "row.name", "row.address",
+                       // the 高级设置 hint names the four hook keys, and the page must keep
+                       // saying that the url only ever travels as an environment value —
+                       // that sentence is the difference between a feature and a remote shell.
+                       "Hook_On_Cast", "Hook_On_Pause", "Hook_On_Resume", "Hook_On_Stop",
+                       "MACAST_URL",
                        // the cookie panel's eight keys (`_cookie_state`)
                        "st.jar", "st.cookies", "st.bad", "st.browser", "st.max_bytes",
                        "st.yt_dlp",
@@ -3781,6 +3865,52 @@ mod tests {
                  nobody reads"
             );
         }
+    }
+
+    /// **The four 自动化钩子 fire from the one cast path a `curl` uses, and that path
+    /// goes through the renderer.**
+    ///
+    /// Measured 2026-10-21 as a defect: `cast_uri` called `player.set_media_url` directly,
+    /// so a cast posted to `POST /api?cast-uri=…` (or the page's own 投屏 button) played
+    /// and fired **no hook**, while the same cast arriving over SOAP did. The reference
+    /// routes step 5 through `self.renderer` (`protocol.py:1190`) for exactly this reason —
+    /// the renderer *is* where the hooks live.
+    ///
+    /// Two questions, because the fix has two halves: this file must take a renderer (a
+    /// signature question) and it must call **that** renderer for both the url and the
+    /// name (a call-site question — a version that takes the handle and then still uses
+    /// `player` passes a signature-only test).
+    #[test]
+    fn cast_uri_hands_the_renderer_both_the_url_and_the_name() {
+        pin_test_dir();
+        let source = include_str!("host.rs");
+        let start = source
+            .find("pub fn cast_uri(")
+            .unwrap_or_else(|| panic!("cast_uri is gone"));
+        let end = source[start..]
+            .find("\n}")
+            .map(|n| start + n)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+        assert!(
+            body.contains("renderer: &dyn macast_upnp::store::Renderer"),
+            "cast_uri no longer takes a renderer, so it cannot fire the cast hook"
+        );
+        for call in ["renderer.set_media_url(uri, None);", "renderer.set_media_title(&name);"] {
+            assert!(
+                body.contains(call),
+                "cast_uri does not call {call} — the hooks live behind the renderer, and \
+                 the player is not the renderer"
+            );
+        }
+        assert!(
+            !body.contains("player.set_media_url(uri, None);"),
+            "step 5 went back to the bare player: no hook will fire on this route"
+        );
+        assert!(
+            !body.contains("player.set_media_title(&name);"),
+            "the name is handed to the player directly again, so the renderer never learns it"
+        );
     }
 
     /// **The card's job id must survive the end of polling.**

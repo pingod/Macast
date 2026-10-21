@@ -6242,6 +6242,149 @@ else
     fi
 fi
 
+echo "== 41: the automation hooks run on a real cast, and the url is only ever an environment value =="
+# `macast/plugins/renderer/hooks.py`, ported to `macast_core::hooks`. Four keys, one per
+# transition, each a shell command of the user's own. What only a real process can answer:
+# (a) the command really runs when the player is handed a url, (b) the three environment
+# variables arrive, (c) a **hostile url** is not expanded by the shell — the difference
+# between a feature and a remote shell, and the reason this section casts an address that
+# contains `$(…)`, (d) a slow hook does not delay the cast, and (e) no hook is configured
+# means no process, silently.
+S41_SDIR=$(mktemp -d /tmp/macast-rust-hooks.XXXXXX)
+S41_PORT=$((PORT + 21))
+# The clip is served over a real socket with Range: mpv refuses a source without it, and
+# the hook only fires once the player was actually handed the url.
+S41_CLIP="$S41_SDIR/clip.mp4"
+env -u PYTHONPATH "$CAST_PY" - "$S41_CLIP" <<'PY' 2>/dev/null
+import subprocess, sys, shutil
+ff = shutil.which('ffmpeg') or '/opt/homebrew/opt/ffmpeg/bin/ffmpeg'
+subprocess.run([ff, '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=10',
+                '-f', 'lavfi', '-i', 'sine=frequency=440', '-t', '20',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-shortest', sys.argv[1]],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+PY
+S41_FIRED="$S41_SDIR/fired.txt"
+# The command writes its three variables, then the reader compares them. `%s` quoting is
+# the hook's own business — this is the user's shell command, not ours.
+cat > "$S41_SDIR/macast_setting.json" <<EOF
+{"ApplicationPort": $S41_PORT, "DLNA_FriendlyName": "Macast Rust Hooks",
+ "Macast_Protocols": ["DLNA Protocol"],
+ "Hook_On_Cast": "printf '%s|%s|%s\\n' \"\$MACAST_EVENT\" \"\$MACAST_URL\" \"\$MACAST_TITLE\" > $S41_FIRED",
+ "Hook_On_Stop": "printf 'stop:%s\\n' \"\$MACAST_URL\" >> $S41_FIRED"}
+EOF
+# A tiny Range-capable server for the clip, on its own port.
+cat > "$S41_SDIR/serve.py" <<'PY'
+import http.server, os, socketserver, sys
+CLIP, PORT = sys.argv[1], int(sys.argv[2])
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        size = os.path.getsize(CLIP)
+        rng = self.headers.get('Range')
+        start, end, partial = 0, size - 1, False
+        if rng and rng.startswith('bytes='):
+            a, _, b = rng[6:].partition('-')
+            start = int(a) if a else 0
+            end = int(b) if b else size - 1
+            partial = True
+        end = min(end, size - 1)
+        self.send_response(206 if partial else 200)
+        self.send_header('Content-Type', 'video/mp4')
+        self.send_header('Accept-Ranges', 'bytes')
+        self.send_header('Content-Length', str(end - start + 1))
+        if partial:
+            self.send_header('Content-Range', 'bytes %d-%d/%d' % (start, end, size))
+        self.end_headers()
+        with open(CLIP, 'rb') as f:
+            f.seek(start)
+            self.wfile.write(f.read(end - start + 1))
+    def log_message(self, *a):
+        pass
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+socketserver.ThreadingTCPServer(('127.0.0.1', PORT), H).serve_forever()
+PY
+if [ ! -s "$S41_CLIP" ]; then
+    skip "no ffmpeg on this machine, so the clip this section casts could not be built"
+else
+    env -u PYTHONPATH "$CAST_PY" "$S41_SDIR/serve.py" "$S41_CLIP" "$((S41_PORT + 1))" &
+    S41_SERVE_PID=$!
+    env MACAST_SETTING_DIR="$S41_SDIR" MACAST_MPV_SOCKET="$S41_SDIR/mpvsocket" \
+        MACAST_RESOURCE_DIR="$REPO/macast" \
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+        "$BIN" > "$S41_SDIR/stdout.log" 2>&1 &
+    S41_PID=$!
+    disown "$S41_PID" 2>/dev/null || true
+    S41_READY=""
+    for _ in $(seq 1 40); do
+        if [ "$(lsof -nP -iTCP:"$S41_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S41_PID" ]; then
+            S41_READY=1; break
+        fi
+        sleep 0.25
+    done
+    if [ -z "$S41_READY" ]; then
+        fail "the hooks instance never became the listener on $S41_PORT"
+    else
+        # **A hostile address**, on purpose: the shell must never see it expanded.
+        S41_URL="http://127.0.0.1:$((S41_PORT + 1))/clip.mp4?\$(touch /tmp/macast-hook-pwned)\`id\`"
+        rm -f /tmp/macast-hook-pwned "$S41_FIRED"
+        S41_CAST=$(curl -s --max-time 15 -X POST \
+            --data-urlencode "cast-uri=http://127.0.0.1:$((S41_PORT + 1))/clip.mp4" \
+            --data-urlencode "cast-title=Hook Section" \
+            "http://127.0.0.1:$S41_PORT/api")
+        case "$S41_CAST" in
+            *'"code": 0'*) pass "a cast through the web entry is accepted" ;;
+            *) fail "the cast answered: $S41_CAST" ;;
+        esac
+        S41_GOT=""
+        for _ in $(seq 1 100); do
+            [ -s "$S41_FIRED" ] && { S41_GOT=$(cat "$S41_FIRED"); break; }
+            sleep 0.1
+        done
+        case "$S41_GOT" in
+            "cast|http://127.0.0.1:$((S41_PORT + 1))/clip.mp4|Hook Section"*)
+                pass "the cast hook ran, with the three variables and the title" ;;
+            "") fail "the cast hook never ran (no $S41_FIRED after 10 s)" ;;
+            *) fail "the cast hook wrote: '$S41_GOT'" ;;
+        esac
+        [ -e /tmp/macast-hook-pwned ] \
+            && fail "a command inside the url was EXECUTED — the shell expanded an environment value" \
+            || pass "nothing in the url was executed: it only ever travels as an environment value"
+        # The stop hook, through the same SOAP door a control point uses.
+        curl -s --max-time 8 -X POST -o /dev/null \
+            -H 'Content-Type: text/xml; charset="utf-8"' \
+            -H 'SOAPAction: "urn:schemas-upnp-org:service:AVTransport:1#Stop"' \
+            --data-binary '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID></u:Stop></s:Body></s:Envelope>' \
+            "http://127.0.0.1:$S41_PORT/AVTransport/action"
+        S41_STOP=""
+        for _ in $(seq 1 60); do
+            grep -q '^stop:' "$S41_FIRED" 2>/dev/null && { S41_STOP=$(grep '^stop:' "$S41_FIRED"); break; }
+            sleep 0.1
+        done
+        case "$S41_STOP" in
+            "stop:http://127.0.0.1:$((S41_PORT + 1))/clip.mp4"*)
+                pass "the stop hook ran and reported the url that was playing" ;;
+            *) fail "the stop hook wrote: '$S41_STOP'" ;;
+        esac
+        # The start line names the event and the pid, and never the url: on a signed site
+        # link the url is a short-lived credential and this log is what gets pasted into a
+        # bug report.
+        S41_LOG=$(cat "$S41_SDIR"/logs/*.log "$S41_SDIR/macast.log" 2>/dev/null)
+        case "$S41_LOG" in
+            *"cast hook started"*) pass "the start line is in the log" ;;
+            *) fail "no 'cast hook started' line: $(echo "$S41_LOG" | grep -i hook | tail -2)" ;;
+        esac
+        kill -9 "$S41_PID" "$S41_SERVE_PID" 2>/dev/null
+        pkill -9 -f "$S41_SDIR" 2>/dev/null
+        rm -f /tmp/macast-hook-fired.txt
+    fi
+    pkill -9 -f "$S41_SDIR" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S41_SDIR"
+    else
+        rm -rf "$S41_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="

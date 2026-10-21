@@ -11,6 +11,7 @@
 //! asked with a unit test instead of a reproduction.
 
 pub mod env;
+pub mod hooks;
 pub mod logging;
 pub mod module_settings;
 pub mod net;

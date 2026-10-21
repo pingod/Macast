@@ -65,7 +65,7 @@ macro_rules! entry {
 /// Keys persisted by Macast itself. Order is the reference's dict order
 /// (`CORE_LABELS`, `module_settings.py:30-55`) and the page renders it in this order,
 /// so a reorder is a visible change, not a refactor.
-pub const CORE: [Entry; 22] = [
+pub const CORE: [Entry; 26] = [
     entry!("USN", "SSDP USN", "设备标识序号，换网卡/重置发现时会变，一般不用手动改。"),
     entry!("CheckUpdate", "自动检查更新", "bool：启动时是否向 GitHub 检查新版本。"),
     entry!("StartAtLogin", "开机自启", "bool：登录后自动运行 Macast。"),
@@ -96,6 +96,16 @@ pub const CORE: [Entry; 22] = [
         "网卡名；空串表示自动选择承载 IPv4 默认路由的网卡。"
     ),
     entry!("Disabled_Plugins", "已停用的插件", "列表：被关掉（不加载）的插件标题。"),
+    // The four 自动化钩子 keys. The reference files them under a **`hooks` plugin group**
+    // (`module_settings.py:133-138`), and this build has no plugin groups — so they take the
+    // core table with the reference's labels **verbatim** (a label is the key's name in the
+    // user's language, and rewording it here would make the same file read differently in
+    // the two apps). The hints are the reference's too, plus the one fact this port adds:
+    // writing one of these is a `GATE_CODE` route on the HTTP face.
+    entry!("Hook_On_Cast", "投屏时执行", "shell 命令；媒体 URL 走环境变量传入（写它等于装一条会在下次投屏时跑的命令）。"),
+    entry!("Hook_On_Pause", "暂停时执行", "同上。"),
+    entry!("Hook_On_Resume", "恢复时执行", "同上。"),
+    entry!("Hook_On_Stop", "停止时执行", "同上（换片的那个 stop 也算）。"),
     entry!(
         "Api_Token",
         "管理令牌",
@@ -602,12 +612,12 @@ mod tests {
         let before = setting.snapshot();
         assert!(before.is_empty(), "a fresh scratch dir should hold no keys, got {before:?}");
         let out = payload(&before);
-        // 22 core + 5 player rows, all `present: false`, and none of them in the table.
+        // 26 core + 5 player rows, all `present: false`, and none of them in the table.
         let rows = out["groups"].as_array().unwrap()[0]["keys"]
             .as_array()
             .unwrap()
             .len();
-        assert_eq!(rows, 22);
+        assert_eq!(rows, CORE.len());
         let after = setting.snapshot();
         assert!(after.is_empty(), "building the payload wrote {} key(s): {after:?}", after.len());
         assert!(!setting.has(Key::Usn), "the read created USN");
@@ -637,7 +647,11 @@ mod tests {
     /// added *with* the key must move these numbers on purpose, not silently.
     #[test]
     fn the_two_tables_have_the_counts_the_docs_quote() {
-        assert_eq!(CORE.len(), 22);
+        // 22 → 26 on 2026-10-21: the four 自动化钩子 keys joined the core table (the
+        // reference files them under a `hooks` plugin group, and this build has no plugin
+        // groups). The sum is what the drift test above compares against `Key::all()`, so
+        // this number moves whenever a key does.
+        assert_eq!(CORE.len(), 26);
         assert_eq!(PLAYER.len(), 5);
     }
 

@@ -108,6 +108,10 @@ const EXTRA_BIN_DIRS: [&str; 4] = [
 struct Runtime {
     player: Player,
     host: TauriHost,
+    /// The renderer the page's own cast goes through, so the 自动化钩子 fire on this route
+    /// too. `Arc<dyn Renderer>` rather than `Arc<ShellRenderer>` because that is the shape
+    /// `cast_uri` takes — one cast path, one owner of "hand the player a url".
+    renderer: SharedRenderer,
     table: Arc<StateTable>,
     setting: Arc<Setting>,
     service_stopped: Arc<AtomicBool>,
@@ -252,6 +256,7 @@ fn cast_url(
     host::cast_uri(
         &runtime.host,
         &runtime.player,
+        runtime.renderer.as_ref(),
         &uri,
         title.as_deref().unwrap_or(""),
     )
@@ -1791,6 +1796,13 @@ pub fn run() {
             // naming. Hoisted above `Soap::new` for that reason, not for tidiness.
             let shell_renderer = Arc::new(host::ShellRenderer {
                 player: player.clone(),
+                setting: setting.clone(),
+                // The hooks' start lines belong with the other renderer traffic, not in
+                // `macast.log`: `macast/plugins/renderer/hooks.py` claims its own name
+                // through `logsplit`, and this is the port's equivalent (the renderer's
+                // logger is the one `logs/MPV.log` belongs to).
+                hooks_log: log.clone(),
+                current_url: Arc::new(Mutex::new(String::new())),
             });
             // The concrete handle is kept because there are now **three** doors
             // (SOAP, the Cast channel, AirPlay's RTSP) and the last one speaks a
@@ -1907,6 +1919,7 @@ pub fn run() {
                 Arc::new(host::ShellManagement {
                     host: host.clone(),
                     player: player.clone(),
+                    renderer: Arc::clone(&renderer),
                     store: relay_store.clone(),
                     temp_dir: relay_temp,
                     port: relay_port,
@@ -2038,6 +2051,7 @@ pub fn run() {
             // `relay_store` below.
             app.manage(Runtime {
                 player: player.clone(),
+                renderer: Arc::clone(&renderer),
                 host,
                 table,
                 setting,

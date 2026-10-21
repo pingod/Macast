@@ -57,6 +57,16 @@ pub enum Key {
     MacastProtocols,
     NetworkInterface,
     DisabledPlugins,
+    // The four keys the 自动化钩子 renderer owns (`macast/plugins/renderer/hooks.py`).
+    // They live here for the same reason `Timeout` does: this file is one table with one
+    // writer, and a key declared on the far side of a crate boundary would be a second
+    // source of truth for the same JSON name. Their **values are shell commands**, which
+    // is why writing one of them is a `GATE_CODE` route on the HTTP face (AGENTS.md
+    // §4.7b): a request that stores a hook is a request that installs something that runs.
+    HookOnCast,
+    HookOnPause,
+    HookOnResume,
+    HookOnStop,
     ApiToken,
     GithubCnMirror,
     ResolveCookieBrowser,
@@ -104,6 +114,10 @@ impl Key {
             Key::MacastProtocols => "Macast_Protocols",
             Key::NetworkInterface => "Network_Interface",
             Key::DisabledPlugins => "Disabled_Plugins",
+            Key::HookOnCast => "Hook_On_Cast",
+            Key::HookOnPause => "Hook_On_Pause",
+            Key::HookOnResume => "Hook_On_Resume",
+            Key::HookOnStop => "Hook_On_Stop",
             Key::ApiToken => "Api_Token",
             Key::GithubCnMirror => "Github_CN_Mirror",
             Key::ResolveCookieBrowser => "Resolve_Cookie_Browser",
@@ -122,7 +136,7 @@ impl Key {
     }
 
     /// Every key, in declaration order.
-    pub fn all() -> [Key; 27] {
+    pub fn all() -> [Key; 31] {
         [
             Key::Usn,
             Key::CheckUpdate,
@@ -142,6 +156,10 @@ impl Key {
             Key::MacastProtocols,
             Key::NetworkInterface,
             Key::DisabledPlugins,
+            Key::HookOnCast,
+            Key::HookOnPause,
+            Key::HookOnResume,
+            Key::HookOnStop,
             Key::ApiToken,
             Key::GithubCnMirror,
             Key::ResolveCookieBrowser,
@@ -684,6 +702,17 @@ mod tests {
                 "Macast_Protocols",
                 "Network_Interface",
                 "Disabled_Plugins",
+                // The four 自动化钩子 keys. They are **not** in the Python core's enum:
+                // `hooks.py` declares its own, and `Setting.get` keys the shared dict on
+                // `property.name` (`macast/utils.py:522`), so these land in the file under
+                // their bare names. They are in this list because this table is the port's
+                // single writer, and the assertion below compares *the file's* names — the
+                // compatibility claim is about what a 0.25 Python install wrote, and a hook
+                // it wrote has to survive a round trip through this build.
+                "Hook_On_Cast",
+                "Hook_On_Pause",
+                "Hook_On_Resume",
+                "Hook_On_Stop",
                 "Api_Token",
                 "Github_CN_Mirror",
                 "Resolve_Cookie_Browser",
