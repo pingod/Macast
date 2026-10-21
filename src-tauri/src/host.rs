@@ -3583,7 +3583,14 @@ mod tests {
 
         // The four new commands must be reachable from the page at all: a card with no
         // `invoke` is the "document-only knob" shape this port keeps refusing.
-        for command in ["resolve_page", "resolve_status", "cast_resolved", "cast_targets"] {
+        // The commands behind the cookie panel, the player card and the 高级设置 editor.
+        // Each one is a seam method with no other caller in this process, so "the page
+        // never calls it" would mean the panel is a picture of a feature rather than a
+        // door — the shape this port keeps refusing.
+        for command in ["resolve_page", "resolve_status", "cast_resolved", "cast_targets",
+                        "resolve_cookies", "save_cookies", "clear_cookies",
+                        "set_cookie_browser", "set_subtitle_show", "set_renderer",
+                        "launch_param", "save_launch_param"] {
             assert!(
                 page.contains(&format!("invoke('{command}'")),
                 "the page never calls {command} — the card is a picture of a feature"
@@ -3606,11 +3613,74 @@ mod tests {
                        "c.merged", "c.last_resort", "c.relay",
                        // the device dropdown, whose first row is inserted by the backend
                        "state.items", "state.searching", "state.known", "row.kind", "row.id",
-                       "row.name", "row.address"] {
+                       "row.name", "row.address",
+                       // the cookie panel's eight keys (`_cookie_state`)
+                       "st.jar", "st.cookies", "st.bad", "st.browser", "st.max_bytes",
+                       "st.yt_dlp",
+                       // the resolve card's two explanations: the engine's own sentence and
+                       // which cookie source failed. Both are read by `renderResolveNote`.
+                       "st.engine_note", "st.cookie_problem"] {
             assert!(
                 page.contains(needle),
                 "the page no longer reads {needle} — either the renderer is gone (see the id \
                  test) or this assertion has gone stale"
+            );
+        }
+    }
+
+    /// **Each of the four cookie-problem families gets its own next step, and the page
+    /// knows exactly those four.**
+    ///
+    /// AGENTS.md §4.14's rule, applied to the window: `locked` / `not_found` / `decrypt` /
+    /// `bad_profile` are four different things to do (quit the browser / point at the right
+    /// directory / unlock the keyring / drop the colon half), and a card that said one
+    /// generic sentence would send three quarters of its readers to fix something that is
+    /// not broken. The vocabulary has one owner — `macast_cast::resolve::COOKIE_PROBLEMS` —
+    /// and this test is what keeps the page from inventing a fifth or dropping one.
+    #[test]
+    fn the_page_speaks_each_cookie_problem_with_its_own_next_step() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        for problem in macast_cast::resolve::COOKIE_PROBLEMS {
+            assert!(
+                page.contains(&format!("{problem}: ")) || page.contains(&format!("{problem}: '")),
+                "the page has no next step for the cookie problem {problem:?} — all four of \
+                 {:?} must be answered separately",
+                macast_cast::resolve::COOKIE_PROBLEMS
+            );
+        }
+        // And no fifth branch: a key in the page's map that the back end can never return
+        // is a sentence nobody will ever read, which is how this table starts rotting.
+        // Scanned as "an identifier followed by a colon, at the map's own indent", which is
+        // why the found set is asserted non-empty first — a scan that finds nothing agrees
+        // with every claim made about it.
+        let start = page
+            .find("const COOKIE_NEXT_STEP = {")
+            .unwrap_or_else(|| panic!("the page has no COOKIE_NEXT_STEP table"));
+        let end = page[start..]
+            .find("\n      };")
+            .map(|n| start + n)
+            .unwrap_or(page.len());
+        let table = &page[start..end];
+        let mut seen: Vec<&str> = Vec::new();
+        for line in table.lines() {
+            let line = line.trim_start();
+            let Some(colon) = line.find(':') else { continue };
+            let name = &line[..colon];
+            if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                seen.push(name);
+            }
+        }
+        assert!(
+            seen.len() >= 4,
+            "only {} branch name(s) were read out of the page's table — the scan is broken: {seen:?}",
+            seen.len()
+        );
+        for key in &seen {
+            assert!(
+                macast_cast::resolve::COOKIE_PROBLEMS.contains(key),
+                "the page carries a branch ({key}) the back end can never return — a sentence \
+                 nobody reads"
             );
         }
     }

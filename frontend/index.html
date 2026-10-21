@@ -199,12 +199,58 @@
         <button id="resolve-go">解析</button>
         <button id="resolve-stop">停止轮询</button>
         <p class="muted" id="resolve-meta">（还没解析过）</p>
+        <div id="resolve-note"></div>
         <div id="resolve-rows"></div>
 
         <label for="cast-target">投给</label>
         <select id="cast-target"></select>
         <button id="targets-refresh">重新搜索设备</button>
         <p class="muted" id="targets-note">第一行永远是本机：它交给我们自己那个渲染器，不经过插件。</p>
+      </section>
+
+      <section class="card">
+        <h2>网页登录态（cookie）</h2>
+        <p class="muted">需要登录才解得出的站点，两条路都要给它凭据：<strong>粘贴一份 Netscape 格式的
+          jar</strong>（浏览器扩展导出的那种，行首 <code>#HttpOnly_</code> 照收），
+          或者<strong>允许从本机某个浏览器读</strong>。两条都不做登录 —— Macast 不代你登录。
+          页面与日志<strong>只报条数，永不回显 cookie 值</strong>。</p>
+        <dl>
+          <dt>文件</dt><dd id="ck-jar">加载中…</dd>
+          <dt>浏览器</dt><dd id="ck-browser">—</dd>
+          <dt>上限</dt><dd id="ck-max">—</dd>
+          <dt>解析引擎</dt><dd id="ck-engine">—</dd>
+        </dl>
+        <label for="ck-text">粘贴 jar 内容（提交前会先校验，空/坏 jar 引擎根本不报错）</label>
+        <textarea id="ck-text" rows="6" placeholder="# Netscape HTTP Cookie File&#10;.example.com	TRUE	/	FALSE	0	name	value"></textarea>
+        <button id="ck-save">保存这份 jar</button>
+        <button id="ck-clear">清除已保存的 jar</button>
+        <div class="row">
+          <div>
+            <label for="ck-browser-in">从浏览器读取（留空＝关）</label>
+            <input id="ck-browser-in" placeholder="vivaldi:C:\Users\me\AppData\…" />
+          </div>
+        </div>
+        <p class="muted">这一栏读的是引擎自己的语法：<code>名字[:资料目录]</code>。<code>+钥匙串</code> 与
+          <code>::容器</code> 我们都不收 —— 那两样是我们从不替你挑的东西。</p>
+        <button id="ck-browser-set">设为这一栏</button>
+        <button id="ck-browser-off">改成不从浏览器读</button>
+      </section>
+
+      <section class="card">
+        <h2>播放器与高级设置</h2>
+        <div class="row">
+          <div><label>字幕</label><button id="sub-show">显示字幕</button><button id="sub-hide">隐藏字幕</button></div>
+          <div><label>渲染器（本构建只有一个）</label><button id="renderer-set">切换为 MPV</button></div>
+        </div>
+        <p class="muted">字幕的显隐不写状态表：<code>DisplayCurrentSubtitle</code> 是<strong>播放器回报</strong>的，
+          所以空闲播放器上按了也不会变 —— 那是参考实现的行为。</p>
+        <h2 style="margin-top: 24px">高级设置（整份 JSON）</h2>
+        <p class="muted">这是管理面同一条 <code>save-launch-param</code>：<strong>整表替换并重启</strong>。
+          写坏一个对象就是写坏整份设置，所以先读取、再改、再提交。</p>
+        <button id="lp-load">读取当前整份设置</button>
+        <textarea id="lp-text" rows="10" placeholder='{"DLNA_FriendlyName": "Macast"}'></textarea>
+        <button id="lp-save">整份写入并重启</button>
+        <p class="muted" id="lp-note">（还没读过）</p>
       </section>
 
       <section class="card">
@@ -739,6 +785,117 @@
       // 重绘由 `renderLogModules` 自己的签名门挡住，长度没变就不会碰选择器。
       services().catch((e) => note('读取服务状态失败：' + e));
       subscribers().catch((e) => note('读取订阅客户端失败：' + e));
+      // —— 网页登录态（cookie） ——
+      // 文档形状照 `_cookie_state`（`macast/protocol.py:2794-2818`）：八个键，
+      // **只报条数不报值**。页面这一格唯一的判断是"文件在不在"，其余都念后端原话。
+      async function loadCookies() {
+        let doc;
+        try {
+          doc = await invoke('resolve_cookies');
+        } catch (e) {
+          out('ck-jar', `读不到：${e}`);
+          return;
+        }
+        const st = (doc && doc.state) || {};
+        // `jar` 是"磁盘上有没有这份文件"，`cookies` 是"里面有几条能读懂的"。两个都要说：
+        // 只报后者时，一份存过但读不懂的 jar 与"从没存过"长得一模一样。
+        out('ck-jar', st.jar
+          ? `已保存 · ${st.cookies} 条能读懂的${st.bad ? ` · 另有 ${st.bad} 行看不懂（一并存了）` : ''}`
+          : '未保存（解析会匿名进行，需要登录的站点会少给地址）');
+        out('ck-browser', st.browser ? `${st.browser}（文件优先于浏览器）` : '关（不从浏览器读取）');
+        out('ck-max', `${fmtBytes(st.max_bytes)} · 超过就在粘贴那一刻拒绝`);
+        out('ck-engine', st.yt_dlp ? '本机有 yt-dlp' : '本机没有 yt-dlp —— 只会抓页面里写明的地址');
+        const box = document.querySelector('#ck-browser-in');
+        if (!box.dataset.touched && st.browser) box.value = st.browser;
+      }
+      document.querySelector('#ck-browser-in').addEventListener('input', (e) => {
+        e.target.dataset.touched = '1';
+      });
+      document.querySelector('#ck-save').addEventListener('click', async () => {
+        const text = document.querySelector('#ck-text').value;
+        if (!text.trim()) { note('cookie：文本框是空的，后端不会动'); return; }
+        let answer;
+        try {
+          answer = await invoke('save_cookies', { text });
+        } catch (e) {
+          note(`保存 cookie 失败：${e}`);
+          return;
+        }
+        // 成功时才带 counts；失败文档**没有** counts（参考实现的形状），所以这里不读它们。
+        note(`cookie → code ${answer.code}: ${answer.message}`);
+        if (answer.code === 0) document.querySelector('#ck-text').value = '';
+        await loadCookies();
+      });
+      document.querySelector('#ck-clear').addEventListener('click', async () => {
+        const answer = await invoke('clear_cookies');
+        note(`清除 cookie → code ${answer.code}: ${answer.message}`);
+        await loadCookies();
+      });
+      document.querySelector('#ck-browser-set').addEventListener('click', async () => {
+        const text = document.querySelector('#ck-browser-in').value;
+        const answer = await invoke('set_cookie_browser', { text });
+        note(`从浏览器读 cookie → code ${answer.code}: ${answer.message}`);
+        document.querySelector('#ck-browser-in').dataset.touched = '';
+        await loadCookies();
+      });
+      document.querySelector('#ck-browser-off').addEventListener('click', async () => {
+        // "关" 是那六个词之一，而它**删键**而不是存 false（§4.2）。
+        const answer = await invoke('set_cookie_browser', { text: 'off' });
+        note(`从浏览器读 cookie → code ${answer.code}: ${answer.message}`);
+        document.querySelector('#ck-browser-in').value = '';
+        await loadCookies();
+      });
+
+      // —— 播放器与高级设置 ——
+      // `set-subtitle-show` 的**值**走四词规则且**不 strip**：`" on "` 是"隐藏"。
+      // 这里两个按钮各自发 `1` / `0`，所以没有那个歧义；把它写在这里是因为下一个人
+      // 不该以为可以传 `on`（那也是"真"，但 `" on "` 不是）。
+      for (const [id, value] of [['#sub-show', '1'], ['#sub-hide', '0']]) {
+        document.querySelector(id).addEventListener('click', async () => {
+          const answer = await invoke('set_subtitle_show', { value });
+          note(`字幕 ${value} → code ${answer.code}: ${answer.message}`
+            + '（空闲播放器上不会变，那一格是播放器回报的）');
+        });
+      }
+      document.querySelector('#renderer-set').addEventListener('click', async () => {
+        const answer = await invoke('set_renderer', { title: 'MPV' });
+        note(`渲染器 → code ${answer.code}: ${answer.message}`);
+      });
+
+      // 高级设置：整表替换 + 重启。**先读**再改，是这个面板存在的理由 —— 一份看不见
+      // 的 JSON 编辑器让用户凭记忆重建 36 个键。
+      document.querySelector('#lp-load').addEventListener('click', async () => {
+        let doc;
+        try {
+          doc = await invoke('launch_param');
+        } catch (e) {
+          out('lp-note', `读不到：${e}`);
+          return;
+        }
+        // `launch-param` 交回的是**设置表本身**（没有 code/message），所以这里直接序列化。
+        document.querySelector('#lp-text').value = JSON.stringify(doc, null, 4);
+        const keys = Object.keys(doc || {}).length;
+        out('lp-note', `已读入 ${keys} 个键。改完提交会**整表替换并重启** —— 少写的键就是没有了。`);
+      });
+      document.querySelector('#lp-save').addEventListener('click', async () => {
+        const text = document.querySelector('#lp-text').value;
+        if (!text.trim()) { note('高级设置：文本框是空的，后端不会动'); return; }
+        // 页面这边**只挡空**，JSON 合不合法由后端判（`json format error` 是参考实现的原话）。
+        // 在页面再写一份 JSON 校验等于造第二个会漂移的真值点。
+        let answer;
+        try {
+          answer = await invoke('save_launch_param', { value: text });
+        } catch (e) {
+          note(`写入失败：${e}`);
+          return;
+        }
+        out('lp-note', `code ${answer.code} · ${answer.message}`
+          + (answer.code === 0 ? ' · 进程正在重启，这一页会跟着回来' : ''));
+        note(`高级设置 → code ${answer.code}: ${answer.message}`);
+      });
+
+      loadCookies().catch(() => {});
+
       // —— 网页地址投屏 ——
       // 形状照 `ResolveJob.status()` 那十七个键（`macast-cast/src/resolve.rs`），
       // 候选行照 `describe()`。**两处都不在这里另算**：进度用后端交回的 `step_label`，
@@ -759,6 +916,50 @@
 
       function stopResolvePolling() {
         if (resolveTimer) { clearTimeout(resolveTimer); resolveTimer = null; }
+      }
+
+      // `cookie_problem` 的四个族各自给一句**自己的下一步**（AGENTS.md §4.14：四种"点的是本机
+      // 这一侧"的失败必须分别给出该去哪个目录、要不要退出浏览器、钥匙串、把冒号后面去掉）。
+      // 判定住在后端（`resolve::cookie_source_problem`），页面只照着它的值说话 —— 页面另写一份
+      // 分类就是第二个会漂移的真值点，而这里漂移的代价是把人送去修一件没坏的东西。
+      const COOKIE_NEXT_STEP = {
+        not_found: '这句点的是本机这一侧，不是站点要不要登录：我们按那个目录去找 cookie 库，'
+          + '里面没有 Cookies 文件。在下面那块「网页登录态」写成「名字:资料目录」'
+          + '（指到那个浏览器真正存 cookie 的目录），或者改用粘贴导出的 cookie 文件。',
+        locked: '这句点的是本机这一侧：那个浏览器正开着，cookie 库被它锁住了，我们复制不出来。'
+          + '完全退出那个浏览器（不是关掉窗口）再解析一次，或者改用粘贴导出的 cookie 文件。',
+        decrypt: '这句点的是本机这一侧：cookie 库读到了，但解密它的钥匙不在手边'
+          + '（钥匙串／密钥环没解锁）。解锁它再解析一次；或者改用粘贴导出的 cookie 文件 —— '
+          + '那条路不需要这把钥匙。',
+        bad_profile: '这句点的是本机这一侧：那个浏览器不接受「:资料目录」这一半写法。'
+          + '把上面那一栏改成只写浏览器名字，冒号后面那半截去掉。',
+      };
+
+      function renderResolveNote(st) {
+        const box = document.querySelector('#resolve-note');
+        box.textContent = '';
+        const add = (text, cls) => {
+          const p = document.createElement('p');
+          p.className = cls || 'muted';
+          p.textContent = text;
+          box.appendChild(p);
+        };
+        // 引擎自己的原话先出来：这一格存在的理由就是"这句话是别人说的"。
+        if (st.engine_note && !st.from_ytdlp) {
+          add(`yt-dlp 这一路说：${st.engine_note}`);
+        }
+        if (st.cookie_problem) {
+          add(`—— ${COOKIE_NEXT_STEP[st.cookie_problem] || st.cookie_problem}`);
+        } else if (st.needs_cookies) {
+          // 只有"不是我们这一侧的问题"时才说这句：`needs_cookies` 在 `status()` 里已经
+          // 取过一次反（`needs_cookies(note) and not cookie_source_problem(note)`），
+          // 所以这里不需要再判一次 —— 两个主人判同一件事就会给出两个答案。
+          add('—— 这通常是站点要会话 cookie，用下面那块「网页登录态」解决。');
+        }
+        if (st.hidden_silent) {
+          add(`另外 ${st.hidden_silent} 条只有画面、源站又没有交回可合并的音轨，`
+            + '投上去必然没声音，所以这里不列它们。');
+        }
       }
 
       // 候选行：一个地址一条，**用 createElement + textContent**（标题与地址都来自那一页，
@@ -843,7 +1044,7 @@
         out('resolve-meta', st.done ? `${head} · 完成` : head);
         if (st.error) note(`解析出错：${st.error}`);
         if (st.note) note(`解析备注：${st.note}`);
-        if (st.needs_cookies) note('这通常是站点要会话 cookie：卡片下方是两条给它凭据的路（本壳还没有那一面）');
+        renderResolveNote(st);
         renderCandidates(st.candidates);
         if (!st.done) resolveTimer = setTimeout(pollResolve, 700);
         else resolveJob = null;

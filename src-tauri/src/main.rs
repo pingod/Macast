@@ -383,6 +383,120 @@ fn cast_targets(runtime: State<'_, Runtime>, refresh: Option<bool>) -> Value {
     macast_upnp::http::answer_value(&runtime.management.cast_targets(refresh.unwrap_or(false)))
 }
 
+/// `GET ?query=resolve-cookies` — the cookie card's one read
+/// (`_cookie_state`, `macast/protocol.py:2794-2818`).
+///
+/// The answer carries **counts, never values** (`jar`, `cookies`, `bad`, `path`,
+/// `browser`, `browsers`, `max_bytes`, `yt_dlp`) and that is a contract, not a habit:
+/// `query=launch-param` and `query=module-settings` already hand out `Api_Token`, so a
+/// second reader being management-gated is not a licence to add a second secret to the
+/// same window. The `path` **is** named, because the panel's whole job is to tell a user
+/// which file to look at.
+#[tauri::command]
+fn resolve_cookies(runtime: State<'_, Runtime>) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.cookie_state())
+}
+
+/// `POST resolve-cookies=<jar text>` — validate the whole Netscape jar, then save it
+/// (`_post_resolve_cookies`, `macast/protocol.py:2986-3030`).
+///
+/// Validation happens **before** anything is opened, and that ordering is the feature: a
+/// malformed jar is not an error to yt-dlp — it resolves anonymously and returns *fewer*
+/// addresses, which the user reads as "this page has no video". The success message
+/// carries both counts so a mixed jar (good lines + unreadable ones) says so instead of
+/// reporting a smaller number as if it were the whole story.
+#[tauri::command]
+fn save_cookies(runtime: State<'_, Runtime>, text: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.save_cookies(&text))
+}
+
+/// `POST resolve-cookies-clear=1` — drop the saved jar
+/// (`_post_resolve_cookies_clear`, `macast/protocol.py:3032-3043`).
+///
+/// A machine that never had a jar answers **success**: the caller's goal is "no jar",
+/// and it has already reached it. That is the reference's own reading, and turning it into
+/// a failure would send a user looking for a file that was never written.
+#[tauri::command]
+fn clear_cookies(runtime: State<'_, Runtime>) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.clear_cookies())
+}
+
+/// `POST resolve-cookie-browser=<名字[:资料目录]>` — which browser to read cookies from
+/// (`_post_resolve_cookie_browser`, `macast/protocol.py:3045-3081`).
+///
+/// "Off" is one of `"" / 0 / off / none / 关闭 / 不用`, and it **unsets the key** rather
+/// than storing `false` (§4.2: a disabled setting is absent, and `Setting::get` would
+/// otherwise take the literal into the table). The grammar of `名字:资料目录` is owned by
+/// `macast-cast::resolve::cookie_browser_spec` — splitting it here would make this file a
+/// second write gate that can disagree with the read gate.
+#[tauri::command]
+fn set_cookie_browser(runtime: State<'_, Runtime>, text: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.set_cookie_browser(&text))
+}
+
+/// `POST set-subtitle-show=<flag>` — show or hide subtitles
+/// (`_post_set_subtitle_show`, `macast/protocol.py:2699-2703`).
+///
+/// The field's **value** goes through the four-word rule with no `strip()`, which is the
+/// reference's own asymmetry (`macast_core::pyops::form_flag_is_true`): `" on "` means
+/// *hide* here, while `?refresh=` on the GET side does strip. The answer is
+/// `{code, message}` and nothing else — Python publishes to the renderer and answers
+/// success whether or not a player is running, and `DisplayCurrentSubtitle` changes
+/// because **mpv reports the property back**, not because this command wrote it.
+#[tauri::command]
+fn set_subtitle_show(runtime: State<'_, Runtime>, value: String) -> Value {
+    let show = macast_core::pyops::form_flag_is_true(&value);
+    runtime.management.set_sub_show(show);
+    json!({ "code": 0, "message": "success" })
+}
+
+/// `POST set-renderer=<title>` — switch the player driver
+/// (`_set_renderer`, `macast/protocol.py:2385-2392`, row **6**).
+///
+/// This build ships **one** renderer, so the only accepted value is the name already in
+/// force (`host::renderer_title`, which is also the name the dropdown shows) and
+/// everything else gets the reference's `未找到播放器：{title}`. Accepting it still does
+/// something real: a fresh install's `''` is persisted as `MPV` and the player reloads.
+#[tauri::command]
+fn set_renderer(runtime: State<'_, Runtime>, title: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.set_renderer(&title))
+}
+
+/// `GET ?query=launch-param` — the raw settings table, which is what the 高级设置 tab
+/// edits (`launch_param_entry`, `macast-upnp/src/http.rs:2246`; `protocol.py:2149-2150`).
+///
+/// **This document is the whole file**, so it carries `Api_Token` — the credential that
+/// opens `query=cast` and every `GATE_CODE` POST. On the HTTP face that is survivable for
+/// one measured reason: no response on that port ever carries a CORS header, so a
+/// cross-origin page cannot read it back even when DNS rebinding gets the request in.
+/// The window is this process's own webview and has no such reader to defend against;
+/// what it must not do is *render* the table list somewhere it can leak.
+///
+/// The answer has **no `code`/`message`** — it is the table itself, which is why this goes
+/// through `Setting::snapshot()` rather than `answer_value`.
+#[tauri::command]
+fn launch_param(runtime: State<'_, Runtime>) -> Value {
+    Value::Object(runtime.setting.snapshot())
+}
+
+/// `POST save-launch-param=<json>` — replace the **whole** settings table and restart
+/// (`_post_save_launch_param`, `macast/protocol.py:2640-2648`, row **10**).
+///
+/// The answer is written **before** the restart (the seam spawns `MACAST_RESTART` with a
+/// 250 ms delay), or the reply would die with the process it is describing. `json format
+/// error` is the reference's own sentence for both a parse failure and a non-object —
+/// the reference accepts an array and breaks on the next read; this port refuses it.
+///
+/// This is the window's door onto the same code-execution-gated row the HTTP face has
+/// (`GATE_CODE` there): it replaces every key, including the ones that later reach
+/// `subprocess(shell=True)`. The window is allowed to call it because it *is* this
+/// process — the same boundary the mirror/gate rules in AGENTS.md §4.7b protect on the
+/// wire, not a weaker one.
+#[tauri::command]
+fn save_launch_param(runtime: State<'_, Runtime>, value: String) -> Value {
+    macast_upnp::http::answer_value(&runtime.management.save_launch_param(&value))
+}
+
 /// `query=status` (`macast/protocol.py:1998-2029`): the service's own identity,
 /// which address the phone should reach, and which NIC is in play.
 ///
@@ -2014,6 +2128,14 @@ pub fn run() {
             resolve_status,
             cast_resolved,
             cast_targets,
+            resolve_cookies,
+            save_cookies,
+            clear_cookies,
+            set_cookie_browser,
+            set_subtitle_show,
+            set_renderer,
+            save_launch_param,
+            launch_param,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Macast Tauri application");
