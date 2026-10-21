@@ -342,6 +342,7 @@ truthiness 在 `macast-mpv/src/pyops.rs`、`macast-upnp` 的 `py_truthy`、`maca
 | `announce`（不做唯一性探测） | 参考实现在广播之前先发 3 个 `QU` 的 PTR 查询并等回话（`generate_service_query`，`_core.py:263-283`），撞名就 `NonUniqueNameException` —— 而 `advertise()` 让它冒出去，所以 Python 那一侧撞名的后果是**这台机器根本不广播** | 我们照播。代价写在模块头：同一局域网里两个相同友好名的实例会发布**同一个** instance 与 SRV 目标，发送端可能把名字解到另一台的端口上。**而且我们连那个探测包都不构造**：没有"发完再听"的探测就只是一句问话，谁也不答它，写出来就是一段长得像覆盖的死代码（§4.13「不提问的检查」的形状）。语料里那行 `probe` 因此是**参考实现的**证据，`every_packet_we_write_is_a_response_and_never_a_query` 断言我们四个构造器没有一个交回它 |
 | `announce`（属性过长时） | 参考实现**整条起不来**：`ServiceInfo(...)` 打包 TXT 时对 >255 字节的属性抛 `ValueError: bytes must be in range(0, 256)`，而这一句不在 `advertise()` 那两个 `try` 里（本机实测：200 字节过、300 字节抛），于是异常一路冲出 `ChromecastProtocol.start()` —— 用户改一个长设备名，买到的是 Chromecast 接收端没了 | 本端口砍属性、不砍接收端：按字符边界截到 255 字节，WARNING 里点名字段、原长度与上限，然后照常广播。方向与 §4.8「越界夹住而不是拒绝」、`vt_level` 的"少钉一个 level 只是不明确，钉错是每一帧都没了"是同一条。**Python 那一侧今天仍然如此**，这句话不是说它修好了 —— 记在这里是因为它是一条会被下一次"照抄参考实现"重新引进来的行为 |
 | `announce`（没有监听就不广播） | 参考实现里 `_advertise()` 在 `_start_tls_server()` 之后无条件跑，而 `cast_port` 绑定失败时保持默认值 —— 于是它广播一个**没人听的端口** | 本端口只在 8009 真的在听时广播（`main.rs` 里那一格是 `match cast_channel.as_ref()`）。一台出现在菜单里却投不上的设备，正是 `AGENTS.md` §4.1 第一行的症状，不是它的小版本 |
+| `announce`（答案顺序不按 `NAME_GETTER` 排 —— **2026-10-21 量过并写成判据**） | 参考实现 `for answer in sorted(answers, key=NAME_GETTER)`（`answers.py:104`），注释写明目的是"让同名记录挤进同一个包，靠名字压缩把整包压小" | 本端口**不排**，而且这是量出来的而不是省事：参考实现的压缩表是**每包重置**的（`_reset_for_next_packet` 清 `names`，`outgoing.py:389-395`），并且它会按 `_MAX_MSG_TYPICAL` 把一条答复**切成多个包**（`packets()` 的 `while has_more_to_add`），所以"同名先写"才买得到字节；本端口的 `datagram_multi` **一个答复就是一个数据报**（没有 1440 的切分），`Writer::names` 从第一个名字活到最后一个 —— 压缩表本来就覆盖全部记录，排序买不到任何东西。语料比的是集合，所以它既看不见也不是判据。**判据是这一行本身**：如果哪天本端口开始按 `_MAX_MSG_TYPICAL` 分包，这条偏离就必须重新量一遍，否则"排不排"会从一个可算的结论变成一句过期的理由。**判据**：`a_reply_still_fits_in_one_packet_which_is_why_answer_order_cannot_save_bytes`（`announce_tests.rs`）用**字段预算**算出最坏情况（实例名 63 + SRV + TXT 255 + NSEC + 每地址一条 A），要求它 ≤ **1460**（参考实现自己的 `_MAX_MSG_TYPICAL`，不是我们挑的 1500 或 9000）；并把真实最宽形状（60 字节友好名 + 8 个地址 = **456 字节**）与那个预算对拍。第一版只断言"我能造出的最宽形状 ≤ 1460"，量到 456 —— 三倍余量，**任何产品能产出的输入都不可能让它红**（§4.13 的同一个形状）；改成算术后，把地址数换成 400 就红（16159 字节） |
 | `announce`（QU 经组播到达的那一问**已落地**） | `add_qu_question_response` 的另一半 —— ¼ TTL 内多播过就**只回单播**，否则**立即多播** —— 现在照 `query_handler.py:245-248` 逐分支实现：`Group::from_qu` 由问题打上，`split_by_bucket` 交出第四条路 `Route::Direct`（它**不是**第四个桶 —— `_ucast` 从不进队列） | **剩下的只有顺序**：参考实现按 `sorted(answers, key=NAME_GETTER)` 排答案（让同名记录挤进同一个压缩窗口，纯尺寸优化），本端口按问题的计划序排。语料比的是集合，所以这一条**看不见也不是判据**；写在这里是因为「两份实现产出同一个包」这句话在它面前是假的 |
 | `aggregate`（账本答两问，仍**不是** cache） | 参考实现的两问（「最后一秒」与「¼ TTL 内多播过」）现在问的是同一本 `Ledger`，条目带上 `created` **和 `ttl`**；`prune` 因此按较长的 ¼ TTL 老化 —— 按一秒老化会让 `is_recent` 永远答「没有」，而那一格只有判据不会响时才会发生（判据就是这条） | 仍然**不是** `DNSCache`：`ServiceBrowser` 监听者、过期堆、goodbye 记账在别处（`targets.rs` / `mdns::browse`）。**代价照旧**：`is_stale` 与 `mark_unique_records_older_than_1s_to_expire` 那两条没有落地，因为这里没有读者 |
 | `aggregate`（NSEC 听不见） | 参考实现把 NSEC 解进 cache，于是重复的 `AAAA` 问题第二次走的是保护队列 | `mdns.rs` 按设计不读 NSEC（广播语料钉的是它**写**的字节，不是它读），`wire_identity` 因此对 NSEC 交回 `None` 而不是一个从名字编出来的键 —— 编出来的键会保护**另一条**记录。判据是 `the_ledger_cannot_hear_an_nsec_and_says_so`，它同时断言同一包里的 TXT 是被保护的，所以这一格是「一种记录类型」而不是「整个机制」 |
@@ -1662,8 +1663,30 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *顺带收成一位主人的一个数字*：`MDNS_PORT` 之前在 `mdns.rs` 与 `announce.rs` 各声明一份
     （都是 `pub const … = 5353`）。两份字面量互相核对只会得到"它们现在一致"，而这条协议数字
     唯一会出事的方式就是有人只改一份 —— 附录 B 因此加了一条 `grep -c '^pub const MDNS_PORT'` 期望 **1**。
-    *仍然欠着*：语料那 17 行的顺序（`NAME_GETTER` 排序）与 `is_stale` 那一族 cache 卫生，
-    都是"没有读者"的偏离，不是待办。**本分支从未推送 ⇒ 这 730 条与 §31 的读数没有任何 CI 见证过。**
+    *仍然欠着的两条，2026-10-21 逐条量过，都是**"没有读者"**而不是待办*：
+    ① **`NAME_GETTER` 排序** —— 参考实现按记录名排答案是为了让同名记录挤进**同一个包**，
+       靠名字压缩把整包压小（`answers.py:104` 的注释原话）。而它做到这一点靠两件事：压缩表
+       **每包重置**（`_reset_for_next_packet` 清 `names`，`outgoing.py:389-395`），以及按
+       `_MAX_MSG_TYPICAL` 把一条答复**切成多个包**（`packets()` 的 `while has_more_to_add`）。
+       本端口的 `datagram_multi` **一个答复就是一个数据报**（没有 1440 切分），`Writer::names`
+       从第一个名字活到最后一个 —— 压缩表本来就覆盖全部记录，**排序买不到一个字节**。
+       所以这一格不是"还没做"，是"在我们这个形状里没有收益"；判据是那一行本身：
+       哪天开始按 `_MAX_MSG_TYPICAL` 分包，这条理由就要重新量。
+    ② **`is_stale` / `mark_unique_records_older_than_1s_to_expire`** —— 它是 RFC 6762 §10.2
+       的"唯一记录刷新"，调用点在 `record_manager.py:138`，而它服务的是**cache 的读者**：
+       `async_get_unique` / `RecordUpdate` / `async_updates` 那一串监听者回调。
+       本端口没有 `DNSCache`：`mdns.rs` 只做一次性 browse（`browse()` 交出答案，不维护 rrset），
+       `targets.rs` 是 SSDP 且只有两张按 host 去重的表 —— 没有一处问"这条记录有没有过期"。
+       要实现它得先有一个 cache，而 cache 的唯一理由是给监听者送增量更新，
+       本端口没有任何增量听众。**先把 cache 写出来再写它的卫生规则，等于给一个不存在的读者
+       建档案**（§4.13「不提问的检查」的另一种形状）。**判据**：
+       `the_ledger_answers_two_questions_and_keeps_nothing_resembling_a_cache`
+       （`aggregate_tests.rs`）把"它只答两问、且不保留任何像 cache 的东西"写成可执行的话 ——
+       一条它真持有的键上`seen` 回"何时听见"、`is_recent` 回"是否在四分之一 TTL 内"，
+       而 `prune(u64::MAX)` 之后两者都只是**不存在**，不是"过期并带一个原因"。
+       写这条时我第一版用 `answer(Kind::Ptr, …, None)` 取 key，断言当场红 ——
+       PTR 的键带 **alias**（`aggregate.rs:149-155`），`None` 会退化成 owner，
+       于是"这个测试问的键没有任何东西学过"这件事被它自己的前置断言抓住了。**本分支从未推送 ⇒ 这 730 条与 §31 的读数没有任何 CI 见证过。**
 39. **`set-interface` 接进管理面，第一次把"钉网卡"这件事量到线上：文档跟着改了，出口没跟着改**（2026-10-20，
     `src-tauri/src/main.rs` 的 `Discovery` + `macast-upnp/src/http.rs` 的 POST 表第 **12** 行 +
     `macast-cast/src/announce.rs` 的 `send_group` / `pin_multicast_if` + `scripts/mdns_iface_listener.py`

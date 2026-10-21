@@ -1024,3 +1024,55 @@ fn served_with_ledger(
         served_from(service, data, now_ms, flush_ms, MDNS_PORT, fill);
     (served, group)
 }
+
+/// **What this ledger deliberately is not**, asked as a check rather than as prose.
+///
+/// The reference's `DNSCache` carries a second family of rules this port does not have:
+/// `async_mark_unique_records_older_than_1s_to_expire` (`_cache.py:144-158`, RFC 6762
+/// §10.2) and the `is_stale` checks around it. Their **only caller** is
+/// `record_manager.py:138`, and what they feed is `RecordUpdate` / `async_updates` — the
+/// change notifications a `ServiceBrowser` listener receives. Nothing here has a
+/// listener: `mdns::browse` asks, waits, and answers with a `Vec`; `targets` is SSDP with
+/// two host-keyed tables.
+///
+/// Writing those rules without a cache would be rules nobody asks, so what is pinned is
+/// the shape that makes them unnecessary: this ledger answers two questions — "when was
+/// this heard" and "was it shouted within a quarter of its TTL" — and keeps nothing about
+/// a record beyond those two facts. If an expiry heap, a per-name rrset or a callback ever
+/// appears, the `is_stale` family stops being out of scope, and this test is where that
+/// gets noticed instead of in a bug report.
+#[test]
+fn the_ledger_answers_two_questions_and_keeps_nothing_resembling_a_cache() {
+    crate::pin_test_dir();
+    let service = service();
+    let logger = Logger::named("Aggregate-Scope");
+    let hello = mdns::parse_message(&service.announcement(), "t", &logger).expect("parses");
+    let mut ledger = Ledger::default();
+    let learned = ledger.learn(&hello.records, 1_000);
+    assert_eq!(learned, 4, "the fixture announcement no longer teaches four records");
+
+    // The two questions it does answer, on a key it really holds.
+    // `plan_identity` takes a *planned* record (`Chosen`), not a parsed one — the two are
+    // different types on purpose: the plan is what we intend to write, and the key is what
+    // the wire will actually carry (`aggregate.rs:147`).
+    // A PTR's key carries the **alias** as well as the owner (`aggregate.rs:149-155`), so the
+    // planned record has to name the instance; `None` would fall back to the owner and this
+    // test would be asking about a key nothing learned. That mismatch is exactly what the
+    // assertion below caught the first time it was written.
+    let ptr = answer(Kind::Ptr, "_googlecast._tcp.local.", Some(&service.instance));
+    let key = plan_identity(&ptr, &service).into_iter().next().expect("a plan key");
+    assert!(
+        ledger.seen(&key, 1_100).is_some(),
+        "the key this test uses is not the one the ledger learned"
+    );
+    assert_eq!(ledger.seen(&key, 1_100), Some(1_000), "when was this heard");
+    assert!(ledger.is_recent(&key, 1_100), "heard well within a quarter of its TTL");
+
+    // …and the one it must not answer: past the record's own lifetime it is simply gone,
+    // rather than expired-with-a-reason. A cache would have to say *why* something went
+    // away (goodbye / timeout / superseded by a newer rrset) because a listener is about
+    // to be told. Nothing here is told anything, so there is nothing to say.
+    ledger.prune(u64::MAX);
+    assert_eq!(ledger.seen(&key, u64::MAX), None);
+    assert!(!ledger.is_recent(&key, u64::MAX));
+}

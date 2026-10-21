@@ -2826,3 +2826,80 @@ fn e13_a_card_that_refused_the_second_bind_is_absent_from_the_sentence_that_repo
         "the refusal does not name the address and its reason: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The reason `NAME_GETTER` ordering buys nothing here — as a check, not a note
+// ---------------------------------------------------------------------------
+
+/// **Our replies are never split across packets, so the reference's answer ordering
+/// cannot save us a byte — and that is only true while this size holds.**
+///
+/// The reference sorts its answers by record name (`for answer in sorted(answers,
+/// key=NAME_GETTER)`, `answers.py:104`) and says why in its own comment: to make records
+/// that share a name land in the **same packet**, so name compression can shrink the
+/// response. It needs that because it does two things this port does not: its compression
+/// table is reset **per packet** (`_reset_for_next_packet`, `outgoing.py:389-395`) and it
+/// splits one response across packets at `_MAX_MSG_TYPICAL = 1460` bytes (`const.py:94`,
+/// `packets()`'s `while has_more_to_add`). Here `datagram_multi` writes one response into
+/// one datagram and `Writer::names` lives from the first name to the last, so the table
+/// already covers every record.
+///
+/// That reasoning has an expiry date, and this is it. **The bound is computed, not
+/// observed**: the first version of this test asserted "the widest shape I could build
+/// stays under 1460" and measured 456 bytes — three times the headroom, i.e. a check that
+/// could not fail on any input the product can produce, which is the same thing as no
+/// check (AGENTS.md §4.13). The worst case is arithmetic over the *budget* of each field:
+///
+/// * instance name — a 63-byte label plus the service type and `.local.`;
+/// * SRV — target (one label, ≤ 63) + 6 fixed bytes;
+/// * TXT — at most 255 bytes of attributes ([`clip_txt`] enforces that ceiling);
+/// * NSEC — the owner name again plus one 8-byte bitmap window;
+/// * one A record per advertised address (the count is the machine's, not a constant).
+///
+/// Names are shorter than their `len()` in the packet because compression replaces the
+/// repeated `_googlecast._tcp.local.` tail with two bytes, so counting every name at full
+/// length is conservative — which is the direction an upper bound must err in.
+const REFERENCE_TYPICAL_PACKET: usize = 1460;
+
+/// The largest reply this port can emit, from the field budgets rather than from a
+/// measurement. See [`a_reply_still_fits_in_one_packet_which_is_why_answer_order_cannot_save_bytes`].
+fn worst_case_reply_bytes(advertised_addresses: usize) -> usize {
+    const HEADER: usize = 12;
+    const QUESTION: usize = 1 + 14 + 4; // `_googlecast` + `_tcp` + `local`, type+class
+    const NAME_FULL: usize = 1 + 11 + 1 + 4 + 1 + 5 + 1 + 1; // `_googlecast._tcp.local.`
+    const INSTANCE: usize = 64; // 63-byte label + length byte
+    const SRV: usize = NAME_FULL + 10 + 6 + 1 + 63; // header, rdata fixed, target label
+    const TXT: usize = NAME_FULL + 10 + 256; // clip_txt caps the attributes at 255 bytes
+    const NSEC: usize = NAME_FULL + 10 + NAME_FULL + 8;
+    const A: usize = NAME_FULL + 10 + 4;
+    HEADER + QUESTION + (INSTANCE + SRV) + TXT + NSEC + A * advertised_addresses
+}
+
+#[test]
+fn a_reply_still_fits_in_one_packet_which_is_why_answer_order_cannot_save_bytes() {
+    crate::pin_test_dir();
+    // The address count is the one input that is the machine's rather than a constant. A
+    // host stack that hands out eight (loopback + LAN + a few bridges + Tailscale) is
+    // already more than the "narrow set" this port advertises, so 8 is generous.
+    let budget = worst_case_reply_bytes(8);
+    assert!(
+        budget <= REFERENCE_TYPICAL_PACKET,
+        "the worst-case reply is {budget} bytes, past the reference's typical packet size \
+         ({REFERENCE_TYPICAL_PACKET}) — from here a reply would have to be split, and then \
+         ordering answers by record name stops being a no-op and has to be implemented \
+         (docs/Rust-Port-Design.md §15's `NAME_GETTER` row)"
+    );
+    // …and the *actual* widest shape agrees with the budget, so the arithmetic above is
+    // not describing a packet nobody writes. Measured 2026-10-21: 456 bytes for the
+    // announcement of the widest service this port can build.
+    let long_friendly = "M".repeat(60);
+    let addresses: Vec<Ipv4Addr> = (1..=8).map(|n| Ipv4Addr::new(192, 0, 2, n)).collect();
+    let service = service(&long_friendly, 8009, addresses);
+    let announcement = service.announcement();
+    assert!(
+        announcement.len() <= budget,
+        "the announcement measured {} bytes but the budget said {budget} — one of the two \
+         is wrong, and the budget is the half that decides whether ordering matters",
+        announcement.len()
+    );
+}
