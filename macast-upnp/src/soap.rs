@@ -2522,3 +2522,72 @@ mod tests {
         assert!(HandlerKind::for_names("AVTransport", "Stop").is_some());
     }
 }
+
+#[cfg(test)]
+mod coverage {
+    //! **Every state variable an SCPD promises can be read back.**
+    //!
+    //! The read branch (`soap.rs`'s `else`) answers a `Get*` by looking each of the action's
+    //! `output` arguments up in the store and **failing the whole action with 501** if one is
+    //! missing. So "does this receiver answer `GetTransportSettings`" is not a question about
+    //! the action table — it is a question about whether the state table carries
+    //! `CurrentRecordQualityMode`, and about whether it carries
+    //! `PossiblePlaybackStorageMedia`, `PossibleRecordStorageMedia`,
+    //! `PossibleRecordQualityModes` and `CurrentTransportActions` for the other three.
+    //!
+    //! That indirection is why a survey of this port once read "40 variables promised, 13
+    //! found, 27 missing" and was **wrong**: the table is in `src-tauri`'s `StateTable`, and
+    //! the thirteen were just the ones whose names happen to appear in this crate. A
+    //! `grep` over one file cannot answer a question about a fact that lives in another, and
+    //! its empty answer reads exactly like "not implemented".
+    //!
+    //! So the assertion is about the *promise*: for every action this crate declares, every
+    //! `output` state must be one the schema's variable list defines. The values themselves
+    //! are the shell's business (`StateTable::new` fills them from `DECLARED`), and that is
+    //! asserted from the shell's side.
+    use crate::scpd::{
+        AVTRANSPORT_XML, CONNECTION_MANAGER_XML, Dom, RENDERING_CONTROL_XML, Scpd,
+    };
+
+    #[test]
+    fn every_action_output_names_a_declared_state_variable() {
+        crate::pin_test_dir();
+        let mut checked = 0usize;
+        for (name, xml) in [
+            ("AVTransport", AVTRANSPORT_XML),
+            ("RenderingControl", RENDERING_CONTROL_XML),
+            ("ConnectionManager", CONNECTION_MANAGER_XML),
+        ] {
+            // The same loader the server uses (`build_action`), so the tables this reads are
+            // the tables a control point's `Get*` reads — not a second parse of the same XML.
+            let mut scpd = Scpd::default();
+            let dom = Dom::parse(xml).expect("the shipped SCPD parses");
+            scpd.build_action(
+                &format!("urn:schemas-upnp-org:service:{name}:1"),
+                name,
+                &dom,
+            )
+            .expect("build_action accepts the shipped SCPD");
+            let service = scpd.service(name).expect("the service was just built").clone();
+            for action in &service.actions {
+                for arg in action.output.iter() {
+                    checked += 1;
+                    assert!(
+                        scpd.state(&arg.state).is_some(),
+                        "{}_{} promises an output from the state variable `{}`, which its \
+                         SCPD does not define — the read branch would answer 501 for it",
+                        service.name,
+                        action.name,
+                        arg.state
+                    );
+                }
+            }
+        }
+        // A scan that examines nothing agrees with every claim made about it.
+        assert!(
+            checked >= 35,
+            "only {checked} output arguments were examined — the shipped SCPDs changed shape \
+             or this scan is broken"
+        );
+    }
+}
