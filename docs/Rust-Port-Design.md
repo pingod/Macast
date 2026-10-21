@@ -2050,8 +2050,8 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     "只动文档的旋钮"；cookie 的"从浏览器读"那一路在本机**没有真浏览器被读过**
     （只验了语法的接受/拒绝与"文件优先于浏览器"那句话），那需要一台装了 yt-dlp 且真有
     登录态的浏览器，§4.14 末那条边界照旧成立。
-    *整跑读数（2026-10-21，四次，逐次收口）*：389 → 412 → 421 PASS，失败 29 → 26 → **17**；
-    `§40` 自己 **12/12**、`§34`/`§35` **全绿**。最后那 17 条**全部落在同一个前提上**：
+    *整跑读数（2026-10-21，六次，逐次收口）*：389 → 412 → 421 → **425** PASS，失败 29 → 26 → 18；
+    `§40` **12/12**、`§41` **5/5**、`§34`/`§35` **全绿**。最后那 17 条**全部落在同一个前提上**：
     这台机器今天没有可用的组播/局域网面 —— `hancast-s`（PID 1215）占着 UDP/1900，
     `xiezuo` / `synergy-s` / `uniclipd` 占着 UDP/5353，且上行已换成合成网卡 `en7`。
     `LAN` 变量是从 SSDP 应答里读的（`grep location:` 那一行），没有应答就没有 `LAN`，
@@ -2139,6 +2139,11 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *仍然欠着*：`Hook_On_Pause` / `Hook_On_Resume` 在真机上没有单独的见证（它们与 cast/stop 同一条
     代码路径，单元层各自有），因为 DLNA 的暂停要走 SOAP 控制点；`MACAST_TITLE` 在 `ShellRenderer`
     里是空串（它没有状态表句柄，参考实现在读不到时也答 `''`）。
+    *§41 自己的第一条红也是判据错*：它要求 cast 钩子拿到 `cast-title`，而参考实现是在
+    `set_media_url` **里面**发钩子的（`hooks.py:125`），那时 `set_media_title` 还没被调用
+    （`protocol.py:1190-1191`）—— 本机 `od -c` 量到的输出是 `cast|<url>|\n`，title 就是空。
+    判据改成只要求 `MACAST_EVENT` 与 `MACAST_URL`，并在注释里写明这是**参考实现的顺序**：
+    断言一个它没有的顺序，等于把"我们的实现比参考实现更整齐"当成缺陷。
     **本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
@@ -2272,7 +2277,10 @@ grep -c '^pub fn unquote_plus' macast-core/src/url.rs           # 期望 **1**�
 grep -c 'fn unquote_plus' macast-upnp/src/http.rs               # 期望 **0**（搬走了）
 grep -c '"queue": True' scripts/mdns_responder_probe.py                     # 期望 **4**（聚合行；判决语料必须把它们排除在外，
 #   而排除是数过的：不是 4 条探针就退出 1 —— 这一行是那个数在文档里的对应物）
-grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **43**（§40 是最后一节：
+grep -c '^echo "== ' scripts/verify_rust_receiver.sh            # 期望 **44**（§41 是最后一节：
+#   自动化钩子：真投一次，`MACAST_EVENT`/`MACAST_URL` 到位，**含 `$(touch …)` 的地址没有被
+#   shell 展开**，stop 钩子报的是当时在播的那条，日志里有 pid 而**没有 url**（§16 第 55 条）。
+#   §40 是它前面那一节：
 #   cookie 面板：`#HttpOnly_` 与 0600 与"只报条数"与"off 是删键"（§16 第 52 条）。
 #   §39 是它前面那一节：
 #   `mirror-action` —— POST 表的第 23 行，也是唯一门是 `token` 的一行；它问的是"本机无令牌
