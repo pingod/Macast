@@ -944,6 +944,15 @@
           p.textContent = text;
           box.appendChild(p);
         };
+        // **"这一页为什么没有地址"必须落在卡片上，不是只进事件框。**
+        // `error` 里那句就是 `ResolveJob::why_empty()` 交给后端的那**四句话**之一
+        // （引擎说不支持 / 引擎说了别的 / 这台机器没有 yt-dlp / 引擎在场却沉默），
+        // 而它们互相之间的区别正是"用户接下来该做什么"：换站点、看引擎原话、
+        // 装 yt-dlp、还是承认要 JavaScript。四句话的判定住在后端（§4.14 那条"一个主人"），
+        // 页面只负责把它原样显示在**候选表为空的那一刻**。
+        if (st.done && !st.candidates.length && st.error) {
+          add(st.error, 'state-warn');
+        }
         // 引擎自己的原话先出来：这一格存在的理由就是"这句话是别人说的"。
         if (st.engine_note && !st.from_ytdlp) {
           add(`yt-dlp 这一路说：${st.engine_note}`);
@@ -1046,8 +1055,17 @@
         if (st.note) note(`解析备注：${st.note}`);
         renderResolveNote(st);
         renderCandidates(st.candidates);
-        if (!st.done) resolveTimer = setTimeout(pollResolve, 700);
-        else resolveJob = null;
+        if (!st.done) {
+          resolveTimer = setTimeout(pollResolve, 700);
+        } else {
+          resolveJob = null;
+          // **第一轮设备搜索在解析完成那一刻起，不在页面加载时。** 参考实现同一支
+          // （`setting.html:3013` 那句 "页面加载时不搜 —— 没解析过页面的用户不该被这次
+          // 组播打扰"）：一次 SSDP + mDNS 搜索会在这台机器所在网络里发出一批查询，
+          // 而一个只是打开过设置页的用户没有要求过它。`refresh=1` 只**开始**搜索并交回
+          // 缓存，所以这一行是异步的、不占 CherryPy worker。
+          loadTargets(true).catch(() => {});
+        }
       }
 
       document.querySelector('#resolve-go').addEventListener('click', async () => {
@@ -1111,7 +1129,8 @@
       document.querySelector('#targets-refresh').addEventListener('click', () => {
         loadTargets(true);
       });
-      loadTargets(false).catch(() => {});
+      // 页面加载时**不搜**（理由见上面解析完成那一支）：这一格先说出它现在的样子。
+      out('targets-note', '还没搜过设备 —— 解析完成时会自动搜一轮，也可以按「重新搜索设备」。');
 
       loadLogModules().catch((e) => note('读取日志清单失败：' + e));
       setInterval(() => {

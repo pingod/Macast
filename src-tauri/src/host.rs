@@ -2704,6 +2704,22 @@ mod tests {
         }
     }
 
+    /// The first `limit` **bytes'** worth of `text`, cut on a char boundary.
+    ///
+    /// A plain byte slice panics when it lands inside a multi-byte character, and this
+    /// crate's page is mostly CJK — the panic would read as a broken test rather than as a
+    /// finding about the page.
+    fn char_tail(text: &str, limit: usize) -> &str {
+        if text.len() <= limit {
+            return text;
+        }
+        let mut end = limit;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+
     #[test]
     fn a_fresh_install_gets_every_face() {
         pin_test_dir();
@@ -3626,6 +3642,88 @@ mod tests {
                  test) or this assertion has gone stale"
             );
         }
+    }
+
+    /// **The first device search starts when a parse finishes, not when the page opens.**
+    ///
+    /// The reference says why in its own comment (`setting.html:3013`): 「页面加载时不搜 ——
+    /// 没解析过页面的用户不该被这次组播打扰」. An SSDP M-SEARCH plus an mDNS browse puts
+    /// queries on the user's LAN, and someone who merely opened the settings window never
+    /// asked for that. The search is cheap to start later and impossible to un-send.
+    ///
+    /// Static, because the timing is a **call site**: the boot sequence must not call
+    /// `loadTargets`, and the poll's finished branch must.
+    #[test]
+    fn the_device_search_waits_for_a_finished_parse() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        let script = page
+            .split_once("<script>")
+            .map(|(_, rest)| rest)
+            .unwrap_or(page);
+        // Anchored on the **finished branch's own comment**, not on `resolveJob = null;`:
+        // that assignment appears three times (the declaration, the "no such job" arm, and
+        // the stop button), and the first version of this test anchored on the first one it
+        // found — which is the declaration, 700 bytes away from anything it was asking
+        // about. (It went red on correct code, which is the §4.13 lesson in miniature: the
+        // needle has to name the thing being asked.)
+        let finished = script
+            .find("// **第一轮设备搜索在解析完成那一刻起")
+            .unwrap_or_else(|| panic!("the poll's finished branch lost its comment"));
+        // Slice on a char boundary: the page is mostly CJK, and a byte cut inside one
+        // panics — which reads as "the test is broken", not as "the page is wrong".
+        let after = char_tail(&script[finished..], 700);
+        assert!(
+            after.contains("loadTargets(true)"),
+            "a finished parse does not start the first device search — the dropdown would \
+             sit empty until the user presses 重新搜索"
+        );
+        // …and the boot block must not. A bare `loadTargets(` anywhere before the boot
+        // calls would put a multicast query on the LAN for a page that was only opened.
+        let boot = script
+            .find("refresh().catch(")
+            .unwrap_or_else(|| panic!("no boot block"));
+        let boot_tail = &script[boot..];
+        assert!(
+            !boot_tail.contains("loadTargets(false)"),
+            "the page searches the network on open, which the reference deliberately avoids"
+        );
+    }
+
+    /// **"Why is this page empty?" is answered on the card, not in the events box.**
+    ///
+    /// `ResolveJob::why_empty` writes one of four sentences into `error` — the engine says
+    /// the site is unsupported, the engine said something else, this machine has no
+    /// `yt-dlp`, or the engine ran and came back with nothing (the JavaScript hole). They
+    /// differ in **what the user does next**, which is the whole point of AGENTS.md §4.14's
+    /// "four sentences, not one". The judgement lives in `macast-cast` (pinned by its own
+    /// tests); what this asks is that the page **shows** it at the moment there is nothing
+    /// to list — a card that only pushed it into the events log would leave a user staring
+    /// at an empty box with a spinner that had already stopped.
+    #[test]
+    fn the_empty_result_sentence_is_rendered_on_the_card() {
+        pin_test_dir();
+        let page = include_str!("../../frontend/index.html");
+        let script = page
+            .split_once("<script>")
+            .map(|(_, rest)| rest)
+            .unwrap_or(page);
+        let start = script
+            .find("function renderResolveNote(")
+            .unwrap_or_else(|| panic!("the card has no note renderer"));
+        let body = &script[start..(start + 1400).min(script.len())];
+        assert!(
+            body.contains("st.error"),
+            "the note renderer never reads `error`, so the four 'why is this empty' \
+             sentences never reach the card"
+        );
+        // And it is shown only when there is nothing to list: an `error` on a card that
+        // still has candidates is a partial failure, and shouting it above a working list
+        // is how a user concludes the cast is broken.
+        assert!(
+            body.contains("!st.candidates.length"),
+            "the empty-result sentence must be gated on the list being empty"
+        );
     }
 
     /// **Each of the four cookie-problem families gets its own next step, and the page
