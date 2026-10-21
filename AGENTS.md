@@ -2867,10 +2867,11 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   `cfg(windows)` / `cfg(unix)` / `cfg(target_os`，且必须仍然借 socket2 的 setter；
   同时 `send_group` 的 pin 必须**在 egress 循环里恰好一次**（放到循环外，每份拷贝就都从
   最后设的那块卡出去了）。
-* 读数：`macast-upnp` **369**、`macast-tauri` **33**（两台仪器一致：`--list` 与整跑），
-  单元合计 **1425 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 34 + upnp 369）；
-  真机脚本 **44 节**，最后一趟整跑 **425 PASS / 18 FAIL**（六趟逐次收口：389→412→421→425），
-  其中 **§39 = 8/8、§40 = 12/12、§41 = 5/5、§34/§35 全绿**。
+* 读数：`macast-upnp` **369**、`macast-tauri` **35**（两台仪器一致：`--list` 与整跑），
+  单元合计 **1426 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 35 + upnp 369）；
+  真机脚本 **44 节**，最后一趟整跑 **425 PASS / 18 FAIL**，其中 **§39 = 8/8、§40 = 12/12、
+  §41 = 5/5、§34/§35 全绿**。那 18 条**与上一轮逐条相同**（把 USN 那个随机值归一化之后
+  `diff` 为空）—— 所以它们是环境的读数，不是回归的读数。
   那 18 条逐条归因过，**没有一条是这一轮改的东西**：7 条是用户的第三方 app `xiezuo`（PID 1080）
   整片占着 UDP/5353（它还广播 `Pavia的MacBook Pro._airplay._tcp.local.`，正是 §26 那句
   "browse 看见的是别人的接收端"）；1 条是 `hancast-s`（PID 1215）占着 UDP/1900；

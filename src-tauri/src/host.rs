@@ -1580,6 +1580,37 @@ impl resolve::ResolveOps for PublishingOps {
 /// [`title_for_uri`] when the caller said nothing, which is §4.2's
 /// 「改播放器的地址，就必须改播放器的名字」 rather than a default this struct gets
 /// to invent.
+/// The sentence a faceless build answers `mirror-action` with, verb and all.
+///
+/// **A free function, not a method**, and that is the whole point: `ShellManagement` needs a
+/// real `AppHandle`, so anything written inline in its impl cannot be unit tested — which is
+/// why this row's wording had no witness until now (§16 第 49 条's "仍然欠着"). Extracting
+/// it moves the only thing that could be wrong (the sentence and the verb echo) somewhere a
+/// test can reach; what stays in the method is one call.
+///
+/// The verb is echoed rather than dropped because that is the reference's shape for an
+/// unknown action: it hands whatever it got to `console_action` and the plugin answers
+/// `未知操作：{action}`. Keeping the shape means the day a mirror host arrives, this surface
+/// already names what was asked for, so nothing has to be re-decided while an ffmpeg runs.
+///
+/// **The verb is trimmed and interpolated verbatim otherwise** — it arrives from a form body,
+/// so it is whatever the caller sent. That is safe here because the answer is JSON
+/// (`serde_json` escapes it) and the page renders it with `textContent`; it would not be safe
+/// in an HTML template, and that difference is worth stating because this is exactly the kind
+/// of string that gets moved into one later.
+pub fn mirror_absent_text(action: &str) -> String {
+    let verb = action.trim();
+    if verb.is_empty() {
+        macast_upnp::http::MIRROR_ABSENT_MESSAGE.to_string()
+    } else {
+        format!(
+            "{}（收到的是「{}」）",
+            macast_upnp::http::MIRROR_ABSENT_MESSAGE,
+            verb
+        )
+    }
+}
+
 pub struct ShellManagement {
     pub host: TauriHost,
     pub player: Player,
@@ -1666,16 +1697,7 @@ impl macast_upnp::http::Management for ShellManagement {
     /// arrives, this surface already names what was asked for, so nothing has to be
     /// re-decided while an ffmpeg is running.
     fn mirror_action(&self, action: &str) -> macast_upnp::http::Answer {
-        let verb = action.trim();
-        macast_upnp::http::Answer::fail(if verb.is_empty() {
-            macast_upnp::http::MIRROR_ABSENT_MESSAGE.to_string()
-        } else {
-            format!(
-                "{}（收到的是「{}」）",
-                macast_upnp::http::MIRROR_ABSENT_MESSAGE,
-                verb
-            )
-        })
+        macast_upnp::http::Answer::fail(mirror_absent_text(action))
     }
 
     /// `_set_renderer` (`protocol.py:2385-2392`): match the raw trimmed title against
@@ -3865,6 +3887,48 @@ mod tests {
                  nobody reads"
             );
         }
+    }
+
+    /// **The mirror sentence, which had no witness because it lived inside a method.**
+    ///
+    /// `ShellManagement::mirror_action` cannot be unit tested — it needs a real `AppHandle` —
+    /// so the wording was covered only by §39 on a live socket. [`mirror_absent_text`] is the
+    /// same sentence as a free function, which is where the only two things that can be wrong
+    /// (the shared constant, and the verb echo) become askable.
+    #[test]
+    fn the_mirror_refusal_names_the_missing_face_and_echoes_the_verb() {
+        pin_test_dir();
+        // No verb: exactly the shared constant, not a near-copy of it. The two GET doors
+        // answer that same constant, so a rewrite here would be the 「两处答案不一致」 shape.
+        assert_eq!(
+            mirror_absent_text(""),
+            macast_upnp::http::MIRROR_ABSENT_MESSAGE,
+            "an empty verb must answer the shared sentence verbatim"
+        );
+        assert_eq!(mirror_absent_text("   "), macast_upnp::http::MIRROR_ABSENT_MESSAGE);
+
+        // A verb: the same sentence, then the verb, because an unknown action has to be
+        // nameable — that is the reference's `未知操作：{action}` shape.
+        let said = mirror_absent_text("start");
+        assert!(
+            said.starts_with(macast_upnp::http::MIRROR_ABSENT_MESSAGE),
+            "the shared sentence is not the front of the answer: {said}"
+        );
+        assert!(said.contains("start"), "the verb was dropped: {said}");
+
+        // Trimmed once, at the edge: `" start "` and `"start"` must ask for the same thing.
+        assert_eq!(mirror_absent_text(" start "), said);
+
+        // A hostile verb stays **data**: it is not interpreted, only carried. The check is
+        // that it survives verbatim rather than being stripped or expanded — the answer is
+        // JSON and the page uses `textContent`, and this is the assertion that would fail if
+        // someone moved this string into an HTML template.
+        let hostile = "<img src=x onerror=alert(1)>";
+        assert!(
+            mirror_absent_text(hostile).contains(hostile),
+            "the verb was rewritten rather than carried — if this ever renders as HTML, that \
+             is script execution"
+        );
     }
 
     /// **The four 自动化钩子 fire from the one cast path a `curl` uses, and that path

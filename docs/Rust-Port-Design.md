@@ -967,7 +967,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 | `macast/plugin_repo.py`（插件仓库坐标、「启用国内镜像地址」那一个开关、extras 的命名与地址规则） | **坐标与开关已交付**（2026-10-20，`macast-core/src/plugin_repo.rs`）：`mirror_enabled` / `set_mirror_enabled` / `to_mirror_url` / `index_urls` / `describe` / `extras_describe` / `extras_asset_name` / `extras_urls`；GET 面 `plugin-info` 交回 `describe()`，POST 表第 1 行 `set-github-mirror`（门 management，照参考实现的行序排在 `cast-uri` 之前）。**插件管理器与 extras 安装器仍未做** —— `plugins` 因此是空的，`extras_urls` 与 `extras_asset_name` 今天是**纯规则 + 用例**，没有产品读者（先中再壳，与 `targets.rs` 那条同一形状） | 判据：单元 14 条（三行的新鲜顺序、镜像开时**三行塌成两行**、jsDelivr 永不加前缀、关是**键消失**而不是存 `false`、读不造键、资产名四洞按序、开关的四词表）+ 单元 3 条 HTTP（两个读者读同一个键必须同答、门的三种来源、表序优先）+ **真机 §29**：把 `macast/plugin_repo.py` **按文件路径** load 进来（它模块级就 `from .utils import Setting`，所以要一个假父包；而桩 `Setting` 读的是**实例自己写的那份文件**），两个开关状态各逐格对拍一次；十一种拼写的"是"打给**参考实现自己的表达式**比；`Github_CN_Mirror` 从 HTTP 面与「模块设置」面各问一次。见 §16 第 34 条 |
 | 管理面的两行 POST：`set-subtitle-show` 与 `clear-play-history`（页面上那两个按钮真的动东西） | **已交付**（2026-10-20）：POST 表 9 → **11** 行，两行都按参考实现的相对位置插入（`set-subtitle-show` 是第 14 行 ⇒ 排在 `cast-uri` 之前；`clear-play-history` 是第 21 行 ⇒ 排在 `clear-log` 之前 —— 两个"清空"按钮在同一个请求里时只有前者跑）；门都是 management（与 `set-module-setting` 那道码门不是同一种）；`StateStore` 多一个 `clear_history`（四份实现：壳的表、soap 的双、eventing 的双、HTTP 的双），`Management` 多一个 `set_sub_show` | 判据：单元 5 条（四种拼写的"是/否"表逐格比、**门不许写状态变量**——比较两次 `media` 读数的相等而不是比一个字面值、被拒的 POST 一次都不许到达播放器、清空之后 `query=status` 与账本自己同读为空、两字段同请求的先后）+ **真机 §30 共 18 条**（自带一台实例，因为 §24 故意杀掉了主实例）：真 mpv 在 PLAYING、播放器的**首次回声**落进表之后才开始动它、`"1 "` 必须**隐藏**（这一格把 §29 在镜像开关上量的"不 strip"在第二扇门上再问一遍）、文件里 `Play_History` 是空列表而不是被删、清空之后再一次投屏仍然恰好回填一行、两个清空字段的先后在线上再验一次。见 §16 第 35 条 |
 | 管理面的 `mirror-action`（电脑投屏的控制面，POST 表第 9 行） | **已交付答复**（2026-10-20）：POST 表 **22 → 23** 行 —— **与参考实现的表齐了**。这是全表唯一门是 **token** 的一行（`protocol.py:2296-2298`：任何网页都能向 127.0.0.1 发 POST，"开始录这块桌面"不是即兴访问能问的），插在 `app-action`（第 8 行）与 `save-launch-param`（第 10 行）之间。`ShellManagement::mirror_action` 答**同一句话**：`MIRROR_ABSENT_MESSAGE` 是**一个常量、三个读者**（两个 GET 门 + 这一个 POST 门），因为这三种问法是"这台设备有没有镜像面"的同一个事实。 | 判据：单元 2 条（`the_mirror_row_is_token_gated_and_names_the_missing_face`：本机无令牌被拒且 seam 一次都没被问过、带令牌时**POST 门的答复逐字包含两个 GET 门的句子**、verb 原样交给 seam 即使答案不依赖它；`the_mirror_row_sits_between_the_quit_and_the_restart`：**两个邻居各问一遍**——`app-action` 在前所以同一个请求只退出不录屏，`save-launch-param` 在后所以只答"没有镜像面"而不重写并重启）+ 表断言（`== 23` 是**齐平**而不是"进度"，另加 `token` 列恰好 `["mirror-action"]`）+ **真机 §39 共 8 条**：本机无令牌 403、带令牌仍拒绝且句子里有「镜像面」、两个 GET 门答同一份文档、POST 门的句子**包含**那句共享的话、GET 无令牌也 403、设置文件逐字节不变、没有 ffmpeg 被拉起。**这一格的形状**：参考实现先找 console surface 再校验 `mirror-args`，所以一个没有镜像面的构建对坏 JSON 答的是"没有镜像面"而不是"mirror-args 不合法"——§39 故意带一个坏 `mirror-args` 发过去，两种顺序才分得开 |
-| `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句 |
+| `link` 的 **Windows 列** | **未在本机行使** | §4.2 的原文边界句。**2026-10-21 的读数**：§15 这 24 行里它是**唯一**仍然没有见证者的实现（另一条"`pin_multicast_if` 的 Windows 列"同日已证明是**缺测量**而不是缺实现）。两者合起来说明这里的边界只有一件事：**这台机器上没有任何 Windows 代码被运行过**，而 `cfg(windows)` 分支一共 **37 处**。补它的最小代价不是一台 Windows 机器，而是 `cargo check --target x86_64-pc-windows-gnu` —— 编译器能抓的是拼写与类型，抓不到的是行为，但"37 处从未被任何编译器看过"比"没有被运行过"要糟一档 |
 | `announce::pin_multicast_if` 的 **Windows 列** | **代码是跨平台的一份，"未行使"是缺见证者，不是缺实现**（2026-10-21 查源码更正了三处旧陈述） | 这句话原来写成"`pin_multicast_if` 在非 unix 上是**明写的空操作**"，而它是**错的**：`pin_multicast_if` 只有一份实现，走 `socket2::SockRef::set_multicast_if_v4`，而 socket2 0.6.5 在**每个平台**都是同一句 `setsockopt(IPPROTO_IP, IP_MULTICAST_IF, in_addr)`（`socket2-0.6.5/src/socket.rs:1546-1557`，没有一个 `cfg` 分支）。两句的区别很实际：**"没在 Windows 上行使过"叫人来补一次测量；"明写不做"叫人去修一个不存在的缺陷。** 判据：`pinning_the_egress_has_no_platform_specific_arm`（`announce_tests.rs`）—— `pin_multicast_if` 的体里不许出现任何 `cfg(windows)` / `cfg(unix)` / `cfg(target_os` 分支（出现了，那这句"跨平台一份"就重新变成假的，得重新论证），且它必须仍然借 socket2 那个 setter；同时 `send_group` 的 pin 必须**在 egress 循环里恰好一次**（放到循环外，每份拷贝就都从最后设的那块卡出去了） |
 | 窗口（`src-tauri`）对着 `Management` 的六个门 | **已交付**（2026-10-21）：cookie 的四个（`resolve_cookies` / `save_cookies` / `clear_cookies` / `set_cookie_browser`）、`set_subtitle_show`、`set_renderer`、`launch_param` 读 + `save_launch_param` 写 —— 之前这些**只有 HTTP 面能调**，窗口点不到。全部经过**同一个** `Arc<dyn Management>`（`main.rs` 里那个有名字的 `management`），所以窗口改的设置与 `curl` 改的是同一张表。**唯一仍然没有窗口门的是 `mirror_action`** —— 它后端也没有面（只有一句"这个构建没有镜像面"），所以一个按钮只会是"只动文档的旋钮"（§16 第 49 条）。 | 判据：`macast-tauri` 的 `the_keys_the_page_reads_…` 现在要求**十二个命令**都真的被 `invoke`（少一个 = 面板是功能的图片）；`the_page_speaks_each_cookie_problem_with_its_own_next_step` 把页面的四个分支与 `resolve::COOKIE_PROBLEMS` **双向**钉住（少一个族 → 红；多一个后端永不返回的键 → 红）；**真机 §40 共 13 条**（`#HttpOnly_` 那份 jar 被算成 2 条而不是"全是注释"、读回的文档里**没有 cookie 值**、值也没进设置文件、jar 是 0600、坏 jar 被门上拒、`名字:资料目录` 逐字节接受、`+钥匙串` 与 `::容器` 各自被拒、`off` 是**删键**而不是存 `false`、清两次都成功）；真浏览器两轮（cookie 卡读出「已保存 · 1 条能读懂的」与「本机有 yt-dlp」、`locked` 那一族走它自己那句"完全退出那个浏览器"、页面全文里搜不到种进去的 cookie 值、高级设置读回 11 个键） || AirPlay RTSP 接收端接进壳（`airplay.rs` 的 7000/20 口回落、十一种方法、会话与音量） | **已交付**（2026-10-18）：`main.rs` 在**同一道 `Macast_Protocols` 门**之后起 `AirPlayReceiver::new(setting.friendly_name())` → `start()` → 线程 `AIRPLAY_RSTP`，渲染面是 `ShellRenderer` 实现的 `airplay::RendererCallback`（五个直通，没有第二个主人）；标题走 `resolve::title_for_uri` 那一个主人，`serve` 的 accept 改非阻塞轮询 | 判据：`verify_rust_receiver.sh` §26（**27 条**，其中 7 条问的是下面那串广播）—— 第二台实例只开 DLNA+AirPlay，真 RTSP 字节打进去，见证是 mpv 自己写的 `file-loaded`、窗口上那个名字、与 mpv 读回来的音量；另有两个新用例把 `SET_PARAMETER` 那两句（"两个数字都说" 与 "读不懂也要说"）钉在单元层。**`_airplay._tcp` 的广播同日接上了**（`Service::for_airplay` / `airplay_from_setting`，由**同一个** announcer 与 Cast 一起广播 —— 2026-10-19 合并成一个 5353 socket，见 §16 第 32 条）：§26 那 7 条是 `.venv` 里那套 zeroconf **从突发里**折出完整设备（PTR+SRV+TXT+A），端口读回来等于实际绑的那个 7001，TXT 的 `deviceid` / `model=Macast` / `name=` 三条逐个对；§24 的浏览现在两种类型都听，所以"关掉 Chromecast"这一问同时管住两条广播。**"会广播 ≠ 会答问"这一格在合并之后变了一半**：判决表只对着 `_googlecast._tcp` 量过（`Service::responder_answers` 是那道门），合并后的 socket 对**每个** `responder_answers()` 为真的 service 才答问 —— 所以 AirPlay 的查询**今天有答案**，那是参考实现的行为（一个引擎答所有注册类型），而它的单元见证是 `one_socket_answers_the_measured_type_and_stays_silent_for_the_other`。**没有真机见证者**：§25 的送达那一格在本机仍 SKIP，§26 的 browse 从突发就能成功，它既证不了答问也证不了不答问。announcer 自己那一行日志仍然明说这件事（`it announces this type and does not answer it — the responder table was measured for _googlecast._tcp`），§26 有一条问它在不在，因为一个把读者送去修一个没坏的东西的日志比没有日志更贵。**取证与形状的账**（`macast-cast/tests/golden/mdns_airplay.hex`）：与 Chromecast 那一串逐条同构（PTR/SRV/TXT/NSEC/A、TTL 4500/120/4500/120/120、除 PTR 外全带 cache-flush、`flags=0x8400`、goodbye 是同样五条记录把 TTL 写成 0），差别全在 TXT 那九条与端口，读法与那两条"为什么不能只冻一行"的理由见 §16 第 28 条。还有一格记在 §8：新实例的第一个会话若在 `set_observe` 写完默认音量之前发 `SET_PARAMETER`，音量会被 100 盖掉（参考实现同形） |
 | AirPlay 作为独立 crate | **不做**（现在住在 cast 里） | §2 那处待归位的陈述 |
@@ -2011,9 +2011,14 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     ③ 答复改成 `Answer::ok("success")` → **1 红**（"只动文档的旋钮"这一格）；
     ④ 两个 GET 门各写一份字面量而不是读共享常量 → **1 红**（§39 的"逐字包含"那一问；
     单元那条也只能在 POST 与 GET 同时被问时红 —— 所以它同时是"三个门读同一个常量"的见证）。
-    *一处仍然欠着的*：`ShellManagement::mirror_action` 自己那几行**没有单元用例**（`TauriHost`
-    要一个 `AppHandle`），它的见证全在 §39。这与 §16 第 35 条 N4 那一格同一形状：
-    一句话的转发，它的两端各有见证者（HTTP 面的"答复形状"与真机上的"答复原话"）。
+    *那一处"仍然欠着的"，2026-10-21 关掉了*：`ShellManagement::mirror_action` 需要真的
+    `AppHandle`，所以写在 impl 里的句子**没有单元用例**，只有 §39 的真机见证。修法不是给
+    `TauriHost` 造一个假句柄，而是把那句话提成自由函数 `mirror_absent_text(action)`
+    —— 可能出错的东西只有两件（共享常量、verb 回显），两件都因此可问：
+    空 verb 必须**逐字**是 `MIRROR_ABSENT_MESSAGE`（两个 GET 门答的是同一个常量，改写它就是
+    「两处答案不一致」）、非空时那句话必须是答复的**前缀**且 verb 在场、`" start "` 与 `"start"`
+    同义、以及**敌意的 verb 只被携带不被解释**（答案走 JSON、页面用 `textContent`；
+    这条断言会在有人把它搬进 HTML 模板时变红）。变异体（把句子换成一份新字面量）红 1 条。
     *整跑读数*：**446 PASS / 0 FAIL / 2 SKIP，退出码 2** —— 那两条 SKIP 都是本机的环境事实而不是
     本节的东西（§25 的送达那一格：这台机器上的另一个进程发出的查询没交到这个 binary 手里；
     §32 的"这台机器只有一块可用网卡"，所以钉住与不钉住在行为上分不开）。它们**照旧计败**，
@@ -2178,6 +2183,48 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     判据改成只要求 `MACAST_EVENT` 与 `MACAST_URL`，并在注释里写明这是**参考实现的顺序**：
     断言一个它没有的顺序，等于把"我们的实现比参考实现更整齐"当成缺陷。
     **本分支从未推送 ⇒ 这些读数没有任何 CI 见证过。**
+
+56. **两条"没有读者"的偏离、一条错了三处的陈述、以及一个从未被编译过的 37**（2026-10-21；
+    `announce_tests.rs` + `aggregate_tests.rs` + 台账三处更正；`macast-cast` 735 → **738**、
+    单元合计 **1425**）：
+    *§15 里那两行"仍然欠着"，逐条量过，都不是待办*：
+    ① **`NAME_GETTER` 排序**——参考实现按记录名排答案，为的是让同名记录挤进**同一个包**，靠名字
+       压缩压小整包（`answers.py:104` 的注释原话）。它需要那个，因为压缩表**每包重置**
+       （`_reset_for_next_packet` 清 `names`）且按 `_MAX_MSG_TYPICAL = 1460` **切包**
+       （`packets()` 的 `while has_more_to_add`）。本端口 `datagram_multi` **一个答复一个数据报**，
+       `Writer::names` 从头活到尾 —— 压缩表本来就覆盖全部记录，**排序买不到一个字节**。
+    ② **`is_stale` / `mark_unique_records_older_than_1s_to_expire`**——它的唯一调用点
+       （`record_manager.py:138`）喂的是 `RecordUpdate` / `async_updates`，也就是 `ServiceBrowser`
+       监听者收到的增量。本端口没有 cache、没有增量听众（`mdns::browse` 问完就答一个 `Vec`，
+       `targets` 是 SSDP 的两张按 host 去重的表）。**先把 cache 写出来再写它的卫生规则，
+       等于给一个不存在的读者建档案。**
+    *两条都改成了能响的判据*（散文不会在形状变化时叫）：
+    `a_reply_still_fits_in_one_packet_which_is_why_answer_order_cannot_save_bytes` 用**字段预算**
+    算最坏情况（≤1460，取参考实现自己的 `_MAX_MSG_TYPICAL`，不是我们挑的 1500 或 9000），
+    并与真实最宽形状对拍；`the_ledger_answers_two_questions_and_keeps_nothing_resembling_a_cache`
+    钉住"只答两问、`prune` 之后只是不存在而不是过期并带一个原因"。
+    *这一格最该留下的是"我第一版写了假守卫"*：那条 1460 的检查第一版只断言"我能造出的最宽形状
+    ≤1460"，量到 **456 字节** —— 三倍余量，**任何产品能产出的输入都不可能让它红**，与不检查等价
+    （§4.13）。改成算术之后，把地址数换成 400 就红（16159 字节）。
+    第二条的第一版也错了一次：`answer(Kind::Ptr, …, None)` 取 key，而 PTR 的键带 **alias**
+    （`aggregate.rs:149-155`），`None` 退化成 owner ⇒ 它问的键没有任何东西学过；
+    是我加的前置断言（"这个键库里有吗"）把它抓住的。
+    *第三条：一句错了三处的陈述*。台账三处写着"`pin_multicast_if` 在非 unix 上是**明写的空操作**"，
+    并据此解释 Windows 列为什么没验。查 `socket2-0.6.5/src/socket.rs:1546-1557`：它在**每个平台**
+    都是同一句 `setsockopt(IPPROTO_IP, IP_MULTICAST_IF, in_addr)`，那个函数自己也没有任何 `cfg`。
+    **所以没有"空操作"这回事，只有"这个调用没在 Windows 上行使过"。** 两句的后果不一样：
+    前者叫人来补一次测量，后者叫人去修一个不存在的缺陷。判据
+    `pinning_the_egress_has_no_platform_specific_arm`：那个函数的体里不许出现 `cfg(windows)` /
+    `cfg(unix)` / `cfg(target_os`，必须仍然借 socket2 的 setter；且 `send_group` 的 pin 必须在
+    egress 循环里**恰好一次**（放到循环外，每份拷贝就都从最后设的那块卡出去了）。两支变异体各红一次。
+    *第四条：一个数字*。`cfg(windows)` 分支在本仓一共 **37 处**，而它们**从未被任何编译器看过** ——
+    这台机器只有 darwin 与 linux 两个 target。补它的最小代价不是一台 Windows 机器，而是
+    `cargo check --target x86_64-pc-windows-gnu`（本轮在装，见下面那句诚实边界）。
+    编译器抓得到拼写与类型，抓不到行为；但"37 处从未被编译过"比"没被运行过"糟一档。
+    *§15 的账**重新数过**（用对词之后）*：**24 行里 22 行已交付或已决定**，剩下的两条是同一件事
+    （Windows 列）。上一次我报"18/23"是因为我的检测器只认"已交付"三个字，把"已接线 / 已落地 /
+    库层已完成"都算成了未交付 —— **一个把已完成的活读成待办的计数器，会让人重复劳动**。
+    **本分支从未推送 ⇒ 这 1425 条与 §22 那趟读数没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：
