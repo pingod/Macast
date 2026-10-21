@@ -2743,7 +2743,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 **Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
 `macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
 `ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
-真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **30**）：
+真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **31**）：
 
 * **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
   于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
@@ -2813,7 +2813,23 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   两条候选各自的理由、零 JS 报错、零格停在加载中；点击路径发出 `{job: "J1", candidate: "1",
   target: "uuid:tv"}`。常驻的是三条静态守卫（含"四命令必须真的被 invoke"与三类键名 ——
   它当场抓到我漏渲染 `c.relay`，也就是那条解释"为什么这一条能投"的句子）。
-* 读数：`macast-upnp` **369**、`macast-tauri` **30**（两台仪器一致：`--list` 与整跑），
+* **六条 seam 方法此前只有 HTTP 面能调、窗口点不到**：cookie 的四个（读/存/清/选浏览器）、
+  字幕显隐、渲染器切换、整份设置读写 —— 后端一直完整，缺的是窗口那一侧的门。`curl` 能做到、
+  窗口做不到，就是 §4.8「只动文档的旋钮」的反面。全部经过 `main.rs` 里那个**有名字的**
+  `Arc<dyn Management>`；第二份会是第二张 job 表 + 第二个 device cache。
+  页面上四条规矩：cookie **只报条数**（真机确认种进去的 `COOKIESECRET40` 在文档、设置文件、
+  整个页面里都搜不到）；`cookie_problem` 的**四个族各一句自己的下一步**，且页面只有那四个分支
+  （双向钉住：少一个族红、多一个后端永不返回的键也红）；字幕开关发 `1`/`0` 而不发 `on`
+  （四词规则不 strip，`" on "` 是隐藏）；高级设置先读再改（整表替换并重启）。
+  **`mirror_action` 仍然没有窗口门**，因为后端也没有面 —— 一个按钮只会是只动文档的旋钮。
+* **一条把网络状态当判决的用例**：`announce_tests::e11` 数 `send_to` 的成功次数（要求 2），
+  而 2026-10-21 这台机器的上行从 `en0` 变成 `en7`（合成 MAC `02:00:00:00:00:00`，无多播路由），
+  内核拒绝 `192.168.1.5` 的组播（`EHOSTUNREACH`）—— 手搓
+  `setsockopt(IP_MULTICAST_IF)+sendto(224.0.0.251)` 复现同样结果，产品代码一个字没变。
+  判据改成：`setsockopt` 必须两个都接受（那是代码的性质）+ **至少一份出去**
+  （loopback 永远可用）。严的每口一份留在它上面的两条 loopback 用例与真机 §32。
+  这是 §4.13「一个没被机器问过的数字」在**网络判决**上的形状：一次绿读数被当成了不变量。
+* 读数：`macast-upnp` **369**、`macast-tauri` **31**（两台仪器一致：`--list` 与整跑），
   单元合计 **1409 passed / 0 failed**（`cargo test --workspace`：cast 735 + core 128 + mpv 149 +
   tauri 28 + upnp 369）；真机脚本 **42 节**，整跑 **446 PASS / 0 FAIL / 2 SKIP，退出码 2**，
   其中 §39 自己是 **8/8**。那两条 SKIP 是本机的环境事实（§25 的送达那一格、§32 的"这张机器只有

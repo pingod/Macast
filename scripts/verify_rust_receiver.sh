@@ -6064,6 +6064,128 @@ else
     fi
 fi
 
+echo "== 40: the cookie panel counts, refuses, and never echoes a value =="
+# AGENTS.md §4.14's red line, asked on a live socket: the jar is a **credential**, so the
+# panel answers counts and a path, never a value. Four things only this can answer:
+# (a) a browser-style jar (every session line starting `#HttpOnly_`) is accepted rather
+# than read as a comment -- the shape a real export has; (b) the read does not carry the
+# secret back; (c) "off" **unsets** the key rather than storing `false`; (d) clearing a
+# jar that is not there is a success, because the caller's goal is "no jar".
+S40_SDIR=$(mktemp -d /tmp/macast-rust-cookies.XXXXXX)
+S40_PORT=$((PORT + 20))
+printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Cookies"}' \
+    "$S40_PORT" > "$S40_SDIR/macast_setting.json"
+env MACAST_SETTING_DIR="$S40_SDIR" MACAST_MPV_SOCKET="$S40_SDIR/mpvsocket" \
+    MACAST_RESOURCE_DIR="$REPO/macast" \
+    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+    "$BIN" > "$S40_SDIR/stdout.log" 2>&1 &
+S40_PID=$!
+disown "$S40_PID" 2>/dev/null || true
+S40_READY=""
+for _ in $(seq 1 40); do
+    if [ "$(lsof -nP -iTCP:"$S40_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1)" = "$S40_PID" ]; then
+        S40_READY=1; break
+    fi
+    sleep 0.25
+done
+if [ -z "$S40_READY" ]; then
+    fail "the cookie instance never became the listener on $S40_PORT"
+    kill -9 "$S40_PID" 2>/dev/null
+    rm -rf "$S40_SDIR"
+else
+    S40_SECRET="COOKIESECRET40"
+    # A real export: the header line, then two `#HttpOnly_` lines. That prefix is what the
+    # browser writes for session cookies, and reading it as a comment is the bug this
+    # section exists for -- a jar of two session cookies would be judged empty and refused.
+    printf '# Netscape HTTP Cookie File\n#HttpOnly_.example.com\tTRUE\t/\tFALSE\t0\tsess\t%s\n#HttpOnly_.example.com\tTRUE\t/\tFALSE\t0\ttok\t%s\n' \
+        "$S40_SECRET" "$S40_SECRET" > "$S40_SDIR/jar.txt"
+    S40_SAVE=$(curl -s --max-time 8 -X POST --data-urlencode "resolve-cookies@$S40_SDIR/jar.txt" \
+        "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_SAVE" in
+        *'"code": 0'*) pass "a jar whose session lines all start with #HttpOnly_ is accepted" ;;
+        *) fail "a browser-style jar answered: $S40_SAVE" ;;
+    esac
+    case "$S40_SAVE" in
+        *'"cookies": 2'*) pass "and it counts both of them (they are cookies, not comments)" ;;
+        *) fail "the save document does not report two cookies: $S40_SAVE" ;;
+    esac
+    S40_READ=$(curl -s --max-time 6 "http://127.0.0.1:$S40_PORT/api?query=resolve-cookies")
+    case "$S40_READ" in
+        *"$S40_SECRET"*) fail "the panel echoed a cookie VALUE back" ;;
+        *'"cookies": 2'*) pass "the panel reports the count and not the value" ;;
+        *) fail "the cookie panel answered: $S40_READ" ;;
+    esac
+    if grep -q "$S40_SECRET" "$S40_SDIR/macast_setting.json" 2>/dev/null; then
+        fail "a cookie value reached the settings file (it must live only in the 0600 jar)"
+    else
+        pass "and no value reached the settings file"
+    fi
+    S40_JAR="$S40_SDIR/resolve_cookies.txt"
+    if [ -f "$S40_JAR" ]; then
+        S40_MODE=$(stat -f '%Lp' "$S40_JAR" 2>/dev/null)
+        [ "$S40_MODE" = "600" ] \
+            && pass "the jar is 0600 on disk" \
+            || fail "the jar is mode $S40_MODE, not 600"
+    else
+        fail "the jar the panel says it saved is not at $S40_JAR"
+    fi
+    # A jar with nothing readable is refused at the door, and the refusal counts the lines.
+    S40_BAD=$(curl -s --max-time 8 -X POST --data-urlencode "resolve-cookies=# only a comment" \
+        "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_BAD" in
+        *'"code": 1'*) pass "an unreadable jar is refused at the door" ;;
+        *) fail "a junk jar answered: $S40_BAD" ;;
+    esac
+    # `名字:资料目录` is accepted byte-for-byte; the two things we never pass into argv are not.
+    S40_SPEC="vivaldi:$S40_SDIR/profile"
+    S40_SET=$(curl -s --max-time 6 -X POST --data-urlencode "resolve-cookie-browser=$S40_SPEC" \
+        "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_SET" in
+        *'"code": 0'*) pass "a browser with a data directory is accepted" ;;
+        *) fail "the profile form was refused: $S40_SET" ;;
+    esac
+    S40_KEYRING=$(curl -s --max-time 6 -X POST --data-urlencode "resolve-cookie-browser=chrome+keyring" \
+        "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_KEYRING" in
+        *'"code": 1'*) pass "a keyring suffix is refused (we never pick a keychain for the user)" ;;
+        *) fail "chrome+keyring answered: $S40_KEYRING" ;;
+    esac
+    S40_CONTAINER=$(curl -s --max-time 6 -X POST --data-urlencode "resolve-cookie-browser=firefox::work" \
+        "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_CONTAINER" in
+        *'"code": 1'*) pass "a container suffix is refused on this side too" ;;
+        *) fail "firefox::work answered: $S40_CONTAINER" ;;
+    esac
+    # Off is the key **disappearing**, not a stored `false` (§4.2): a read of the raw table
+    # is the only way to tell those two apart.
+    curl -s --max-time 6 -X POST --data-urlencode "resolve-cookie-browser=off" \
+        "http://127.0.0.1:$S40_PORT/api" >/dev/null
+    if curl -s --max-time 6 "http://127.0.0.1:$S40_PORT/api?query=launch-param" \
+        | grep -q 'Resolve_Cookie_Browser'; then
+        fail "switching the browser off stored a key instead of removing it"
+    else
+        pass "switching it off removes the key rather than storing false"
+    fi
+    # Clearing twice: the second time is still a success, and it says why.
+    S40_C1=$(curl -s --max-time 6 -X POST -d "resolve-cookies-clear=1" "http://127.0.0.1:$S40_PORT/api")
+    S40_C2=$(curl -s --max-time 6 -X POST -d "resolve-cookies-clear=1" "http://127.0.0.1:$S40_PORT/api")
+    case "$S40_C1" in
+        *'"code": 0'*) pass "clearing a saved jar is a success" ;;
+        *) fail "clear answered: $S40_C1" ;;
+    esac
+    case "$S40_C2" in
+        *'"code": 0'*) pass "…and clearing again is still a success (the goal is 'no jar', already reached)" ;;
+        *) fail "the second clear answered: $S40_C2" ;;
+    esac
+    kill -9 "$S40_PID" 2>/dev/null
+    pkill -9 -f "$S40_SDIR" 2>/dev/null
+    if [ -n "$KEEP" ]; then
+        echo "  MACAST_VERIFY_KEEP: kept $S40_SDIR"
+    else
+        rm -rf "$S40_SDIR"
+    fi
+fi
+
 echo
 if [ "$FAILED" -eq 0 ]; then
     echo "=== SUMMARY: all checks passed ==="
