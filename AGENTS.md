@@ -2743,7 +2743,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
 **Rust 侧把 POST 表补到齐平、并修掉一个"页面看起来是过期资产"的假象时量到的事**（2026-10-20，
 `macast-upnp/src/http.rs` 的第 **23** 行 `mirror-action` + `MIRROR_ABSENT_MESSAGE` +
 `ShellManagement::mirror_action` + `frontend/index.html` 的重建 + `src-tauri/src/host.rs` 的两条静态守卫 +
-真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **31**）：
+真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **33**）：
 
 * **上一轮那条待办读错了，而错的方式比缺陷本身更值钱。** 它记的是"嵌进窗口的那份页面不是当前的"，
   于是下一件事被写成"用 Web Inspector 与 console 二选一先定性资产"。**资产是当前的**：把
@@ -2829,12 +2829,15 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   判据改成：`setsockopt` 必须两个都接受（那是代码的性质）+ **至少一份出去**
   （loopback 永远可用）。严的每口一份留在它上面的两条 loopback 用例与真机 §32。
   这是 §4.13「一个没被机器问过的数字」在**网络判决**上的形状：一次绿读数被当成了不变量。
-* 读数：`macast-upnp` **369**、`macast-tauri` **31**（两台仪器一致：`--list` 与整跑），
-  单元合计 **1409 passed / 0 failed**（`cargo test --workspace`：cast 735 + core 128 + mpv 149 +
-  tauri 28 + upnp 369）；真机脚本 **42 节**，整跑 **446 PASS / 0 FAIL / 2 SKIP，退出码 2**，
-  其中 §39 自己是 **8/8**。那两条 SKIP 是本机的环境事实（§25 的送达那一格、§32 的"这张机器只有
-  一块可用网卡"），**照旧计败**，所以"全绿"这句话在这里仍然说不出口 —— 它们与本节无关。
-  本分支从未推送 ⇒ **这些读数没有任何 CI 见证过**。
+* 读数：`macast-upnp` **369**、`macast-tauri` **33**（两台仪器一致：`--list` 与整跑），
+  单元合计 **1414 passed / 0 failed**（cast 735 + core 128 + mpv 149 + tauri 33 + upnp 369）；
+  真机脚本 **43 节**，最近一次整跑 **420 PASS / 18 FAIL**，其中 **§39 = 8/8、§40 = 12/12**。
+  那 18 条逐条归因过，**没有一条是这一轮改的东西**：7 条是用户的第三方 app `xiezuo`（PID 1080）
+  整片占着 UDP/5353（它还广播 `Pavia的MacBook Pro._airplay._tcp.local.`，正是 §26 那句
+  "browse 看见的是别人的接收端"）；1 条是 `hancast-s`（PID 1215）占着 UDP/1900；
+  6 条是「LAN caller」那一族的 `HTTP 000`；1 条是 §19 的连拍闩。按 §10 那三个进程都属于用户，
+  **我没有动它们** —— 所以这几格今天的诚实读法是"本机暂时量不出来"，不是"产品坏了"，
+  更不是"CI 绿了"。本分支从未推送 ⇒ **这些读数没有任何 CI 见证过**。
 
 **配额是护栏不是精度**：`MAX_MEASURED = 8`、`MAX_MEASURED_PER_HOST = 5`、
 `PAGE_MAX_BYTES = 2 MiB`、`SCRAPE_TIMEOUT = 15` / `YTDLP_TIMEOUT = 120` / `PROBE_TIMEOUT = 25`、

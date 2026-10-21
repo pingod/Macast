@@ -1123,8 +1123,15 @@
         // `searching` 在一台发现不到设备的机器上可能一直是 true（设计如此，见 §16 第 8 条），
         // 所以这一行说的是"搜索还在不在"，不是"有没有设备"。
         const count = (state.items || []).length;
+        // **`searching` 永远为真不是故障**（§16 第 8 条）：冷启动那条踢法的字面结果是
+        // "两份缓存都空 ⇒ 再起一次搜索"，所以一台发现不到设备的机器上，每一次轮询都恰好
+        // 看见有人在搜。页面必须把这件事说出口，否则那句话读起来像"卡住了"。
         out('targets-note', `${count} 行（含本机）· ${state.searching ? '搜索还在跑' : '搜索已停'}`
-          + `${state.known ? '' : ' · 还没有拿到过完整一轮结果'}`);
+          + `${state.known ? '' : ' · 还没有拿到过完整一轮结果'}`
+          + (count <= 1 && state.searching
+            ? ' · 只有本机：这台机器所在的网络里没有应答的接收端（局域网里没有 Chromecast / 电视，'
+              + '或者它们不在同一个网段）—— 搜不到不是故障，投本机仍然可用'
+            : ''));
       }
       document.querySelector('#targets-refresh').addEventListener('click', () => {
         loadTargets(true);

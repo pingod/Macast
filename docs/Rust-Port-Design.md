@@ -1961,7 +1961,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 
 49. **POST 表齐了：`mirror-action` 是最后一行，而它的答案与两个 GET 门读同一个常量**（2026-10-20，
     `macast-upnp/src/http.rs` 的第 23 行 + `MIRROR_ABSENT_MESSAGE` + `ShellManagement::mirror_action`
-    + 真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **31**）：
+    + 真机 §39 的 **8** 条；`macast-upnp` 367 → **369**、`macast-tauri` 26 → **33**）：
     *为什么这一行不能写成 `management`*：启动一块桌面的采集不是"本机来的就可以"的事 ——
     任何网页都能向 127.0.0.1 发 POST，这正是 §4.7b 写下的那一课。参考实现自己在那一行上面就这么说，
     所以这里照抄门、不重新推理（`Gate::parse` 不认识门名就拒绝，fail closed）。
@@ -1985,7 +1985,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     本节的东西（§25 的送达那一格：这台机器上的另一个进程发出的查询没交到这个 binary 手里；
     §32 的"这台机器只有一块可用网卡"，所以钉住与不钉住在行为上分不开）。它们**照旧计败**，
     所以"全绿"这句话在这里仍然说不出口。§39 自己是 **8/8**。
-    **本分支从未推送 ⇒ 这 369 + 31 条与 §39 那 8 条读数没有任何 CI 见证过。**
+    **本分支从未推送 ⇒ 这 369 + 33 条与 §39 那 8 条读数没有任何 CI 见证过。**
 
 51. **窗口第一次能自己走完「网页地址投屏」那条链，而它的第一个 bug 只有点击才现形**
     （2026-10-20，`src-tauri/src/main.rs` 的四条命令 `resolve_page` / `resolve_status` /
@@ -2024,7 +2024,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 52. **六条 seam 方法此前只有 HTTP 面能调，窗口点不到**（2026-10-21，
     `src-tauri/src/main.rs` 新增 `resolve_cookies` / `save_cookies` / `clear_cookies` /
     `set_cookie_browser` / `set_subtitle_show` / `set_renderer` / `launch_param` /
-    `save_launch_param`，共 **33** 条窗口命令；`macast-upnp` 369 不变、`macast-tauri` 30 → **31**）：
+    `save_launch_param`，共 **33** 条窗口命令；`macast-upnp` 369 不变、`macast-tauri` 30 → **33**）：
     *这不是"接线"那么一句话*。后端那六个 seam 一直完整（`_cookie_state` 的八个键、
     `cookie_jar_state` 的先校验后落盘、`set_cookie_browser` 的 `名字:资料目录` 语法、
     `save_launch_param` 的先答复再重启），缺的是**窗口那一侧的门**：一个用户看着
@@ -2050,7 +2050,17 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     "只动文档的旋钮"；cookie 的"从浏览器读"那一路在本机**没有真浏览器被读过**
     （只验了语法的接受/拒绝与"文件优先于浏览器"那句话），那需要一台装了 yt-dlp 且真有
     登录态的浏览器，§4.14 末那条边界照旧成立。
-    **本分支从未推送 ⇒ 这 31 条与 §40 那 13 条、两次浏览器探针读数没有任何 CI 见证过。**
+    *整跑读数（2026-10-21，两次）*：**420 PASS / 18 FAIL**，`§40` 自己 **12/12 全绿**。
+    那 18 条红逐条归因过，**没有一条是这一轮改的东西**：其中 **7 条**（§22 的 mDNS 语料、§26 的
+    AirPlay 折叠）是因为用户的第三方 app `xiezuo`（PID 1080）整片占着 5353 —— 它还广播
+    `Pavia的MacBook Pro._airplay._tcp.local.`，也就是 §26 那句 "browse 看见的是别人的接收端"；
+    **1 条**是 `hancast-s`（PID 1215）占着 UDP/1900，所以 §2 的 M-SEARCH 没人答；
+    **6 条**是「LAN caller」那一族（§28/§29/§30/§32 里的 `HTTP 000`），而 `curl` 到
+    `192.168.1.5` 在这台机器上现在是 `000`；**1 条**是 §19 的连拍闩。按 AGENTS.md §10
+    那三个进程都属于用户，**我没有去动它们** —— 所以这几格的诚实读法是"本机暂时量不出来"，
+    不是"产品坏了"，也不是"CI 绿了"。要重跑那几格需要一台 5353/1900 干净、且有第二个可用
+    网卡的机器。
+    **本分支从未推送 ⇒ 这 33 条与 §40 那 12 条、两次浏览器探针读数没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：
