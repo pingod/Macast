@@ -599,34 +599,45 @@ SOCK="$SDIR/mpvsocket"
 printf '{"ApplicationPort": %d, "DLNA_FriendlyName": "Macast Rust Verify"}' "$PORT" \
     > "$SDIR/macast_setting.json"
 echo "$SOCK" > "$SDIR/.socket"
-env MACAST_SETTING_DIR="$SDIR" MACAST_MPV_SOCKET="$SOCK" \
-    MACAST_RESOURCE_DIR="$REPO/macast" \
-    perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
-    "$BIN" > "$SDIR/stdout.log" 2>&1 &
-APP_PID=$!
-# This job is killed with SIGKILL in `cleanup`, and bash reports a job killed by
-# a signal on **its own** stderr when the shell exits — a redirect on `wait`
-# cannot silence it. Without this line the run's last line is
-# "Killed: 9   env MACAST_SETTING_DIR=…", printed one line after the SUMMARY,
-# where every reader expects a verdict and would read it as a failed check.
-disown "$APP_PID" 2>/dev/null || true
+# One launcher, because **§24 has to stop this instance and put it back**: 8009/8008
+# are fixed ports (`dial.py:25-26`), so the "all three faces closed" check cannot run
+# while ours holds them — but every section after it (§26's RTSP receiver, §27's
+# restart, §28's cross-implementation table) reads `$BASE` and expects this instance
+# to be the one answering. Measured 2026-10-21: with the stop left permanent, §24 passed
+# its closes and §22/§24/§26/§27/§34/§35 went red in a cascade — the later sections then
+# bound 8010 or asked a dead port, and the run's verdict was about the orchestration
+# rather than about the product.
+start_main() {
+    env MACAST_SETTING_DIR="$SDIR" MACAST_MPV_SOCKET="$SOCK" \
+        MACAST_RESOURCE_DIR="$REPO/macast" \
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV or die "exec: $!"' \
+        "$BIN" > "$SDIR/stdout.log" 2>&1 &
+    APP_PID=$!
+    # This job is killed with SIGKILL in `cleanup`, and bash reports a job killed by
+    # a signal on **its own** stderr when the shell exits — a redirect on `wait`
+    # cannot silence it. Without this line the run's last line is
+    # "Killed: 9   env MACAST_SETTING_DIR=…", printed one line after the SUMMARY,
+    # where every reader expects a verdict and would read it as a failed check.
+    disown "$APP_PID" 2>/dev/null || true
 
-# Wait for the HTTP face to actually be listening (the real fact, not a sleep),
-# and then for **this** instance to be the one that answers. `env … perl … exec`
-# keeps the pid, so $APP_PID is the binary itself — and "a listener exists" is
-# not the same claim as "ours is up": if a previous run's instance were still
-# holding the port, every check below would pass against someone else's receiver.
-ok=""
-for _ in $(seq 1 40); do
-    [ "$(listener_pid)" = "$APP_PID" ] && { ok=1; break; }
-    sleep 0.25
-done
-if [ -z "$ok" ]; then
-    echo "  pid $APP_PID never became the listener on $PORT (someone else: '$(listener_pid)')"
-    tail -20 "$SDIR/macast.log" 2>/dev/null
-    exit 2
-fi
-echo "  listener up (pid $APP_PID)"
+    # Wait for the HTTP face to actually be listening (the real fact, not a sleep),
+    # and then for **this** instance to be the one that answers. `env … perl … exec`
+    # keeps the pid, so $APP_PID is the binary itself — and "a listener exists" is
+    # not the same claim as "ours is up": if a previous run's instance were still
+    # holding the port, every check below would pass against someone else's receiver.
+    local ok=""
+    for _ in $(seq 1 40); do
+        [ "$(listener_pid)" = "$APP_PID" ] && { ok=1; break; }
+        sleep 0.25
+    done
+    if [ -z "$ok" ]; then
+        echo "  pid $APP_PID never became the listener on $PORT (someone else: '$(listener_pid)')"
+        tail -20 "$SDIR/macast.log" 2>/dev/null
+        exit 2
+    fi
+    echo "  listener up (pid $APP_PID)"
+}
+start_main
 
 BASE="http://127.0.0.1:$PORT"
 TITLE="Rust Verify Witness"
@@ -3138,6 +3149,14 @@ PY
     pkill -9 -f "$GATE_SOCK" 2>/dev/null
     rm -rf "$GATE_SDIR"
 fi
+
+# **Put the main instance back.** Everything after this section reads `$BASE` and expects
+# it to be the receiver §1–§23 spent a minute proving things about; §26's RTSP receiver
+# takes 7001 *beside* it, §27's restart reads the history it wrote, and §28/§29 compare
+# against the one process. Leaving it dead made those sections bind 8010 or talk to a
+# closed port — measured 2026-10-21, and the cascade read exactly like six product bugs.
+start_main
+
 
 echo "== 25: a sender that ASKS gets an answer, and the empties are told apart =="
 # §22 proves a passive listener can find us — the libvlc shape. It does not prove the
