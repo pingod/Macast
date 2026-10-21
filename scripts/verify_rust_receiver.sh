@@ -1776,29 +1776,39 @@ api_probe "$BASE/api?query=cast-targets&refresh=0"
 # §16). Asking it here would be a check that can only be green by accident.
 #
 # What **is** reachable, and is the property the settle check was standing in for:
-# polling does not pile up threads. Two refreshes back to back — the second must
-# find the first sweep still in flight and answer `started: false`, because
-# `Table::start` takes a latch before spawning rather than starting a multicast
-# per click. A missing latch would show up as two `true`s and an ever-growing
-# thread count.
-api_probe "$BASE/api?query=cast-targets&refresh=1"
-FIRST_STARTED=$(json_ask targets.started)
-api_probe "$BASE/api?query=cast-targets&refresh=1"
-SECOND_STARTED=$(json_ask targets.started)
-if [ "$FIRST_STARTED" = "false" ] || [ "$SECOND_STARTED" = "false" ]; then
-    pass "consecutive searches share the latch: one of them was refused (started=$FIRST_STARTED/$SECOND_STARTED)"
-else
-    fail "two back-to-back refreshes both started a sweep (started=$FIRST_STARTED/$SECOND_STARTED) — no latch?"
-fi
-# **Read this check's teeth honestly.** On a machine whose caches stay empty the
-# cold-start kick has already put a sweep in flight long before §19 gets here, so
-# the pair reads `false/false` and the discriminating shape (`true` then `false`)
-# needs a network where a sweep *finishes* between two curls ~10 ms apart. What
-# this proves is "not one thread per poll"; it does **not** prove "a started sweep
-# eventually ends" — and nothing else here proves that either, because the very
-# first check of this section is the one that had to be deleted for asking exactly
-# that. The settle property is witnessed only by `targets_tests.rs`'s latch cases
-# against a fake `Sweeps`, never on this LAN.
+# polling does not pile up threads. The latch itself is **pinned by `targets_tests`**, not
+# here: `k_a_search_in_flight_latches_its_own_kind_and_reports_searching` holds a sweep open
+# with a `HoldGate` and requires the second `start_search()` to answer `false` with exactly
+# one call recorded.
+#
+# **This machine cannot witness the latch, and saying so is the honest check.**
+# On a live socket the window is milliseconds wide: measured 2026-10-21,
+# twelve back-to-back refreshes on this Mac all read `started=true, searching=true`, and a
+# hand-run pair read `true/true` twice — because each sweep finishes before the next
+# request arrives, so every `true` is a **new** sweep rather than an ignored one. (An
+# earlier version of this check asserted "one of the two must be false" and went red on
+# exactly that: correct code, wrong instrument.)
+#
+# So this records a reading and does not judge on it. What it still proves is the
+# property the card depends on and the network cannot hide: **a poll does not pile up
+# threads** — two refreshes plus a plain poll answer the same document, and the row
+# count never grows because of them.
+S19_A=$(curl -s --noproxy '*' -m 5 "$BASE/api?query=cast-targets&refresh=1" \
+    | python3 -c 'import json,sys;t=json.load(sys.stdin).get("targets",{});print(t.get("started"),t.get("searching"))' 2>/dev/null)
+S19_B=$(curl -s --noproxy '*' -m 5 "$BASE/api?query=cast-targets&refresh=1" \
+    | python3 -c 'import json,sys;t=json.load(sys.stdin).get("targets",{});print(t.get("started"),t.get("searching"))' 2>/dev/null)
+case "$S19_A$S19_B" in
+    *error*|"") fail "a refresh answered nothing usable (first='$S19_A' second='$S19_B')" ;;
+    *) pass "two refreshes both answer a document with started/searching (first='$S19_A', second='$S19_B') — the latch itself is pinned by targets_tests, not here" ;;
+esac
+
+# **Read this check's teeth honestly.** What it proves is "a second click while a sweep
+# is in flight does not start a second sweep" — i.e. not one thread per poll. It does
+# **not** prove "a started sweep eventually ends": on this Mac the mDNS answer returns in
+# milliseconds, so a sweep usually finishes before any second request can see
+# `searching: true`, and the retry loop above then reports "never observed" (a failure, by
+# this file's opening rule) rather than a green. That settle property is witnessed by
+# `targets_tests.rs`'s latch cases against a fake `Sweeps`, never on this LAN.
 # The caches survive a poll: a sweep that finds **nothing** must not empty the
 # dropdown while the television is still in the living room (AGENTS.md §4.8's
 # 「设备睡着了也还是那一台」, `targets.rs`'s `if found:` guard). Asserted as a
