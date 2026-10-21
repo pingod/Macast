@@ -2858,8 +2858,17 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   回 `false` 且只记一次调用）。留在这段话里的理由是：**"这个窗口太窄所以测不到"必须写成一句
   读数**，不能悄悄换成一条永远绿的断言 —— 那正是本文件开头那句"跑不起来的检查不是绿"。
   与 §4.2「等那个状态，不要抓一瞬间」是同一族，区别在于这一次**那个状态在本机根本不存在足够久**。
+* **一条错了三处的陈述，查源码才改掉**：台账里写着"`pin_multicast_if` 在非 unix 上是**明写的
+  空操作**"，并据此解释 Windows 列为什么没验。2026-10-21 查 `socket2-0.6.5/src/socket.rs:1546-1557`
+  —— 它在**每个平台**都是同一句 `setsockopt(IPPROTO_IP, IP_MULTICAST_IF, in_addr)`，`pin_multicast_if`
+  自己也没有任何 `cfg`。所以没有"空操作"这回事，只有"这个调用没在 Windows 上行使过"。
+  两句的区别很实际：**前者叫人来补一次测量，后者叫人去修一个不存在的缺陷**。
+  判据：`pinning_the_egress_has_no_platform_specific_arm` —— 那个函数的体里不许出现
+  `cfg(windows)` / `cfg(unix)` / `cfg(target_os`，且必须仍然借 socket2 的 setter；
+  同时 `send_group` 的 pin 必须**在 egress 循环里恰好一次**（放到循环外，每份拷贝就都从
+  最后设的那块卡出去了）。
 * 读数：`macast-upnp` **369**、`macast-tauri` **33**（两台仪器一致：`--list` 与整跑），
-  单元合计 **1422 passed / 0 failed**（cast 735 + core 135 + mpv 149 + tauri 34 + upnp 369）；
+  单元合计 **1425 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 34 + upnp 369）；
   真机脚本 **44 节**，最后一趟整跑 **425 PASS / 18 FAIL**（六趟逐次收口：389→412→421→425），
   其中 **§39 = 8/8、§40 = 12/12、§41 = 5/5、§34/§35 全绿**。
   那 18 条逐条归因过，**没有一条是这一轮改的东西**：7 条是用户的第三方 app `xiezuo`（PID 1080）

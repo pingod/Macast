@@ -2903,3 +2903,61 @@ fn a_reply_still_fits_in_one_packet_which_is_why_answer_order_cannot_save_bytes(
         announcement.len()
     );
 }
+
+/// **`pin_multicast_if` is one implementation, not one per platform — ask the source.**
+///
+/// The design doc carried, in three places, the sentence "`pin_multicast_if` is an explicit
+/// no-op on non-unix" and cited it whenever the Windows column came up. Measured
+/// 2026-10-21: there is no `cfg` in the call at all — it is
+/// `socket2::SockRef::set_multicast_if_v4`, and socket2 0.6.5 implements that with the same
+/// `setsockopt(IPPROTO_IP, IP_MULTICAST_IF, struct in_addr)` on every target
+/// (`socket2-0.6.5/src/socket.rs:1546-1557`, no `cfg` branches).
+///
+/// The distinction the wrong sentence destroyed is the one that matters: "never happened to
+/// be exercised on Windows" sends someone to *measure*, while "explicitly does nothing"
+/// sends them to *fix a defect that does not exist*. So the sentence is now a check:
+///
+/// * this call site must not grow a platform gate — the day someone writes a `cfg(windows)`
+///   arm here, the doc's claim becomes true again and has to be re-argued;
+/// * `send_group` must actually call it once per egress entry, because "one call" is what
+///   makes the sentence above about *this* function rather than about a helper nobody uses.
+#[test]
+fn pinning_the_egress_has_no_platform_specific_arm() {
+    crate::pin_test_dir();
+    let source = include_str!("announce.rs");
+    let start = source
+        .find("fn pin_multicast_if(")
+        .expect("pin_multicast_if is gone — this test's premise");
+    let body = &source[start..(start + 400).min(source.len())];
+    let body = &body[..body.find("\n}").map(|n| n + 2).unwrap_or(body.len())];
+    for gate in ["cfg(windows)", "cfg(unix)", "cfg(not(unix))", "cfg(target_os"] {
+        assert!(
+            !body.contains(gate),
+            "pin_multicast_if grew a {gate} arm — then the Windows column really is \
+             un-exercised *code* rather than an un-measured call, and docs/Rust-Port-Design.md \
+             §16 第 39 条 has to be re-argued instead of quietly staying as it is"
+        );
+    }
+    assert!(
+        body.contains("set_multicast_if_v4"),
+        "pin_multicast_if no longer borrows socket2's cross-platform setter; whatever it does \
+         now needs its own per-platform story"
+    );
+
+    // One pin per egress entry: the loop, not a single call before it.
+    let sender = source
+        .find("pub fn send_group(")
+        .expect("send_group is gone");
+    let sender_body = &source[sender..(sender + 1200).min(source.len())];
+    let sender_body = &sender_body[..sender_body.find("\n}").map(|n| n + 2).unwrap_or(sender_body.len())];
+    let pin_calls = sender_body.matches("pin_multicast_if(sock, *address)").count();
+    assert_eq!(
+        pin_calls, 1,
+        "send_group no longer pins inside its egress loop (found {pin_calls} call(s)) — a pin \
+         outside the loop sends every copy out of whichever card was set last"
+    );
+    assert!(
+        sender_body.contains("for address in egress"),
+        "the egress loop is gone, so \"one copy per interface\" is no longer what this does"
+    );
+}
