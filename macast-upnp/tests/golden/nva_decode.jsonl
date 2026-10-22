@@ -1,0 +1,8 @@
+{"case": "single_res", "chunks": ["c001000000050000000c7b22766f6c756d65223a307d"], "events": [["res", 5, {"volume": 0}]]}
+{"case": "two_frames", "chunks": ["e002000000010107436f6d6d616e6409476574566f6c756d65c001000000020000000d7b22766f6c756d65223a35307d"], "events": [["cmd", "GetVolume", 1, null], ["res", 2, {"volume": 50}]]}
+{"case": "byte_at_a_time", "chunks": ["e0", "03", "00", "00", "00", "03", "01", "07", "43", "6f", "6d", "6d", "61", "6e", "64", "0a", "4f", "6e", "50", "72", "6f", "67", "72", "65", "73", "73", "00", "00", "00", "0f", "7b", "22", "70", "6f", "73", "69", "74", "69", "6f", "6e", "22", "3a", "36", "34", "7d"], "events": [["cmd", "OnProgress", 3, {"position": 64}]]}
+{"case": "junk_then_frames", "chunks": ["ff001399c00000000001c00000000002"], "events": [["res", 1, null], ["res", 2, null]]}
+{"case": "ping_then_res", "chunks": ["e40000000001c00000000009"], "events": [["res", 9, null]]}
+{"case": "bad_json", "chunks": ["c00100000004000000086e6f74206a736f6e"], "events": []}
+{"case": "bad_flag", "chunks": ["e00900000001c00000000007"], "events": [["res", 7, null]]}
+{"case": "two_chunks", "chunks": ["e002000000010107", "436f6d6d616e64057061757365c00100000002000000027b7d"], "events": [["cmd", "pause", 1, null], ["res", 2, {}]]}
