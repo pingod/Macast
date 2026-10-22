@@ -2553,6 +2553,28 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *仍然是判决层*：真正的采集/编码/推流（avfoundation / ddagrab / SCK、广播线程、WebRTC
     信令、Cast Streaming 的 UDP 与 AES）一行没搬，而且和上面十截一样**没有生产调用方**。
 
+    **这一轮最后一个真缺陷是"小数点舍入"，而它有两个站点**（`bab71ca`）：
+    Python 的 `round()` 是**四舍六入五取偶**，Rust 的 `.round()` 是**五远离零**。
+    ① `mirror_queue` 的 `round2`（队列秒数，诊断卡与观看页都在显示）：参数空间扫描
+    （chunk/cluster 形状、0.6–20 Mbit/s、每个可能的队列深度）**142 处分歧**，例如 1 Mbit/s、
+    48 个 cluster —— Python 20.62 / Rust 20.63。② `channel.rs` 的音量，参考实现是
+    `int(round(level * 100))` 且**直接送给播放器**：0.000–1.000 按 0.001 步进 **46 处分歧**，
+    0.005 → Python 0 / Rust 1。两处都改成 `format!("{:.N}")` 再 parse 回来（那正是 Python 的
+    规则），并各补一条钉住**精确半值**的用例 —— 那些正是"顺手写的"舍入会错、别处又都对的
+    地方。改回 `.round()` 各红 1–2 条。
+    *同一类差异顺手系统查过五族*：`int()`/`as` 对负数都是向零截断（一致）、`include`/`len`
+    的码点 vs 字节（`mdns.rs:453` 早就用 `chars().count()` 并在注释里写明理由）、
+    `{:.0}` 的银行家舍入（Rust 与 Python 一致）、`-0.0` 的格式化（两边都 `-0`）、
+    `ceil`/`floor`（语义一致）。**只有 `round` 这一族是真分歧。**
+
+    *这一轮也做了端到端真机验证，比之前的"页面渲染了"更进一步*：release 二进制起真实例后，
+    用真 SOAP 打了三个控制点 —— `AVTransport#GetTransportInfo` 回
+    `CurrentTransportStatus=OK`、`RenderingControl#GetVolume` 回 `100`。
+    *顺带确认了 `controlURL` 的相对路径是对的*：`description.xml` 里没有 `URLBase`，所以按
+    UPnP 规范以文档自身 URL（`/description.xml`）为基准，`AVTransport/action` 解析成
+    `/AVTransport/action` —— 正是服务实际响应的那个。我第一版手工拼了 `/dlna/AVTransport/action`
+    并得到管理面的"没有可执行的操作"，那是**我猜错了路径**，不是产品缺陷。
+
     *仍然欠着的，按依赖顺序*：
     `screen_mirror` 的**管线本体**是 Rust 完全空白的一块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
