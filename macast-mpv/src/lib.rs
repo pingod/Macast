@@ -75,6 +75,7 @@
 pub mod link;
 pub mod player;
 pub mod argv;
+pub mod external_player;
 pub mod floating;
 pub mod command;
 pub mod ipc;
