@@ -1,0 +1,15 @@
+{"method": "GetVolume", "params": null, "result": {"events": ["res", "GetVolume"], "raised": null}}
+{"method": "Pause", "params": null, "result": {"events": ["res", "Pause"], "raised": null}}
+{"method": "Pause", "params": {"x": 1}, "result": {"events": ["res", "Pause"], "raised": null}}
+{"method": "SetVolume", "params": null, "result": {"events": [], "raised": "TypeError"}}
+{"method": "SetVolume", "params": {"volume": 50}, "result": {"events": ["SetVolume"], "raised": null}}
+{"method": "SetVolume", "params": {"other": 1}, "result": {"events": ["SetVolume"], "raised": null}}
+{"method": "SwitchSpeed", "params": null, "result": {"events": [], "raised": "TypeError"}}
+{"method": "SwitchSpeed", "params": {"speed": "2"}, "result": {"events": ["SwitchSpeed"], "raised": null}}
+{"method": "SwitchQn", "params": {"qn": 80}, "result": {"events": ["res", "SwitchQn"], "raised": null}}
+{"method": "Play", "params": {"aid": 1}, "result": {"events": ["res"], "raised": "KeyError"}}
+{"method": "Play", "params": {"aid": 1, "cid": 2}, "result": {"events": ["res", "Play"], "raised": null}}
+{"method": "PlayUrl", "params": {"url": "http://x"}, "result": {"events": ["res", "PlayUrl"], "raised": null}}
+{"method": "Seek", "params": {"seekTs": 30}, "result": {"events": ["res", "Seek"], "raised": null}}
+{"method": "Seek", "params": null, "result": {"events": ["res"], "raised": "TypeError"}}
+{"method": "Unknown", "params": null, "result": {"events": ["res"], "raised": null}}
