@@ -87,6 +87,7 @@ pub mod entities;
 pub mod gbk;
 pub mod html;
 pub mod local_file;
+pub mod raop;
 pub mod mdns;
 pub mod proto;
 pub mod push;
