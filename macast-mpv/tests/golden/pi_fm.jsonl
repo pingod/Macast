@@ -1,0 +1,6 @@
+{"case": "none", "has": [], "verdict": "NoTransmitter"}
+{"case": "sudo_only", "has": ["sudo"], "verdict": "NoTransmitter"}
+{"case": "both", "has": ["pi_fm_rds", "sox"], "verdict": "Spawn"}
+{"case": "no_sox", "has": ["pi_fm_rds"], "verdict": "NoDecoder"}
+{"case": "sudo_sox", "has": ["sox", "sudo"], "verdict": "NoTransmitter"}
+{"case": "sox_only", "has": ["sox"], "verdict": "NoTransmitter"}
