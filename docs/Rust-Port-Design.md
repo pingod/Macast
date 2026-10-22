@@ -2534,8 +2534,27 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *它同样没有生产调用方*（`media-file` 在参考实现里是**插件**路由，不是核心的一条），
     所以这一截和上面九截一样，属于"插件宿主落地时的现成决策面"。
 
+    **`screen_mirror`（13,629 行）的决策层搬了四截**，这是本轮唯一碰过的全新通道：
+    `mirror_profiles.rs`（五个目标 + 五个 DLNA 档位 + 延迟表）、`mirror_queue.rs`（队列单位与
+    秒数预算）、`mirror_encoder.rs`（编码器选择 + 那条**我们自己造成过**的 `-level` 规则）、
+    `mirror_knobs.rs`（预填 / 直播边缘 / 最大时长）。语料合计 **5+5+5 表字段 + 48 队列 +
+    36 编码 + 50 旋钮**，全部由执行参考实现生成；五个变异体各红 1–4 条。
+    *三格是本轮最值得留的*：
+    ① `-level 42` 曾写死给 VideoToolbox ⇒ 3456×2234 的桌面（30384 个宏块，而 4.2 上限是
+    8704）**退出 187、零字节**，而 `auto` 在 Mac 上落在硬件 ⇒ 「原画」档出厂即产不出帧，
+    失败还被送去**屏幕录制授权**那扇门。修法是"能履行的才钉、更大的钉下一个、不知道尺寸就
+    整个省略"。
+    ② `frag_every_frame` 按**采样**计数：带声音的 24 fps 一秒写 **70.875** 个 moof（实测
+    15.02 秒 1063 片 = 70.8/s），所以 fMP4 队列是 54 个单位而不是写死的 8（8 个 = 0.11 秒，
+    预算要 0.75 秒，实测 28% 自丢）。
+    ③ `webrtc`/`caststream` 的 suffix 字段是 `h264` **不是空** —— 参考实现的注释说
+    "no suffix, no Content-Type"，我把它读成了空字段；真正表达"不走 HTTP"的是
+    `content_type: None`。**又一次"按注释读实现"**。
+    *仍然是判决层*：真正的采集/编码/推流（avfoundation / ddagrab / SCK、广播线程、WebRTC
+    信令、Cast Streaming 的 UDP 与 AES）一行没搬，而且和上面十截一样**没有生产调用方**。
+
     *仍然欠着的，按依赖顺序*：
-    `screen_mirror`（13,629 行）是 Rust 完全空白的一块
+    `screen_mirror` 的**管线本体**是 Rust 完全空白的一块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
     `airplay_mirror`/`nirvana`/`iina`/`potplayer`/`pi_fm`/`web`/`live` 九个插件按 §18 的方向
     应当按**原生**实现而不是开脚本口；`scripts/verify_cast_airplay.py`（44k 行）是 **Python 应用的
