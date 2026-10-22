@@ -2522,8 +2522,20 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     非对象体也接受。后两处如果没有语料，我写好的是一个**会让真实客户端掉线**的版本 ——
     那正是"按文档搬"和"按实现搬"的差别。
 
+    **`cast_local_file` 的供字节那一半也搬了**（`local_serve.rs`）：注册表 + 每条应答的头。
+    `relay.rs` 早有 `parse_range`/`serve_plan`，但那是**远端源**那一路；本地文件这一路只差一处，
+    而那一处值得单独一张表：三条红线（没发 Range 就是 200 且不带 `Content-Range`、消失的文件
+    必须拒答而不是回空 200、起点越界是 416 带 `bytes */total`），外加 `Accept-Ranges` 出现在
+    每一条应答上、DLNA 推送独有的两行（电视**先读它们才决定播不播**）。
+    语料 49 条由执行参考实现的 `do_GET` 生成；**抓到两处**：416 分支我多发了 DLNA 头、
+    以及我先手写了一个 `is_junk()` 去修正 `bytes=9-0` —— 而 `relay::parse_range` **早就**
+    按参考实现的 `stop < start → None` 实现了。**那不是两种实现漂移，是我在没读那个函数之前
+    先动手了**；`is_junk` 删掉，Range 文法现在只有一处。
+    *它同样没有生产调用方*（`media-file` 在参考实现里是**插件**路由，不是核心的一条），
+    所以这一截和上面九截一样，属于"插件宿主落地时的现成决策面"。
+
     *仍然欠着的，按依赖顺序*：
-    `screen_mirror`（13,629 行）与 `cast_local_file` 的**供字节那一半**是 Rust 完全没有的两块
+    `screen_mirror`（13,629 行）是 Rust 完全空白的一块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
     `airplay_mirror`/`nirvana`/`iina`/`potplayer`/`pi_fm`/`web`/`live` 九个插件按 §18 的方向
     应当按**原生**实现而不是开脚本口；`scripts/verify_cast_airplay.py`（44k 行）是 **Python 应用的
