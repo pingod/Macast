@@ -65,6 +65,7 @@
 //! in [`ssdp`] is therefore an ordered `Vec`, not a `HashMap`, and a "tidier"
 //! map would shuffle headers in a way no test on this machine can see.
 
+pub mod nva;
 pub mod description;
 pub mod device;
 pub mod eventing;

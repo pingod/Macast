@@ -1,0 +1,13 @@
+{"line": "GET http://h/a HTTP/1.0\r\n", "result": {"close_connection": false, "is_nva": false, "method": "GET", "ok": true, "uri": "http://h/a"}}
+{"line": "GET http://h/a NVA/1.0\r\n", "result": {"close_connection": true, "is_nva": true, "method": "GET", "ok": true, "uri": "http://h/a"}}
+{"line": "PLAY http://h/a NVA/1.0\r\n", "result": {"close_connection": true, "is_nva": true, "method": "PLAY", "ok": true, "uri": "http://h/a"}}
+{"line": "GET http://h/a HTTP/1.1\r\n", "result": {"close_connection": false, "is_nva": false, "method": "GET", "ok": true, "uri": "http://h/a"}}
+{"line": "GET http://h/a HTTP/2.0\r\n", "result": {"ok": false, "status": 505}}
+{"line": "GET http://h/a NVA/2.0\r\n", "result": {"ok": false, "status": 400, "why": "protocol"}}
+{"line": "GET http://h/a FOO/1.0\r\n", "result": {"ok": false, "status": 400, "why": "protocol"}}
+{"line": "GET http://h/a HTTP/1\r\n", "result": {"ok": false, "status": 400, "why": "version"}}
+{"line": "GET  HTTP/1.0\r\n", "result": {"close_connection": false, "is_nva": false, "method": "GET", "ok": true, "uri": ""}}
+{"line": "GET http://h/a HTTP/1.0\n", "result": {"ok": false, "status": 400, "why": "crlf"}}
+{"line": "", "result": {"ok": false, "status": 408}}
+{"line": "GET http://h/a HTTP/x.y\r\n", "result": {"ok": false, "status": 400, "why": "malformed"}}
+{"line": "nva http://h/a NVA/1.0\r\n", "result": {"close_connection": true, "is_nva": true, "method": "NVA", "ok": true, "uri": "http://h/a"}}
