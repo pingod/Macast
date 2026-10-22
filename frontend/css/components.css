@@ -1,0 +1,617 @@
+/*
+ * Components: the pieces both views are built from.
+ *
+ * Every rule here is a *named* thing — `.card`, `.chip`, `.field`, `.btn` — rather than a
+ * selector on an id. That is what makes the two views one product: the user view and the
+ * admin view assemble the same parts, so a change here lands in both.
+ *
+ * Nothing in this file knows about Macast. A component that needs to know what it is
+ * showing belongs in `views.css`.
+ */
+
+/* ---------------------------------------------------------------- shell */
+
+.shell {
+  display: flex;
+  min-height: 100%;
+}
+
+/* The rail is a real navigation, not a decoration: it is the only way to move between
+ * the two halves of the app, and it stays put while the content scrolls. */
+.rail {
+  flex: 0 0 var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s5);
+  padding: var(--s5) var(--s3);
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+}
+
+.rail__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: 0 var(--s2);
+}
+
+/* The mark is a monogram, not an image: no asset to ship, and it inherits the accent so
+ * it recolours with the theme. */
+.rail__mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r2);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+  font-size: var(--text-lg);
+}
+
+.rail__name {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.rail__version {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--faint);
+}
+
+.rail__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail__group {
+  padding: var(--s4) var(--s2) var(--s1);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+/* Nav items are buttons: keyboard reachable for free, and `aria-current` says which
+ * one is showing. */
+.navitem {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 0;
+  border-radius: var(--r2);
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.navitem:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.navitem[aria-current="page"] {
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.navitem__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: currentColor;
+  opacity: 0.5;
+}
+
+.rail__foot {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+/* The newest event line. Clamped to two lines: a rail is not a log, and a long URL here
+ * would push the nav off the top of the sidebar. */
+.rail__last {
+  color: var(--faint);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- content */
+
+.content {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--s6) var(--s6) var(--s7);
+}
+
+.content__inner {
+  max-width: var(--shell-max);
+  margin: 0 auto;
+}
+
+.pagehead {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s4);
+  margin-bottom: var(--s5);
+}
+
+.pagehead h1 {
+  font-size: var(--text-2xl);
+  font-weight: 620;
+  letter-spacing: -0.015em;
+}
+
+.pagehead p {
+  margin-top: var(--s1);
+  color: var(--muted);
+  max-width: 62ch;
+}
+
+/* Views are panels of cards. `auto-fill` + a minmax floor is what makes the layout
+ * respond without a single media query: a card is never squeezed below 340px, and the
+ * grid adds a column when there is room. */
+.grid {
+  display: grid;
+  gap: var(--s4);
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  align-items: start;
+}
+
+/* A card that should span the whole row (log viewer, settings editor). */
+.grid > .span {
+  grid-column: 1 / -1;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s5);
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: var(--surface);
+}
+
+.card--flat {
+  background: var(--surface-2);
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.card__title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.card__hint {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+/* ---------------------------------------------------------------- data */
+
+/* A definition list as a two-column key/value table. `minmax(0, 1fr)` on the value side
+ * is load-bearing: without it a long URL refuses to wrap and the card grows sideways. */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(96px, 38%) minmax(0, 1fr);
+  gap: var(--s2) var(--s3);
+  align-items: baseline;
+}
+
+.kv dt {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.kv dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* ---------------------------------------------------------------- chips */
+
+/* A state chip. `data-tone` is the only variant axis, so a caller cannot invent a
+ * colour that is not in the palette. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: 2px var(--s2);
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.chip[data-tone="ok"] {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.chip[data-tone="warn"] {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+.chip[data-tone="bad"] {
+  background: var(--bad-bg);
+  color: var(--bad);
+}
+
+.chip[data-tone="accent"] {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.chip::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-full);
+  background: currentColor;
+}
+
+/* A chip that is just a label, with no dot. */
+.chip--quiet::before {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--surface-2);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn[data-variant="primary"] {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+.btn[data-variant="primary"]:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn[data-variant="danger"] {
+  color: var(--bad);
+}
+
+.btn[data-variant="danger"]:hover:not(:disabled) {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
+
+.btn[data-variant="quiet"] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.btn[data-variant="quiet"]:hover:not(:disabled) {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.btn--sm {
+  padding: var(--s1) var(--s3);
+  font-size: var(--text-sm);
+}
+
+.btnrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+/* ---------------------------------------------------------------- forms */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+}
+
+.field > label {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+/* Hints sit under their control and are quiet: a hint louder than the label is a hint
+ * nobody reads twice. */
+.field > .hint {
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--bg);
+  color: var(--fg);
+  transition: border-color var(--fast) var(--ease);
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.textarea {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  resize: vertical;
+  min-height: 96px;
+}
+
+/* The row form: a field that grows, with its button pinned to the baseline. */
+.fieldrow {
+  display: flex;
+  gap: var(--s2);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.fieldrow > .field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- log panes */
+
+/* A log is monospace, scrollable, and selectable. It is never `white-space: pre` — the
+ * content wraps, because one long DIDL line must not introduce a horizontal scrollbar. */
+.pane {
+  margin: 0;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.pane--short {
+  max-height: 220px;
+  min-height: 88px;
+}
+
+/* The event feed: same monospace, but dimmer, because it is ambient. */
+.pane--feed {
+  min-height: 96px;
+  max-height: 200px;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- lists */
+
+/* A row that is itself clickable (history entries, candidates). Built as a button so it
+ * is keyboard reachable; the two-line layout is a grid so the title and the address
+ * cannot drift apart. */
+.rowitem {
+  display: grid;
+  gap: 2px var(--s3);
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: 100%;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--bg);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+
+.rowitem:hover {
+  border-color: var(--accent);
+  background: var(--surface-2);
+}
+
+.rowitem__title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+}
+
+.rowitem__meta {
+  grid-column: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.rowitem__why {
+  grid-column: 1;
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+/* `grid-column: 2` is load-bearing, not tidiness. A grid item with a definite *row*
+ * (`1 / span 3`) but no column is placed by the auto-placement algorithm in the **first**
+ * column that fits — so the button landed in column 1 and the title was pushed to column 2.
+ * Measured in a real browser on 2026-10-21: the 重投 chip covered the first half of every
+ * history row. Pinning the column is what makes the row read title-first. */
+.rowitem__go {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: center;
+  justify-self: end;
+}
+
+.rowitem--dead {
+  border-color: var(--bad);
+}
+
+/* ---------------------------------------------------------------- empty / notices */
+
+/* An empty state says what would fill it. A bare "—" is a dead end. */
+.empty {
+  padding: var(--s4);
+  border: 1px dashed var(--border);
+  border-radius: var(--r2);
+  color: var(--faint);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* An inline notice: the thing a click produced. It carries a tone, never a raw colour. */
+.notice {
+  padding: var(--s2) var(--s3);
+  border-left: 2px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.notice[data-tone="ok"] {
+  border-left-color: var(--ok);
+}
+
+.notice[data-tone="warn"] {
+  border-left-color: var(--warn);
+}
+
+.notice[data-tone="bad"] {
+  border-left-color: var(--bad);
+  color: var(--fg);
+}
+
+.notice:empty {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- responsive */
+
+/* Two breakpoints, and both are about the *rail*: below 900px the sidebar becomes a top
+ * bar, below 620px the page head stacks. No card ever changes its own layout. */
+@media (max-width: 900px) {
+  .shell {
+    flex-direction: column;
+  }
+
+  .rail {
+    position: static;
+    height: auto;
+    flex: 0 0 auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s3);
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .rail__nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .rail__group {
+    display: none;
+  }
+
+  .rail__foot {
+    margin: 0 0 0 auto;
+    flex-direction: row;
+  }
+
+  .content {
+    padding: var(--s4);
+  }
+}
+
+@media (max-width: 620px) {
+  .pagehead {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .kv {
+    grid-template-columns: 1fr;
+    gap: var(--s1);
+  }
+
+  .kv dt {
+    margin-top: var(--s2);
+  }
+}
+
+/* Respect a user who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

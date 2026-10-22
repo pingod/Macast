@@ -1,0 +1,231 @@
+/*
+ * View-specific layout. Everything reusable lives in `components.css`; this file only
+ * holds the few arrangements that belong to one screen.
+ *
+ * Kept apart on purpose: when the user view and the admin view need to look different,
+ * the difference shows up here, in one readable place, instead of as scattered overrides.
+ */
+
+/* ---------------------------------------------------------------- user: now playing */
+
+/* The hero card is the largest thing on the user view, because it answers the only
+ * question a person casting has: "is it playing, and what is it". */
+.now {
+  display: grid;
+  gap: var(--s4);
+  padding: var(--s5);
+  border: 1px solid var(--border);
+  border-radius: var(--r3);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 7%, var(--surface)) 0%,
+    var(--surface) 62%
+  );
+}
+
+.now__top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+}
+
+.now__title {
+  font-size: var(--text-xl);
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.now__url {
+  margin-top: var(--s1);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* A bar that only moves when there is a duration to divide by. Without one it is a
+ * static track — an indeterminate progress bar that never fills reads as "stuck". */
+.progress {
+  position: relative;
+  height: 4px;
+  border-radius: var(--r-full);
+  background: var(--surface-3);
+  overflow: hidden;
+}
+
+.progress__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 300ms var(--ease);
+}
+
+.progress__times {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  margin-top: var(--s1);
+}
+
+.now__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+}
+
+.now__spacer {
+  flex: 1 1 auto;
+}
+
+/* ---------------------------------------------------------------- user: cast */
+
+/* Two ways to cast, side by side on a wide window: paste a page address (parsed into
+ * candidates) or hand over a direct media URL. They are different jobs, so they are
+ * different cards rather than two buttons in one form. */
+.castrows {
+  display: grid;
+  gap: var(--s3);
+}
+
+/* ---------------------------------------------------------------- admin: log grid */
+
+/* The log card needs a toolbar that does not wrap into three lines on a narrow window:
+ * the two selects share a row, the three buttons a second. */
+.logbar {
+  display: grid;
+  gap: var(--s2);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  align-items: end;
+}
+
+@media (max-width: 720px) {
+  .logbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---------------------------------------------------------------- admin: settings */
+
+/* Module settings are a dense list of key/value rows, not a grid of cards: they are read
+ * by scanning, so the label column has to align down the whole group. */
+.settingsgroup {
+  display: grid;
+  gap: var(--s1);
+}
+
+.settingsgroup__title {
+  margin-top: var(--s4);
+  padding-bottom: var(--s1);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settingsgroup__title:first-child {
+  margin-top: 0;
+}
+
+/* One setting. The key is shown because the JSON editor next door needs it; the label is
+ * what the user reads. */
+.setting {
+  display: grid;
+  gap: var(--s1) var(--s3);
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 0.8fr) auto;
+  align-items: center;
+  padding: var(--s2) 0;
+}
+
+@media (max-width: 720px) {
+  .setting {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.setting__what {
+  min-width: 0;
+}
+
+.setting__label {
+  font-size: var(--text-sm);
+}
+
+.setting__key {
+  display: block;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.setting__hint {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  margin-top: 2px;
+}
+
+.setting--ro .setting__value {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------- admin: counters */
+
+/* Three counters in a row, because they are compared, not read one at a time. */
+.counters {
+  display: grid;
+  gap: var(--s2);
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
+.counter {
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r2);
+  background: var(--bg);
+}
+
+.counter__label {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.counter__value {
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+/* A counter that is not zero is the whole point of showing it: it means a queue is not
+ * being drained, so it is the one thing on this card allowed to shout. */
+.counter[data-bad="true"] {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+}
+
+.counter[data-bad="true"] .counter__value {
+  color: var(--warn);
+}
+
+/* ---------------------------------------------------------------- admin: danger zone */
+
+/* Destructive controls are last on the page and visually separated. A quit button next to
+ * a save button is a mis-click waiting to happen. */
+.danger {
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--border));
+}
+
+.danger .card__title {
+  color: var(--bad);
+}

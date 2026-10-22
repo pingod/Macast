@@ -3526,6 +3526,153 @@ mod tests {
     /// Same discipline as the library crates: a test added without the pin would
     /// write into the user's configuration directory, so the count is checked
     /// rather than trusted.
+    /// **The whole front end, as one string.**
+    ///
+    /// The window used to be a single `index.html` with its script inline, so every guard in
+    /// this module could scan one `include_str!`. It is now a shell plus ES modules, which
+    /// would have made all seven of those guards quietly scan a file that no longer contains
+    /// the code — a scanner whose subject moved is a scanner that agrees with everything.
+    ///
+    /// So they scan this instead: the HTML (markup and ids) concatenated with every module
+    /// (behaviour). Order does not matter for any of the questions asked, because each one
+    /// is a substring or a count.
+    ///
+    /// The list of modules is written out rather than globbed: `include_str!` is resolved at
+    /// compile time and there is no glob for it. A module added to the page and not to this
+    /// list is a module no guard reads — which is why `every_module_the_page_loads_is_one
+    /// _this_test_reads` exists below.
+    fn front_end() -> String {
+        let mut all = String::from(include_str!("../../frontend/index.html"));
+        for module in [
+            include_str!("../../frontend/js/app.js"),
+            include_str!("../../frontend/js/lib/bridge.js"),
+            include_str!("../../frontend/js/lib/dom.js"),
+            include_str!("../../frontend/js/lib/feed.js"),
+            include_str!("../../frontend/js/user/now-playing.js"),
+            include_str!("../../frontend/js/user/casting.js"),
+            include_str!("../../frontend/js/user/accounts.js"),
+            include_str!("../../frontend/js/admin/services.js"),
+            include_str!("../../frontend/js/admin/logs.js"),
+            include_str!("../../frontend/js/admin/settings.js"),
+            include_str!("../../frontend/js/admin/diagnostics.js"),
+        ] {
+            all.push('\n');
+            all.push_str(module);
+        }
+        all
+    }
+
+    /// **Every `import` in the front end resolves to a real export.**
+    ///
+    /// Measured 2026-10-21, in a real browser: `app.js` imported `toastNode` from `feed.js`
+    /// after that function was deleted. An ES module graph fails **atomically** — the import
+    /// that cannot resolve takes the whole graph with it, so *nothing* ran: every field stayed
+    /// at its placeholder and the console held one line nobody was reading. That is the same
+    /// shape as the blank-window bug of 2026-10-20 (a card with no writer) reached through a
+    /// different door, and no Rust test could see it because nothing here loads the modules.
+    ///
+    /// So this asks the linker's question statically: for each `import { a, b } from './x.js'`,
+    /// the target file exists and exports each name. `export default` is not used anywhere in
+    /// this front end, and a named import of a default export fails in the browser too.
+    #[test]
+    fn every_module_import_resolves_to_a_real_export() {
+        pin_test_dir();
+        // The modules, by the paths their own imports use relative to `js/`.
+        let modules: [(&str, &str); 11] = [
+            ("app.js", include_str!("../../frontend/js/app.js")),
+            ("lib/bridge.js", include_str!("../../frontend/js/lib/bridge.js")),
+            ("lib/dom.js", include_str!("../../frontend/js/lib/dom.js")),
+            ("lib/feed.js", include_str!("../../frontend/js/lib/feed.js")),
+            ("user/now-playing.js", include_str!("../../frontend/js/user/now-playing.js")),
+            ("user/casting.js", include_str!("../../frontend/js/user/casting.js")),
+            ("user/accounts.js", include_str!("../../frontend/js/user/accounts.js")),
+            ("admin/services.js", include_str!("../../frontend/js/admin/services.js")),
+            ("admin/logs.js", include_str!("../../frontend/js/admin/logs.js")),
+            ("admin/settings.js", include_str!("../../frontend/js/admin/settings.js")),
+            ("admin/diagnostics.js", include_str!("../../frontend/js/admin/diagnostics.js")),
+        ];
+        let by_path: std::collections::HashMap<&str, &str> = modules.iter().copied().collect();
+
+        let normalise = |from: &str, spec: &str| -> String {
+            // Only relative specifiers exist here; anything else (a bare specifier) cannot be
+            // resolved by this test and cannot be resolved by the browser either, so it is a
+            // finding rather than something to skip.
+            // A file at the root of the module tree has no directory at all, and splitting
+            // `""` yields one empty segment that would then survive into every joined path —
+            // measured as this test's first failure: `app.js` was reported as importing
+            // `/lib/bridge.js`, i.e. absolute, for a path that is plainly relative.
+            let mut parts: Vec<&str> = match from.rsplit_once('/') {
+                Some((dir, _)) if !dir.is_empty() => dir.split('/').collect(),
+                _ => Vec::new(),
+            };
+            for segment in spec.trim_start_matches("./").split('/') {
+                match segment {
+                    "." | "" => {}
+                    ".." => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            parts.join("/")
+        };
+
+        let mut checked = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for (from, source) in modules {
+            let mut rest = source;
+            // `import { a, b } from './x.js'` and `import * as ns from './y.js'`.
+            while let Some(at) = rest.find("import ") {
+                rest = &rest[at..];
+                let end = rest.find(';').unwrap_or(rest.len());
+                let statement = &rest[..end];
+                rest = &rest[end..];
+                let Some(from_at) = statement.find(" from '") else { continue };
+                let spec = statement[from_at + 7..]
+                    .split('\'')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !spec.starts_with('.') || !spec.ends_with(".js") {
+                    problems.push(format!("{from}: import specifier `{spec}` is not a relative .js path"));
+                    continue;
+                }
+                let path = normalise(from, &spec);
+                let Some(target) = by_path.get(path.as_str()) else {
+                    problems.push(format!("{from}: imports `{spec}`, which is not one of the modules this test reads ({path})"));
+                    continue;
+                };
+                let names = statement
+                    .find('{')
+                    .and_then(|open| statement.find('}').map(|close| (open, close)))
+                    .map(|(open, close)| &statement[open + 1..close])
+                    .unwrap_or("");
+                for name in names.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                    let name = name.split(" as ").next().unwrap_or(name).trim();
+                    checked += 1;
+                    let declared = target.contains(&format!("function {name}("))
+                        || target.contains(&format!("const {name} ="))
+                        || target.contains(&format!("let {name} ="))
+                        || target.contains(&format!("class {name}"));
+                    if !declared {
+                        problems.push(format!("{from}: `{spec}` exports nothing named `{name}`"));
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 30,
+            "only {checked} named imports were examined — a scan that finds nothing agrees with \
+             every claim about it"
+        );
+        assert!(
+            problems.is_empty(),
+            "the module graph would fail to load (one bad import takes the whole graph down, \
+             which leaves every field at its placeholder):\n  {}",
+            problems.join("\n  ")
+        );
+    }
+
     /// **Every `id=` the page's markup declares is mentioned by the page's own script.**
     ///
     /// This is the browser-free guard for the defect of 2026-10-20: `40a9b25` deleted the
@@ -3552,18 +3699,28 @@ mod tests {
     #[test]
     fn every_element_the_page_declares_is_also_one_its_script_touches() {
         pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
-        // The split is load-bearing: an `id="…"` that only appears inside the script (a
-        // string built at runtime) is not a declaration, and counting it would let a card
-        // vanish from the markup unnoticed.
-        let (markup, script) = page
-            .split_once("<script>")
-            .unwrap_or_else(|| panic!("the page has no <script> section"));
+        let page = front_end();
+        // Two slices, and both boundaries matter:
+        //
+        // * **markup** is `</head>` … `</body>`. The head holds the stylesheets and the
+        //   `<script type="module">` tag and declares no element, so starting at `<body>`
+        //   keeps the scan to the part a reader would call "the page".
+        // * **script** is everything after `</body>` — i.e. the modules `front_end()`
+        //   appends. An `id` that only appears inside a module (a string built at runtime) is
+        //   not a declaration, so it must not be counted as one.
+        let after_body = page
+            .split_once("<body>")
+            .unwrap_or_else(|| panic!("the page has no <body>"))
+            .1;
+        let (markup, script) = after_body
+            .split_once("</body>")
+            .unwrap_or_else(|| panic!("the page has no closing </body>"));
         assert!(
             script.len() > 4_000,
-            "the script section is {} bytes — this test would pass over an empty page",
+            "the module text is {} bytes — this test would pass over an empty page",
             script.len()
         );
+
         let mut declared = Vec::new();
         for (index, _) in markup.match_indices("id=\"") {
             let rest = &markup[index + 4..];
@@ -3575,16 +3732,23 @@ mod tests {
             "only {} ids were found — the markup scan is broken, not the page",
             declared.len()
         );
-        let exempt = ["proto-hint"];
+        assert_eq!(
+            declared.len(),
+            declared.iter().collect::<std::collections::HashSet<_>>().len(),
+            "a duplicate id means `getElementById` silently picks one of two elements — two \
+             cards that look separate and are not"
+        );
+
+        // `proto-hint` was the old wording's static hint element; it is gone with the rewrite,
+        // so the exemption list is empty rather than carrying a name nothing declares.
         let orphans: Vec<&String> = declared
             .iter()
-            .filter(|id| !exempt.contains(&id.as_str()))
             .filter(|id| !script.contains(id.as_str()))
             .collect();
         assert!(
             orphans.is_empty(),
-            "these ids are declared but never mentioned by the page's script, so whatever \
-             was meant to fill them is gone (the 2026-10-20 blank-window bug): {orphans:?}"
+            "these ids are declared but never mentioned by any module, so whatever was meant \
+             to fill them is gone (the 2026-10-20 blank-window bug): {orphans:?}"
         );
     }
 
@@ -3609,7 +3773,7 @@ mod tests {
     #[test]
     fn the_keys_the_page_reads_are_keys_the_backend_sends() {
         pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
+        let page = front_end();
 
         // `log_modules()` — the one that was wrong.
         let modules = macast_core::logging::log_modules_document();
@@ -3624,7 +3788,7 @@ mod tests {
         // because a list is exactly what went stale — `known` was not on anybody's list.
         // `m.<name>` is the page's own spelling for this document (see its renderer), and
         // the scan is anchored on that binding so it cannot pick up unrelated objects.
-        let script = page.split_once("<script>").map(|(_, rest)| rest).unwrap_or(page);
+        let script = page.split_once("</body>").map(|(_, rest)| rest).unwrap_or(&page);
         // Comments are stripped before scanning, and that is a **feature, not tidiness**:
         // this page explains the `known` defect in a comment right where the fix lives, and
         // a scanner that fired on that sentence would be a scanner someone deletes — taking
@@ -3638,20 +3802,52 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let script = script.as_str();
+        // The binding moved with the rewrite: `renderLogModules(m)` became
+        // `paintModules(doc)` in `js/admin/logs.js`. The scan is scoped to **that module**
+        // rather than to the whole front end, because `doc` is a local name several modules
+        // reuse for their own documents — a front-end-wide scan would collect
+        // `doc.status` (the resolve job) and `doc.groups` (the settings table) and then
+        // demand them from `log_modules()`. Scoping is what keeps the question about one
+        // document; the count assertion below is what catches the scan going blind.
+        // **One function body, not a byte window.** The first version of this took 4 KiB
+        // from the signature and thereby reached into `readTail`, which reads `doc.code` —
+        // a `log_view` field — and demanded it from `log_modules()`. A window is not a
+        // subject; the subject is "what the log-module renderer reads", and that is exactly
+        // `paintModules`'s body, ending at the first `}` in column 0.
+        let rest = page
+            .split_once("function paintModules(")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("js/admin/logs.js no longer has paintModules"));
+        let close = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("paintModules has no closing brace at column 0"));
+        let logs_module = &rest[..close];
+        // Both spellings, because optional chaining is how the module reads a document whose
+        // shape it does not own: `doc?.modules` and `doc?.main?.size`. A scan that only knew
+        // `doc.` would find nothing here and then agree with every claim about it.
         let mut read_keys: Vec<&str> = Vec::new();
-        for (index, _) in script.match_indices("m.") {
+        for (index, _) in logs_module.match_indices("doc") {
+            let after = &logs_module[index + 3..];
+            // `documents`, `docId`… are different identifiers; only a `.` or `?.` continues
+            // the binding this scan is about.
+            let marks: &str = if after.starts_with("?.") {
+                &after[2..]
+            } else if after.starts_with('.') {
+                &after[1..]
+            } else {
+                continue;
+            };
             // Word boundary: `item.editable` contains the substring `m.`, and counting it
             // would make this test fail on a correct page — a test that cannot pass gets
             // deleted, and the rule it guards goes with it.
-            let before = script[..index].chars().next_back();
+            let before = logs_module[..index].chars().next_back();
             if matches!(before, Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$') {
                 continue;
             }
-            let rest = &script[index + 2..];
-            let end = rest
+            let end = marks
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                .unwrap_or(rest.len());
-            let name = &rest[..end];
+                .unwrap_or(marks.len());
+            let name = &marks[..end];
             if !name.is_empty() {
                 read_keys.push(name);
             }
@@ -3698,56 +3894,113 @@ mod tests {
             assert!(tail.get(key).is_some(), "the page reads log_view().{key}: {tail}");
         }
 
-        // The four new commands must be reachable from the page at all: a card with no
-        // `invoke` is the "document-only knob" shape this port keeps refusing.
-        // The commands behind the cookie panel, the player card and the 高级设置 editor.
-        // Each one is a seam method with no other caller in this process, so "the page
-        // never calls it" would mean the panel is a picture of a feature rather than a
-        // door — the shape this port keeps refusing.
+        // The commands behind the casting cards, the cookie panel and the settings editor.
+        // Each is a seam method with no other caller in this process, so "nothing calls it"
+        // would mean that card is a picture of a feature rather than a door — the shape this
+        // port keeps refusing.
+        //
+        // **The wrapper counts as calling it.** Every module goes through `bridge.call()` /
+        // `read()`, which is what gives one shape to a failure and one place to log it, so
+        // demanding a literal `invoke(` would punish the abstraction that makes a silent
+        // failure impossible.
         for command in ["resolve_page", "resolve_status", "cast_resolved", "cast_targets",
                         "resolve_cookies", "save_cookies", "clear_cookies",
                         "set_cookie_browser", "set_subtitle_show", "set_renderer",
                         "launch_param", "save_launch_param"] {
             assert!(
-                page.contains(&format!("invoke('{command}'")),
-                "the page never calls {command} — the card is a picture of a feature"
+                page.contains(&format!("'{command}'")),
+                "no module names the command {command} — that card is a picture of a feature"
             );
         }
 
         // …and every name the web-address card reads must still be in the page. These come
         // from `macast-cast`'s builders (pinned by that crate's own tests); what this half
         // adds is "the page and those builders still agree on the names".
-        for needle in ["m.main", "m.modules", "group.title", "group.keys", "item.key",
-                       "item.label", "item.hint", "item.present", "item.type", "item.editable",
-                       "d.logs", "d.truncated", "d.lines", "d.size",
-                       // the resolved job's counters
-                       "st.step_label", "st.step_seconds", "st.seconds", "st.scraped",
-                       "st.from_ytdlp", "st.measured", "st.rejected", "st.hidden_silent",
-                       "st.candidates", "st.needs_cookies", "st.error", "st.note", "st.done",
-                       // one candidate row, key for key
-                       "c.title", "c.label", "c.container", "c.width", "c.height",
-                       "c.duration", "c.mode", "c.video_codec", "c.audio_codec",
-                       "c.merged", "c.last_resort", "c.relay",
-                       // the device dropdown, whose first row is inserted by the backend
-                       "state.items", "state.searching", "state.known", "row.kind", "row.id",
-                       "row.name", "row.address",
-                       // the 高级设置 hint names the four hook keys, and the page must keep
-                       // saying that the url only ever travels as an environment value —
-                       // that sentence is the difference between a feature and a remote shell.
-                       "Hook_On_Cast", "Hook_On_Pause", "Hook_On_Resume", "Hook_On_Stop",
-                       "MACAST_URL",
-                       // the cookie panel's eight keys (`_cookie_state`)
-                       "st.jar", "st.cookies", "st.bad", "st.browser", "st.max_bytes",
-                       "st.yt_dlp",
-                       // the resolve card's two explanations: the engine's own sentence and
-                       // which cookie source failed. Both are read by `renderResolveNote`.
-                       "st.engine_note", "st.cookie_problem"] {
+        // A renderer that stopped touching a name makes the assertions above vacuous, so
+        // each name is also required to still appear **at its call site**. Rewritten with the
+        // 2026-10-21 split: the bindings are the modules' own.
+        for needle in [
+            // the log module chooser (`js/admin/logs.js`)
+            "doc?.main", "doc?.modules",
+            // module settings (`js/admin/settings.js`)
+            "group.title", "group.keys", "item.key", "item.label",
+            // the tail reader (`js/admin/logs.js`)
+            "doc.logs", "doc.truncated", "doc.lines", "doc.size",
+            // the 高级设置 hint names the four hook keys, and the page must keep saying that
+            // the url only travels as an environment value — that sentence is the difference
+            // between a feature and a remote shell
+            "Hook_On_Cast", "Hook_On_Pause", "Hook_On_Resume", "Hook_On_Stop",
+            "MACAST_URL",
+            // the cookie panel (`js/user/accounts.js`)
+            "s.jar", "s.cookies", "s.bad", "s.browser", "s.max_bytes", "s.yt_dlp",
+            // the resolve card's two explanations (`js/user/casting.js`)
+            "status.engine_note", "status.cookie_problem",
+            // the resolved job's counters
+            "s.step_label", "s.step_seconds", "s.seconds", "s.scraped",
+            "s.from_ytdlp", "s.measured", "s.rejected", "s.hidden_silent",
+            "s.candidates", "s.needs_cookies", "s.error", "s.note", "s.done",
+            // one candidate row, key for key
+            "candidate.title", "candidate.label", "candidate.container",
+            "candidate.width", "candidate.height", "candidate.duration",
+            "candidate.mode", "candidate.video_codec", "candidate.audio_codec",
+            "candidate.merged", "candidate.last_resort", "candidate.relay",
+            // the device dropdown, whose first row is inserted by the back end
+            "view.items", "view.searching", "view.known",
+            "row.kind", "row.id", "row.name", "row.address",
+        ] {
             assert!(
-                page.contains(needle),
+                script.contains(needle),
                 "the page no longer reads {needle} — either the renderer is gone (see the id \
                  test) or this assertion has gone stale"
             );
         }
+        // …and each of them is *caught*: an unhandled rejection in the boot block takes the
+        // rest of the initialisation with it, which is how one missing function reads as
+        // five broken cards.
+        let boot_calls = script.matches(".catch(").count();
+        assert!(
+            boot_calls >= 6,
+            "only {boot_calls} guarded calls in the script — the boot block is not catching"
+        );
+    }
+
+    /// The ids that *are* written must be written by the startup path, not only by a
+    /// click handler: the bug above would also fire if `refresh()`/`services()`/…
+    /// existed but nothing ever called them at boot.
+    ///
+    /// Asked as "the five boot calls appear as calls", which is a text question this
+    /// crate can answer without a browser. It cannot prove they *succeed* — that is what
+    /// the one-off browser probe did (16 cells filled, `stillLoading: 0`) — but it does
+    /// pin the shape whose deletion caused the blank window.
+    #[test]
+    fn the_page_boots_by_asking_the_backend_five_questions() {
+        pin_test_dir();
+        let page = front_end();
+        let script = page.split_once("</body>").map(|(_, rest)| rest).unwrap_or(&page);
+        // The shapes changed with the 2026-10-21 split; the property did not. **Every**
+        // initialisation is individually guarded, so one missing function cannot take the rest
+        // of the boot with it — `boot()` in `js/app.js` names each module's first read.
+        for call in [
+            "playing.refresh().catch(",
+            "services.refresh().catch(",
+            "diagnostics.refresh().catch(",
+            "logs.loadModules().catch(",
+            "accounts.refresh().catch(",
+            "settings.refresh().catch(",
+        ] {
+            assert!(
+                script.contains(call),
+                "the boot sequence no longer calls {call} — that is the 2026-10-20 blank-window \
+                 shape: the cards stay at their placeholder text"
+            );
+        }
+        // …and each is caught, as is every poll: an unhandled rejection takes the rest of the
+        // initialisation with it, which is how one missing function reads as five broken cards.
+        assert!(
+            script.matches(".catch(").count() >= 10,
+            "too few guarded calls in the modules — a poll that can reject is a view that stops \
+             updating with no visible reason"
+        );
     }
 
     /// **The first device search starts when a parse finishes, not when the page opens.**
@@ -3762,37 +4015,72 @@ mod tests {
     #[test]
     fn the_device_search_waits_for_a_finished_parse() {
         pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
-        let script = page
-            .split_once("<script>")
-            .map(|(_, rest)| rest)
-            .unwrap_or(page);
-        // Anchored on the **finished branch's own comment**, not on `resolveJob = null;`:
-        // that assignment appears three times (the declaration, the "no such job" arm, and
-        // the stop button), and the first version of this test anchored on the first one it
-        // found — which is the declaration, 700 bytes away from anything it was asking
-        // about. (It went red on correct code, which is the §4.13 lesson in miniature: the
-        // needle has to name the thing being asked.)
+        let page = front_end();
+        let script = page.split_once("</body>").map(|(_, rest)| rest).unwrap_or(&page);
+        // The finished branch is `if (s.done) {` in `js/user/casting.js`'s `poll()`. The
+        // reference's reason for starting the search there instead of on page load is quoted
+        // in that function: an SSDP M-SEARCH plus an mDNS browse puts queries on the user's
+        // LAN, and someone who merely opened the window never asked for that.
         let finished = script
-            .find("// **第一轮设备搜索在解析完成那一刻起")
-            .unwrap_or_else(|| panic!("the poll's finished branch lost its comment"));
-        // Slice on a char boundary: the page is mostly CJK, and a byte cut inside one
-        // panics — which reads as "the test is broken", not as "the page is wrong".
-        let after = char_tail(&script[finished..], 700);
+            .find("if (s.done) {")
+            .unwrap_or_else(|| panic!("the poll has no finished branch"));
+        let after = char_tail(&script[finished..], 900);
         assert!(
             after.contains("loadTargets(true)"),
-            "a finished parse does not start the first device search — the dropdown would \
-             sit empty until the user presses 重新搜索"
+            "a finished parse does not start the first device search — the dropdown would sit \
+             empty until the user presses 重新搜索"
         );
-        // …and the boot block must not. A bare `loadTargets(` anywhere before the boot
-        // calls would put a multicast query on the LAN for a page that was only opened.
+        // …and the module's own boot must not. A bare `loadTargets(` before the first poll
+        // would put a multicast query on the LAN for a page that was only opened.
         let boot = script
-            .find("refresh().catch(")
-            .unwrap_or_else(|| panic!("no boot block"));
-        let boot_tail = &script[boot..];
+            .find("function boot()")
+            .unwrap_or_else(|| panic!("the shell has no boot sequence"));
+        let boot_body = char_tail(&script[boot..], 1200);
         assert!(
-            !boot_tail.contains("loadTargets(false)"),
+            !boot_body.contains("loadTargets("),
             "the page searches the network on open, which the reference deliberately avoids"
+        );
+    }
+
+    /// **The card's job id must survive the end of polling.**
+    ///
+    /// Measured on the live instance: with one variable doing both jobs, the poll's
+    /// "finished" branch cleared it, so clicking 投第 N 条 on a completed card sent
+    /// `job: null` — and the backend answered `success`, because that path only reads the
+    /// candidate list. The symptom is "the button does nothing" on a card that looks
+    /// perfectly filled in, which is the class the other two page guards were written for.
+    ///
+    /// A static question, because the defect is a **variable's lifetime** and the page has
+    /// no unit harness: two names, one meaning "keep polling" and one meaning "the id this
+    /// card was built from", and the cast call must read the second.
+    #[test]
+    fn the_cast_button_sends_the_job_the_card_was_built_from() {
+        pin_test_dir();
+        let page = front_end();
+        let script = page.split_once("</body>").map(|(_, rest)| rest).unwrap_or(&page);
+        // The two slots moved into the module's `state` object; the property did not: one for
+        // "keep polling", one for "the id this card was built from". With a single slot the
+        // poll's finished branch cleared it, so clicking 投 on a completed card sent
+        // `job: null` — and the back end answered `success`, because that path only reads the
+        // candidate list. Nothing on screen looked wrong.
+        for field in ["polling:", "finished:"] {
+            assert!(
+                script.contains(field),
+                "the card no longer keeps a {field} slot — the `job: null` defect of 2026-10-20 \
+                 was one slot doing both jobs"
+            );
+        }
+        let call = script
+            .find("'cast_resolved'")
+            .unwrap_or_else(|| panic!("the card never casts a resolved candidate"));
+        let window = char_tail(&script[call..], 320);
+        assert!(
+            window.contains("job: state.finished"),
+            "cast_resolved is not handed the durable job id: {}", char_tail(window, 200)
+        );
+        assert!(
+            !window.contains("job: state.polling"),
+            "cast_resolved reads the polling slot again — it is cleared when the poll ends"
         );
     }
 
@@ -3809,26 +4097,26 @@ mod tests {
     #[test]
     fn the_empty_result_sentence_is_rendered_on_the_card() {
         pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
-        let script = page
-            .split_once("<script>")
-            .map(|(_, rest)| rest)
-            .unwrap_or(page);
+        let page = front_end();
+        let script = page.split_once("</body>").map(|(_, rest)| rest).unwrap_or(&page);
+        // The renderer is `renderNote(status)` in `js/user/casting.js`.
         let start = script
-            .find("function renderResolveNote(")
+            .find("function renderNote(")
             .unwrap_or_else(|| panic!("the card has no note renderer"));
-        let body = &script[start..(start + 1400).min(script.len())];
+        // To the end of that function, which is where the next one starts.
+        let body = &script[start..];
+        let body = &body[..body.find("\nfunction ").unwrap_or(body.len())];
         assert!(
-            body.contains("st.error"),
+            body.contains("status.error"),
             "the note renderer never reads `error`, so the four 'why is this empty' \
              sentences never reach the card"
         );
-        // And it is shown only when there is nothing to list: an `error` on a card that
-        // still has candidates is a partial failure, and shouting it above a working list
-        // is how a user concludes the cast is broken.
+        // Shown only when there is nothing to list: an `error` beside a working list is a
+        // partial failure, and shouting it above the candidates is how a user concludes the
+        // cast is broken.
         assert!(
-            body.contains("!st.candidates.length"),
-            "the empty-result sentence must be gated on the list being empty"
+            body.contains("!(status.candidates"),
+            "the empty-result sentence must be gated on the candidate list being empty"
         );
     }
 
@@ -3844,28 +4132,24 @@ mod tests {
     #[test]
     fn the_page_speaks_each_cookie_problem_with_its_own_next_step() {
         pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
+        let page = front_end();
+        // The table moved to `js/user/casting.js` but its **shape** did not: one entry per
+        // family, keyed by the back end's own vocabulary, each with its own next step.
         for problem in macast_cast::resolve::COOKIE_PROBLEMS {
             assert!(
-                page.contains(&format!("{problem}: ")) || page.contains(&format!("{problem}: '")),
+                page.contains(&format!("{problem}: ")),
                 "the page has no next step for the cookie problem {problem:?} — all four of \
                  {:?} must be answered separately",
                 macast_cast::resolve::COOKIE_PROBLEMS
             );
         }
-        // And no fifth branch: a key in the page's map that the back end can never return
-        // is a sentence nobody will ever read, which is how this table starts rotting.
-        // Scanned as "an identifier followed by a colon, at the map's own indent", which is
-        // why the found set is asserted non-empty first — a scan that finds nothing agrees
-        // with every claim made about it.
+        // And no fifth branch: a key the back end can never return is a sentence nobody reads,
+        // which is how this table starts rotting.
         let start = page
             .find("const COOKIE_NEXT_STEP = {")
             .unwrap_or_else(|| panic!("the page has no COOKIE_NEXT_STEP table"));
-        let end = page[start..]
-            .find("\n      };")
-            .map(|n| start + n)
-            .unwrap_or(page.len());
-        let table = &page[start..end];
+        let table = &page[start..];
+        let table = &table[..table.find("\n};").unwrap_or(table.len())];
         let mut seen: Vec<&str> = Vec::new();
         for line in table.lines() {
             let line = line.trim_start();
@@ -3974,85 +4258,6 @@ mod tests {
         assert!(
             !body.contains("player.set_media_title(&name);"),
             "the name is handed to the player directly again, so the renderer never learns it"
-        );
-    }
-
-    /// **The card's job id must survive the end of polling.**
-    ///
-    /// Measured on the live instance: with one variable doing both jobs, the poll's
-    /// "finished" branch cleared it, so clicking 投第 N 条 on a completed card sent
-    /// `job: null` — and the backend answered `success`, because that path only reads the
-    /// candidate list. The symptom is "the button does nothing" on a card that looks
-    /// perfectly filled in, which is the class the other two page guards were written for.
-    ///
-    /// A static question, because the defect is a **variable's lifetime** and the page has
-    /// no unit harness: two names, one meaning "keep polling" and one meaning "the id this
-    /// card was built from", and the cast call must read the second.
-    #[test]
-    fn the_cast_button_sends_the_job_the_card_was_built_from() {
-        pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
-        let script = page
-            .split_once("<script>")
-            .map(|(_, rest)| rest)
-            .unwrap_or(page);
-        assert!(
-            script.contains("let finishedJob = null;"),
-            "the card no longer keeps a job id separate from the polling flag — that is the \
-             `job: null` defect of 2026-10-20"
-        );
-        let call = script
-            .find("invoke('cast_resolved'")
-            .unwrap_or_else(|| panic!("the card never casts a resolved candidate"));
-        let window = &script[call..(call + 260).min(script.len())];
-        assert!(
-            window.contains("job: finishedJob"),
-            "cast_resolved is not handed the durable job id: {}",
-            &window[..window.len().min(200)]
-        );
-        assert!(
-            !window.contains("job: resolveJob"),
-            "cast_resolved reads the polling flag again — it is cleared when the poll ends"
-        );
-    }
-
-    /// The ids that *are* written must be written by the startup path, not only by a
-    /// click handler: the bug above would also fire if `refresh()`/`services()`/…
-    /// existed but nothing ever called them at boot.
-    ///
-    /// Asked as "the five boot calls appear as calls", which is a text question this
-    /// crate can answer without a browser. It cannot prove they *succeed* — that is what
-    /// the one-off browser probe did (16 cells filled, `stillLoading: 0`) — but it does
-    /// pin the shape whose deletion caused the blank window.
-    #[test]
-    fn the_page_boots_by_asking_the_backend_five_questions() {
-        pin_test_dir();
-        let page = include_str!("../../frontend/index.html");
-        let script = page
-            .split_once("<script>")
-            .map(|(_, rest)| rest)
-            .expect("the page has a script");
-        for call in [
-            "refresh().catch(",
-            "snapshot().catch(",
-            "services().catch(",
-            "subscribers().catch(",
-            "loadLogModules().catch(",
-            "loadModules().catch(",
-        ] {
-            assert!(
-                script.contains(call),
-                "the boot sequence no longer calls {call} — that is the 2026-10-20 blank-window \
-                 shape: the cards stay at their 「加载中…」 placeholders"
-            );
-        }
-        // …and each of them is *caught*: an unhandled rejection in the boot block takes the
-        // rest of the initialisation with it, which is how one missing function reads as
-        // five broken cards.
-        let boot_calls = script.matches(".catch(").count();
-        assert!(
-            boot_calls >= 6,
-            "only {boot_calls} guarded calls in the script — the boot block is not catching"
         );
     }
 

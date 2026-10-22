@@ -4,1165 +4,399 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Macast</title>
-    <style>
-      :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      body { margin: 0; background: #111827; color: #e5e7eb; }
-      main { max-width: 960px; margin: 0 auto; padding: 48px 24px; }
-      h1 { margin: 0 0 8px; font-size: 36px; }
-      h2 { margin: 0 0 16px; font-size: 20px; }
-      .muted { color: #9ca3af; }
-      .card { margin-top: 28px; padding: 24px; border: 1px solid #374151; border-radius: 14px; background: #1f2937; }
-      dl { display: grid; grid-template-columns: 160px 1fr; gap: 12px; }
-      dt { color: #9ca3af; }
-      dd { margin: 0; overflow-wrap: anywhere; }
-      button { margin: 12px 8px 0 0; padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer; }
-      button:hover { background: #1d4ed8; }
-      button:disabled { background: #4b5563; cursor: default; }
-      input { padding: 9px 12px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; width: 100%; box-sizing: border-box; }
-      label { display: block; margin-top: 14px; color: #9ca3af; font-size: 13px; }
-      .row { display: flex; gap: 12px; flex-wrap: wrap; }
-      .row > div { flex: 1 1 260px; }
-      #error { color: #fca5a5; }
-      #events { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60px; }
-      .hist { display: block; width: 100%; text-align: left; margin: 6px 0 0; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; cursor: pointer; }
-      .hist:hover { border-color: #2563eb; background: #16213a; }
-      .hist-title { display: block; font-size: 13px; overflow-wrap: anywhere; }
-      .hist-url { display: block; font-size: 11px; color: #9ca3af; overflow-wrap: anywhere; }
-      #clear-history { background: #7f1d1d; }
-      #clear-history:hover { background: #991b1b; }
-      select { padding: 9px 12px; border: 1px solid #374151; border-radius: 8px; background: #111827; color: #e5e7eb; width: 100%; box-sizing: border-box; }
-      .state-ok { color: #86efac; }
-      .state-warn { color: #fcd34d; }
-      .state-bad { color: #fca5a5; }
-      .reason { color: #9ca3af; font-size: 12px; }
-      #log-text { margin: 12px 0 0; padding: 12px; border-radius: 8px; background: #111827; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 420px; overflow-y: auto; min-height: 60px; }
-      #log-clear { background: #7f1d1d; }
-      #log-clear:hover { background: #991b1b; }
-      .sub { display: block; width: 100%; text-align: left; margin: 6px 0 0; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; }
-      .sub-sid { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
-      .sub-meta { display: block; font-size: 11px; color: #9ca3af; overflow-wrap: anywhere; }
-      .sub-dead { border-color: #7f1d1d; }
-      .counters { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-      .counters div { flex: 1 1 120px; padding: 8px 10px; border: 1px solid #374151; border-radius: 8px; background: #111827; }
-      .counters span { display: block; font-size: 11px; color: #9ca3af; }
-      .counters b { font-size: 18px; font-weight: 500; }
-    </style>
+    <!--
+      Three stylesheets, in dependency order: tokens declare the palette, components use it,
+      views arrange components. Nothing declares a raw colour outside tokens.css — that is
+      what keeps the two halves of this window looking like one product.
+    -->
+    <link rel="stylesheet" href="css/tokens.css" />
+    <link rel="stylesheet" href="css/components.css" />
+    <link rel="stylesheet" href="css/views.css" />
+    <script type="module" src="js/app.js"></script>
   </head>
   <body>
-    <main>
-      <h1>Macast</h1>
-      <p class="muted">Rust + Tauri 2 重构分支 · 播放器已接入（mpv 子进程由本窗口持有）</p>
-
-      <section class="card">
-        <h2>运行时状态</h2>
-        <dl>
-          <dt>后端</dt><dd id="backend">加载中…</dd>
-          <dt>版本</dt><dd id="version">加载中…</dd>
-          <dt>迁移策略</dt><dd id="migration">加载中…</dd>
-          <dt>状态</dt><dd id="status">加载中…</dd>
-        </dl>
-        <button id="mark-ready">标记骨架已就绪</button>
-        <p id="error"></p>
-      </section>
-
-      <section class="card">
-        <h2>播放器</h2>
-        <dl>
-          <dt>mpv 进程</dt><dd id="running">加载中…</dd>
-          <dt>IPC</dt><dd id="ipc">—</dd>
-          <dt>pid</dt><dd id="pid">—</dd>
-          <dt>mpv 路径</dt><dd id="mpv_path">—</dd>
-          <dt>socket</dt><dd id="socket_path">—</dd>
-          <dt>窗口标题</dt><dd id="title">—</dd>
-          <dt>TransportState</dt><dd id="transport_state">—</dd>
-          <dt>当前地址</dt><dd id="current_url">—</dd>
-          <dt>位置 / 时长</dt><dd id="position">—</dd>
-          <dt>媒体形态</dt><dd id="media_live">—</dd>
-          <dt>播放列表</dt><dd id="playlist">—</dd>
-        </dl>
-
-        <div class="row">
-          <div>
-            <label for="uri">地址（URL 或本机文件路径）</label>
-            <input id="uri" placeholder="http://127.0.0.1:8010/clip.ts" />
-          </div>
-          <div>
-            <label for="title-in">标题（留空则按地址末段推断）</label>
-            <input id="title-in" placeholder="Never Gonna Give You Up" />
-          </div>
+    <div class="shell">
+      <!--
+        The rail is the only navigation. Two entries, because there are two readers: the
+        person casting something, and the person diagnosing this machine.
+      -->
+      <nav class="rail" aria-label="主要导航">
+        <div class="rail__brand">
+          <span class="rail__mark" aria-hidden="true">M</span>
+          <span>
+            <span class="rail__name">Macast</span>
+            <span class="rail__version" id="version">—</span>
+          </span>
         </div>
-        <button id="cast">投屏</button>
-        <button id="pause">暂停</button>
-        <button id="resume">继续</button>
-        <button id="stop">停止</button>
-        <button id="volume">音量 80</button>
-        <button id="snap">重新读取</button>
 
-        <label>事件（后端 publish 到页面的那几条）</label>
-        <div id="events">（还没有事件）</div>
-      </section>
-
-      <section class="card">
-        <h2>播放历史</h2>
-        <p class="muted">最近 50 条，按地址去重，新的在前。点一行就是拿「当初一起交过来的那个名字」重投，
-          所以窗口标题不会变成地址末段。</p>
-        <div id="history">（还没有投过）</div>
-        <button id="clear-history">清空历史</button>
-      </section>
-
-      <section class="card">
-        <h2>服务与网络</h2>
-        <p class="muted">这台接收端是<strong>三个</strong>各有生命周期的服务（HTTP 接口 / SSDP 通告 / GENA 事件），
-          所以状态一行一个，而不是参考实现那一个总开关 —— 这里要能看出来的是「其中一个死了、另两个还在答话」。</p>
-        <dl>
-          <dt>HTTP 接口</dt><dd id="svc-http">加载中…</dd>
-          <dt>SSDP 通告</dt><dd id="svc-ssdp">加载中…</dd>
-          <dt>GENA 事件</dt><dd id="svc-gena">加载中…</dd>
-          <dt>端口</dt><dd id="svc-port">—</dd>
-          <dt>HTTPS</dt><dd id="svc-https">—</dd>
-          <dt>可广播地址</dt><dd id="svc-advertised">—</dd>
-          <dt>启用协议</dt><dd id="svc-protocol">—</dd>
-          <dt>渲染器</dt><dd id="svc-renderer">—</dd>
-          <dt>版本 / 系统</dt><dd id="svc-system">—</dd>
-        </dl>
-
-        <div class="row">
-          <div>
-            <label for="friendly-name">设备名（手机和电视上看到的那一行）</label>
-            <input id="friendly-name" placeholder="Macast" />
-          </div>
-          <div>
-            <label for="iface">发现用的网卡（留空＝自动跟随默认路由）</label>
-            <select id="iface"></select>
-          </div>
+        <div class="rail__nav">
+          <span class="rail__group">使用</span>
+          <button class="navitem" type="button" data-goto="use">
+            <span class="navitem__dot" aria-hidden="true"></span>投屏与播放
+          </button>
+          <span class="rail__group">管理</span>
+          <button class="navitem" type="button" data-goto="manage">
+            <span class="navitem__dot" aria-hidden="true"></span>服务与诊断
+          </button>
         </div>
-        <button id="save-name">保存设备名</button>
-        <button id="save-iface">切换网卡</button>
-        <p class="muted" id="cfg-note"></p>
-      </section>
 
-      <section class="card">
-        <h2>日志</h2>
-        <p class="muted">正文里含<strong>发送端给的标题和地址</strong>，所以这一格永远只用 textContent 渲染，
-          并且只在按下按钮时拉一次 —— 它不参与任何轮询。</p>
-        <div class="row">
-          <div>
-            <label for="log-module">看哪一份</label>
-            <select id="log-module"></select>
-          </div>
-          <div>
-            <label for="log-tail">末尾行数</label>
-            <input id="log-tail" type="number" min="1" value="200" />
-          </div>
+        <div class="rail__foot">
+          <!--
+            The last event, visible from either view. The full feed lives on the admin half,
+            but a note raised while the user half is showing must not be invisible — that is
+            how "I clicked and nothing happened" starts.
+          -->
+          <p class="rail__last" id="last-event">—</p>
+          <p class="card__hint" id="backend">—</p>
         </div>
-        <button id="log-read">读取尾部</button>
-        <button id="log-all">读全文</button>
-        <button id="log-clear">清空这一份</button>
-        <p class="muted" id="log-meta">（还没读过）</p>
-        <div id="log-text">（还没读过）</div>
-      </section>
+      </nav>
 
-      <section class="card">
-        <h2>订阅客户端</h2>
-        <p class="muted">谁订阅了我们的 UPnP 事件，以及那台「把他们列出来」的机器还在不在排干自己的队列。</p>
-        <dl>
-          <dt>聚合</dt><dd id="sub-aggregated">加载中…</dd>
-          <dt>事件线程</dt><dd id="sub-thread">—</dd>
-        </dl>
-        <div class="counters">
-          <div><span>待入表</span><b id="sub-append">—</b></div>
-          <div><span>待发状态</span><b id="sub-state">—</b></div>
-          <div><span>待摘除</span><b id="sub-remove">—</b></div>
+      <main class="content">
+        <div class="content__inner">
+          <!-- ============================ 使用 ============================ -->
+          <!--
+            What a person casting something needs, in the order they need it: what is
+            playing, how to cast something else, and where to put credentials when a page
+            asks for them. No port numbers, no threads, no queues.
+          -->
+          <section data-view="use" hidden>
+            <header class="pagehead">
+              <div>
+                <h1>投屏与播放</h1>
+                <p>
+                  手机把媒体地址发过来，这台机器用 mpv 播放。下面的卡片是你现在能做的事情 ——
+                  诊断信息在左边的「服务与诊断」里。
+                </p>
+              </div>
+              <span class="chip" id="player-chip">加载中…</span>
+            </header>
+
+            <!-- Now playing: the largest card, because it answers the only urgent question. -->
+            <div class="now" style="margin-bottom: var(--s4)">
+              <div class="now__top">
+                <div style="min-width: 0">
+                  <h2 class="now__title" id="title">加载中…</h2>
+                  <p class="now__url" id="current_url">—</p>
+                </div>
+                <span class="chip" id="live-chip">—</span>
+              </div>
+
+              <div>
+                <div class="progress" role="progressbar" aria-label="播放进度">
+                  <div class="progress__fill" id="progress-fill"></div>
+                </div>
+                <div class="progress__times">
+                  <span id="progress-left">—</span>
+                  <span id="progress-right">—</span>
+                </div>
+              </div>
+
+              <div class="now__controls">
+                <button class="btn" type="button" id="pause">暂停</button>
+                <button class="btn" type="button" id="resume">继续</button>
+                <button class="btn" type="button" id="stop">停止</button>
+                <button class="btn" type="button" id="volume">音量 80</button>
+                <span class="now__spacer"></span>
+                <span class="chip chip--quiet" id="transport_state">—</span>
+              </div>
+            </div>
+
+            <div class="grid">
+              <!-- Cast a direct media address. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">投一个地址</h2>
+                </div>
+                <p class="card__hint">媒体文件的直链。手机端投过来的流也会走同一条路。</p>
+                <div class="castrows">
+                  <div class="field">
+                    <label for="uri">媒体地址</label>
+                    <input class="input" id="uri" placeholder="http://192.168.1.9:8000/video.mp4" />
+                  </div>
+                  <div class="field">
+                    <label for="title-in">标题（可选）</label>
+                    <input class="input" id="title-in" placeholder="留空就按地址猜一个" />
+                    <span class="hint">播放器窗口显示的名字就是这个。</span>
+                  </div>
+                  <div class="btnrow">
+                    <button class="btn" data-variant="primary" type="button" id="cast">投屏</button>
+                  </div>
+                </div>
+              </section>
+
+              <!-- The history list: re-cast what played before. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">播放历史</h2>
+                  <button class="btn btn--sm" data-variant="danger" type="button" id="clear-history">清空</button>
+                </div>
+                <p class="card__hint">点一行就重新投它，名字会一起带回去。</p>
+                <div class="stack" id="history"></div>
+              </section>
+
+              <!-- Cast a web page: parsed into candidates, then chosen. -->
+              <section class="card span">
+                <div class="card__head">
+                  <h2 class="card__title">投一个网页地址</h2>
+                </div>
+                <p class="card__hint">
+                  贴一个网页地址，也可以贴手机 App 复制的整段分享文案。解析在本机后台跑，
+                  候选表出来之后选一条 —— <strong>电视永远拿不到页面上那个签名地址</strong>，
+                  它只拿到本机中转出来的那条。
+                </p>
+                <div class="fieldrow">
+                  <div class="field">
+                    <label for="page-url">网页地址或分享文案</label>
+                    <input class="input" id="page-url" placeholder="https://www.bilibili.com/video/BV…" />
+                  </div>
+                  <button class="btn" data-variant="primary" type="button" id="resolve-go">解析</button>
+                  <button class="btn" data-variant="quiet" type="button" id="resolve-stop">停止轮询</button>
+                </div>
+                <p class="notice" id="resolve-meta">还没有解析过。</p>
+                <div class="stack" id="resolve-note"></div>
+                <div class="stack" id="resolve-rows"></div>
+
+                <div class="fieldrow" style="margin-top: var(--s3)">
+                  <div class="field">
+                    <label for="cast-target">投给谁</label>
+                    <select class="select" id="cast-target"></select>
+                    <span class="hint" id="targets-note">—</span>
+                  </div>
+                  <button class="btn" type="button" id="targets-refresh">重新搜索设备</button>
+                </div>
+                <p class="card__hint">
+                  第一行永远是<strong>本机</strong>：它交给这台机器上的播放器，不经过任何插件。
+                </p>
+              </section>
+
+              <!-- Player details: subtitle visibility and the renderer. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">播放器</h2>
+                </div>
+                <p class="card__hint">
+                  字幕的显隐<strong>不写状态表</strong>：<code>DisplayCurrentSubtitle</code> 是播放器
+                  回报的，所以空闲播放器上按了也不会变 —— 那是参考实现的行为，不是没生效。
+                </p>
+                <div class="btnrow">
+                  <button class="btn" type="button" id="sub-show">显示字幕</button>
+                  <button class="btn" type="button" id="sub-hide">隐藏字幕</button>
+                  <button class="btn" type="button" id="renderer-set">切换为 MPV</button>
+                </div>
+                <dl class="kv">
+                  <dt>进程</dt><dd class="mono" id="pid">—</dd>
+                  <dt>IPC</dt><dd id="ipc">—</dd>
+                  <dt>可执行文件</dt><dd class="mono" id="mpv_path">—</dd>
+                  <dt>套接字</dt><dd class="mono" id="socket_path">—</dd>
+                  <dt>播放列表</dt><dd id="playlist">—</dd>
+                </dl>
+                <p class="card__hint">
+                  本构建只有一个渲染器，所以「切换」只接受那个已经生效的名字；
+                  别的东西会被后端按参考实现的句子拒掉。
+                </p>
+              </section>
+
+              <!-- Where credentials go. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">账号与登录态</h2>
+                </div>
+                <p class="card__hint">
+                  需要登录才解得出的站点，两条路都要给它凭据：粘贴一份浏览器导出的 cookie 文件，
+                  或者允许从本机某个浏览器读。<strong>Macast 不代你登录</strong>，
+                  而且只报条数、永不回显 cookie 的内容。
+                </p>
+                <dl class="kv">
+                  <dt>文件</dt><dd id="ck-jar">加载中…</dd>
+                  <dt>浏览器</dt><dd id="ck-browser">—</dd>
+                  <dt>上限</dt><dd id="ck-max">—</dd>
+                  <dt>解析引擎</dt><dd id="ck-engine">—</dd>
+                </dl>
+                <div class="field">
+                  <label for="ck-text">粘贴 cookie 文件（提交前会先校验）</label>
+                  <textarea class="textarea" id="ck-text" rows="5"
+                    placeholder="# Netscape HTTP Cookie File&#10;.example.com&#9;TRUE&#9;/&#9;FALSE&#9;0&#9;name&#9;value"></textarea>
+                  <span class="hint">空或全坏的 jar 引擎不会报错，它只是匿名解出更少的地址。</span>
+                </div>
+                <div class="btnrow">
+                  <button class="btn" data-variant="primary" type="button" id="ck-save">保存这份文件</button>
+                  <button class="btn" data-variant="danger" type="button" id="ck-clear">清除已保存的</button>
+                </div>
+                <div class="fieldrow">
+                  <div class="field">
+                    <label for="ck-browser-in">从浏览器读取（留空即关）</label>
+                    <input class="input" id="ck-browser-in" placeholder="vivaldi:C:\Users\me\AppData\…" />
+                    <span class="hint">这一栏读的是引擎自己的语法：名字[:资料目录]。
+                      +钥匙串 与 ::容器 都不收 —— 那两样是从不替你挑的东西。</span>
+                  </div>
+                  <button class="btn" type="button" id="ck-browser-set">设为这一栏</button>
+                  <button class="btn" data-variant="quiet" type="button" id="ck-browser-off">改成不读</button>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <!-- ============================ 管理 ============================ -->
+          <!--
+            The diagnostic half. Everything here is about the machine rather than the media:
+            services, the network interface, logs, every persisted key, and the way out.
+          -->
+          <section data-view="manage" hidden>
+            <header class="pagehead">
+              <div>
+                <h1>服务与诊断</h1>
+                <p>
+                  这一半是给排障用的：哪个服务在听、直播包发到哪张网卡、日志说什么、
+                  以及每一个被持久化的配置键属于谁。
+                </p>
+              </div>
+            </header>
+
+            <div class="grid">
+              <!-- Services. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">服务</h2>
+                </div>
+                <dl class="kv">
+                  <dt>DLNA / HTTP</dt><dd><span class="chip" id="svc-http">—</span></dd>
+                  <dt>SSDP</dt><dd><span class="chip" id="svc-ssdp">—</span></dd>
+                  <dt>事件（GENA）</dt><dd><span class="chip" id="svc-gena">—</span></dd>
+                  <dt>端口</dt><dd id="svc-port" class="mono">—</dd>
+                  <dt>HTTPS</dt><dd id="svc-https">—</dd>
+                  <dt>可广播地址</dt><dd id="svc-advertised" class="mono">—</dd>
+                  <dt>启用的协议</dt><dd id="svc-protocol">—</dd>
+                  <dt>渲染器</dt><dd id="svc-renderer">—</dd>
+                  <dt>版本</dt><dd id="svc-system">—</dd>
+                </dl>
+                <div class="btnrow">
+                  <button class="btn btn--sm" type="button" data-protocol="DLNA Protocol">切换 DLNA</button>
+                  <button class="btn btn--sm" type="button" data-protocol="Chromecast Protocol">切换 Chromecast</button>
+                  <button class="btn btn--sm" type="button" data-protocol="AirPlay Protocol">切换 AirPlay</button>
+                </div>
+                <p class="card__hint">
+                  关掉一个协议就真的关掉它那几张脸（不必重启进程）；关掉最后一个会被拒绝，
+                  因为那样这台机器就什么都不听了。
+                </p>
+              </section>
+
+              <!-- The device name and the network interface. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">设备与网卡</h2>
+                </div>
+                <div class="fieldrow">
+                  <div class="field">
+                    <label for="friendly-name">设备名（手机看到的）</label>
+                    <input class="input" id="friendly-name" placeholder="Macast" />
+                    <span class="hint">按你打的原样存，末尾的空格也留着。</span>
+                  </div>
+                  <button class="btn" data-variant="primary" type="button" id="save-name">保存</button>
+                </div>
+                <div class="fieldrow">
+                  <div class="field">
+                    <label for="iface">直播包从哪张网卡出去</label>
+                    <select class="select" id="iface"></select>
+                    <span class="hint">不可用的网卡也列出来：一台没插线的口仍然是真实选项。</span>
+                  </div>
+                  <button class="btn" type="button" id="save-iface">切换</button>
+                </div>
+                <p class="notice" id="cfg-note"></p>
+              </section>
+
+              <!-- Logs: the module chooser, the tail, the clearer. -->
+              <section class="card span">
+                <div class="card__head">
+                  <h2 class="card__title">日志</h2>
+                  <span class="chip chip--quiet" id="log-meta">—</span>
+                </div>
+                <div class="logbar">
+                  <div class="field">
+                    <label for="log-module">哪一份</label>
+                    <select class="select" id="log-module"></select>
+                  </div>
+                  <div class="field">
+                    <label for="log-tail">末尾行数</label>
+                    <input class="input" id="log-tail" type="number" min="1" max="50000" value="400" />
+                  </div>
+                </div>
+                <div class="btnrow">
+                  <button class="btn" data-variant="primary" type="button" id="log-read">读取末尾</button>
+                  <button class="btn" type="button" id="log-all">读取全文</button>
+                  <button class="btn" data-variant="danger" type="button" id="log-clear">清空这一份</button>
+                </div>
+                <pre class="pane" id="log-text">（还没读过）</pre>
+              </section>
+
+              <!-- Subscribers: three counters and the table. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">订阅客户端</h2>
+                  <span class="chip" id="sub-thread">—</span>
+                </div>
+                <p class="card__sub value" id="sub-aggregated">暂无订阅客户端</p>
+                <div class="counters" id="sub-counters"></div>
+                <div class="stack" id="sub-rows"></div>
+                <p class="card__hint">
+                  三个计数器说的是三种不同的死法：待入表＝握了手却没进表，
+                  待广播＝状态变化排着没发出去，待移除＝收尸那一路没在排干。
+                </p>
+              </section>
+
+              <!-- The event feed. -->
+              <section class="card">
+                <div class="card__head">
+                  <h2 class="card__title">事件</h2>
+                </div>
+                <p class="card__hint">后端推过来的每一条，以及每一次按钮的结果。最新在最上面。</p>
+                <pre class="pane pane--feed" id="events"></pre>
+              </section>
+
+              <!-- Module settings. -->
+              <section class="card span">
+                <div class="card__head">
+                  <h2 class="card__title">模块设置</h2>
+                </div>
+                <p class="card__hint">
+                  每一个被持久化的键，按拥有它的模块分组。可编辑的是标量；
+                  列表和字典要改请用下面的「高级设置」。
+                </p>
+                <div id="mods"></div>
+              </section>
+
+              <!-- The whole settings table, as JSON. -->
+              <section class="card span">
+                <div class="card__head">
+                  <h2 class="card__title">高级设置</h2>
+                </div>
+                <p class="card__hint">
+                  这是整份设置文件。<strong>写入会整表替换并重启进程</strong> ——
+                  少写的键就是没有了，所以先读取、再改、再提交。
+                </p>
+                <div class="btnrow">
+                  <button class="btn" type="button" id="lp-load">读取当前整份设置</button>
+                  <button class="btn" data-variant="primary" type="button" id="lp-save">整份写入并重启</button>
+                </div>
+                <textarea class="textarea" id="lp-text" rows="14" placeholder='{"DLNA_FriendlyName": "Macast"}'></textarea>
+                <div class="stack" id="lp-note"></div>
+              </section>
+
+              <!-- The way out, last and separated. -->
+              <section class="card span danger">
+                <div class="card__head">
+                  <h2 class="card__title">危险区</h2>
+                </div>
+                <p class="card__hint">
+                  退出会先答复、再关掉进程：广播撤下、各张脸关闭、播放器停止。
+                </p>
+                <div class="btnrow">
+                  <button class="btn" data-variant="danger" type="button" id="quit">退出 Macast</button>
+                </div>
+              </section>
+            </div>
+          </section>
         </div>
-        <div id="sub-rows"></div>
-      </section>
-      <section class="card">
-        <h2>协议开关</h2>
-        <p class="muted">每一项都是管理面同一条 POST（`toggle-protocol`）：关掉的那一项会在同一个进程里停掉它的脸（8009/setup/广播，或 7000），再开回来。</p>
-        <div class="row">
-          <div><button data-toggle="DLNA Protocol">DLNA Protocol</button></div>
-          <div><button data-toggle="Chromecast Protocol">Chromecast Protocol</button></div>
-          <div><button data-toggle="AirPlay Protocol">AirPlay Protocol</button></div>
-        </div>
-        <p class="muted" id="proto-hint">DLNA 的 HTTP 面承载这一页，所以它会被拒绝停用。</p>
-        <h2 style="margin-top: 24px">退出</h2>
-        <div class="row"><div><button id="quit">退出 Macast</button></div></div>
-      </section>
-
-      <section class="card">
-        <h2>网页地址投屏</h2>
-        <p class="muted">贴一个网页地址（或手机 App 复制的整段分享文案）。解析在本机后台跑，
-          候选表出来之后选一条投出去 —— 直链走中转的反向转发，HLS/DASH 走 ffmpeg 转封装，
-          <strong>电视永远拿不到页面上那个签名地址</strong>（AGENTS.md §4.14）。</p>
-        <label for="page-url">网页地址</label>
-        <input id="page-url" placeholder="https://www.bilibili.com/video/BV…" />
-        <button id="resolve-go">解析</button>
-        <button id="resolve-stop">停止轮询</button>
-        <p class="muted" id="resolve-meta">（还没解析过）</p>
-        <div id="resolve-note"></div>
-        <div id="resolve-rows"></div>
-
-        <label for="cast-target">投给</label>
-        <select id="cast-target"></select>
-        <button id="targets-refresh">重新搜索设备</button>
-        <p class="muted" id="targets-note">第一行永远是本机：它交给我们自己那个渲染器，不经过插件。</p>
-      </section>
-
-      <section class="card">
-        <h2>网页登录态（cookie）</h2>
-        <p class="muted">需要登录才解得出的站点，两条路都要给它凭据：<strong>粘贴一份 Netscape 格式的
-          jar</strong>（浏览器扩展导出的那种，行首 <code>#HttpOnly_</code> 照收），
-          或者<strong>允许从本机某个浏览器读</strong>。两条都不做登录 —— Macast 不代你登录。
-          页面与日志<strong>只报条数，永不回显 cookie 值</strong>。</p>
-        <dl>
-          <dt>文件</dt><dd id="ck-jar">加载中…</dd>
-          <dt>浏览器</dt><dd id="ck-browser">—</dd>
-          <dt>上限</dt><dd id="ck-max">—</dd>
-          <dt>解析引擎</dt><dd id="ck-engine">—</dd>
-        </dl>
-        <label for="ck-text">粘贴 jar 内容（提交前会先校验，空/坏 jar 引擎根本不报错）</label>
-        <textarea id="ck-text" rows="6" placeholder="# Netscape HTTP Cookie File&#10;.example.com	TRUE	/	FALSE	0	name	value"></textarea>
-        <button id="ck-save">保存这份 jar</button>
-        <button id="ck-clear">清除已保存的 jar</button>
-        <div class="row">
-          <div>
-            <label for="ck-browser-in">从浏览器读取（留空＝关）</label>
-            <input id="ck-browser-in" placeholder="vivaldi:C:\Users\me\AppData\…" />
-          </div>
-        </div>
-        <p class="muted">这一栏读的是引擎自己的语法：<code>名字[:资料目录]</code>。<code>+钥匙串</code> 与
-          <code>::容器</code> 我们都不收 —— 那两样是我们从不替你挑的东西。</p>
-        <button id="ck-browser-set">设为这一栏</button>
-        <button id="ck-browser-off">改成不从浏览器读</button>
-      </section>
-
-      <section class="card">
-        <h2>播放器与高级设置</h2>
-        <div class="row">
-          <div><label>字幕</label><button id="sub-show">显示字幕</button><button id="sub-hide">隐藏字幕</button></div>
-          <div><label>渲染器（本构建只有一个）</label><button id="renderer-set">切换为 MPV</button></div>
-        </div>
-        <p class="muted">字幕的显隐不写状态表：<code>DisplayCurrentSubtitle</code> 是<strong>播放器回报</strong>的，
-          所以空闲播放器上按了也不会变 —— 那是参考实现的行为。</p>
-        <h2 style="margin-top: 24px">高级设置（整份 JSON）</h2>
-        <p class="muted">这是管理面同一条 <code>save-launch-param</code>：<strong>整表替换并重启</strong>。
-          写坏一个对象就是写坏整份设置，所以先读取、再改、再提交。</p>
-        <p class="muted">四个自动化钩子也在这里：<code>Hook_On_Cast</code> / <code>Hook_On_Pause</code> /
-          <code>Hook_On_Resume</code> / <code>Hook_On_Stop</code>，值是一条 shell 命令。它拿到三个环境变量
-          <code>MACAST_EVENT</code>、<code>MACAST_URL</code>、<code>MACAST_TITLE</code> ——
-          <strong>地址只走环境变量，绝不拼进命令</strong>（拼进去就等于让任何投屏的网页在这台机器上执行命令）。
-          钩子是 spawn 出去的，不等人。写下一个钩子等于装一条会在下次投屏时跑的命令，所以 HTTP 面那一条是
-          <code>GATE_CODE</code>。</p>
-        <button id="lp-load">读取当前整份设置</button>
-        <textarea id="lp-text" rows="10" placeholder='{"DLNA_FriendlyName": "Macast"}'></textarea>
-        <button id="lp-save">整份写入并重启</button>
-        <p class="muted" id="lp-note">（还没读过）</p>
-      </section>
-
-      <section class="card">
-        <h2>模块设置</h2>
-        <p class="muted">与 HTTP 的 `query=module-settings` / `set-module-setting` 同一张归属表。只读的格子不给输入框。</p>
-        <div id="mods"></div>
-      </section>
-
-    </main>
-    <script>
-      const core = window.__TAURI__?.core;
-      const invoke = core?.invoke;
-      const listen = window.__TAURI__?.event?.listen;
-      const out = (id, text) => { document.querySelector(`#${id}`).textContent = text; };
-
-      function note(text) {
-        const box = document.querySelector('#events');
-        if (box.textContent === '（还没有事件）') box.textContent = '';
-        const stamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-        box.textContent = `[${stamp}] ${text}\n` + box.textContent;
-        const lines = box.textContent.split('\n');
-        if (lines.length > 21) box.textContent = lines.slice(0, 21).join('\n');
-      }
-
-      async function refresh() {
-        if (!invoke) {
-          out('error', '请通过 Tauri 运行此页面。');
-          return;
-        }
-        const data = await invoke('runtime_status');
-        for (const key of ['backend', 'version', 'migration', 'status']) out(key, data[key]);
-      }
-
-      // 历史记录每行是 (名字, 地址)。这一列的每一项都来自**发送端**：DLNA 那边
-      // 是 DIDL 的 `dc:title`，我们把它存下来就完了。所以这一格跟设置页的日志面板
-      // 是同一个 XSS 边界（AGENTS.md §4.10 那条红线），行必须用 createElement +
-      // textContent 建，永远不许 innerHTML。
-      // 重投必须把存下来的那个名字一起交回去。**只交地址**不交名字，
-      // `cast_uri` 就用 `title_for_uri` 现推一个，而中转地址的末段是 `media` ——
-      // 那正是 §4.2「改播放器的地址，就必须改播放器的名字」记下的症状。
-      let historySignature = null;
-      function renderHistory(rows) {
-        const box = document.querySelector('#history');
-        const list = rows || [];
-        const signature = JSON.stringify(list);
-        // 页面每 1500 毫秒重读一次快照；没有变化就不重建 DOM，
-        // 否则鼠标正指向的那一行会在自己那一次点击之前被换掉。
-        if (signature === historySignature) return;
-        historySignature = signature;
-        box.textContent = '';
-        if (!list.length) {
-          const empty = document.createElement('p');
-          empty.className = 'muted';
-          empty.textContent = '（还没有投过）';
-          box.appendChild(empty);
-          return;
-        }
-        for (const row of list) {
-          const button = document.createElement('button');
-          button.className = 'hist';
-          const title = document.createElement('span');
-          title.className = 'hist-title';
-          title.textContent = row.title || '（没有名字）';
-          const url = document.createElement('span');
-          url.className = 'hist-url';
-          url.textContent = row.url;
-          button.appendChild(title);
-          button.appendChild(url);
-          button.addEventListener('click', async () => {
-            try {
-              note(`重投 → ${JSON.stringify(await invoke('cast_url', { uri: row.url, title: row.title || null }))}`);
-            } catch (e) {
-              note(`重投失败：${e}`);
-            }
-            await snapshot();
-          });
-          box.appendChild(button);
-        }
-      }
-
-      async function snapshot() {
-        if (!invoke) return;
-        const s = await invoke('player_snapshot');
-        out('running', s.running ? '在跑' : '没起来');
-        out('ipc', `连着：${s.ipc_running} · 连过：${s.ipc_once_connected}`);
-        out('pid', s.pid === null || s.pid === undefined ? '—' : String(s.pid));
-        out('mpv_path', s.mpv_path);
-        out('socket_path', s.socket_path);
-        out('title', s.title || '（空）');
-        out('transport_state', s.transport_state || '（空）');
-        out('current_url', s.current_url || '（空）');
-        out('position', `${s.position || '—'} / ${s.duration || '—'}`);
-        out('media_live', s.media_live === null ? '未声明' : String(s.media_live));
-        out('playlist', s.playlist.length ? s.playlist.join(' · ') : '（空）');
-        renderHistory(s.history);
-      }
-
-      document.querySelector('#mark-ready').addEventListener('click', async () => {
-        await invoke('set_status', { value: 'scaffold-ready' });
-        await refresh();
-      });
-      document.querySelector('#snap').addEventListener('click', snapshot);
-      document.querySelector('#cast').addEventListener('click', async () => {
-        const uri = document.querySelector('#uri').value.trim();
-        const title = document.querySelector('#title-in').value.trim();
-        if (!uri) { note('投屏：没有地址，后端不会动'); return; }
-        try {
-          const r = await invoke('cast_url', { uri, title: title || null });
-          note(`cast_url → ${JSON.stringify(r)}`);
-        } catch (e) {
-          note(`cast_url 失败：${e}`);
-        }
-        await snapshot();
-      });
-      // 清空是唯一能让这一列行数变少的动作 —— 播放本身只有 50 条上限的截断。
-      // 后端的 `clear_play_history` 早已注册，这一格一直是页面缺的那一半。
-      document.querySelector('#clear-history').addEventListener('click', async () => {
-        try {
-          await invoke('clear_play_history');
-          note('clear_play_history → {"history":[]}');
-        } catch (e) {
-          note(`清空历史失败：${e}`);
-        }
-        await snapshot();
-      });
-
-      // 后端那四个控制命令回的是「等过状态表」的答复，不是「mpv 照做了」的答复：
-      // `settled` 说的是我们有没有在 400 毫秒里读到那一句，参考实现（mpv.py:273-300）
-      // 只有在 mpv 自己上报 ObserveProperty 时才写表，播放器空闲时它根本不写，
-      // 所以 `settled:false` 是正常状态，不是故障 —— 页面必须把这一格说出口。
-      function ack(cmd, data) {
-        const text = JSON.stringify(data);
-        note(data && data.settled === false
-          ? `${cmd} → ${text}（没等到 mpv 认账；空闲播放器上参考实现也不写这一格）`
-          : `${cmd} → ${text}`);
-      }
-
-      for (const [id, cmd] of [['pause', 'pause'], ['resume', 'resume'], ['stop', 'stop_playback']]) {
-        document.querySelector(`#${id}`).addEventListener('click', async () => {
-          ack(cmd, await invoke(cmd));
-          await snapshot();
-        });
-      }
-      // 音量按钮交替发 80 / 60：一直发同一个数字时，状态表里可能早就坐着那个值，
-      // `settled:true` 就成了在替一次没有发生的变更说话。
-      let nextVolume = 80;
-      const volumeButton = document.querySelector('#volume');
-      volumeButton.addEventListener('click', async () => {
-        const value = nextVolume;
-        nextVolume = value === 80 ? 60 : 80;
-        volumeButton.textContent = `音量 ${nextVolume}`;
-        ack(`set_volume(${value})`, await invoke('set_volume', { value }));
-        await snapshot();
-      });
-
-      // payload 是 publish 的参数数组，所以读 payload[0]。
-      for (const name of ['mpv_start', 'mpvipc_start', 'renderer_start', 'app_notify',
-                          'mpv_update_duration', 'renderer_av_uri', 'renderer_av_stop']) {
-        if (listen) {
-          listen(name, ({ payload }) => note(`${name} ${JSON.stringify(payload ?? [])}`))
-            .catch((e) => note(`${name} 监听失败：${e}`));
-        }
-      }
-      if (!listen) note('window.__TAURI__.event 不可用：页面拿不到后端事件');
-
-      // —— 服务与网络 ——
-      // `is_healthy()` 在 HTTP 接口（http.rs:1857）与 SSDP（ssdp.rs:379）里都是
-      // 「没在跑就答健康」：一个**主动停掉**的服务器不是故障。所以页面不能把
-      // healthy:true 读成「一切正常」，必须先问 running，再把两者不一致的那一格
-      // 单独说清 —— 那才是这一格存在的理由（AGENTS.md §4.2「别把端口在听当证据」）。
-      function svcState(running, healthy) {
-        if (!running) return { text: '已停止', cls: 'state-warn' };
-        if (healthy) return { text: '在听', cls: 'state-ok' };
-        return { text: '端口还在听，可工作线程已经不在 —— 这是故障，不是停止', cls: 'state-bad' };
-      }
-      // GENA 没有 healthy 这一问，只有「线程还在不在」。`event_thread_alive()` 的
-      // 注释就写着它要和 running 一起读：有用的状态恰恰是两者的不一致 —— 服务
-      // 声称在跑而线程没了，订阅者就永远进不了表，设置页看到的是「暂无订阅客户端」，
-      // 而真相是「那台负责把他们列进来的机器已经不排干队列了」。
-      function threadState(running, alive) {
-        if (!running) return { text: '没让它跑', cls: 'state-warn' };
-        if (alive) return { text: '在跑', cls: 'state-ok' };
-        return { text: '要它在跑，可线程已经不在了（订阅者因此永远进不了表）', cls: 'state-bad' };
-      }
-      function setState(id, st) {
-        const el = document.querySelector(`#${id}`);
-        el.textContent = st.text;
-        el.className = st.cls;
-      }
-      function fmtBytes(n) {
-        if (typeof n !== 'number' || !Number.isFinite(n)) return '—';
-        if (n < 1024) return `${n} B`;
-        if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`;
-        return `${(n / 1048576).toFixed(1)} MiB`;
-      }
-
-      // 每 5000 毫秒的轮询不许吃掉了用户正在打的字：一旦用户在框里动过手，
-      // 这一格就交给他，直到下一次显式读取为止。
-      let nameTouched = false;
-      let ifaceTouched = false;
-
-      // 网卡表里**可用与不可用的行都要列出来**（`network_interfaces` 不过滤），
-      // 因为参考实现也不过滤：一台「在但没插线」的网卡是真实选项，把它藏起来
-      // 等于让用户以为这台机器上没有那个口。不可用的那一行把后端的 reason 原样
-      // 念出来 —— 那句话的主人是谁决定的，页面就不该另写一份。
-      let ifaceSignature = null;
-      function renderInterfaces(rows, current) {
-        const list = rows || [];
-        const signature = JSON.stringify([list.map((r) => [r.name, r.ip, r.usable, r.reason, r.default]), current]);
-        if (signature === ifaceSignature) return;
-        ifaceSignature = signature;
-        const sel = document.querySelector('#iface');
-        sel.textContent = '';
-        const auto = document.createElement('option');
-        auto.value = '';
-        auto.textContent = '自动（跟随默认路由）';
-        sel.appendChild(auto);
-        for (const row of list) {
-          const opt = document.createElement('option');
-          opt.value = row.name;
-          const marks = [row.usable ? '' : '不可用', row.default ? '默认路由' : '', row.selected ? '已选中' : '']
-            .filter(Boolean).join(' · ');
-          opt.textContent = `${row.name}  ${row.ip || '（没有 IPv4）'}${row.reason ? ` ${row.reason}` : ''}${marks ? ` 【${marks}】` : ''}`;
-          sel.appendChild(opt);
-        }
-        if (ifaceTouched && list.some((r) => r.name === sel.value)) return;
-        sel.value = current || '';
-        if (sel.value !== (current || '')) sel.value = '';
-      }
-
-      // 后端**不会**在你指定的网卡消失时报错，也不会改写你存的值：
-      // `resolve_pin`（net.rs:199-219）在指不到行、或那一行没有局域网可达 IPv4 时，
-      // 打一行 Utils 的 warning 然后回 `""` = 自动选择。所以「这一行现在其实没生效」
-      // 这句话只有页面能说，而且必须从服务交回来的数据里推，不能另加一个字段。
-      function pinNote(rows, current) {
-        if (!current) return '';
-        const row = (rows || []).find((r) => r.name === current);
-        if (!row) {
-          return `指定的网卡 ${current} 现在不在这台机器的表里：后端的回落是静默的（它只往日志写一行 warning），`
-            + '发现其实已经改由默认路由决定，而你存的值没有被改写。';
-        }
-        if (!row.usable) {
-          return `指定的网卡 ${current} 没有局域网可达的 IPv4（${row.reason || '原因见日志'}）：`
-            + '后端的回落是静默的，发现已由默认路由决定，而你存的值没有被改写。';
-        }
-        return '';
-      }
-
-      async function services() {
-        if (!invoke) return;
-        const d = await invoke('service_snapshot');
-        const s = d.server, nw = d.network;
-        setState('svc-http', svcState(d.http.running, d.http.healthy));
-        setState('svc-ssdp', svcState(d.ssdp.running, d.ssdp.healthy));
-        setState('svc-gena', threadState(d.eventing.running, d.eventing.thread_alive));
-
-        // `bound_port` 只在**拥有它的那一行**报一次（这是本端口与参考实现的一处
-        // 有意分歧：三个服务三条生命周期，而 `server.running` 只说 HTTP 那一张脸）。
-        let port = `${s.port}`;
-        if (s.bound_port === null || s.bound_port === undefined) {
-          port += '（还没有真的绑上）';
-        } else if (s.bound_port !== s.port) {
-          port += ` · 实际绑定 ${s.bound_port}（${s.port} 被占用，本端口按参考实现一样回退到别的端口，USN 也跟着改了）`;
-        }
-        out('svc-port', port);
-        out('svc-https', s.https_enabled ? `已启用 · 端口 ${s.https_port}` : '未启用');
-        out('svc-advertised', (nw.advertised && nw.advertised.length) ? nw.advertised.join(' / ') : '（读不到可广播的地址：手机看得到我们也投不上）');
-        out('svc-protocol', (s.protocol && s.protocol.length) ? s.protocol.join(' · ') : '（没有配置任何协议）');
-        out('svc-renderer', s.renderer || '（默认 mpv）');
-        out('svc-system', `${s.version} · ${s.system} ${s.system_version}（${s.platform}）`);
-
-        const nameBox = document.querySelector('#friendly-name');
-        if (!nameTouched) nameBox.value = s.friendly_name || '';
-        renderInterfaces(nw.interfaces, nw.interface);
-        const note_ = pinNote(nw.interfaces, nw.interface);
-        out('cfg-note', s.service_stopped ? `服务已被停用（service_stopped=true）：${note_}` : note_);
-      }
-
-      document.querySelector('#friendly-name').addEventListener('input', () => { nameTouched = true; });
-      document.querySelector('#iface').addEventListener('change', () => { ifaceTouched = true; });
-
-      // 存下来的名字**按你打的原样存**（参考实现 trim 网卡名，从不 trim 友好名：
-      // 设备名末尾那个空格就是用户打的）。但描述 XML 是 `Face::new` 在构造时烤成
-      // 一个 Vec<u8> 的，所以 `GET /description.xml` 要到重启才跟着变 ——
-      // 后端把这件事写在 `restart_pending` 里，页面就必须把它说出口，
-      // 否则用户读到的是「改了没生效，界面坏了」。
-      document.querySelector('#save-name').addEventListener('click', async () => {
-        const name = document.querySelector('#friendly-name').value;
-        try {
-          const r = await invoke('set_friendly_name', { name });
-          if (r.code === 0) {
-            nameTouched = false;
-            note(`设备名已存为「${r.saved}」· 读回「${r.friendly_name}」· 手机看到的描述文件要到下次重启才跟着变（restart_pending=${r.restart_pending}）`);
-          } else {
-            note(`保存设备名：${JSON.stringify(r)}`);
-          }
-        } catch (e) {
-          note(`保存设备名失败：${e}`);
-        }
-        await services().catch(() => {});
-      });
-
-      // 不认识的网卡名是**后端**拒的，不是页面拒的（打错一个字就会静默掉到回环，
-      // 症状长得像「配好了却找不到设备」）。所以这里把后端那句原话念回来，
-      // 而不是在页面再抄一份可用清单 —— 那句话只有一个主人。
-      document.querySelector('#save-iface').addEventListener('click', async () => {
-        const name = document.querySelector('#iface').value;
-        try {
-          const r = await invoke('set_network_interface', { name });
-          if (r.code === 0) {
-            ifaceTouched = false;
-            note(`${r.message}${r.ssdp_reannounced ? ' · SSDP 已重新通告' : ' · SSDP 当前没在跑，所以这一次没有重通告任何东西'}`);
-            // 网卡一换，可广播地址就换了一批；立刻重读一次，别让页面停在旧表上。
-            await services().catch(() => {});
-          } else {
-            note(r.message);
-          }
-        } catch (e) {
-          note(`切换网卡失败：${e}`);
-        }
-      });
-
-      // —— 日志 ——
-      // `log_modules()` 交回来的是**两个**键：主日志（`main` = size + mtime）与磁盘上
-      // 现在的模块文件（`modules`，每行 name/file/size/mtime，按名字排）。这是参考实现
-      // `protocol.py:2120-2128` 与 `logsplit.list_logs()` 的形状，本壳由
-      // `macast_core::logging::log_modules_document()` 一处产出、HTTP 面与这个窗口共用。
-      //
-      // **这一格曾经读过一个不存在的键**：`m.known`（"在盘上的 ∪ 已被插件认领的"），
-      // 那是写页面时想出来的第三个字段 —— 后端从来没发过它，于是 `(m.known || [])` 永远是空数组，
-      // 那段"空盒子也要列出来"的循环一次都没执行过。这正是 §4.13「不提问的检查」在前端的形状：
-      // 一个读不到的键既不报错也不显示，读起来像"这个功能还没内容"。
-      // 删掉而不是给后端补上：参考实现那一份只有两个键，而 `known_log_modules()` 在本壳里
-      // 是 `log_target()` 的校验集（内部用），不是线上的形状 —— 把它发出去就是一条
-      // 只被我们自己页面读的偏差。
-      let logSignature = null;
-      function renderLogModules(m) {
-        const onDisk = m.modules || [];
-        const signature = JSON.stringify([m.main, onDisk]);
-        if (signature === logSignature) return;
-        logSignature = signature;
-        const sel = document.querySelector('#log-module');
-        const previous = sel.value;
-        sel.textContent = '';
-        const main = document.createElement('option');
-        main.value = '';
-        main.textContent = `整体日志（macast.log）· ${fmtBytes(m.main && m.main.size)}`;
-        sel.appendChild(main);
-        for (const row of onDisk) {
-          const opt = document.createElement('option');
-          opt.value = row.name;
-          opt.textContent = `${row.name} · ${fmtBytes(row.size)}`;
-          sel.appendChild(opt);
-        }
-        sel.value = previous;
-        if (![...sel.options].some((o) => o.value === previous)) sel.value = '';
-      }
-
-      async function loadModules() {
-        const doc = await invoke('module_settings_snapshot');
-        const box = document.querySelector('#mods');
-        box.textContent = '';
-        for (const group of doc.groups || []) {
-          const title = document.createElement('h3');
-          title.textContent = group.title;
-          title.style.margin = '18px 0 6px';
-          box.appendChild(title);
-          for (const item of group.keys || []) {
-            const line = document.createElement('div');
-            line.style.margin = '6px 0';
-            const label = document.createElement('label');
-            label.textContent = `${item.label}（${item.key}）`;
-            label.title = item.hint || '';
-            line.appendChild(label);
-            if (item.editable) {
-              const input = document.createElement('input');
-              input.value = item.present ? JSON.stringify(item.value) : '';
-              input.placeholder = item.type || '';
-              const save = document.createElement('button');
-              save.textContent = '保存';
-              save.addEventListener('click', async () => {
-                const answer = await invoke('set_module_setting', {
-                  key: item.key, value: input.value, remove: false,
-                });
-                note(`模块设置 ${item.key} → ${JSON.stringify(answer)}`);
-              });
-              line.appendChild(input);
-              line.appendChild(save);
-            } else {
-              const value = document.createElement('p');
-              value.className = 'muted';
-              value.textContent = item.present ? String(item.value) : '—';
-              line.appendChild(value);
-            }
-            box.appendChild(line);
-          }
-        }
-      }
-      loadModules().catch((e) => note(`模块设置: ${e}`));
-      async function loadLogModules() {
-        if (!invoke) return;
-        renderLogModules(await invoke('log_modules'));
-      }
-
-      // 正文里含**发送端提供的** DIDL `dc:title` 与地址（AGENTS.md §4.10 那条红线：
-      // 局域网里任何一台设备投一个带 `<img onerror=…>` 的标题，打开日志面板就会执行）。
-      // 所以这里只有 textContent，永远不许 innerHTML；而且这一格不参与任何轮询，
-      // 只在按下按钮时拉一次。
-      async function readLog(wantAll) {
-        if (!invoke) return;
-        const module = document.querySelector('#log-module').value;
-        const tail = Number(document.querySelector('#log-tail').value);
-        const args = { module: module || null, all: wantAll || null };
-        // 行数不在页面里夹：`read_tail` 自己 `clamp(1, MAX_TAIL_LINES)`，
-        // 在页面再抄一个上限等于造第二个会漂移的真值点。
-        if (!wantAll && Number.isFinite(tail) && tail >= 1) args.tail = Math.floor(tail);
-        let d;
-        try {
-          d = await invoke('log_view', args);
-        } catch (e) {
-          out('log-text', String(e));
-          out('log-meta', '读取失败');
-          return;
-        }
-        if (d.code !== 0) {
-          out('log-text', '（没有这一份日志）');
-          out('log-meta', `${d.message}：${d.module}`);
-          return;
-        }
-        out('log-text', d.logs || '（空的）');
-        const which = d.module ? `「${d.module}」` : '整体日志';
-        const head = wantAll
-          ? `${which} · 全文 ${fmtBytes(d.size)}，读到 ${d.lines} 行`
-          : `${which} · 要 ${args.tail ?? '默认'} 行，读到 ${d.lines} 行，文件 ${fmtBytes(d.size)}`;
-        // 被切掉的只有**字节窗口**，不是行数上限：窗口是按行数算出来的，
-        // 所以要行数它就跟着变大 —— 这句话别说成「最多 50000 行」。
-        out('log-meta', d.truncated
-          ? `${head} · 字节窗口装不下，只给了末尾这一段（把行数调大就看得更多）`
-          : `${head} · 没被截断`);
-      }
-
-      document.querySelector('#log-read').addEventListener('click', () => readLog(false));
-      document.querySelector('#log-all').addEventListener('click', () => readLog(true));
-
-      // `clear_log_file` 数的是「被清空或被删掉几个文件」，而日志本身算一个，
-      // 所以备份数 = removed − 1。页面要说的是这个数，不是「清空了」了事。
-      document.querySelector('#log-clear').addEventListener('click', async () => {
-        const module = document.querySelector('#log-module').value;
-        try {
-          const r = await invoke('clear_log', { module: module || null });
-          if (r.code === 0) {
-            const backups = Math.max(0, (r.removed || 0) - 1);
-            note(`已清空${module ? `「${module}」` : '整体日志'}${backups ? `，连同它轮转出来的 ${backups} 个备份` : '（没有轮转出来的备份）'}`);
-          } else {
-            note(r.message);
-          }
-        } catch (e) {
-          note(`清空日志失败：${e}`);
-        }
-        await loadLogModules().catch(() => {});
-        await readLog(false).catch(() => {});
-      });
-
-      // —— 订阅客户端 ——
-      // 三个计数器要**分开列**，因为它们说的是三种不同的死法：`pending_append`
-      // 非零是「连接握好了却还没进表」（跟「根本没人订阅」是两件事），
-      // `pending_state` 是「状态变更排着而没广播出去」，`pending_remove` 是
-      // 「收尸的那一路没在排干」。最后这个不在参考实现里，因为那里没有它的见证者。
-      let subSignature = null;
-      function renderSubscribers(child, sids) {
-        out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
-        setState('sub-thread', threadState(child.running, child.event_thread_alive));
-        out('sub-append', String(child.pending_append));
-        out('sub-state', String(child.pending_state));
-        out('sub-remove', String(child.pending_remove));
-
-        const rows = child.rows || [];
-        const signature = JSON.stringify(rows);
-        const box = document.querySelector('#sub-rows');
-        if (signature === subSignature) return;
-        subSignature = signature;
-        box.textContent = '';
-        if (!rows.length) {
-          const empty = document.createElement('p');
-          empty.className = 'muted';
-          empty.textContent = sids.length
-            ? '（表里没有行，但上面那三个计数器不是零 —— 队列没被排干，看「待入表」）'
-            : '（没有订阅者：手机还没连上来，或者它续约的 path 不是我们答的那一个）';
-          box.appendChild(empty);
-          return;
-        }
-        for (const row of rows) {
-          const div = document.createElement('div');
-          div.className = row.timed_out ? 'sub sub-dead' : 'sub';
-          const sid = document.createElement('span');
-          sid.className = 'sub-sid';
-          sid.textContent = `${row.sid} · ${row.service} · seq ${row.seq}${row.timed_out ? ' · 已超时' : ''}`;
-          const meta = document.createElement('span');
-          meta.className = 'sub-meta';
-          // url 是发送端给的（SUBSCRIBE 的回调地址），所以它和日志正文一样是
-          // 不可信文字，进 textContent 而不是进标记。
-          meta.textContent = `${row.url} · 续约 ${row.timeout} 秒 · 失败 ${row.errors} 次`;
-          div.appendChild(sid);
-          div.appendChild(meta);
-          box.appendChild(div);
-        }
-      }
-
-      async function subscribers() {
-        if (!invoke) return;
-        const d = await invoke('subscriber_snapshot');
-        const sids = d.aggregated || [];
-        // 这一族现在只有一个孩子（DLNA 接收端）；写法按多个来，
-        // 以后 Chromecast / AirPlay 加进来时这一格不用改。
-        for (const child of d.children || []) renderSubscribers(child, child.subscribed || []);
-        if (!(d.children || []).length) out('sub-aggregated', sids.length ? sids.join(' · ') : '暂无订阅客户端');
-      }
-
-      // 启动。**这一段曾经在 40a9b25 被整块删掉而卡片留着** —— 于是每一格永远停在
-      // 「加载中…」，而窗口里没有任何一条控制台消息能告诉你少的是这一段（页面本身
-      // 语法是合法的）。所以这里每条 boot 调用都各自 catch 并把原因写进事件框，
-      // 而不是让一个 rejection 静默带走后面的初始化。
-      refresh().catch((e) => out('error', String(e)));
-      snapshot().catch((e) => note('读取播放器状态失败：' + e));
-      setInterval(() => snapshot().catch(() => {}), 1500);
-
-      // 网卡枚举要问操作系统（getifaddrs），比读一次播放器状态贵，所以它不进
-      // 那一轮 1500 毫秒；订阅表同理 —— 它是服务侧的事，不是逐帧的事。
-      // 日志清单也走这一轮：它只是 `stat` 目录下那几个文件，一次读都不做，
-      // 而它**必须**跟着轮 —— 下拉里那两个字节数是文件当下的长度，
-      // 只在启动时问一次等于让页面印一个越来越旧的数（广播一开日志就在长）。
-      // 重绘由 `renderLogModules` 自己的签名门挡住，长度没变就不会碰选择器。
-      services().catch((e) => note('读取服务状态失败：' + e));
-      subscribers().catch((e) => note('读取订阅客户端失败：' + e));
-      // —— 网页登录态（cookie） ——
-      // 文档形状照 `_cookie_state`（`macast/protocol.py:2794-2818`）：八个键，
-      // **只报条数不报值**。页面这一格唯一的判断是"文件在不在"，其余都念后端原话。
-      async function loadCookies() {
-        let doc;
-        try {
-          doc = await invoke('resolve_cookies');
-        } catch (e) {
-          out('ck-jar', `读不到：${e}`);
-          return;
-        }
-        const st = (doc && doc.state) || {};
-        // `jar` 是"磁盘上有没有这份文件"，`cookies` 是"里面有几条能读懂的"。两个都要说：
-        // 只报后者时，一份存过但读不懂的 jar 与"从没存过"长得一模一样。
-        out('ck-jar', st.jar
-          ? `已保存 · ${st.cookies} 条能读懂的${st.bad ? ` · 另有 ${st.bad} 行看不懂（一并存了）` : ''}`
-          : '未保存（解析会匿名进行，需要登录的站点会少给地址）');
-        out('ck-browser', st.browser ? `${st.browser}（文件优先于浏览器）` : '关（不从浏览器读取）');
-        out('ck-max', `${fmtBytes(st.max_bytes)} · 超过就在粘贴那一刻拒绝`);
-        out('ck-engine', st.yt_dlp ? '本机有 yt-dlp' : '本机没有 yt-dlp —— 只会抓页面里写明的地址');
-        const box = document.querySelector('#ck-browser-in');
-        if (!box.dataset.touched && st.browser) box.value = st.browser;
-      }
-      document.querySelector('#ck-browser-in').addEventListener('input', (e) => {
-        e.target.dataset.touched = '1';
-      });
-      document.querySelector('#ck-save').addEventListener('click', async () => {
-        const text = document.querySelector('#ck-text').value;
-        if (!text.trim()) { note('cookie：文本框是空的，后端不会动'); return; }
-        let answer;
-        try {
-          answer = await invoke('save_cookies', { text });
-        } catch (e) {
-          note(`保存 cookie 失败：${e}`);
-          return;
-        }
-        // 成功时才带 counts；失败文档**没有** counts（参考实现的形状），所以这里不读它们。
-        note(`cookie → code ${answer.code}: ${answer.message}`);
-        if (answer.code === 0) document.querySelector('#ck-text').value = '';
-        await loadCookies();
-      });
-      document.querySelector('#ck-clear').addEventListener('click', async () => {
-        const answer = await invoke('clear_cookies');
-        note(`清除 cookie → code ${answer.code}: ${answer.message}`);
-        await loadCookies();
-      });
-      document.querySelector('#ck-browser-set').addEventListener('click', async () => {
-        const text = document.querySelector('#ck-browser-in').value;
-        const answer = await invoke('set_cookie_browser', { text });
-        note(`从浏览器读 cookie → code ${answer.code}: ${answer.message}`);
-        document.querySelector('#ck-browser-in').dataset.touched = '';
-        await loadCookies();
-      });
-      document.querySelector('#ck-browser-off').addEventListener('click', async () => {
-        // "关" 是那六个词之一，而它**删键**而不是存 false（§4.2）。
-        const answer = await invoke('set_cookie_browser', { text: 'off' });
-        note(`从浏览器读 cookie → code ${answer.code}: ${answer.message}`);
-        document.querySelector('#ck-browser-in').value = '';
-        await loadCookies();
-      });
-
-      // —— 播放器与高级设置 ——
-      // `set-subtitle-show` 的**值**走四词规则且**不 strip**：`" on "` 是"隐藏"。
-      // 这里两个按钮各自发 `1` / `0`，所以没有那个歧义；把它写在这里是因为下一个人
-      // 不该以为可以传 `on`（那也是"真"，但 `" on "` 不是）。
-      for (const [id, value] of [['#sub-show', '1'], ['#sub-hide', '0']]) {
-        document.querySelector(id).addEventListener('click', async () => {
-          const answer = await invoke('set_subtitle_show', { value });
-          note(`字幕 ${value} → code ${answer.code}: ${answer.message}`
-            + '（空闲播放器上不会变，那一格是播放器回报的）');
-        });
-      }
-      document.querySelector('#renderer-set').addEventListener('click', async () => {
-        const answer = await invoke('set_renderer', { title: 'MPV' });
-        note(`渲染器 → code ${answer.code}: ${answer.message}`);
-      });
-
-      // 高级设置：整表替换 + 重启。**先读**再改，是这个面板存在的理由 —— 一份看不见
-      // 的 JSON 编辑器让用户凭记忆重建 36 个键。
-      document.querySelector('#lp-load').addEventListener('click', async () => {
-        let doc;
-        try {
-          doc = await invoke('launch_param');
-        } catch (e) {
-          out('lp-note', `读不到：${e}`);
-          return;
-        }
-        // `launch-param` 交回的是**设置表本身**（没有 code/message），所以这里直接序列化。
-        document.querySelector('#lp-text').value = JSON.stringify(doc, null, 4);
-        const keys = Object.keys(doc || {}).length;
-        out('lp-note', `已读入 ${keys} 个键。改完提交会**整表替换并重启** —— 少写的键就是没有了。`);
-      });
-      document.querySelector('#lp-save').addEventListener('click', async () => {
-        const text = document.querySelector('#lp-text').value;
-        if (!text.trim()) { note('高级设置：文本框是空的，后端不会动'); return; }
-        // 页面这边**只挡空**，JSON 合不合法由后端判（`json format error` 是参考实现的原话）。
-        // 在页面再写一份 JSON 校验等于造第二个会漂移的真值点。
-        let answer;
-        try {
-          answer = await invoke('save_launch_param', { value: text });
-        } catch (e) {
-          note(`写入失败：${e}`);
-          return;
-        }
-        out('lp-note', `code ${answer.code} · ${answer.message}`
-          + (answer.code === 0 ? ' · 进程正在重启，这一页会跟着回来' : ''));
-        note(`高级设置 → code ${answer.code}: ${answer.message}`);
-      });
-
-      loadCookies().catch(() => {});
-
-      // —— 网页地址投屏 ——
-      // 形状照 `ResolveJob.status()` 那十七个键（`macast-cast/src/resolve.rs`），
-      // 候选行照 `describe()`。**两处都不在这里另算**：进度用后端交回的 `step_label`，
-      // 徽标用 `describe()` 已经交回的 `audio_codec` 与 `merged` —— 页面自己拼一句
-      // "有声/无声"就是 AGENTS.md §4.8 那条「两处答案不一致」的第四个形状。
-      // **两个变量，不是一个**：`resolveJob` 是"还要不要再轮询"，`finishedJob` 是"这张卡片现在
-      // 列的是哪一次解析的结果"。合成一个会造出一个只有真机点得出来的 bug —— 轮询一结束就把它
-      // 清空，于是**候选表还在、点"投第 N 条"发出去的 job 是 null**（本机实测：`{job: null,
-      // candidate: "1", target: "uuid:tv"}`，而回答是 success，因为后端那条路径只看候选表）。
-      // 参考实现在这一点上没有歧义：`cast-resolved` 读的是页面手里的 job id，与轮询状态无关。
-      let resolveJob = null;
-      let finishedJob = null;
-      let resolveTimer = null;
-
-      function fmtSeconds(v) {
-        return typeof v === 'number' && Number.isFinite(v) ? `${v.toFixed(1)} 秒` : '—';
-      }
-
-      function stopResolvePolling() {
-        if (resolveTimer) { clearTimeout(resolveTimer); resolveTimer = null; }
-      }
-
-      // `cookie_problem` 的四个族各自给一句**自己的下一步**（AGENTS.md §4.14：四种"点的是本机
-      // 这一侧"的失败必须分别给出该去哪个目录、要不要退出浏览器、钥匙串、把冒号后面去掉）。
-      // 判定住在后端（`resolve::cookie_source_problem`），页面只照着它的值说话 —— 页面另写一份
-      // 分类就是第二个会漂移的真值点，而这里漂移的代价是把人送去修一件没坏的东西。
-      const COOKIE_NEXT_STEP = {
-        not_found: '这句点的是本机这一侧，不是站点要不要登录：我们按那个目录去找 cookie 库，'
-          + '里面没有 Cookies 文件。在下面那块「网页登录态」写成「名字:资料目录」'
-          + '（指到那个浏览器真正存 cookie 的目录），或者改用粘贴导出的 cookie 文件。',
-        locked: '这句点的是本机这一侧：那个浏览器正开着，cookie 库被它锁住了，我们复制不出来。'
-          + '完全退出那个浏览器（不是关掉窗口）再解析一次，或者改用粘贴导出的 cookie 文件。',
-        decrypt: '这句点的是本机这一侧：cookie 库读到了，但解密它的钥匙不在手边'
-          + '（钥匙串／密钥环没解锁）。解锁它再解析一次；或者改用粘贴导出的 cookie 文件 —— '
-          + '那条路不需要这把钥匙。',
-        bad_profile: '这句点的是本机这一侧：那个浏览器不接受「:资料目录」这一半写法。'
-          + '把上面那一栏改成只写浏览器名字，冒号后面那半截去掉。',
-      };
-
-      function renderResolveNote(st) {
-        const box = document.querySelector('#resolve-note');
-        box.textContent = '';
-        const add = (text, cls) => {
-          const p = document.createElement('p');
-          p.className = cls || 'muted';
-          p.textContent = text;
-          box.appendChild(p);
-        };
-        // **"这一页为什么没有地址"必须落在卡片上，不是只进事件框。**
-        // `error` 里那句就是 `ResolveJob::why_empty()` 交给后端的那**四句话**之一
-        // （引擎说不支持 / 引擎说了别的 / 这台机器没有 yt-dlp / 引擎在场却沉默），
-        // 而它们互相之间的区别正是"用户接下来该做什么"：换站点、看引擎原话、
-        // 装 yt-dlp、还是承认要 JavaScript。四句话的判定住在后端（§4.14 那条"一个主人"），
-        // 页面只负责把它原样显示在**候选表为空的那一刻**。
-        if (st.done && !st.candidates.length && st.error) {
-          add(st.error, 'state-warn');
-        }
-        // 引擎自己的原话先出来：这一格存在的理由就是"这句话是别人说的"。
-        if (st.engine_note && !st.from_ytdlp) {
-          add(`yt-dlp 这一路说：${st.engine_note}`);
-        }
-        if (st.cookie_problem) {
-          add(`—— ${COOKIE_NEXT_STEP[st.cookie_problem] || st.cookie_problem}`);
-        } else if (st.needs_cookies) {
-          // 只有"不是我们这一侧的问题"时才说这句：`needs_cookies` 在 `status()` 里已经
-          // 取过一次反（`needs_cookies(note) and not cookie_source_problem(note)`），
-          // 所以这里不需要再判一次 —— 两个主人判同一件事就会给出两个答案。
-          add('—— 这通常是站点要会话 cookie，用下面那块「网页登录态」解决。');
-        }
-        if (st.hidden_silent) {
-          add(`另外 ${st.hidden_silent} 条只有画面、源站又没有交回可合并的音轨，`
-            + '投上去必然没声音，所以这里不列它们。');
-        }
-      }
-
-      // 候选行：一个地址一条，**用 createElement + textContent**（标题与地址都来自那一页，
-      // 与日志面板同一个 XSS 边界，AGENTS.md §4.10）。
-      function renderCandidates(candidates) {
-        lastCandidates = candidates || [];
-        const box = document.querySelector('#resolve-rows');
-        box.textContent = '';
-        if (!lastCandidates.length) {
-          const p = document.createElement('p');
-          p.className = 'muted';
-          p.textContent = '（这次没有可用候选；上面那句说的是哪一种没有）';
-          box.appendChild(p);
-          return;
-        }
-        lastCandidates.forEach((c, index) => {
-          const row = document.createElement('div');
-          row.className = 'sub';
-          const title = document.createElement('span');
-          title.className = 'hist-title';
-          title.textContent = c.title || '（没有名字）';
-          const meta = document.createElement('span');
-          meta.className = 'sub-meta';
-          // 这一行的每个数是后端算的：`mode` 是 plan() 的判决（proxy / remux），
-          // `relay` 是它给出的一句话理由，`merged` 说明音画是两条地址合并来的。
-          const bits = [c.label, c.container, `${c.width}x${c.height}`,
-                        fmtSeconds(c.duration), c.mode];
-          if (c.video_codec) bits.push(c.video_codec + (c.audio_codec ? '+' + c.audio_codec : ''));
-          if (c.merged) bits.push('音画合并');
-          if (c.last_resort) bits.push('未度量');
-          meta.textContent = bits.filter(Boolean).join(' · ');
-          // `relay` 是后端给的一句话**理由**（"带请求头反向转发" / "转封装：写完之前没有可信
-          // 长度，拖动要等它写完"）。卡片必须把它说出来：用户选这一条还是下一条，靠的就是这句
-          // —— 而它只有一个主人（`relay_reason()`），页面不许自己再拼一句同义的话。
-          const why = document.createElement('span');
-          why.className = 'reason';
-          why.textContent = c.relay || '';
-          const button = document.createElement('button');
-          button.textContent = `投第 ${index + 1} 条`;
-          button.addEventListener('click', async () => {
-            try {
-              const target = document.querySelector('#cast-target').value || '';
-              const answer = await invoke('cast_resolved', {
-                job: finishedJob, candidate: String(index), target,
-              });
-              note(`投屏 → code ${answer.code}: ${answer.message}`);
-            } catch (e) {
-              note(`投屏失败：${e}`);
-            }
-            await snapshot();
-          });
-          row.appendChild(title);
-          row.appendChild(meta);
-          row.appendChild(why);
-          row.appendChild(button);
-          box.appendChild(row);
-        });
-      }
-
-      async function pollResolve() {
-        resolveTimer = null;
-        if (!resolveJob) return;
-        let doc;
-        try {
-          doc = await invoke('resolve_status', { job: resolveJob });
-        } catch (e) {
-          out('resolve-meta', `轮询失败：${e}`);
-          return;
-        }
-        // 两种空是两句话：没有这个任务（`status: null`，超时或已重启）与还在跑。
-        // 把前者继续当"解析中"轮下去，会让一张卡永远转圈到 TTL 结束。
-        if (doc.code !== 0 || !doc.status) {
-          out('resolve-meta', `${doc.message || '没有这个解析任务'}（已停止轮询）`);
-          resolveJob = null;
-          return;
-        }
-        const st = doc.status;
-        const head = `${st.step_label || st.step} · ${fmtSeconds(st.seconds)}`
-          + `（这一步 ${fmtSeconds(st.step_seconds)}）· 页面 ${st.scraped} 条`
-          + ` · 引擎 ${st.from_ytdlp} 条 · 已度量 ${st.measured} 条`
-          + ` · 剔除 ${st.rejected} 条 · 藏起无声 ${st.hidden_silent} 条`;
-        out('resolve-meta', st.done ? `${head} · 完成` : head);
-        if (st.error) note(`解析出错：${st.error}`);
-        if (st.note) note(`解析备注：${st.note}`);
-        renderResolveNote(st);
-        renderCandidates(st.candidates);
-        if (!st.done) {
-          resolveTimer = setTimeout(pollResolve, 700);
-        } else {
-          resolveJob = null;
-          // **第一轮设备搜索在解析完成那一刻起，不在页面加载时。** 参考实现同一支
-          // （`setting.html:3013` 那句 "页面加载时不搜 —— 没解析过页面的用户不该被这次
-          // 组播打扰"）：一次 SSDP + mDNS 搜索会在这台机器所在网络里发出一批查询，
-          // 而一个只是打开过设置页的用户没有要求过它。`refresh=1` 只**开始**搜索并交回
-          // 缓存，所以这一行是异步的、不占 CherryPy worker。
-          loadTargets(true).catch(() => {});
-        }
-      }
-
-      document.querySelector('#resolve-go').addEventListener('click', async () => {
-        const text = document.querySelector('#page-url').value.trim();
-        if (!text) { note('解析：没有地址，后端不会动'); return; }
-        stopResolvePolling();
-        let answer;
-        try {
-          answer = await invoke('resolve_page', { text });
-        } catch (e) {
-          out('resolve-meta', `解析没能开始：${e}`);
-          return;
-        }
-        if (answer.code !== 0) {
-          out('resolve-meta', answer.message || '解析被拒绝');
-          renderCandidates([]);
-          return;
-        }
-        resolveJob = answer.job;
-        finishedJob = answer.job;
-        out('resolve-meta', `已开始解析 ${answer.url}${answer.note ? `（${answer.note}）` : ''}`);
-        renderCandidates([]);
-        pollResolve();
-      });
-      document.querySelector('#resolve-stop').addEventListener('click', () => {
-        stopResolvePolling();
-        resolveJob = null;
-        out('resolve-meta', '已停止轮询（后台那一次解析仍在跑完，只是这一格不再看它）');
-      });
-
-      // 设备下拉：第一行是**后端插的**本机（`_local_target`），页面不许自己塞一个 ——
-      // 塞了就出现两个"本机"，而它们的 id 都是 `local`。
-      async function loadTargets(refresh) {
-        let doc;
-        try {
-          doc = await invoke('cast_targets', { refresh: !!refresh });
-        } catch (e) {
-          out('targets-note', `读设备列表失败：${e}`);
-          return;
-        }
-        const state = (doc && doc.targets) || {};
-        const sel = document.querySelector('#cast-target');
-        const previous = sel.value;
-        sel.textContent = '';
-        for (const row of state.items || []) {
-          const opt = document.createElement('option');
-          opt.value = row.id;
-          opt.textContent = row.kind === 'local'
-            ? `本机 · ${row.name}`
-            : `${row.name}${row.address ? ` · ${row.address}` : ''}`;
-          sel.appendChild(opt);
-        }
-        sel.value = previous;
-        if (![...sel.options].some((o) => o.value === previous)) sel.value = 'local';
-        // `searching` 在一台发现不到设备的机器上可能一直是 true（设计如此，见 §16 第 8 条），
-        // 所以这一行说的是"搜索还在不在"，不是"有没有设备"。
-        const count = (state.items || []).length;
-        // **`searching` 永远为真不是故障**（§16 第 8 条）：冷启动那条踢法的字面结果是
-        // "两份缓存都空 ⇒ 再起一次搜索"，所以一台发现不到设备的机器上，每一次轮询都恰好
-        // 看见有人在搜。页面必须把这件事说出口，否则那句话读起来像"卡住了"。
-        out('targets-note', `${count} 行（含本机）· ${state.searching ? '搜索还在跑' : '搜索已停'}`
-          + `${state.known ? '' : ' · 还没有拿到过完整一轮结果'}`
-          + (count <= 1 && state.searching
-            ? ' · 只有本机：这台机器所在的网络里没有应答的接收端（局域网里没有 Chromecast / 电视，'
-              + '或者它们不在同一个网段）—— 搜不到不是故障，投本机仍然可用'
-            : ''));
-      }
-      document.querySelector('#targets-refresh').addEventListener('click', () => {
-        loadTargets(true);
-      });
-      // 页面加载时**不搜**（理由见上面解析完成那一支）：这一格先说出它现在的样子。
-      out('targets-note', '还没搜过设备 —— 解析完成时会自动搜一轮，也可以按「重新搜索设备」。');
-
-      loadLogModules().catch((e) => note('读取日志清单失败：' + e));
-      setInterval(() => {
-        services().catch(() => {});
-        subscribers().catch(() => {});
-        loadLogModules().catch(() => {});
-      }, 5000);
-    
-      for (const button of document.querySelectorAll('[data-toggle]')) {
-        button.addEventListener('click', async () => {
-          const title = button.getAttribute('data-toggle');
-          const answer = await invoke('toggle_protocol', { title });
-          note(`协议 ${title} → code ${answer.code}: ${answer.message}`);
-        });
-      }
-      document.querySelector('#quit').addEventListener('click', async () => {
-        const answer = await invoke('app_action', { action: 'quit' });
-        note(`退出 → code ${answer.code}: ${answer.message}`);
-      });
-    </script>
+      </main>
+    </div>
   </body>
 </html>
