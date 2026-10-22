@@ -2456,6 +2456,13 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     **但今天它们不是功能**：一个用户在这台机器上感受不到它们存在。谁要开始接插件宿主，
     从这里接；谁要评估"端口还差什么"，不要把这几行算成已完成的能力。
 
+    *最硬的一道门不是代码，是发版*：`.github/workflows/` 里**只有一个 `build.yml`，而它出的是
+    Python 产物**（`python scripts/setup_py2app.py py2app`、`verify_cast_airplay.py --ci`、
+    `build_webrtc_extras.py`）—— `grep` 量过，没有任何 job 调 `cargo build` 或 `tauri build`。
+    所以在今天这套流水线里，**删掉 `macast/` 等于删掉唯一能出产物的路径**。这一格不是"再搬
+    几个模块"能解决的，它要先有一条 Rust 的发版 job（三平台 `cargo build` + 产物校验），
+    而那是一条独立的、需要用户裁定的决定 —— 不是"顺手做掉"。
+
     *仍然欠着的，按依赖顺序*：
     `screen_mirror`（13,629 行）与 `cast_local_file` 的**供字节那一半**是 Rust 完全没有的两块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
