@@ -1,0 +1,167 @@
+{
+"outputs": {
+"cast": {
+"label": "Chromecast / Google TV",
+"suffix": "ts",
+"content_type": "video/mp2t",
+"muxer": [
+"-f",
+"mpegts",
+"-muxdelay",
+"0",
+"-muxpreload",
+"0",
+"pipe:1"
+]
+},
+"browser": {
+"label": "浏览器（打开网址即可看）",
+"suffix": "m4s",
+"content_type": "video/mp4",
+"muxer": [
+"-f",
+"mp4",
+"-movflags",
+"frag_every_frame+empty_moov+default_base_moof",
+"pipe:1"
+]
+},
+"webrtc": {
+"label": "浏览器 · WebRTC（低延迟 · 此通道无声音）",
+"suffix": "h264",
+"content_type": null,
+"muxer": [
+"-f",
+"h264",
+"pipe:1"
+]
+},
+"caststream": {
+"label": "Chromecast 低延迟（实验 · 此通道无声音）",
+"suffix": "h264",
+"content_type": null,
+"muxer": [
+"-f",
+"h264",
+"pipe:1"
+]
+},
+"dlna": {
+"label": "DLNA 电视（老电视，无需在电视上装东西）",
+"suffix": "mpg",
+"content_type": "video/mpeg",
+"muxer": null
+}
+},
+"profiles": {
+"ps-pal": {
+"label": "MPEG-PS · PAL 576p（老电视首选）",
+"muxer": [
+"-f",
+"vob"
+],
+"suffix": "mpg",
+"content_type": "video/mpeg",
+"pn": "MPEG_PS_PAL",
+"width": 720,
+"height": 576,
+"fps": 25,
+"vbr": 4500000,
+"abr": 192000
+},
+"ps-ntsc": {
+"label": "MPEG-PS · NTSC 480p（北美/日本老电视）",
+"muxer": [
+"-f",
+"vob"
+],
+"suffix": "mpg",
+"content_type": "video/mpeg",
+"pn": "MPEG_PS_NTSC",
+"width": 720,
+"height": 480,
+"fps": 30,
+"vbr": 4500000,
+"abr": 192000
+},
+"ts-mpeg2": {
+"label": "MPEG-TS · MPEG-2 576p（认 TS 不认 PS 的电视）",
+"muxer": [
+"-f",
+"mpegts",
+"-muxdelay",
+"0",
+"-muxpreload",
+"0"
+],
+"suffix": "ts",
+"content_type": "video/vnd.dlna.mpeg-tts",
+"pn": "MPEG_TS_SD_EU",
+"width": 720,
+"height": 576,
+"fps": 25,
+"vbr": 5000000,
+"abr": 192000
+},
+"ts-h264": {
+"label": "MPEG-TS · H.264 720p（较新的电视，清晰度更高）",
+"muxer": [
+"-f",
+"mpegts",
+"-muxdelay",
+"0",
+"-muxpreload",
+"0"
+],
+"suffix": "ts",
+"content_type": "video/vnd.dlna.mpeg-tts",
+"pn": null,
+"width": 0,
+"height": 720,
+"fps": 25,
+"vbr": 6000000,
+"abr": 128000
+},
+"mkv-h264": {
+"label": "Matroska · H.264 720p（只认 MKV 的电视/Kodi）",
+"muxer": [
+"-f",
+"matroska",
+"-muxdelay",
+"0",
+"-muxpreload",
+"0"
+],
+"suffix": "mkv",
+"content_type": "video/x-matroska",
+"pn": null,
+"width": 0,
+"height": 720,
+"fps": 25,
+"vbr": 6000000,
+"abr": 128000
+}
+},
+"latency": {
+"ts-h264": [
+"2.0",
+"1.9"
+],
+"mkv-h264": [
+"2.4",
+"2.1"
+],
+"ts-mpeg2": [
+"2.5",
+"2.2"
+],
+"ps-pal": [
+"5.7",
+"5.1"
+],
+"ps-ntsc": [
+"5.7",
+"5.0"
+]
+}
+}
