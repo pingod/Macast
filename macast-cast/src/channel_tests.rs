@@ -592,6 +592,44 @@ fn stop_and_quit_app_clear_the_ledger_and_stop_the_player() {
     }
 }
 
+/// The volume reaches the player as **Python's** `int(round(level * 100))`, not Rust's rounding.
+///
+/// `round()` is half-to-even and `.round()` is half-away-from-zero, so the two disagree on every
+/// `x.xx5` level: 0.005 → 0 against 1, 0.025 → 2 against 3. Over 0.000–1.000 in 0.001 steps that
+/// is **46 values**, and the number goes straight to the player's IPC — so a sender resting its
+/// slider on one of them would hear a volume the reference does not produce.
+///
+/// The regression guard is the exact halves, because those are where any "obvious" rounding
+/// implementation goes wrong while agreeing everywhere else.
+#[test]
+fn the_volume_is_rounded_the_way_python_rounds_it() {
+    crate::pin_test_dir();
+    let h = Harness::new();
+    let conn = h.fake_conn();
+    for (level, expected) in [
+        // Exact halves: Python rounds to the even neighbour.
+        (0.005, 0),
+        (0.025, 2),
+        (0.045, 4),
+        (0.125, 12),
+        // …and the ordinary cases, so this is about the rule and not "everything is off".
+        (0.42, 42),
+        (0.1255, 13),
+        (1.0, 100),
+    ] {
+        h.deliver(
+            conn,
+            "sender-1",
+            NS_RECEIVER,
+            json!({"type": "SET_VOLUME", "volume": {"level": level}}),
+        );
+        assert!(
+            h.renderer.has(&format!("set_media_volume={expected}")),
+            "level {level} should reach the player as {expected}"
+        );
+    }
+}
+
 #[test]
 fn set_volume_updates_real_state_answers_the_request_and_reaches_the_player() {
     crate::pin_test_dir();

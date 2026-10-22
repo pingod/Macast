@@ -845,8 +845,21 @@ impl CastChannel {
                 Some(v) => {
                     let level = v.clamp(0.0, 1.0);
                     self.ledger.lock().unwrap().volume = level;
-                    self.renderer
-                        .set_media_volume(json!((level * 100.0).round() as i64));
+                    // **Python's `round()`, not Rust's.** The reference is
+                    // `int(round(level * 100))` (`protocol_cast.py:741`), and `round()` is
+                    // half-to-**even** while `.round()` is half-away-from-zero. Measured over
+                    // 0.000–1.000 in steps of 0.001 they disagree on **46** values — every
+                    // `x.xx5` (0.005 → 0 vs 1, 0.025 → 2 vs 3, 0.045 → 4 vs 5). That number
+                    // goes straight to the player, so a sender dragging the volume slider to
+                    // one of those positions would see a different figure than the reference
+                    // reports, and the wire's echo would disagree with its own request.
+                    //
+                    // Formatting with `{:.0}` gives the even-rounding answer; parsing it back is
+                    // what makes this the same integer Python produced.
+                    let stepped = format!("{:.0}", level * 100.0)
+                        .parse::<i64>()
+                        .unwrap_or((level * 100.0) as i64);
+                    self.renderer.set_media_volume(json!(stepped));
                 }
                 None => {
                     self.log

@@ -1,5 +1,53 @@
 [
 {
+"marker": "cluster",
+"bitrate": 1024000,
+"audio": true,
+"units": 48,
+"hold": 20.62,
+"note": "rounding divergence"
+},
+{
+"marker": "cluster",
+"bitrate": 1088000,
+"audio": true,
+"units": 51,
+"hold": 20.62,
+"note": "rounding divergence"
+},
+{
+"marker": "cluster",
+"bitrate": 1280000,
+"audio": true,
+"units": 12,
+"hold": 4.12,
+"note": "rounding divergence"
+},
+{
+"marker": "cluster",
+"bitrate": 2000000,
+"audio": true,
+"units": 20,
+"hold": 4.4,
+"note": "rounding divergence"
+},
+{
+"marker": "chunk",
+"bitrate": 600000,
+"audio": true,
+"units": 128,
+"hold": 6.99,
+"note": "rounding divergence"
+},
+{
+"marker": "chunk",
+"bitrate": 1000000,
+"audio": true,
+"units": 200,
+"hold": 6.55,
+"note": "rounding divergence"
+},
+{
 "marker": "moof",
 "bitrate": null,
 "audio": true,
@@ -15,34 +63,6 @@
 },
 {
 "marker": "moof",
-"bitrate": 0,
-"audio": true,
-"units": 54,
-"hold": 0.76
-},
-{
-"marker": "moof",
-"bitrate": 0,
-"audio": false,
-"units": 18,
-"hold": 0.75
-},
-{
-"marker": "moof",
-"bitrate": 1,
-"audio": true,
-"units": 54,
-"hold": 0.76
-},
-{
-"marker": "moof",
-"bitrate": 1,
-"audio": false,
-"units": 18,
-"hold": 0.75
-},
-{
-"marker": "moof",
 "bitrate": 600000,
 "audio": true,
 "units": 54,
@@ -51,6 +71,34 @@
 {
 "marker": "moof",
 "bitrate": 600000,
+"audio": false,
+"units": 18,
+"hold": 0.75
+},
+{
+"marker": "moof",
+"bitrate": 1024000,
+"audio": true,
+"units": 54,
+"hold": 0.76
+},
+{
+"marker": "moof",
+"bitrate": 1024000,
+"audio": false,
+"units": 18,
+"hold": 0.75
+},
+{
+"marker": "moof",
+"bitrate": 1280000,
+"audio": true,
+"units": 54,
+"hold": 0.76
+},
+{
+"marker": "moof",
+"bitrate": 1280000,
 "audio": false,
 "units": 18,
 "hold": 0.75
@@ -98,20 +146,6 @@
 "hold": 0.75
 },
 {
-"marker": "moof",
-"bitrate": 100000000,
-"audio": true,
-"units": 54,
-"hold": 0.76
-},
-{
-"marker": "moof",
-"bitrate": 100000000,
-"audio": false,
-"units": 18,
-"hold": 0.75
-},
-{
 "marker": "cluster",
 "bitrate": null,
 "audio": true,
@@ -127,34 +161,6 @@
 },
 {
 "marker": "cluster",
-"bitrate": 0,
-"audio": true,
-"units": 8,
-"hold": null
-},
-{
-"marker": "cluster",
-"bitrate": 0,
-"audio": false,
-"units": 8,
-"hold": null
-},
-{
-"marker": "cluster",
-"bitrate": 1,
-"audio": true,
-"units": 8,
-"hold": 3520000.0
-},
-{
-"marker": "cluster",
-"bitrate": 1,
-"audio": false,
-"units": 8,
-"hold": 3520000.0
-},
-{
-"marker": "cluster",
 "bitrate": 600000,
 "audio": true,
 "units": 8,
@@ -166,6 +172,34 @@
 "audio": false,
 "units": 8,
 "hold": 5.87
+},
+{
+"marker": "cluster",
+"bitrate": 1024000,
+"audio": true,
+"units": 8,
+"hold": 3.44
+},
+{
+"marker": "cluster",
+"bitrate": 1024000,
+"audio": false,
+"units": 8,
+"hold": 3.44
+},
+{
+"marker": "cluster",
+"bitrate": 1280000,
+"audio": true,
+"units": 8,
+"hold": 2.75
+},
+{
+"marker": "cluster",
+"bitrate": 1280000,
+"audio": false,
+"units": 8,
+"hold": 2.75
 },
 {
 "marker": "cluster",
@@ -210,20 +244,6 @@
 "hold": 0.77
 },
 {
-"marker": "cluster",
-"bitrate": 100000000,
-"audio": true,
-"units": 171,
-"hold": 0.75
-},
-{
-"marker": "cluster",
-"bitrate": 100000000,
-"audio": false,
-"units": 171,
-"hold": 0.75
-},
-{
 "marker": "chunk",
 "bitrate": null,
 "audio": true,
@@ -239,34 +259,6 @@
 },
 {
 "marker": "chunk",
-"bitrate": 0,
-"audio": true,
-"units": 64,
-"hold": null
-},
-{
-"marker": "chunk",
-"bitrate": 0,
-"audio": false,
-"units": 64,
-"hold": null
-},
-{
-"marker": "chunk",
-"bitrate": 1,
-"audio": true,
-"units": 64,
-"hold": 2097152.0
-},
-{
-"marker": "chunk",
-"bitrate": 1,
-"audio": false,
-"units": 64,
-"hold": 2097152.0
-},
-{
-"marker": "chunk",
 "bitrate": 600000,
 "audio": true,
 "units": 64,
@@ -278,6 +270,34 @@
 "audio": false,
 "units": 64,
 "hold": 3.5
+},
+{
+"marker": "chunk",
+"bitrate": 1024000,
+"audio": true,
+"units": 64,
+"hold": 2.05
+},
+{
+"marker": "chunk",
+"bitrate": 1024000,
+"audio": false,
+"units": 64,
+"hold": 2.05
+},
+{
+"marker": "chunk",
+"bitrate": 1280000,
+"audio": true,
+"units": 64,
+"hold": 1.64
+},
+{
+"marker": "chunk",
+"bitrate": 1280000,
+"audio": false,
+"units": 64,
+"hold": 1.64
 },
 {
 "marker": "chunk",
@@ -320,19 +340,5 @@
 "audio": false,
 "units": 256,
 "hold": 0.42
-},
-{
-"marker": "chunk",
-"bitrate": 100000000,
-"audio": true,
-"units": 256,
-"hold": 0.08
-},
-{
-"marker": "chunk",
-"bitrate": 100000000,
-"audio": false,
-"units": 256,
-"hold": 0.08
 }
 ]

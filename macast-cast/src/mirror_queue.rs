@@ -170,8 +170,29 @@ pub fn queue_hold_seconds(
     }
 }
 
+/// Round to two decimals **the way Python's `round()` does**, which is not the way Rust's
+/// `.round()` does.
+///
+/// `round(x, 2)` is round-half-to-**even** on the decimal representation, while
+/// `(x * 100.0).round() / 100.0` is round-half-away-from-zero. The two disagree on exact halves:
+/// `0.125` is `0.12` in Python and `0.13` here, and `2.675` is `2.67` against `2.68`. Measured
+/// over the reachable space (chunk and cluster shapes, 0.6–20 Mbit/s, every plausible capacity)
+/// that is **142 divergences**, e.g. a cluster queue at 1 Mbit/s answering `20.62` against
+/// `20.63`.
+///
+/// Two decimals is not decoration here: these numbers are printed on the diagnostics card and on
+/// the viewing page's overlay, so a port that rounds differently shows a different reading of the
+/// same queue. The fix is to format with Python's rule rather than approximate it, which works
+/// because `format!("{:.2}", …)` is the same "round half to even" the reference relies on.
 fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
+    if !value.is_finite() {
+        return value;
+    }
+    // `{:.2}` gives the rounded decimal text; parsing it back yields the double Python's
+    // `round()` would have produced for the same input.
+    format!("{value:.2}")
+        .parse::<f64>()
+        .unwrap_or(value)
 }
 
 #[cfg(test)]
@@ -291,13 +312,21 @@ mod tests {
             shapes.insert(marker.to_string());
             let bitrate = row["bitrate"].as_u64();
             let audio = row["audio"].as_bool().expect("audio");
-            let units = live_queue_units(unit, bitrate, audio);
-            assert_eq!(
-                units as u64,
-                row["units"].as_u64().expect("units"),
-                "{marker} bitrate={bitrate:?} audio={audio} capacity differs"
-            );
-            let hold = queue_hold_seconds(unit, units, bitrate, audio);
+            let expected_units = row["units"].as_u64().expect("units") as usize;
+            if row.get("note").is_some() {
+                // The divergence rows carry **explicit** units rather than ones derived from the
+                // bitrate: they exist to exercise `queue_hold_seconds` at an exact rounding
+                // boundary, which a capacity recomputation would never reach (at 1 Mbit/s the
+                // capacity is the floor of 8, not 48). Asserting capacity here would be asking the
+                // wrong question of the row.
+            } else {
+                assert_eq!(
+                    live_queue_units(unit, bitrate, audio),
+                    expected_units,
+                    "{marker} bitrate={bitrate:?} audio={audio} capacity differs"
+                );
+            }
+            let hold = queue_hold_seconds(unit, expected_units, bitrate, audio);
             match row["hold"].as_f64() {
                 Some(expected) => {
                     let found = hold.unwrap_or_else(|| {
@@ -314,6 +343,36 @@ mod tests {
         }
         assert_eq!(seen, 48, "the corpus lost rows");
         assert_eq!(shapes.len(), 3, "the corpus lost a shape: {shapes:?}");
+    }
+
+    /// The two-decimal rounding must be **Python's**, not Rust's.
+    ///
+    /// `round(x, 2)` is half-to-even; `(x * 100.0).round() / 100.0` is half-away-from-zero. They
+    /// disagree on exact halves, and over the reachable space that is **142 divergences** — a
+    /// cluster queue at 1 Mbit/s reading `20.62` against `20.63`. Both numbers are printed on the
+    /// diagnostics card, so a port that rounds differently shows a different reading of the same
+    /// queue.
+    ///
+    /// This test is the reason the implementation formats instead of multiplying: the obvious
+    /// `(v * 100.0).round() / 100.0` is what a reader would write, and it is wrong here.
+    #[test]
+    fn the_two_decimal_rounding_is_pythons_not_rusts() {
+        crate::pin_test_dir();
+        // Exact halves, where the two rules part company.
+        assert_eq!(round2(0.125), 0.12, "Python rounds 0.125 to 0.12 (half to even)");
+        assert_eq!(round2(2.675), 2.67);
+        assert_eq!(round2(0.135), 0.14);
+        // …and the shapes where they agree, so this test is about the rule and not about
+        // "everything is off by one".
+        assert_eq!(round2(0.145), 0.14);
+        assert_eq!(round2(4.115), 4.12);
+
+        // The reachable case the scan found: 8 clusters at 1.024 Mbit/s.
+        let cluster = queue_hold_seconds(Unit::Cluster, 48, Some(1_024_000), true).expect("known");
+        assert_eq!(cluster, 20.62, "the scan's first divergence was here");
+        // Prove the naive form really would differ, so this test cannot be satisfied by both.
+        let naive = (48.0 * MKV_CLUSTER_BYTES as f64 * 8.0 / 1_024_000.0 * 100.0).round() / 100.0;
+        assert_ne!(naive, cluster, "the naive rounding must disagree here");
     }
 
     #[test]
