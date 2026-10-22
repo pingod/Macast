@@ -1728,7 +1728,7 @@ pub fn run() {
             // and the window shows nothing but its static labels. Injected JavaScript does
             // run, so the bundle is compiled in with `include_str!` and handed to the page.
             //
-            // The bundle is generated from `frontend/js/**` by `scripts/bundle_frontend.py`,
+            // The bundle is generated from `frontend/js/**` by `bundle-frontend` (a bin of this crate),
             // so the source stays modules and the delivery is one string.
             if let Some(view) = app.get_webview_window("main") {
                 let bundle = include_str!("../../frontend/bundle.js");

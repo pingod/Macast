@@ -14,8 +14,15 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# `lib/` is a Python build artifact (pip's `--target`, `build/lib`). It was written unanchored,
+# so it also swallowed `frontend/js/lib/` — the three modules that own the window's bridge, DOM
+# helpers and event feed were never tracked, while `frontend/bundle.js` (generated from them)
+# was. A clean clone would have lost the source and the window would still have worked, which
+# is the worst version of that bug. Anchoring the rule to the repository root is the fix that
+# does not need an exception: a `!dir/` rule cannot re-include anything, because git never
+# descends into an ignored directory.
+/lib/
+/lib64/
 parts/
 sdist/
 var/

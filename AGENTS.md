@@ -2872,7 +2872,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   `h-bodyopen--1` / `h-ready-0`，二分到 `links+module` 正常而 `+内联脚本` 坏。那段脚本是**我
   自己做排查时加的诊断代码**。② **这个 webview 从不请求 `<script src>`** ——
   `performance.getEntriesByType('resource')` 一直是空的，module 与 classic、相对与绝对都不请求；
-  而 `window.__TAURI__` 在、`eval` 会跑。修法：源码继续是 11 个 ES module，`scripts/bundle_frontend.py`
+  而 `window.__TAURI__` 在、`eval` 会跑。修法：源码继续是 11 个 ES module，`bundle-frontend`（本 crate 的一个 bin）
   解析模块图、剥掉 import/export、每模块一个 IIFE 并 `return` 命名空间，写进 **`frontend/bundle.js`**；
   `index.html` 里只留一对**必须为空**的 `<!-- BUNDLE:BEGIN/END -->`；`main.rs` 用 `include_str!`
   在窗口起来 400 ms 后 `view.eval(bundle)`。读数：`window: page bundle injected` 与
@@ -2885,7 +2885,7 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   `macast.log` 里 grep —— 报出「页面什么都没说」。现在走 `logging::root()`，判据两问都钉。
   这是 §4.3「日志指错嫌疑人」的**指错文件**版本。
   **`--check` 也接进来了**：`the_committed_bundle_matches_the_modules_it_was_generated_from`
-  起子进程跑 `scripts/bundle_frontend.py --check`。`bundle.js` 是生成物但入库，所以"改了模块
+  起子进程跑 `bundle-frontend --check`。`bundle.js` 是生成物但入库，所以"改了模块
   忘重跑"是这套构建里唯一会静默腐烂的地方（测试对着新模块全绿、窗口跑旧 bundle）。
   变异体（往 app.js 末尾加一行）⇒ 红 1 条并念出 `frontend/bundle.js is stale`。
 * 读数：`macast-upnp` **370**、`macast-tauri` **39**（两台仪器一致：`--list` 与整跑），

@@ -3632,7 +3632,7 @@ mod tests {
     /// a silent failure: the tests pass against the new modules while the window keeps running
     /// the old bundle.
     ///
-    /// `scripts/bundle_frontend.py --check` answers exactly this, and nothing was calling it —
+    /// `bundle-frontend --check` answers exactly this, and nothing was calling it —
     /// a check nobody runs is the shape this repository keeps refusing. So the test shells out
     /// to it and requires exit 0.
     ///
@@ -3642,23 +3642,41 @@ mod tests {
     #[test]
     fn the_committed_bundle_matches_the_modules_it_was_generated_from() {
         pin_test_dir();
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/bundle_frontend.py");
+        // **The bundler is Rust now**, so there is no interpreter to find: this test builds the
+        // binary the same way a developer would and asks it the same question. `bundle-frontend`
+        // lives in this crate because the bundler and the shell that reads its output are one
+        // delivery path — `main.rs` gets `frontend/bundle.js` through `include_str!`.
+        // The binary sits beside this test's own executable (`target/<profile>/`), because both
+        // are artifacts of this crate. Calling it directly rather than `cargo run` is not
+        // micro-optimisation: `cargo run` inside a `cargo test` takes the build lock and
+        // recompiles, which turned a 0.03 s check into 18 s and would make the suite something
+        // people skip.
+        // Two levels up: the test binary is `target/<profile>/deps/<name>-<hash>`, while
+        // `cargo test` puts the crate's own binaries in `target/<profile>/`.
+        let binary = std::env::current_exe()
+            .expect("the test executable has a path")
+            .parent()
+            .and_then(|deps| deps.parent())
+            .expect("the test executable lives in target/<profile>/deps")
+            .join(if cfg!(windows) {
+                "bundle-frontend.exe"
+            } else {
+                "bundle-frontend"
+            });
         assert!(
-            std::path::Path::new(script).exists(),
-            "scripts/bundle_frontend.py is missing — the bundle has no generator and the \
-             window has no script"
+            binary.exists(),
+            "{} is missing — `cargo test` builds every bin of the crate, so this means the \
+             bundler was renamed or removed without teaching this test about it",
+            binary.display()
         );
-        // `python3` from PATH: the shell's own build already requires it for the icon and
-        // packaging steps, and this workspace has no Python toolchain dependency of its own.
-        let output = std::process::Command::new("python3")
-            .arg(script)
+        let output = std::process::Command::new(&binary)
             .arg("--check")
             .output()
-            .unwrap_or_else(|why| panic!("cannot run {script}: {why}"));
+            .unwrap_or_else(|why| panic!("cannot run {}: {why}", binary.display()));
         assert!(
             output.status.success(),
             "the committed bundle is stale or `index.html` carries an inline script again — \
-             run `python3 scripts/bundle_frontend.py`. The generator said:\n{}{}",
+             run `cargo run -p macast-tauri --bin bundle-frontend`. The bundler said:\n{}{}",
             String::from_utf8_lossy(&output.stderr),
             String::from_utf8_lossy(&output.stdout)
         );
@@ -3667,7 +3685,7 @@ mod tests {
     /// **The committed bundle is the one the modules produce, and it is not inline.**
     ///
     /// The window does not load `<script src>` at all, so the page's behaviour travels as a
-    /// generated string: `scripts/bundle_frontend.py` resolves the eleven ES modules into
+    /// generated string: the `bundle-frontend` bin resolves the eleven ES modules into
     /// `frontend/bundle.js`, and `main.rs` hands that file to the webview with `eval`
     /// (measured 2026-10-22 — see §16 第 60 条). Two ways that construction rots, both silent:
     ///
@@ -3750,6 +3768,85 @@ mod tests {
                  rendering 13 cards and staying hidden"
             );
         }
+    }
+
+    /// **`front_end()` reads every module that exists — the list is checked against the disk.**
+    ///
+    /// `include_str!` cannot glob, so the eleven modules are written out by hand in
+    /// [`front_end`]. Every page guard in this file asks its question of that string, which
+    /// means a module added to `frontend/js/` and *not* added to the list is a module no guard
+    /// reads — the guards keep passing while a third of the page goes unchecked. That is the
+    /// same shape as the `known` key that nothing sent (§16 第 50b 条): a scan whose subject
+    /// quietly stopped covering the thing it is named after.
+    ///
+    /// The check walks the real directory at test time and requires the two sets to be equal in
+    /// both directions: every file on disk is read, and every path the list names exists.
+    #[test]
+    fn the_page_guards_read_every_module_that_exists() {
+        pin_test_dir();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../frontend/js");
+        let mut on_disk: Vec<String> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let entries = std::fs::read_dir(&dir)
+                .unwrap_or_else(|why| panic!("cannot read {}: {why}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                    let relative = path
+                        .strip_prefix(&root)
+                        .expect("a path under frontend/js")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    on_disk.push(relative);
+                }
+            }
+        }
+        // `bundle.js` is the *output* of the bundler, not an input: it lives one level up at
+        // `frontend/bundle.js` and must not appear here. If it ever does, the bundler wrote to
+        // the wrong place and `include_str!` would be reading a module that imports itself.
+        assert!(
+            !on_disk.iter().any(|p| p == "bundle.js"),
+            "frontend/js/bundle.js exists — the bundler's output belongs at frontend/bundle.js"
+        );
+        on_disk.sort();
+
+        // The list, read back out of the source rather than duplicated here: the subject of
+        // this test is the list in `front_end()`, and a copy of it would be a second owner.
+        let source = include_str!("host.rs");
+        let start = source.find("fn front_end() -> String {").expect("front_end is gone");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }").expect("front_end has no end")];
+        let listed: Vec<String> = body
+            .match_indices("frontend/js/")
+            .map(|(at, _)| {
+                let rest = &body[at + "frontend/js/".len()..];
+                rest[..rest.find('"').expect("an unterminated include_str path")].to_string()
+            })
+            .collect();
+        let mut listed = listed;
+        listed.sort();
+
+        assert!(
+            on_disk.len() >= 11,
+            "only {} modules were found on disk — the walk is broken, not the front end",
+            on_disk.len()
+        );
+        // **Only one direction is reachable at runtime, and that is a fact about `include_str!`.**
+        // A listed path that does not exist fails the *build* (`couldn't read …: No such file
+        // or directory`), so the "listed but absent" half of this assertion can never be the
+        // thing that fails — measured 2026-10-22 by renaming a listed module: the run stopped
+        // at `error: could not compile` and no test executed. The direction that matters is the
+        // other one: a file on disk and not in the list, which compiles fine and leaves that
+        // module unread by every guard.
+        assert_eq!(
+            listed, on_disk,
+            "`front_end()` and the module directory disagree. Modules are the subject of every \
+             page guard in this file, so a file missing from the list is a file no guard reads.\n  \
+             listed: {listed:?}\n  on disk: {on_disk:?}"
+        );
     }
 
     /// **Every `import` in the front end resolves to a real export.**

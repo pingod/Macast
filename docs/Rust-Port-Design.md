@@ -2309,7 +2309,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     **本分支从未推送 ⇒ 这 1428 条与那次渲染没有任何 CI 见证过。**
 
 60. **窗口重做的最后一格：页面在真 webview 里一行 JS 都不执行 —— 两个根因，都已修**
-    （2026-10-22；`frontend/**` 重做 + `scripts/bundle_frontend.py` + `main.rs` 的注入；
+    （2026-10-22；`frontend/**` 重做 + `bundle-frontend`（Rust bin）+ `main.rs` 的注入；
     单元 1429 → **1431**）：
     *症状*：用户报「只有两个菜单文字，其他什么都没有」。那不是形容词 —— 那是**静态标记**：
     两半 `<section data-view>` 都带 `hidden`，所以只剩侧栏两个导航按钮可见。
@@ -2325,7 +2325,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     都不请求**（`appjs-0`、`perf-0`），而 `window.__TAURI__` 在、`core.invoke` 可调、
     `eval` 注入的代码会跑。也就是说：文档能解析、桥能通、注入能执行，唯独**子资源**永远不加载。
     *修法：源码继续是模块，投递改成 eval。*
-    `scripts/bundle_frontend.py` 从 `frontend/js/app.js` 解析 11 个 ES module 的图，剥掉
+    `bundle-frontend` 从 `frontend/js/app.js` 解析 11 个 ES module 的图，剥掉
     import/export、把 `import { a } from './x.js'` 改写成 `const { a } = __x;`、每个模块包一个
     IIFE 并 `return` 它的命名空间，写进 **`frontend/bundle.js`**；`index.html` 里只留一对
     `<!-- BUNDLE:BEGIN/END -->` 标记（**必须为空**）；`main.rs` 用 `include_str!` 把它编进二进制，
@@ -2347,7 +2347,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     `bundle.js` 与模块现状；`the_page_reports_what_it_rendered` 钉住所用 logger。
     变异体：把 bundle 贴回 inline ⇒ 红 1 条并点名 75514 字节。
     *`--check` 已经接进来了*：`the_committed_bundle_matches_the_modules_it_was_generated_from`
-    起一个子进程跑 `scripts/bundle_frontend.py --check`，要求退出码 0。`bundle.js` 是**生成物
+    起一个子进程跑 `bundle-frontend --check`，要求退出码 0。`bundle.js` 是**生成物
     但入库**（窗口只能 `include_str!` 它），所以"改了模块忘了重跑 bundler"是这套构建里唯一会
     静默腐烂的地方：测试对着新模块全绿，窗口继续跑旧 bundle。变异体（往 `app.js` 末尾加一行）
     ⇒ 红 1 条并念出 `frontend/bundle.js is stale`。**为什么用子进程而不是在 Rust 里再实现一遍
