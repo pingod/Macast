@@ -1,0 +1,217 @@
+# The Rust port's build pipeline — **additive, not the release path (yet)**.
+#
+# Why a separate file instead of a job inside `build.yml`: `build.yml`'s four
+# jobs are what produce the artefacts users actually download, and its
+# `release` job creates the GitHub Release. This file does **neither** — it
+# builds the Tauri shell on three platforms and uploads the results as Actions
+# artefacts (tag pushes only, per the storage rule below). Nothing here can
+# change what a `v*.*` tag publishes, because no step in this file writes to a
+# Release.
+#
+# That separation is deliberate. Flipping the release path from Python to Rust
+# is a decision with a user-visible consequence (the Python app and this shell
+# do not yet have feature parity — no plugin host, no screen mirroring, no NVA),
+# so it belongs to whoever owns that call, not to a refactor commit.
+#
+# ---------------------------------------------------------------------------
+# What this proves, and what it proved first on a laptop
+# ---------------------------------------------------------------------------
+# Until this file existed, **nothing in CI ever compiled the Rust port**:
+# `grep -rn "cargo build\|tauri build" .github/workflows/` returned nothing.
+# The four library crates got a test job in `build.yml` (`rust`), but the shell
+# itself — the thing that has to become the product — was never built anywhere
+# but one machine.
+#
+# Measured on that machine (2026-10-22) before writing this:
+#   * `cargo build -p macast-tauri --release` succeeds in 52 s and produces a
+#     12,883,248-byte binary;
+#   * that binary, started against an isolated setting directory, logs
+#     `window: page rendered — view=use cards=6 placeholders=0 errors=0` and
+#     serves `/description.xml` — so a release binary is genuinely usable, and
+#     what was missing was a job, not the ability;
+#   * `tauri.conf.json` already has `bundle.active: true` and both icons, but the
+#     `tauri` CLI is not installed here, so `tauri build` (the step that wraps
+#     the binary into `.app` / `.dmg` / `.msi`) has never run.
+#
+# ---------------------------------------------------------------------------
+# Storage: uploads are gated to tag pushes
+# ---------------------------------------------------------------------------
+# `build.yml`'s header explains the quota arithmetic at length: the free plan
+# caps Actions storage at 500 MB, one four-platform run is ~170 MB, so three
+# builds inside the retention window wedge every later upload. This file adds
+# **three more** bundles, so it follows the same rule — a plain push to main
+# builds and stores nothing; only a tag push uploads. Manual runs
+# (`workflow_dispatch`) build without uploading, so a debugging run cannot
+# spend the quota either.
+#
+# Note that a tag push uploads *both* this pipeline's artefacts and
+# `build.yml`'s. That is the one place where token cost is real, and it is why
+# `retention-days` here is 2 — the same backstop the other file uses.
+
+name: Build Macast (Rust)
+
+# Same Node pin as `build.yml`: GitHub announced 2025-09-19 that Node 20 is
+# deprecated on the runners, and every action used here defaults to Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE: '24'
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*']
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository and uploads Actions
+# artefacts. It must not be able to create a Release — that is the guarantee
+# that it cannot become the release path by accident.
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # macOS arm64 — the primary target (.app in a .dmg)
+  # -------------------------------------------------------------------------
+  rust-macos-arm64:
+    name: Rust macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install the Tauri CLI
+        # `--locked` so this job tests what the lockfile says, not whatever
+        # resolved today.
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: The committed frontend bundle is current
+        # Before the build, so a stale bundle fails fast and the reason is this
+        # step's name rather than a mysterious empty window later.
+        run: cargo run -p macast-frontend -- --check
+
+      - name: Build the shell
+        # `cargo tauri build` compiles the binary *and* wraps it with the bundle
+        # config in `tauri.conf.json` (`.app` + `.dmg` on macOS). Driving
+        # `cargo build` directly would produce a bare binary that no user can
+        # install.
+        run: cargo tauri build --target aarch64-apple-darwin
+
+      - name: Upload
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Macast-Rust-macos-arm64
+          path: |
+            target/**/release/bundle/dmg/*.dmg
+            target/**/release/bundle/macos/*.app
+          if-no-files-found: error
+          retention-days: 2
+
+  # -------------------------------------------------------------------------
+  # Linux x86_64 — .deb / AppImage
+  # -------------------------------------------------------------------------
+  rust-linux-x86_64:
+    name: Rust Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the system libraries Tauri needs
+        # Named explicitly rather than in a `-dev` grab-bag: each of these is a
+        # compile-time pkg-config requirement, so a missing one is a build
+        # failure with a message that names the library.
+        #   webkit2gtk-4.1  the webview itself
+        #   libxdo          window/focus control (tray + window APIs)
+        #   librsvg         icon rendering at bundle time
+        #   appindicator    the tray icon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl wget file \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: The committed frontend bundle is current
+        run: cargo run -p macast-frontend -- --check
+
+      - name: Build the shell
+        run: cargo tauri build
+
+      - name: Upload
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Macast-Rust-linux-x86_64
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+          retention-days: 2
+
+  # -------------------------------------------------------------------------
+  # Windows x86_64 — .msi / NSIS .exe
+  # -------------------------------------------------------------------------
+  rust-windows-x86_64:
+    name: Rust Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install the Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: The committed frontend bundle is current
+        run: cargo run -p macast-frontend -- --check
+
+      - name: Build the shell
+        run: cargo tauri build
+
+      - name: Upload
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: Macast-Rust-windows-x86_64
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 2

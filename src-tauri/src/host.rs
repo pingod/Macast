@@ -3624,6 +3624,72 @@ mod tests {
         let _ = source;
     }
 
+    /// **The Rust build pipeline cannot become the release path by accident.**
+    ///
+    /// `.github/workflows/rust-build.yml` builds the shell on three platforms but must not
+    /// publish anything: flipping the product from the Python app to this shell is a decision
+    /// with a user-visible consequence (no plugin host, no screen mirroring, no NVA yet), so it
+    /// belongs to whoever owns that call. A workflow that quietly started creating Releases
+    /// would make that decision by itself, in a refactor commit.
+    ///
+    /// Three facts, each of which has a way to go wrong silently:
+    ///
+    /// * **`permissions: contents: read`** — without it a step could create a Release;
+    /// * **no Release step** — `action-gh-release` / `gh release create` never appear;
+    /// * **three platforms** — a pipeline that quietly lost one reads as "we build everywhere"
+    ///   while shipping two.
+    ///
+    /// The failure this guards against is not hypothetical: this repository already has a
+    /// header comment that claimed an Intel build job existed after it was removed
+    /// (`build.yml`'s note about `f8b3a15`), and a comment is exactly what a reader trusts
+    /// instead of the job list.
+    #[test]
+    fn the_rust_pipeline_builds_but_never_publishes() {
+        pin_test_dir();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crate has a parent directory");
+        let path = root.join(".github/workflows/rust-build.yml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|why| panic!("cannot read {}: {why}", path.display()));
+
+        assert!(
+            text.contains("contents: read"),
+            "the workflow must be read-only, or it can create a Release"
+        );
+        for forbidden in ["action-gh-release", "gh release create", "GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(
+                !text.contains(forbidden),
+                "the Rust pipeline must not publish: found {forbidden:?}"
+            );
+        }
+        // …and it really is a build pipeline, not an empty file that passes the checks above.
+        //
+        // Counted on **`run:` lines only**. A bare `text.matches("cargo tauri build")` answered
+        // 4 on the first run, because the macOS step's own comment explains what
+        // `cargo tauri build` does — the scanner reading my prose as a build step. This
+        // repository has met that shape before (§16 第 19 条's CORS scanner, and the docs
+        // counted by a `grep`), and the rule that came out of it is: a check that fires on
+        // documentation gets deleted rather than fixed, so exclude the documentation.
+        let builds = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("run:"))
+            .filter(|line| line.contains("cargo tauri build"))
+            .count();
+        assert_eq!(builds, 3, "one `cargo tauri build` per platform");
+        for runner in ["macos-14", "ubuntu-22.04", "windows-2022"] {
+            assert!(text.contains(runner), "no job on {runner}");
+        }
+        // The bundle check runs before the build on every platform, so a stale bundle fails
+        // fast and names itself rather than showing up as an empty window.
+        let checks = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("run:"))
+            .filter(|line| line.contains("cargo run -p macast-frontend -- --check"))
+            .count();
+        assert_eq!(checks, 3, "every platform must check the bundle before building");
+    }
+
     /// **`frontend/bundle.js` is what the modules produce right now.**
     ///
     /// This is the one place in the tree where a generated artifact is committed — it has to
@@ -3632,7 +3698,8 @@ mod tests {
     /// a silent failure: the tests pass against the new modules while the window keeps running
     /// the old bundle.
     ///
-    /// `bundle-frontend --check` answers exactly this, and nothing was calling it —
+    /// `cargo run -p macast-frontend -- --check` answers exactly this, and nothing was calling
+    /// it —
     /// a check nobody runs is the shape this repository keeps refusing. So the test shells out
     /// to it and requires exit 0.
     ///
@@ -3642,11 +3709,8 @@ mod tests {
     #[test]
     fn the_committed_bundle_matches_the_modules_it_was_generated_from() {
         pin_test_dir();
-        // **The bundler is Rust now**, so there is no interpreter to find: this test builds the
-        // binary the same way a developer would and asks it the same question. `bundle-frontend`
-        // lives in this crate because the bundler and the shell that reads its output are one
-        // delivery path — `main.rs` gets `frontend/bundle.js` through `include_str!`.
-        // **The bundler moved to its own crate** (`macast-frontend`), because a bin of this
+        // **The bundler is Rust now**, so there is no interpreter to find: this test asks the
+        // binary the same question a developer would. **It moved to its own crate** (`macast-frontend`), because a bin of this
         // package inherits `tauri`'s dependencies and `tauri` needs webkit2gtk on Linux — which
         // would make the "bundle is current" check unrunnable in the headless CI job that is its
         // only witness. So this test can no longer find the binary beside its own executable;
