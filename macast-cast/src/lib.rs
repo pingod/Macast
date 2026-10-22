@@ -91,6 +91,7 @@ pub mod local_file;
 pub mod local_serve;
 pub mod mirror_profiles;
 pub mod mirror_encoder;
+pub mod mirror_knobs;
 pub mod mirror_queue;
 pub mod raop;
 pub mod mdns;
