@@ -2489,7 +2489,19 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     它没有加，因为它会改变发版行为（而这个仓的发版路径今天是 Python 那四个 job），
     那是需要斟酌的一步，不是顺手做掉的一步。
 
-    *最硬的一道门不是代码，是发版*：`.github/workflows/` 里**只有一个 `build.yml`，而它出的是
+    **发版这条门现在有了 builder，但还没换过去**（`c4cf997`，`.github/workflows/rust-build.yml`）。
+    独立文件、`permissions: contents: read`、三平台 `cargo tauri build`、上传只在 tag push。
+    **它不产出 Release，也不改 `build.yml` 的任何一步** —— 把产品从 Python 应用换成这个壳，
+    是一句有用户可见后果的决定（还没有插件宿主、没有屏幕镜像、没有 NVA），那份决定属于
+    拍板的人，不该由一次重构提交顺手做掉。守卫用例钉住三条：只读权限、不出现任何发布动作、
+    三平台各一次构建（两个变异体各红 1 条）。
+    *本机真跑过那一步*：装了 `tauri-cli 2.12.4` 执行 `cargo tauri build --target
+    aarch64-apple-darwin`，产出 **`Macast.app` 12.51 MiB + `Macast_0.1.0_aarch64.dmg`
+    4.78 MiB**，workflow 里那两条 `path:` glob 对着真实产物验过；**启动打包出来的那个二进制**，
+    日志仍是 `cards=6 placeholders=0 errors=0`。所以"Rust 能出包"这句话今天有产物作证，
+    不只是能编译。
+
+    *最硬的一道门曾经不是代码，是发版*：`.github/workflows/` 里**只有一个 `build.yml`，而它出的是
     Python 产物**（`python scripts/setup_py2app.py py2app`、`verify_cast_airplay.py --ci`、
     `build_webrtc_extras.py`）—— `grep` 量过，没有任何 job 调 `cargo build` 或 `tauri build`。
     所以在今天这套流水线里，**删掉 `macast/` 等于删掉唯一能出产物的路径**。这一格不是"再搬
