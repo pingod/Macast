@@ -31,10 +31,10 @@
 //!   the sender to fill in, and the restart-under-a-lock that an IP change
 //!   needs.
 //! * [`scpd`] — the service descriptors: the flat state table and the action
-//!   lists that `macast/xml/*.xml` declare, read with lxml's navigation rules
+//!   lists that `macast/assets/xml/*.xml` declare, read with lxml's navigation rules
 //!   because a control point's `GetStateVariables` answer is those rules.
 //! * [`description`] — the one document that is *filled in* rather than built:
-//!   `macast/xml/Description.xml` with eleven names substituted, byte for byte
+//!   `macast/assets/xml/Description.xml` with eleven names substituted, byte for byte
 //!   the same file the shipped receiver serves.
 //! * [`soap`] — the action dispatcher: read the envelope the way lxml reads it,
 //!   write the state variables the SCPD's `<argumentList>` says to write, answer

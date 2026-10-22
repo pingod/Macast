@@ -86,7 +86,7 @@ const NOT_IMPLEMENTED: [&str; 5] = [
 ];
 
 /// Every `stateVariable` name declared by the three SCPDs, with the datatype the
-/// XML gives it. Read off `macast/xml/AVTransport.xml` (32),
+/// XML gives it. Read off `macast/assets/xml/AVTransport.xml` (32),
 /// `RenderingControl.xml` (8) and `ConnectionManager.xml` (10) — 50 declarations,
 /// **48 unique names**: `LastChange` and `A_ARG_TYPE_InstanceID` are each declared
 /// twice, and because `DLNAProtocol.__init__` keeps one merged

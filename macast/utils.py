@@ -737,10 +737,16 @@ class Setting:
 
 class XMLPath(Enum):
     BASE_PATH = os.path.dirname(__file__)
-    DESCRIPTION = BASE_PATH + '/xml/Description.xml'
-    AV_TRANSPORT = BASE_PATH + '/xml/AVTransport.xml'
-    CONNECTION_MANAGER = BASE_PATH + '/xml/ConnectionManager.xml'
-    RENDERING_CONTROL = BASE_PATH + '/xml/RenderingControl.xml'
+    # The four SCPD/description documents live in `macast/assets/xml/`, **inside this
+    # package**, because the Rust receiver compiles them in with `include_str!` and both
+    # sides must read one copy. Inside `macast/` (not a sibling directory) is what keeps
+    # them in a packaged `.app`: py2app copies the `macast` package wholesale and knows
+    # nothing about a `macast-upnp/` that happens to sit next to the source tree.
+    _XML_DIR = BASE_PATH + '/assets/xml'
+    DESCRIPTION = _XML_DIR + '/Description.xml'
+    AV_TRANSPORT = _XML_DIR + '/AVTransport.xml'
+    CONNECTION_MANAGER = _XML_DIR + '/ConnectionManager.xml'
+    RENDERING_CONTROL = _XML_DIR + '/RenderingControl.xml'
     SETTING_PAGE = BASE_PATH + '/xml/setting.html'
     PROTOCOL_INFO = BASE_PATH + '/xml/SinkProtocolInfo.csv'
     MANIFEST = BASE_PATH + '/xml/manifest.webmanifest'

@@ -668,8 +668,19 @@ class DLNAProtocol(Protocol):
             # service_type:  urn:schemas-upnp-org:service:ConnectionManager:1
             namespace = service_type.text
             service = service_type.text.split(":")[3]
-            self.build_action(namespace, service, etree.parse(
-                XMLPath.BASE_PATH.value + f"/xml/{service}.xml").getroot())
+            # The SCPD documents live in `macast/assets/xml/` (shared with the Rust receiver,
+            # which compiles them in). Ask the enum rather than rebuilding the path from
+            # `BASE_PATH`: the hand-built form `/xml/{service}.xml` was a second, invisible
+            # reader that kept working right up until the files moved.
+            service_xml = {
+                "AVTransport": XMLPath.AV_TRANSPORT,
+                "RenderingControl": XMLPath.RENDERING_CONTROL,
+                "ConnectionManager": XMLPath.CONNECTION_MANAGER,
+            }.get(service)
+            if service_xml is None:
+                raise ValueError("unknown DLNA service: {}".format(service))
+            self.build_action(namespace, service,
+                              etree.parse(service_xml.value).getroot())
 
     def build_action(self, namespace, service, xml):
         """

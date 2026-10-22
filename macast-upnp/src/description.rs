@@ -8,7 +8,7 @@
 //! ## Why this is a substitution and not a builder
 //!
 //! Python does not assemble the description from parts: it reads
-//! `macast/xml/Description.xml`, calls `str.format` with eleven named values, and
+//! `macast/assets/xml/Description.xml`, calls `str.format` with eleven named values, and
 //! keeps the resulting bytes. That is the whole rule, and it is worth keeping
 //! exactly, because the template is the artifact a control point author reads
 //! when they wonder what we are. A Rust builder that produced the *same intent*
@@ -109,7 +109,7 @@ pub const HEADER_EXTRA: &str = "";
 pub const SERVICE_EXTRA: &str = "";
 
 /// The eleven names the template may ask for, in the order `fill` sees them in
-/// `macast/xml/Description.xml`.
+/// `macast/assets/xml/Description.xml`.
 ///
 /// Python's keyword order differs (`uuid=` is the eighth argument but the first
 /// field in the file) and cannot matter, because every field is named. What this

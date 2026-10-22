@@ -90,7 +90,7 @@ pub const DEVICE_NS: &str = "urn:schemas-upnp-org:device-1-0";
 /// without a declaration; so do we, as the base of every scope stack.
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
-/// `macast/xml/Description.xml`, embedded rather than read at runtime.
+/// `macast/assets/xml/Description.xml`, embedded rather than read at runtime.
 ///
 /// Two reasons, both load-bearing. First, `macast_core::paths::resource_dir()`
 /// resolves to `target/debug/deps` under a test binary, which has no `macast/xml`
@@ -102,17 +102,17 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 /// `{header_extra}` and `{service_extra}` and the nine other braces are **not**
 /// substituted here: this module reads the template, it does not fill it. That
 /// belongs to `crate::description`.
-pub const DESCRIPTION_XML: &str = include_str!("../../macast/xml/Description.xml");
+pub const DESCRIPTION_XML: &str = include_str!("../../macast/assets/xml/Description.xml");
 
-/// `macast/xml/AVTransport.xml` — the only one of the three that declares a
+/// `macast/assets/xml/AVTransport.xml` — the only one of the three that declares a
 /// `<defaultValue>` (twice; see the tests).
-pub const AVTRANSPORT_XML: &str = include_str!("../../macast/xml/AVTransport.xml");
+pub const AVTRANSPORT_XML: &str = include_str!("../../macast/assets/xml/AVTransport.xml");
 
-/// `macast/xml/RenderingControl.xml`.
-pub const RENDERING_CONTROL_XML: &str = include_str!("../../macast/xml/RenderingControl.xml");
+/// `macast/assets/xml/RenderingControl.xml`.
+pub const RENDERING_CONTROL_XML: &str = include_str!("../../macast/assets/xml/RenderingControl.xml");
 
-/// `macast/xml/ConnectionManager.xml`.
-pub const CONNECTION_MANAGER_XML: &str = include_str!("../../macast/xml/ConnectionManager.xml");
+/// `macast/assets/xml/ConnectionManager.xml`.
+pub const CONNECTION_MANAGER_XML: &str = include_str!("../../macast/assets/xml/ConnectionManager.xml");
 
 /// `{ns}local`, the form lxml calls a Clark name and the only form this module
 /// compares tags in. Written as pushes rather than `format!` because this runs on
