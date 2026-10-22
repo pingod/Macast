@@ -78,6 +78,7 @@
 
 pub mod aggregate;
 pub mod airplay;
+pub mod airplay_mirror;
 pub mod announce;
 pub mod cert;
 pub mod channel;
