@@ -1,0 +1,230 @@
+[
+{
+"kind": "vt_level",
+"height": 0,
+"out": null
+},
+{
+"kind": "vt_level",
+"height": 1,
+"out": "42"
+},
+{
+"kind": "vt_level",
+"height": 480,
+"out": "42"
+},
+{
+"kind": "vt_level",
+"height": 720,
+"out": "42"
+},
+{
+"kind": "vt_level",
+"height": 1080,
+"out": "42"
+},
+{
+"kind": "vt_level",
+"height": 1081,
+"out": "51"
+},
+{
+"kind": "vt_level",
+"height": 1440,
+"out": "51"
+},
+{
+"kind": "vt_level",
+"height": 2160,
+"out": "51"
+},
+{
+"kind": "vt_level",
+"height": 2161,
+"out": null
+},
+{
+"kind": "vt_level",
+"height": 2234,
+"out": null
+},
+{
+"kind": "vt_level",
+"height": 2880,
+"out": null
+},
+{
+"kind": "vt_level",
+"height": 4320,
+"out": null
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "darwin",
+"bitrate": 600000,
+"out": 900000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "darwin",
+"bitrate": 4000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "darwin",
+"bitrate": 6000000,
+"out": 9000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "darwin",
+"bitrate": 20000000,
+"out": 30000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "win32",
+"bitrate": 600000,
+"out": 600000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "win32",
+"bitrate": 4000000,
+"out": 4000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "win32",
+"bitrate": 6000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "win32",
+"bitrate": 20000000,
+"out": 20000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "linux",
+"bitrate": 600000,
+"out": 600000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "linux",
+"bitrate": 4000000,
+"out": 4000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "linux",
+"bitrate": 6000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "hardware",
+"platform": "linux",
+"bitrate": 20000000,
+"out": 20000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "darwin",
+"bitrate": 600000,
+"out": 600000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "darwin",
+"bitrate": 4000000,
+"out": 4000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "darwin",
+"bitrate": 6000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "darwin",
+"bitrate": 20000000,
+"out": 20000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "win32",
+"bitrate": 600000,
+"out": 600000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "win32",
+"bitrate": 4000000,
+"out": 4000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "win32",
+"bitrate": 6000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "win32",
+"bitrate": 20000000,
+"out": 20000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "linux",
+"bitrate": 600000,
+"out": 600000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "linux",
+"bitrate": 4000000,
+"out": 4000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "linux",
+"bitrate": 6000000,
+"out": 6000000
+},
+{
+"kind": "rate_target",
+"encoder": "software",
+"platform": "linux",
+"bitrate": 20000000,
+"out": 20000000
+}
+]
