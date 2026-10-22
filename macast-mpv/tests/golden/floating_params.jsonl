@@ -1,0 +1,20 @@
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=16%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 0, "supports": true}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=16%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 0, "supports": false}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 1, "supports": true}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 1, "supports": false}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=38%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 2, "supports": true}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=38%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 2, "supports": false}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 7, "supports": true}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 7, "supports": false}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": -1, "supports": true}
+{"mode": 0, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": -1, "supports": false}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--geometry=100%:100%", "--no-border", "--no-osc", "--no-input-default-bindings", "--ontop", "--ontop-level=desktop", "--cursor-autohide=always", "--no-window-dragging"], "size": 0, "supports": true}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--autofit=16%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 0, "supports": false}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--geometry=100%:100%", "--no-border", "--no-osc", "--no-input-default-bindings", "--ontop", "--ontop-level=desktop", "--cursor-autohide=always", "--no-window-dragging"], "size": 1, "supports": true}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 1, "supports": false}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--geometry=100%:100%", "--no-border", "--no-osc", "--no-input-default-bindings", "--ontop", "--ontop-level=desktop", "--cursor-autohide=always", "--no-window-dragging"], "size": 2, "supports": true}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--autofit=38%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 2, "supports": false}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--geometry=100%:100%", "--no-border", "--no-osc", "--no-input-default-bindings", "--ontop", "--ontop-level=desktop", "--cursor-autohide=always", "--no-window-dragging"], "size": 7, "supports": true}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": 7, "supports": false}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--geometry=100%:100%", "--no-border", "--no-osc", "--no-input-default-bindings", "--ontop", "--ontop-level=desktop", "--cursor-autohide=always", "--no-window-dragging"], "size": -1, "supports": true}
+{"mode": 1, "params": ["--no-config", "--volume=80", "--autofit=26%", "--geometry=98%:3%", "--ontop", "--no-border"], "size": -1, "supports": false}

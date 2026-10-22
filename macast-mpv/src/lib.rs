@@ -75,6 +75,7 @@
 pub mod link;
 pub mod player;
 pub mod argv;
+pub mod floating;
 pub mod command;
 pub mod ipc;
 pub mod pyjson;
