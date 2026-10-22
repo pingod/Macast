@@ -2310,7 +2310,7 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
 
 60. **窗口重做的最后一格：页面在真 webview 里一行 JS 都不执行 —— 两个根因，都已修**
     （2026-10-22；`frontend/**` 重做 + `scripts/bundle_frontend.py` + `main.rs` 的注入；
-    单元 1429 → **1430**）：
+    单元 1429 → **1431**）：
     *症状*：用户报「只有两个菜单文字，其他什么都没有」。那不是形容词 —— 那是**静态标记**：
     两半 `<section data-view>` 都带 `hidden`，所以只剩侧栏两个导航按钮可见。
     **根因一：head 里那段 3 KB 的内联 classic 脚本让解析器停在 `<head>`。**
@@ -2346,10 +2346,13 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     preamble 开头、> 60 KB、11 个模块头注释都在、boot 三行是顶层语句）；`--check` 模式比对
     `bundle.js` 与模块现状；`the_page_reports_what_it_rendered` 钉住所用 logger。
     变异体：把 bundle 贴回 inline ⇒ 红 1 条并点名 75514 字节。
-    *诚实边界*：`bundle.js` 是**生成物但入库**（窗口只能 `include_str!` 它），所以"改了模块忘了
-    重跑 bundler"这件事只有 `--check` 能抓，而 `--check` 今天没有被任何自动化调用 ——
-    这是下一步要接进 CI 或测试的那一格。
-    **本分支从未推送 ⇒ 这 1430 条与那次渲染没有任何 CI 见证过。**
+    *`--check` 已经接进来了*：`the_committed_bundle_matches_the_modules_it_was_generated_from`
+    起一个子进程跑 `scripts/bundle_frontend.py --check`，要求退出码 0。`bundle.js` 是**生成物
+    但入库**（窗口只能 `include_str!` 它），所以"改了模块忘了重跑 bundler"是这套构建里唯一会
+    静默腐烂的地方：测试对着新模块全绿，窗口继续跑旧 bundle。变异体（往 `app.js` 末尾加一行）
+    ⇒ 红 1 条并念出 `frontend/bundle.js is stale`。**为什么用子进程而不是在 Rust 里再实现一遍
+    解析**：bundler 是模块图的唯一主人，第二个解析器就是"bundle 里有什么"的第二个答案。
+    **本分支从未推送 ⇒ 这 1431 条与那次渲染没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：

@@ -2884,8 +2884,12 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   (c) **`page_ready` 原来写进 `logs/MPV.log`**（`host.log` 是 MPV 那个 logger），而我在
   `macast.log` 里 grep —— 报出「页面什么都没说」。现在走 `logging::root()`，判据两问都钉。
   这是 §4.3「日志指错嫌疑人」的**指错文件**版本。
-* 读数：`macast-upnp` **370**、`macast-tauri` **38**（两台仪器一致：`--list` 与整跑），
-  单元合计 **1430 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 38 + upnp 370）；
+  **`--check` 也接进来了**：`the_committed_bundle_matches_the_modules_it_was_generated_from`
+  起子进程跑 `scripts/bundle_frontend.py --check`。`bundle.js` 是生成物但入库，所以"改了模块
+  忘重跑"是这套构建里唯一会静默腐烂的地方（测试对着新模块全绿、窗口跑旧 bundle）。
+  变异体（往 app.js 末尾加一行）⇒ 红 1 条并念出 `frontend/bundle.js is stale`。
+* 读数：`macast-upnp` **370**、`macast-tauri` **39**（两台仪器一致：`--list` 与整跑），
+  单元合计 **1431 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 39 + upnp 370）；
   真机脚本 **44 节**，最后一趟整跑 **425 PASS / 18 FAIL**，其中 **§39 = 8/8、§40 = 12/12、
   §41 = 5/5、§34/§35 全绿**。那 18 条**与上一轮逐条相同**（把 USN 那个随机值归一化之后
   `diff` 为空）—— 所以它们是环境的读数，不是回归的读数。

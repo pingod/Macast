@@ -3624,6 +3624,46 @@ mod tests {
         let _ = source;
     }
 
+    /// **`frontend/bundle.js` is what the modules produce right now.**
+    ///
+    /// This is the one place in the tree where a generated artifact is committed — it has to
+    /// be, because the window cannot load a `<script src>` and reads the file through
+    /// `include_str!`. That makes "someone edited a module and forgot to re-run the bundler"
+    /// a silent failure: the tests pass against the new modules while the window keeps running
+    /// the old bundle.
+    ///
+    /// `scripts/bundle_frontend.py --check` answers exactly this, and nothing was calling it —
+    /// a check nobody runs is the shape this repository keeps refusing. So the test shells out
+    /// to it and requires exit 0.
+    ///
+    /// **Why a subprocess rather than re-implementing the resolution here**: the bundler is
+    /// the only owner of the module graph. A second resolver in Rust would be a second answer
+    /// to "what is in the bundle", and the whole point is that there is one.
+    #[test]
+    fn the_committed_bundle_matches_the_modules_it_was_generated_from() {
+        pin_test_dir();
+        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/bundle_frontend.py");
+        assert!(
+            std::path::Path::new(script).exists(),
+            "scripts/bundle_frontend.py is missing — the bundle has no generator and the \
+             window has no script"
+        );
+        // `python3` from PATH: the shell's own build already requires it for the icon and
+        // packaging steps, and this workspace has no Python toolchain dependency of its own.
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .arg("--check")
+            .output()
+            .unwrap_or_else(|why| panic!("cannot run {script}: {why}"));
+        assert!(
+            output.status.success(),
+            "the committed bundle is stale or `index.html` carries an inline script again — \
+             run `python3 scripts/bundle_frontend.py`. The generator said:\n{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     /// **The committed bundle is the one the modules produce, and it is not inline.**
     ///
     /// The window does not load `<script src>` at all, so the page's behaviour travels as a
