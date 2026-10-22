@@ -2431,7 +2431,20 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     节点得出的，不是手写字符串）。服务端 `query=status` 也确认那是本实例
     （`Macast(Pavia-MacBookPro-1859.local)`），不是场上残留的另一个进程 —— 那一格上一轮就吃掉过一次读数。
 
-    *仍然欠着的，按依赖顺序*：`macast/xml/*.xml` 四份要搬出 `macast/` 才能删目录（编译期依赖）；
+    **同一轮的第二个交付：那四份 XML 搬了**（`db5fa47`）。它们是 Rust **编译期**唯一的
+    `include_str!` 依赖，也是删 `macast/` 的第一道门。落点是 `macast/assets/xml/` ——
+    **不是** `macast-upnp/assets/`，因为 py2app 的 `packages: ['macast', …]` 整目录拷贝，
+    它不认识源码树旁边的 `macast-upnp/`，放在那里产物会静默丢文件。`git mv` 是纯 rename。
+    *一搬就发现第二处读者*：`macast/protocol.py:669` 用 `BASE_PATH + f"/xml/{service}.xml"`
+    **手拼**服务名，绕过了 `XMLPath` 枚举，所以第一次跑 Python 套件就红在那里。现在它问枚举，
+    不认的服务名响亮报错。验收：Rust 1493 绿（`include_str!` 指错即编译错误）、
+    Python 套件 **2653/2659**（红的 6 条是 §4.12 记的 Part 34 常红，与本次改动无关）。
+    *`setting.html` 不在可搬之列*：Rust 这一侧**根本没有页面要发** —— 它的界面是 Tauri 窗口
+    （`frontend/`），而 `macast-upnp/src/http.rs:840` 的 `ROOT_PAGE` 是一句明写理由的偏离
+    （"这个端口只提供 DLNA 需要的四个地址"）。所以只要 Python 应用还在，`macast/xml/setting.html`
+    就不能删；它是"删 Python"这件事的一部分，而不是搬家能解决的。
+
+    *仍然欠着的，按依赖顺序*：
     `screen_mirror`（13,629 行）与 `cast_local_file` 的**供字节那一半**是 Rust 完全没有的两块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
     `airplay_mirror`/`nirvana`/`iina`/`potplayer`/`pi_fm`/`web`/`live` 九个插件按 §18 的方向
