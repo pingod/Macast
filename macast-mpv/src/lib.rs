@@ -77,6 +77,7 @@ pub mod player;
 pub mod argv;
 pub mod external_player;
 pub mod floating;
+pub mod ytdlp;
 pub mod command;
 pub mod ipc;
 pub mod pyjson;
