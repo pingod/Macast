@@ -1,0 +1,11 @@
+{"case": "empty", "chunks": 0, "rows": [], "text": ""}
+{"case": "spaces", "chunks": 1, "rows": [["malformed", null]], "text": "   \n  "}
+{"case": "single_header", "chunks": 1, "rows": [["playlist", null]], "text": "#EXTM3U"}
+{"case": "header_one", "chunks": 2, "rows": [["playlist", null], ["CCTV1", "http://a/1.m3u8"]], "text": "#EXTM3U\n#EXTINF:-1 ,CCTV1\nhttp://a/1.m3u8"}
+{"case": "two", "chunks": 3, "rows": [["playlist", null], ["CCTV1", "http://a/1.m3u8"], ["CCTV2", "http://a/2.m3u8"]], "text": "#EXTM3U\n#EXTINF:-1 ,CCTV1\nhttp://a/1.m3u8\n#EXTINF:-1 ,CCTV2\nhttp://a/2.m3u8"}
+{"case": "no_header", "chunks": 2, "rows": [["malformed", null], ["CCTV1", "http://a/1.m3u8"]], "text": "#EXTINF:-1 ,CCTV1\nhttp://a/1.m3u8"}
+{"case": "tidied", "chunks": 1, "rows": [["playlist", null]], "text": "#EXTM3U\n#EXTINF:-1,CCTV1\nhttp://a/1.m3u8"}
+{"case": "malformed_one_line", "chunks": 2, "rows": [["playlist", null], ["malformed", null]], "text": "#EXTM3U\n#EXTINF:-1 ,CCTV1"}
+{"case": "malformed_blank", "chunks": 2, "rows": [["playlist", null], ["malformed", null]], "text": "#EXTM3U\n#EXTINF:-1 ,CCTV1\n   "}
+{"case": "crlf", "chunks": 2, "rows": [["playlist", null], ["CCTV1\r", "http://a/1.m3u8\r"]], "text": "#EXTM3U\r\n#EXTINF:-1 ,CCTV1\r\nhttp://a/1.m3u8\r\n"}
+{"case": "blank_names", "chunks": 2, "rows": [["playlist", null], ["", "http://a/1.m3u8"]], "text": "#EXTM3U\n#EXTINF:-1 ,\nhttp://a/1.m3u8"}

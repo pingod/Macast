@@ -76,6 +76,7 @@ pub mod link;
 pub mod player;
 pub mod argv;
 pub mod external_player;
+pub mod live_list;
 pub mod floating;
 pub mod web;
 pub mod ytdlp;
