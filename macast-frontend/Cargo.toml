@@ -1,0 +1,20 @@
+# The frontend bundler: `frontend/js/**` -> `frontend/bundle.js`.
+#
+# **A crate of its own, with no dependencies.** It has to be runnable on a headless Linux
+# runner (the "the committed bundle is current" CI step), so it must not inherit `tauri`'s
+# build requirements — `src-tauri`'s `[dependencies]` would pull in webkit2gtk through
+# `tauri`, and a bundler that needs a GUI toolkit to bundle a script is exactly the kind of
+# coupling that turns a 0.02 s check into a job nobody can run.
+#
+# Not a `[workspace.dependencies]` consumer either: the bundler parses a fixed, in-tree subset
+# of JavaScript (one-line `import`/`export`) by hand precisely so this crate can stay
+# dependency-free. See `src/main.rs`'s note on why the parser is hand-written.
+[package]
+name = "macast-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No `[dependencies]` — deliberately. Adding one here means the bundler can no longer run in
+# the four-crate CI job, and that job is the only witness the bundle has.

@@ -1766,6 +1766,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "macast-frontend"
+version = "0.1.0"
+
+[[package]]
 name = "macast-mpv"
 version = "0.1.0"
 dependencies = [

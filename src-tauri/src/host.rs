@@ -3646,37 +3646,37 @@ mod tests {
         // binary the same way a developer would and asks it the same question. `bundle-frontend`
         // lives in this crate because the bundler and the shell that reads its output are one
         // delivery path — `main.rs` gets `frontend/bundle.js` through `include_str!`.
-        // The binary sits beside this test's own executable (`target/<profile>/`), because both
-        // are artifacts of this crate. Calling it directly rather than `cargo run` is not
-        // micro-optimisation: `cargo run` inside a `cargo test` takes the build lock and
-        // recompiles, which turned a 0.03 s check into 18 s and would make the suite something
-        // people skip.
-        // Two levels up: the test binary is `target/<profile>/deps/<name>-<hash>`, while
-        // `cargo test` puts the crate's own binaries in `target/<profile>/`.
-        let binary = std::env::current_exe()
+        // **The bundler moved to its own crate** (`macast-frontend`), because a bin of this
+        // package inherits `tauri`'s dependencies and `tauri` needs webkit2gtk on Linux — which
+        // would make the "bundle is current" check unrunnable in the headless CI job that is its
+        // only witness. So this test can no longer find the binary beside its own executable;
+        // it locates the workspace target directory instead, which is where `cargo test` at the
+        // root puts every crate's binaries.
+        let target = std::env::current_exe()
             .expect("the test executable has a path")
             .parent()
             .and_then(|deps| deps.parent())
             .expect("the test executable lives in target/<profile>/deps")
-            .join(if cfg!(windows) {
-                "bundle-frontend.exe"
-            } else {
-                "bundle-frontend"
-            });
+            .to_path_buf();
+        let binary = target.join(if cfg!(windows) {
+            "bundle-frontend.exe"
+        } else {
+            "bundle-frontend"
+        });
         assert!(
             binary.exists(),
-            "{} is missing — `cargo test` builds every bin of the crate, so this means the \
-             bundler was renamed or removed without teaching this test about it",
+            "{} is missing — `cargo test` builds every workspace member's bins, so this means \
+             `macast-frontend` was renamed or removed without teaching this test about it",
             binary.display()
         );
-        let output = std::process::Command::new(&binary)
+let output = std::process::Command::new(&binary)
             .arg("--check")
             .output()
             .unwrap_or_else(|why| panic!("cannot run {}: {why}", binary.display()));
         assert!(
             output.status.success(),
             "the committed bundle is stale or `index.html` carries an inline script again — \
-             run `cargo run -p macast-tauri --bin bundle-frontend`. The bundler said:\n{}{}",
+             run `cargo run -p macast-frontend`. The bundler said:\n{}{}",
             String::from_utf8_lossy(&output.stderr),
             String::from_utf8_lossy(&output.stdout)
         );
@@ -3685,7 +3685,7 @@ mod tests {
     /// **The committed bundle is the one the modules produce, and it is not inline.**
     ///
     /// The window does not load `<script src>` at all, so the page's behaviour travels as a
-    /// generated string: the `bundle-frontend` bin resolves the eleven ES modules into
+    /// generated string: the `macast-frontend` crate resolves the eleven ES modules into
     /// `frontend/bundle.js`, and `main.rs` hands that file to the webview with `eval`
     /// (measured 2026-10-22 — see §16 第 60 条). Two ways that construction rots, both silent:
     ///
