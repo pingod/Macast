@@ -66,6 +66,7 @@
 //! map would shuffle headers in a way no test on this machine can see.
 
 pub mod nva;
+pub mod nva_frames;
 pub mod description;
 pub mod device;
 pub mod eventing;

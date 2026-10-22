@@ -1,0 +1,126 @@
+{"counter": 0, "hex": "c00000000000", "kind": "res_empty"}
+{"counter": 0, "hex": "e40000000000", "kind": "ping"}
+{"body": "{}", "counter": 0, "hex": "c00100000000000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 0, "hex": "c00100000000000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 0, "hex": "c00100000000000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 0, "hex": "c0010000000000000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 0, "hex": "e002000000000107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 0, "hex": "e003000000000107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 0, "hex": "e003000000000107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 0, "hex": "e002000000000107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 0, "hex": "e003000000000107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 0, "hex": "e003000000000107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 0, "hex": "e002000000000107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 0, "hex": "e003000000000107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 0, "hex": "e003000000000107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 0, "hex": "e002000000000107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 0, "hex": "e003000000000107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 0, "hex": "e003000000000107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 1, "hex": "c00000000001", "kind": "res_empty"}
+{"counter": 1, "hex": "e40000000001", "kind": "ping"}
+{"body": "{}", "counter": 1, "hex": "c00100000001000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 1, "hex": "c00100000001000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 1, "hex": "c00100000001000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 1, "hex": "c0010000000100000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 1, "hex": "e002000000010107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 1, "hex": "e003000000010107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 1, "hex": "e003000000010107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 1, "hex": "e002000000010107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 1, "hex": "e003000000010107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 1, "hex": "e003000000010107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 1, "hex": "e002000000010107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 1, "hex": "e003000000010107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 1, "hex": "e003000000010107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 1, "hex": "e002000000010107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 1, "hex": "e003000000010107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 1, "hex": "e003000000010107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 7, "hex": "c00000000007", "kind": "res_empty"}
+{"counter": 7, "hex": "e40000000007", "kind": "ping"}
+{"body": "{}", "counter": 7, "hex": "c00100000007000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 7, "hex": "c00100000007000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 7, "hex": "c00100000007000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 7, "hex": "c0010000000700000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 7, "hex": "e002000000070107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 7, "hex": "e003000000070107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 7, "hex": "e003000000070107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 7, "hex": "e002000000070107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 7, "hex": "e003000000070107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 7, "hex": "e003000000070107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 7, "hex": "e002000000070107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 7, "hex": "e003000000070107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 7, "hex": "e003000000070107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 7, "hex": "e002000000070107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 7, "hex": "e003000000070107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 7, "hex": "e003000000070107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 255, "hex": "c000000000ff", "kind": "res_empty"}
+{"counter": 255, "hex": "e400000000ff", "kind": "ping"}
+{"body": "{}", "counter": 255, "hex": "c001000000ff000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 255, "hex": "c001000000ff000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 255, "hex": "c001000000ff000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 255, "hex": "c001000000ff00000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 255, "hex": "e002000000ff0107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 255, "hex": "e003000000ff0107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 255, "hex": "e003000000ff0107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 255, "hex": "e002000000ff0107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 255, "hex": "e003000000ff0107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 255, "hex": "e003000000ff0107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 255, "hex": "e002000000ff0107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 255, "hex": "e003000000ff0107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 255, "hex": "e003000000ff0107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 255, "hex": "e002000000ff0107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 255, "hex": "e003000000ff0107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 255, "hex": "e003000000ff0107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 256, "hex": "c00000000100", "kind": "res_empty"}
+{"counter": 256, "hex": "e40000000100", "kind": "ping"}
+{"body": "{}", "counter": 256, "hex": "c00100000100000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 256, "hex": "c00100000100000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 256, "hex": "c00100000100000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 256, "hex": "c0010000010000000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 256, "hex": "e002000001000107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 256, "hex": "e003000001000107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 256, "hex": "e003000001000107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 256, "hex": "e002000001000107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 256, "hex": "e003000001000107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 256, "hex": "e003000001000107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 256, "hex": "e002000001000107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 256, "hex": "e003000001000107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 256, "hex": "e003000001000107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 256, "hex": "e002000001000107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 256, "hex": "e003000001000107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 256, "hex": "e003000001000107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 65535, "hex": "c0000000ffff", "kind": "res_empty"}
+{"counter": 65535, "hex": "e4000000ffff", "kind": "ping"}
+{"body": "{}", "counter": 65535, "hex": "c0010000ffff000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 65535, "hex": "c0010000ffff000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 65535, "hex": "c0010000ffff000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 65535, "hex": "c0010000ffff00000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 65535, "hex": "e0020000ffff0107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 65535, "hex": "e0020000ffff0107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 65535, "hex": "e0020000ffff0107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 65535, "hex": "e0020000ffff0107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 65535, "hex": "e0030000ffff0107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
+{"counter": 2147483648, "hex": "c00080000000", "kind": "res_empty"}
+{"counter": 2147483648, "hex": "e40080000000", "kind": "ping"}
+{"body": "{}", "counter": 2147483648, "hex": "c00180000000000000027b7d", "kind": "res_body"}
+{"body": "{\"a\":1}", "counter": 2147483648, "hex": "c00180000000000000077b2261223a317d", "kind": "res_body"}
+{"body": "{\"a\":1,\"b\":[1,2]}", "counter": 2147483648, "hex": "c00180000000000000117b2261223a312c2262223a5b312c325d7d", "kind": "res_body"}
+{"body": "弹幕", "counter": 2147483648, "hex": "c0018000000000000006e5bcb9e5b995", "kind": "res_body"}
+{"command": "pause", "counter": 2147483648, "hex": "e002800000000107436f6d6d616e64057061757365", "kind": "cmd"}
+{"body": "{}", "command": "pause", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e64057061757365000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "pause", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e64057061757365000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "seek", "counter": 2147483648, "hex": "e002800000000107436f6d6d616e64047365656b", "kind": "cmd"}
+{"body": "{}", "command": "seek", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e64047365656b000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "seek", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e64047365656b000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "play", "counter": 2147483648, "hex": "e002800000000107436f6d6d616e6404706c6179", "kind": "cmd"}
+{"body": "{}", "command": "play", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e6404706c6179000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "play", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e6404706c6179000000077b2270223a327d", "kind": "cmd_body"}
+{"command": "a", "counter": 2147483648, "hex": "e002800000000107436f6d6d616e640161", "kind": "cmd"}
+{"body": "{}", "command": "a", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e640161000000027b7d", "kind": "cmd_body"}
+{"body": "{\"p\":2}", "command": "a", "counter": 2147483648, "hex": "e003800000000107436f6d6d616e640161000000077b2270223a327d", "kind": "cmd_body"}
