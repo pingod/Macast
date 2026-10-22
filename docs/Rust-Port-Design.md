@@ -2456,6 +2456,26 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     **但今天它们不是功能**：一个用户在这台机器上感受不到它们存在。谁要开始接插件宿主，
     从这里接；谁要评估"端口还差什么"，不要把这几行算成已完成的能力。
 
+    **同日后半：那 1,479 条终于有了 CI 见证**（`53a1f1a`）。新增 job `rust`（ubuntu-22.04、
+    `dtolnay/rust-toolchain@stable`、按 `Cargo.lock` 缓存）跑
+    `cargo test -p macast-core -p macast-mpv -p macast-upnp -p macast-cast`，外加
+    `cargo run -p macast-frontend -- --check`。
+    *三个决定各有理由*：① **不接进 `release`** —— `release.needs` 一个字节没动，所以这个 job
+    不阻塞发版，这一轮不改变任何发版行为；② **只测四个库 crate，不测 `src-tauri`** —— 后者在
+    Linux 上要 webkit2gtk + libgtk，而它那 40 条测的是壳（窗口注入、命令接线），留在有屏幕的
+    机器上；显式点名而不是 `--workspace`，正是为了不带进 webkit（`--workspace` 会因缺系统库
+    变红，读起来像"端口坏了"）；③ **跑步器是 Linux 不是 macOS** —— 这个端口有一整族"不许依赖
+    跑测试的那台机器"的决定（`sys_platform` 作参数、`platform=` 接缝、每个 `which` 都用合成
+    机器），只在 macOS 上跑永远不会问这个纪律到底成不成立。
+    *顺手抓到的真缺陷*：打包器原本是 `src-tauri/src/bin/bundle-frontend.rs`，而**一个 bin 会继承
+    所属包的 `[dependencies]`** ⇒ 那条 CI 步骤会先编译 `tauri` ⇒ Linux 上要 webkit2gtk ⇒
+    **根本跑不起来**。本机没暴露是因为 `target/` 早就预热过了（同一个形状：AGENTS.md 那条
+    "等长还原留下一份有效的旧 `.pyc`"的 Rust 版）。现在它是独立 crate `macast-frontend`，
+    `cargo tree` 量过**依赖数为 1**（只有它自己），冷启动 `CARGO_TARGET_DIR` 跑一遍
+    1.34 秒、产物目录里 `tauri`/`webkit` **0 个**。
+    *仍然没有 CI 见证的*：`src-tauri` 那 40 条、以及 `scripts/verify_rust_receiver.sh` 那 44 节
+    真机脚本（它要 8009/8008 与一个真窗口）。这两项本轮**没有**加见证，别把新 job 读成"全覆盖"。
+
     *最硬的一道门不是代码，是发版*：`.github/workflows/` 里**只有一个 `build.yml`，而它出的是
     Python 产物**（`python scripts/setup_py2app.py py2app`、`verify_cast_airplay.py --ci`、
     `build_webrtc_extras.py`）—— `grep` 量过，没有任何 job 调 `cargo build` 或 `tauri build`。
