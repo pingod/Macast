@@ -2308,42 +2308,48 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     `overflowX: false`、1280 与 640 两档截图各看过。
     **本分支从未推送 ⇒ 这 1428 条与那次渲染没有任何 CI 见证过。**
 
-60. **窗口重做之后：页面在真 webview 里一行 JS 都不执行，而这一点今天查不动**
-    （2026-10-22；`frontend/**` 已重做并提交，`page_ready` 已进命令表，**窗口仍然空白**）：
-    *症状*：用户报「只有两个菜单文字，其他什么都没有」。这不是形容词 —— 那是**静态标记**，
-    两半 `<section data-view>` 都带 `hidden`，所以只剩侧栏的两个导航按钮可见。
-    *已经排除的（每条都有读数，不是推断）*：
-    ① **资产在包里**：`tauri-codegen-assets` 下 53 个条目，其中 `index.html` 的 brotli 解压结果
-       与仓库文件**逐字节相同**（`20467` 字节时比对过 `a48c88dd` 那一条），`js/**` 与 `css/**`
-       也都在（`13dbff2c` = components.css 12240、`17f884e1` = bridge.js 4560 …）。
-       顺带记一条读法：那份 1 MiB 的 `fff95b21…` 是**编码过的资产表**，`grep index.html` 得 0
-       不代表缺失 —— 我第一遍就是这么误判的。
-    ② **URL 对**：`view.url()` 交回 `tauri://localhost`，显式 `navigate("tauri://localhost/index.html")`
-       之后交回 `tauri://localhost/index.html`。
-    ③ **webview 是活的**：`view.eval(...)` 返回 `Ok`；系统里有 8 个 `WebContent` 进程。
-    ④ **日志通路是好的**：在 `setup` 里用同一个根 logger 写一行，它出现在 `macast.log`；
-       而页面那行（`page_ready`）从未出现 ⇒ 页面根本没调用它。
-    ⑤ **不是 Accessory 策略**：临时改成 `Regular` 重跑，症状不变。
-    ⑥ **不是 capabilities**：`capabilities/default.json` 有 `windows: ["main"]`，Tauri 只门控核心
-       API，本 crate 自己的命令不需要条目。
-    ⑦ **不是我的前端代码**：同一份 `frontend/` 在真 Firefox（playwright）里两屏都渲染、
-       `errors: []`、零占位（见第 59 条）。把它换成**一页只有 `document.title = 'SCRIPT_RAN'`
-       的最小 HTML**，窗口标题仍然是 `"Macast"` —— 连文档的 `<title>` 都没生效，所以问题在
-       「webview 有没有加载这份文档」这一层，不在模块、CSP 或我的脚本。
-    *留下的仪器（有意保留）*：`page_ready` 命令 + `js/app.js` 的 `reportRendered()` +
-    `host.rs` 的 `the_page_reports_what_it_rendered`。它把「窗口空白」从**外部不可观测**变成
-    可观测：页面首屏之后往 `macast.log` 写一行
-    `window: page rendered — view=use cards=9 placeholders=0 errors=0`。这台机器上这行
-    **始终没有出现**，而那本身就是判据 —— 它证明的不是"页面工作"，是"页面没跑"。
-    *下一步（需要一次有人看着屏幕的会话，我没有屏幕录制权限，`screencapture -l <window>` 被系统拒绝）*：
-    在窗口里右键 →「检查元素」（debug 构建默认开 devtools），看 Console 首行与 Network 里
-    `index.html` 的状态码。三种可能各自对应一个修法：Console 有 CSP/类型错误 ⇒ 改
-    `tauri.conf.json` 的 `security.csp`；Network 里 `index.html` 是 404 ⇒ 资产表没编进去，
-    要查 `tauri-build` 的 `frontendDist` 解析；两者都空 ⇒ 窗口的 webview 没被创建成
-    `main`（`view.eval` 能派发却拿不到文档，这一条与 ③ 冲突，所以才需要眼睛看一次）。
-    **诚实边界**：这一条是**未解决**，不是「已交付」。上一轮我把「页面能渲染」的证据取自
-    Firefox 桩，而那个证据对真窗口**不成立** —— 这正是 §4.12 那条「同一份代码在两个读者眼里
-    给两个答案」的形状，只是这次两个读者是 Firefox 与 WKWebView。
+60. **窗口重做的最后一格：页面在真 webview 里一行 JS 都不执行 —— 两个根因，都已修**
+    （2026-10-22；`frontend/**` 重做 + `scripts/bundle_frontend.py` + `main.rs` 的注入；
+    单元 1429 → **1430**）：
+    *症状*：用户报「只有两个菜单文字，其他什么都没有」。那不是形容词 —— 那是**静态标记**：
+    两半 `<section data-view>` 都带 `hidden`，所以只剩侧栏两个导航按钮可见。
+    **根因一：head 里那段 3 KB 的内联 classic 脚本让解析器停在 `<head>`。**
+    读数（用 `view.eval` 把数值以 `<img>` 打到本机一个自开的 socket 上取回，不依赖 IPC、
+    不依赖屏幕权限）：`h-head-4296`（head 完整）、`h-doc-4335`（整个 documentElement 只有
+    4335 字节）、`h-bodyopen--1`（`outerHTML` 里没有 `<body` 这个串）、`h-has-body-n`、
+    `h-ready-0`（`readyState` 永远 loading）。二分：`links + module` 正常（`body-11`、`ready-2`），
+    `links + module + 内联脚本` 坏（`body--1`、`ready-0`）。删掉那段脚本之后 body 立刻回来
+    （`body-17375`、`cards-13`、`ready-2`）。**那段脚本是我自己在上一轮排查时加的诊断代码**。
+    **根因二：这个 webview 从不请求 `<script src>`。**
+    `performance.getEntriesByType('resource')` 一直是空的 —— **module 与 classic、相对与绝对路径
+    都不请求**（`appjs-0`、`perf-0`），而 `window.__TAURI__` 在、`core.invoke` 可调、
+    `eval` 注入的代码会跑。也就是说：文档能解析、桥能通、注入能执行，唯独**子资源**永远不加载。
+    *修法：源码继续是模块，投递改成 eval。*
+    `scripts/bundle_frontend.py` 从 `frontend/js/app.js` 解析 11 个 ES module 的图，剥掉
+    import/export、把 `import { a } from './x.js'` 改写成 `const { a } = __x;`、每个模块包一个
+    IIFE 并 `return` 它的命名空间，写进 **`frontend/bundle.js`**；`index.html` 里只留一对
+    `<!-- BUNDLE:BEGIN/END -->` 标记（**必须为空**）；`main.rs` 用 `include_str!` 把它编进二进制，
+    窗口起来 400 ms 后 `view.eval(bundle)`。日志 `window: page bundle injected`，随后
+    `window: page rendered — view=use cards=6 placeholders=0 errors=0`。
+    *三处只有真机才教得会的东西*：
+    ① **内联脚本不能大**：把 70 KB 的 bundle 贴回文档（无论在 `</body>` 之前还是之后）都会让解析器
+       停在 head，窗口只剩静态标签。所以有一个判据专门禁止它（见下）。
+    ② **bundle 的第一版把 boot 序列包进了没人调用的函数**：`app.js` 没有 export，我的 bundler 给
+       它套了一个裸 IIFE，于是 `mountShell(); show(start); boot();` 落在里面 —— 窗口渲染出 13 张卡
+       却 `[data-view]:not([hidden])` 仍是 0。判据改成要求那三行是**零缩进的顶层语句**。
+       （第一版判据取「最后 600 字节」去找 `show(start)`，而它在前面的位置 —— 又一次「窗口不是主体」。）
+    ③ **`page_ready` 原来写进了 `logs/MPV.log`**：`host.log` 是 `MPV` 那个 logger。报告确实写了，
+       而我在 `macast.log` 里 grep，读数是「页面什么都没说」。现在走 `logging::root()`，
+       判据同时要求 `logging::root()` 在场、`host.log.info` 不在场。这是 §4.3「日志指错嫌疑人」
+       的**指错文件**版本。
+    *判据*：`the_page_bundle_is_generated_not_inline`（inline 区域必须为空、bundle 以 bundler 的
+    preamble 开头、> 60 KB、11 个模块头注释都在、boot 三行是顶层语句）；`--check` 模式比对
+    `bundle.js` 与模块现状；`the_page_reports_what_it_rendered` 钉住所用 logger。
+    变异体：把 bundle 贴回 inline ⇒ 红 1 条并点名 75514 字节。
+    *诚实边界*：`bundle.js` 是**生成物但入库**（窗口只能 `include_str!` 它），所以"改了模块忘了
+    重跑 bundler"这件事只有 `--check` 能抓，而 `--check` 今天没有被任何自动化调用 ——
+    这是下一步要接进 CI 或测试的那一格。
+    **本分支从未推送 ⇒ 这 1430 条与那次渲染没有任何 CI 见证过。**
 
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：

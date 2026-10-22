@@ -73,8 +73,17 @@ function show(view) {
   }
   // The deep link stays shareable and reloadable: `#manage` opens the admin view.
   if (history.replaceState) history.replaceState(null, '', `#${view}`);
-  document.querySelector('.content')?.scrollTo?.({ top: 0 });
-  window.scrollTo({ top: 0 });
+  // Not `?.` on `scrollTo`: an element's `scrollTo` exists but can throw in a webview whose
+  // engine has no scrolling implementation for it, and an exception here would abort `show()`
+  // — leaving both views hidden, which is exactly the "two nav labels and nothing else"
+  // symptom this function exists to prevent. Swallowed, because scrolling to the top is a
+  // courtesy, not a requirement.
+  try {
+    document.querySelector('.content')?.scrollTo?.({ top: 0 });
+    window.scrollTo({ top: 0 });
+  } catch (ignored) {
+    /* a view that cannot scroll is still a view that renders */
+  }
 }
 
 /** Mount everything, once. */
@@ -201,6 +210,10 @@ const start = location.hash === '#manage' ? 'manage' : 'use';
 mountShell();
 show(start);
 boot();
-// One frame after the first paint, so the readings describe what was actually drawn rather
-// than what the DOM looked like mid-boot.
-requestAnimationFrame(() => setTimeout(() => reportRendered(earlyErrors), 0));
+// **After the initial reads have landed, not at the first frame.** The three placeholder
+// strings in the markup (`player-chip`, `title`, `ck-jar`) are filled by async commands, so a
+// report taken at the first frame counts them as "still loading" and reports a healthy window
+// as half-broken — measured 2026-10-22: `placeholders=1` on a window that was rendering fine.
+// 600 ms is longer than any of those three round trips and shorter than the first poll, so the
+// number means "placeholders still showing after the initial reads settled".
+setTimeout(() => reportRendered(earlyErrors), 600);

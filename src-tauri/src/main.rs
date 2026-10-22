@@ -257,8 +257,12 @@ fn set_status(value: String, state: State<'_, AppState>) -> Result<(), String> {
 /// Deliberately **not** a heartbeat: one line, once, at first paint. A periodic one would be
 /// the §4.10 "the log is 92% saying nothing changed" mistake with a new subject.
 #[tauri::command]
-fn page_ready(report: String, runtime: State<'_, Runtime>) {
-    runtime.host.log.info(&format!("window: page rendered — {report}"));
+fn page_ready(report: String, _runtime: State<'_, Runtime>) {
+    // **The root logger, not the player's.** `host.log` is the `MPV` logger (its file is
+    // `logs/MPV.log`), so a window report written through it lands in the renderer's file
+    // while an operator looks in `macast.log` — the same "log points at the wrong suspect"
+    // mistake §4.3 records for the certificate generator. This line is about the *window*.
+    macast_core::logging::root().info(&format!("window: page rendered — {report}"));
 }
 
 /// `Handler.cast_uri` for the page: the full push sequence, in the reference's
@@ -1714,6 +1718,34 @@ pub fn run() {
             // behind when it cycles quickly (tao 0.37.1 dock.rs).
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            // **The page's script travels by `eval`, not by the document.**
+            //
+            // Two facts make this the only working channel here (both measured 2026-10-22,
+            // docs/Rust-Port-Design.md §16 第 60 条): this webview never requests a
+            // `<script src>` — `performance.getEntriesByType('resource')` stays empty for
+            // module *or* classic, relative *or* absolute — and an inline script the size of
+            // this app's bundle holds the parser at `<head>`, so `<body>` never enters the DOM
+            // and the window shows nothing but its static labels. Injected JavaScript does
+            // run, so the bundle is compiled in with `include_str!` and handed to the page.
+            //
+            // The bundle is generated from `frontend/js/**` by `scripts/bundle_frontend.py`,
+            // so the source stays modules and the delivery is one string.
+            if let Some(view) = app.get_webview_window("main") {
+                let bundle = include_str!("../../frontend/bundle.js");
+                // After the document has parsed: the modules call `byId` at mount time and
+                // throw rather than returning null, so injecting early would fail loudly for
+                // the wrong reason.
+                let target = view.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    if let Err(why) = target.eval(bundle) {
+                        Logger::named("Macast")
+                            .error(&format!("window: cannot inject the page bundle: {why}"));
+                    } else {
+                        Logger::named("Macast").info("window: page bundle injected");
+                    }
+                });
+            }
             let handle = app.handle().clone();
             let log = Logger::named("MPV");
             // logs/MPV.log inside whatever MACAST_SETTING_DIR points at. Claiming

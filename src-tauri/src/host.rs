@@ -3587,9 +3587,19 @@ mod tests {
             .unwrap_or_else(|| panic!("`page_ready` is gone — the window would be silent again"));
         let body = &main[start..];
         let body = &body[..body.find("\n}").unwrap_or(body.len())];
+        // **The root logger specifically.** `host.log` is the `MPV` logger, whose file is
+        // `logs/MPV.log` — a window report written through it lands in the renderer's file
+        // while an operator reads `macast.log` (§4.3's "the log names the wrong suspect"
+        // applied to a file rather than to a sentence). Measured 2026-10-22: the line was
+        // there, in `logs/MPV.log`, and my own grep of `macast.log` said "no report".
         assert!(
-            body.contains("host.log.info"),
-            "the report does not go through the root logger, so it lands nowhere an operator reads"
+            body.contains("logging::root()"),
+            "the report does not go through the root logger, so it lands in the player's file \
+             instead of `macast.log` — which reads exactly like 'the page said nothing'"
+        );
+        assert!(
+            !body.contains("host.log.info"),
+            "the report went back to `host.log`, which is the MPV logger"
         );
 
         let app = include_str!("../../frontend/js/app.js");
@@ -3612,6 +3622,94 @@ mod tests {
             "`reportRendered` is never called, so nothing is reported"
         );
         let _ = source;
+    }
+
+    /// **The committed bundle is the one the modules produce, and it is not inline.**
+    ///
+    /// The window does not load `<script src>` at all, so the page's behaviour travels as a
+    /// generated string: `scripts/bundle_frontend.py` resolves the eleven ES modules into
+    /// `frontend/bundle.js`, and `main.rs` hands that file to the webview with `eval`
+    /// (measured 2026-10-22 — see §16 第 60 条). Two ways that construction rots, both silent:
+    ///
+    /// * someone edits a module and forgets to re-run the bundler, so the window keeps running
+    ///   the previous code while the tests pass against the new one;
+    /// * someone pastes the bundle back into `index.html`, which does not merely duplicate it —
+    ///   an inline script that size **holds this webview's parser at `<head>`**, so `<body>`
+    ///   never enters the DOM and the window shows nothing but its static labels. That is
+    ///   exactly how the 2026-10-22 blank window happened.
+    ///
+    /// The first is asked by `--check` in the script; this test asks the second, plus that the
+    /// generated file still exists and looks like the bundle the shell injects.
+    #[test]
+    fn the_page_bundle_is_generated_not_inline() {
+        pin_test_dir();
+        let html = include_str!("../../frontend/index.html");
+        let bundle = include_str!("../../frontend/bundle.js");
+
+        let begin = html
+            .find("<!-- BUNDLE:BEGIN -->")
+            .expect("index.html lost its BUNDLE:BEGIN marker");
+        let end = html
+            .find("<!-- BUNDLE:END -->")
+            .expect("index.html lost its BUNDLE:END marker");
+        let inline = html[begin + "<!-- BUNDLE:BEGIN -->".len()..end].trim();
+        assert!(
+            inline.is_empty(),
+            "index.html carries an inline script again ({} bytes). That is not merely \
+             redundant: an inline script this size holds this webview's parser at `<head>`, so \
+             `<body>` never parses and the window shows only its static labels",
+            inline.len()
+        );
+
+        // The injected file is the bundle the script produced, not a stub or a stale copy of
+        // some module: it opens with the bundler's own preamble and is big enough to contain
+        // all eleven modules.
+        assert!(
+            bundle.starts_with("(() => {\n'use strict';"),
+            "frontend/bundle.js is not the bundler's output (its preamble changed?)"
+        );
+        assert!(
+            bundle.len() > 60_000,
+            "frontend/bundle.js is only {} bytes — the eleven modules are ~70 KB, so this is a \
+             truncated or stale bundle and the window would run partial code",
+            bundle.len()
+        );
+        // Every module's header comment is in it, which is the cheapest way to see that the
+        // graph resolution did not silently drop a file.
+        for marker in [
+            "/* ---- app.js ---- */",
+            "/* ---- lib/bridge.js ---- */",
+            "/* ---- lib/dom.js ---- */",
+            "/* ---- lib/feed.js ---- */",
+            "/* ---- user/now-playing.js ---- */",
+            "/* ---- user/casting.js ---- */",
+            "/* ---- user/accounts.js ---- */",
+            "/* ---- admin/services.js ---- */",
+            "/* ---- admin/logs.js ---- */",
+            "/* ---- admin/settings.js ---- */",
+            "/* ---- admin/diagnostics.js ---- */",
+        ] {
+            assert!(
+                bundle.contains(marker),
+                "the bundle does not contain {marker} — the module graph resolution dropped a file"
+            );
+        }
+        // …and the boot sequence is at the bundle's top level, not inside a wrapper nobody
+        // calls. That was a real defect in the first version of the bundler: `app.js` has no
+        // exports, and wrapping it left `mountShell(); show(start); boot();` unreachable — the
+        // window rendered 13 cards and stayed hidden (measured 2026-10-22).
+        // The boot lines must appear at **zero indentation**, which is what "top level of the
+        // bundle" means here. A window of bytes is the wrong instrument — my first version took
+        // the last 600 bytes and `show(start)` sits before it, so it reported a defect that was
+        // not there.
+        for line in ["mountShell();", "show(start);", "boot();"] {
+            assert!(
+                bundle.lines().any(|candidate| candidate == line),
+                "{line} is not a top-level statement of the bundle — it is nested inside a \
+                 function that nobody calls, which is how the first bundler left the window \
+                 rendering 13 cards and staying hidden"
+            );
+        }
     }
 
     /// **Every `import` in the front end resolves to a real export.**

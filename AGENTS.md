@@ -2867,8 +2867,25 @@ POST 表第 **12** 行 + `macast-cast/src/announce.rs` 的 `send_group` / `pin_m
   `cfg(windows)` / `cfg(unix)` / `cfg(target_os`，且必须仍然借 socket2 的 setter；
   同时 `send_group` 的 pin 必须**在 egress 循环里恰好一次**（放到循环外，每份拷贝就都从
   最后设的那块卡出去了）。
-* 读数：`macast-upnp` **370**、`macast-tauri` **36**（两台仪器一致：`--list` 与整跑），
-  单元合计 **1428 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 36 + upnp 370）；
+* **窗口重做的最后一格：页面在真 webview 里一行 JS 都不执行，两个根因**（2026-10-22）：
+  ① **head 里那段 3 KB 内联脚本让解析器停在 `<head>`** —— 读数 `h-head-4296` / `h-doc-4335` /
+  `h-bodyopen--1` / `h-ready-0`，二分到 `links+module` 正常而 `+内联脚本` 坏。那段脚本是**我
+  自己做排查时加的诊断代码**。② **这个 webview 从不请求 `<script src>`** ——
+  `performance.getEntriesByType('resource')` 一直是空的，module 与 classic、相对与绝对都不请求；
+  而 `window.__TAURI__` 在、`eval` 会跑。修法：源码继续是 11 个 ES module，`scripts/bundle_frontend.py`
+  解析模块图、剥掉 import/export、每模块一个 IIFE 并 `return` 命名空间，写进 **`frontend/bundle.js`**；
+  `index.html` 里只留一对**必须为空**的 `<!-- BUNDLE:BEGIN/END -->`；`main.rs` 用 `include_str!`
+  在窗口起来 400 ms 后 `view.eval(bundle)`。读数：`window: page bundle injected` 与
+  `window: page rendered — view=use cards=6 placeholders=0 errors=0`。
+  **三处只有真机才教得会的**：(a) 把 70 KB 的 bundle 贴回文档（`</body>` 前后都一样）又会让解析器
+  停在 head，所以有判据禁止 inline；(b) bundler 第一版给没有 export 的 `app.js` 套了个裸 IIFE，
+  于是 `mountShell(); show(start); boot();` 在没人调用的函数里 —— 13 张卡渲染了却全 `hidden`，
+  判据改成要求那三行是**零缩进顶层语句**（第一版判据取"最后 600 字节"，而它在前面的位置）；
+  (c) **`page_ready` 原来写进 `logs/MPV.log`**（`host.log` 是 MPV 那个 logger），而我在
+  `macast.log` 里 grep —— 报出「页面什么都没说」。现在走 `logging::root()`，判据两问都钉。
+  这是 §4.3「日志指错嫌疑人」的**指错文件**版本。
+* 读数：`macast-upnp` **370**、`macast-tauri` **38**（两台仪器一致：`--list` 与整跑），
+  单元合计 **1430 passed / 0 failed**（cast 738 + core 135 + mpv 149 + tauri 38 + upnp 370）；
   真机脚本 **44 节**，最后一趟整跑 **425 PASS / 18 FAIL**，其中 **§39 = 8/8、§40 = 12/12、
   §41 = 5/5、§34/§35 全绿**。那 18 条**与上一轮逐条相同**（把 USN 那个随机值归一化之后
   `diff` 为空）—— 所以它们是环境的读数，不是回归的读数。
