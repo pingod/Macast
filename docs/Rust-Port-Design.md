@@ -2476,6 +2476,19 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     *仍然没有 CI 见证的*：`src-tauri` 那 40 条、以及 `scripts/verify_rust_receiver.sh` 那 44 节
     真机脚本（它要 8009/8008 与一个真窗口）。这两项本轮**没有**加见证，别把新 job 读成"全覆盖"。
 
+    **发版这一格本轮量了三件事，结论是"可行但没接线"**（本机 2026-10-22）：
+    ① `cargo build -p macast-tauri --release` **成功**，52 秒，产物
+    `target/release/macast-tauri` **12,883,248 字节**；
+    ② 拿它起真实例（隔离配置目录），`macast.log` 读回
+    `window: page rendered — view=use cards=6 placeholders=0 errors=0`，`/description.xml`
+    也正常发出 —— 也就是说 **release 二进制是真的能用的**，不只是能编；
+    ③ `tauri.conf.json` 的 `bundle.active` 已是 `true`、`icons/` 有 `icon.icns` + `icon.png`，
+    但本机 `~/.cargo/bin` 里**没有 `tauri` CLI**，所以 `tauri build`（出 `.app`/`.dmg`/`.msi`）
+    这一步从未被跑过。
+    所以缺的不是能力，是**一条 job**：装 `tauri-cli` → 三平台 `tauri build` → 产物校验。
+    它没有加，因为它会改变发版行为（而这个仓的发版路径今天是 Python 那四个 job），
+    那是需要斟酌的一步，不是顺手做掉的一步。
+
     *最硬的一道门不是代码，是发版*：`.github/workflows/` 里**只有一个 `build.yml`，而它出的是
     Python 产物**（`python scripts/setup_py2app.py py2app`、`verify_cast_airplay.py --ci`、
     `build_webrtc_extras.py`）—— `grep` 量过，没有任何 job 调 `cargo build` 或 `tauri build`。
