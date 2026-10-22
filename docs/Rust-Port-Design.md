@@ -2308,6 +2308,43 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     `overflowX: false`、1280 与 640 两档截图各看过。
     **本分支从未推送 ⇒ 这 1428 条与那次渲染没有任何 CI 见证过。**
 
+60. **窗口重做之后：页面在真 webview 里一行 JS 都不执行，而这一点今天查不动**
+    （2026-10-22；`frontend/**` 已重做并提交，`page_ready` 已进命令表，**窗口仍然空白**）：
+    *症状*：用户报「只有两个菜单文字，其他什么都没有」。这不是形容词 —— 那是**静态标记**，
+    两半 `<section data-view>` 都带 `hidden`，所以只剩侧栏的两个导航按钮可见。
+    *已经排除的（每条都有读数，不是推断）*：
+    ① **资产在包里**：`tauri-codegen-assets` 下 53 个条目，其中 `index.html` 的 brotli 解压结果
+       与仓库文件**逐字节相同**（`20467` 字节时比对过 `a48c88dd` 那一条），`js/**` 与 `css/**`
+       也都在（`13dbff2c` = components.css 12240、`17f884e1` = bridge.js 4560 …）。
+       顺带记一条读法：那份 1 MiB 的 `fff95b21…` 是**编码过的资产表**，`grep index.html` 得 0
+       不代表缺失 —— 我第一遍就是这么误判的。
+    ② **URL 对**：`view.url()` 交回 `tauri://localhost`，显式 `navigate("tauri://localhost/index.html")`
+       之后交回 `tauri://localhost/index.html`。
+    ③ **webview 是活的**：`view.eval(...)` 返回 `Ok`；系统里有 8 个 `WebContent` 进程。
+    ④ **日志通路是好的**：在 `setup` 里用同一个根 logger 写一行，它出现在 `macast.log`；
+       而页面那行（`page_ready`）从未出现 ⇒ 页面根本没调用它。
+    ⑤ **不是 Accessory 策略**：临时改成 `Regular` 重跑，症状不变。
+    ⑥ **不是 capabilities**：`capabilities/default.json` 有 `windows: ["main"]`，Tauri 只门控核心
+       API，本 crate 自己的命令不需要条目。
+    ⑦ **不是我的前端代码**：同一份 `frontend/` 在真 Firefox（playwright）里两屏都渲染、
+       `errors: []`、零占位（见第 59 条）。把它换成**一页只有 `document.title = 'SCRIPT_RAN'`
+       的最小 HTML**，窗口标题仍然是 `"Macast"` —— 连文档的 `<title>` 都没生效，所以问题在
+       「webview 有没有加载这份文档」这一层，不在模块、CSP 或我的脚本。
+    *留下的仪器（有意保留）*：`page_ready` 命令 + `js/app.js` 的 `reportRendered()` +
+    `host.rs` 的 `the_page_reports_what_it_rendered`。它把「窗口空白」从**外部不可观测**变成
+    可观测：页面首屏之后往 `macast.log` 写一行
+    `window: page rendered — view=use cards=9 placeholders=0 errors=0`。这台机器上这行
+    **始终没有出现**，而那本身就是判据 —— 它证明的不是"页面工作"，是"页面没跑"。
+    *下一步（需要一次有人看着屏幕的会话，我没有屏幕录制权限，`screencapture -l <window>` 被系统拒绝）*：
+    在窗口里右键 →「检查元素」（debug 构建默认开 devtools），看 Console 首行与 Network 里
+    `index.html` 的状态码。三种可能各自对应一个修法：Console 有 CSP/类型错误 ⇒ 改
+    `tauri.conf.json` 的 `security.csp`；Network 里 `index.html` 是 404 ⇒ 资产表没编进去，
+    要查 `tauri-build` 的 `frontendDist` 解析；两者都空 ⇒ 窗口的 webview 没被创建成
+    `main`（`view.eval` 能派发却拿不到文档，这一条与 ③ 冲突，所以才需要眼睛看一次）。
+    **诚实边界**：这一条是**未解决**，不是「已交付」。上一轮我把「页面能渲染」的证据取自
+    Firefox 桩，而那个证据对真窗口**不成立** —— 这正是 §4.12 那条「同一份代码在两个读者眼里
+    给两个答案」的形状，只是这次两个读者是 Firefox 与 WKWebView。
+
 50b. **页面的第三个病：读一个后端从来不发的键**（2026-10-20，`frontend/index.html` 的
     `renderLogModules` + `src-tauri/src/host.rs` 的 `the_keys_the_page_reads_are_keys_the_backend_sends`）：
     *发现方式*：把浏览器探针的假 `window.__TAURI__` 从"我照着 `main.rs` 打字"改成"照着**活实例的

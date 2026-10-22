@@ -3562,6 +3562,58 @@ mod tests {
         all
     }
 
+    /// **The page reports what it rendered, once, and the report can only come from it.**
+    ///
+    /// "The window is blank" has been indistinguishable from "the window is fine" from
+    /// outside the process — twice on this branch the answer came from opening devtools by
+    /// hand: a deleted boot block left every card at its placeholder, and a binary older than
+    /// its modules showed two nav labels and nothing else. Neither wrote anything the log
+    /// could see.
+    ///
+    /// `page_ready` closes that: the page sends the view it ended up showing, how many cards
+    /// it drew, and how many placeholders survived. The values are computed from the DOM at
+    /// first paint, so a broken window cannot produce the healthy report.
+    ///
+    /// What this test can ask without a GUI: the command exists, it writes through the root
+    /// logger, the shell calls it **once** (not on a timer), and the report it builds is
+    /// derived from `querySelector`, not from a constant.
+    #[test]
+    fn the_page_reports_what_it_rendered() {
+        pin_test_dir();
+        let source = include_str!("host.rs");
+        let main = include_str!("main.rs");
+        let start = main
+            .find("fn page_ready(")
+            .unwrap_or_else(|| panic!("`page_ready` is gone — the window would be silent again"));
+        let body = &main[start..];
+        let body = &body[..body.find("\n}").unwrap_or(body.len())];
+        assert!(
+            body.contains("host.log.info"),
+            "the report does not go through the root logger, so it lands nowhere an operator reads"
+        );
+
+        let app = include_str!("../../frontend/js/app.js");
+        assert_eq!(
+            app.matches("call('page_ready'").count(),
+            1,
+            "the page must report exactly once — a heartbeat would be the §4.10 'the log is \
+             92% saying nothing changed' mistake with a new subject"
+        );
+        for needle in ["querySelectorAll", "placeholders", "cards", "view="] {
+            assert!(
+                app.contains(needle),
+                "the report no longer derives `{needle}` from the DOM, so a blank window could \
+                 send a healthy one"
+            );
+        }
+        // …and the report is wired into the boot, not merely defined.
+        assert!(
+            app.contains("reportRendered(earlyErrors)"),
+            "`reportRendered` is never called, so nothing is reported"
+        );
+        let _ = source;
+    }
+
     /// **Every `import` in the front end resolves to a real export.**
     ///
     /// Measured 2026-10-21, in a real browser: `app.js` imported `toastNode` from `feed.js`

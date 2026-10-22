@@ -31,7 +31,7 @@
  * field at its placeholder with nothing in the console to point at it.
  */
 
-import { bridged, read, subscribe } from './lib/bridge.js';
+import { bridged, call, read, subscribe } from './lib/bridge.js';
 import { mountFeed, note } from './lib/feed.js';
 import * as playing from './user/now-playing.js';
 import * as casting from './user/casting.js';
@@ -40,6 +40,16 @@ import * as services from './admin/services.js';
 import * as logs from './admin/logs.js';
 import * as settings from './admin/settings.js';
 import * as diagnostics from './admin/diagnostics.js';
+
+/**
+ * Everything the window wrote to its own console before the first paint.
+ *
+ * Collected from the first statement of this module, because the failures worth reporting
+ * happen *before* any handler exists — a module that does not import, a `null` element.
+ */
+const earlyErrors = [];
+globalThis.addEventListener?.('error', (event) => earlyErrors.push(String(event.message ?? event)));
+globalThis.addEventListener?.('unhandledrejection', (event) => earlyErrors.push(String(event.reason ?? event)));
 
 /** Which view is showing. `null` means "not decided yet". */
 let current = null;
@@ -155,9 +165,42 @@ function boot() {
   }, 5000);
 }
 
+/**
+ * Tell the back end what the first paint actually produced.
+ *
+ * A page that fails to load looks identical from the outside to a page that is fine: the
+ * markup's placeholders stay on screen and nothing is logged anywhere. Twice now the answer
+ * to "the window is blank" was found only by opening devtools — once for a deleted boot
+ * block, once for a binary older than its modules. This line makes the page answer for
+ * itself, once, in `macast.log`:
+ *
+ * ```
+ * window: page rendered — view=use cards=9 placeholders=0 errors=0
+ * ```
+ *
+ * `placeholders` counts elements still holding the markup's own loading text, and `errors`
+ * counts what the console saw. Both zero is what a working window reports, and both are
+ * what a broken one cannot fake — a hand-written string could not name the view or count
+ * the cards.
+ */
+function reportRendered(errors) {
+  const placeholders = [...document.querySelectorAll('dd, h2, p, span')]
+    .filter((node) => node.textContent.trim() === '加载中…').length;
+  const cards = [...document.querySelectorAll('[data-view]:not([hidden]) .card, [data-view]:not([hidden]) .now')].length;
+  const view = document.querySelector('[data-view]:not([hidden])')?.dataset.view ?? 'none';
+  // The modules may not have imported cleanly, in which case `bridged` is false and there is
+  // no one to tell — but the console error above already said so.
+  Promise.resolve(call('page_ready', {
+    report: `view=${view} cards=${cards} placeholders=${placeholders} errors=${errors.length}`,
+  })).catch(() => {});
+}
+
 // The initial view comes from the fragment, so `#manage` opens the admin half — a reload
 // keeps you where you were.
 const start = location.hash === '#manage' ? 'manage' : 'use';
 mountShell();
 show(start);
 boot();
+// One frame after the first paint, so the readings describe what was actually drawn rather
+// than what the DOM looked like mid-boot.
+requestAnimationFrame(() => setTimeout(() => reportRendered(earlyErrors), 0));

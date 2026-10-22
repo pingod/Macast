@@ -239,6 +239,28 @@ fn set_status(value: String, state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// **The page's own report that it is alive and rendered.**
+///
+/// Called once by the shell after the first paint, with the readings a user would see. The
+/// point is that "the window is blank" has, until now, been indistinguishable from "the
+/// window is fine" from the outside: a page that fails to load leaves the markup's
+/// placeholders on screen and says nothing anywhere. That is exactly the 2026-10-20 defect
+/// (a deleted boot block with the cards left behind) and it struck again on 2026-10-21, when
+/// the window showed two nav labels and nothing else because the binary predated the
+/// modules.
+///
+/// So the page tells the log what it rendered: which view is visible, how many cards have
+/// text, and whether any placeholder survived. `host.rs`'s `the_page_reports_what_it_rendered`
+/// asks that this command exists and that the shell calls it; the acceptance script reads the
+/// resulting log line on a live window.
+///
+/// Deliberately **not** a heartbeat: one line, once, at first paint. A periodic one would be
+/// the §4.10 "the log is 92% saying nothing changed" mistake with a new subject.
+#[tauri::command]
+fn page_ready(report: String, runtime: State<'_, Runtime>) {
+    runtime.host.log.info(&format!("window: page rendered — {report}"));
+}
+
 /// `Handler.cast_uri` for the page: the full push sequence, in the reference's
 /// order, ending with mpv holding the address **and the name**.
 ///
@@ -2150,6 +2172,7 @@ pub fn run() {
             set_renderer,
             save_launch_param,
             launch_param,
+            page_ready,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Macast Tauri application");
