@@ -1,0 +1,6 @@
+{"env": "with_tmp", "input": {"HOME": "/Users/a", "PATH": "/usr/bin:/tmp/shim", "PYTHONPATH": "/tmp/x", "TMPDIR": "/var/folders/tmp/x"}, "keys_dropped": ["PYTHONPATH", "TMPDIR"]}
+{"env": "clean", "input": {"HOME": "/Users/a", "PATH": "/usr/bin"}, "keys_dropped": []}
+{"env": "path_tmp", "input": {"HOME": "/Users/a", "PATH": "/tmp/bin"}, "keys_dropped": []}
+{"env": "non_string", "input": {"HOME": "/tmp/a", "NUM": 5, "PATH": "/usr/bin"}, "keys_dropped": ["HOME"]}
+{"env": "empty", "input": {}, "keys_dropped": []}
+{"env": "only_path", "input": {"PATH": "/a/tmp/b"}, "keys_dropped": []}

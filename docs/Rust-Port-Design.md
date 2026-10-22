@@ -2382,6 +2382,64 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     也不是 Rust 的测试面：唯一的连接是那份 HTML 里的一串属性名。
     **本分支从未推送 ⇒ 这一条与它那两次读数没有任何 CI 见证过。**
 
+61. **去 Python 的第一批：一个构建步骤 + 四个判决层（2026-10-22）** —— 用户的要求是
+    "将所有 python 写的东西用 rust 复写一遍，从而彻底去掉 python 代码"。先量清楚再动手，
+    因为 81k 行 Python 不是一次能搬完的，而**顺序由依赖决定，不由喜好决定**：
+    *   `macast/**/*.py` **36,122 行**（应用 + 18 个插件）—— 只有它自己依赖
+    *   `scripts/*.py` **44,454 行**（含 44k 行的 Python 测试套件）—— 只测 Python 应用
+    *   `macast/xml/*.xml` ×4 —— **Rust 编译期 `include_str!`**（唯一被 Rust 直接依赖的一组）
+    *   `scripts/bundle_frontend.py` —— Rust 测试起子进程调它（本轮已删）
+
+    **核心七块早已被 Rust 覆盖**（按行数比：`media_resolve` 1604→4655、`media_relay` 1230→1522、
+    `protocol_cast` 1297→1386、`protocol_airplay` 512→745、`protocol` 3202→9705、
+    `utils` 808→1030、`macast.py` 1682→4906），所以剩下的主体是**插件那 21,957 行**。
+
+    这一轮的五个交付，每个都有差分语料而不是"我觉得语义一样"：
+
+    | Python | 行 | Rust | 行 | 判据 |
+    |---|---|---|---|---|
+    | `scripts/bundle_frontend.py` | 200 | `src-tauri/src/bin/bundle-frontend.rs` | 460 | 输出**逐字节相同**（75,497 B） |
+    | `cast_local_file.py`（判决层） | 3126 | `macast-cast/src/local_file.rs` | 570 | 语料 **1,566** 行（含 611 条 copy），逐条同判 |
+    | `floating.py` | 171 | `macast-mpv/src/floating.rs` | 310 | 语料 20 行，**按元素顺序**比 |
+    | `external_player.py` | 257 | `macast-mpv/src/external_player.rs` | 485 | 语料 49 行 = 7 台合成机器 × 7 种配置 |
+    | `macast_ytdlp.py` | 392 | `macast-mpv/src/ytdlp.rs` | 284 | 语料 22 行（含畸形形状） |
+
+    *语料是**执行参考实现**生成的，不是照抄文档*：`local_file` 的 1,566 行来自对
+    `plan()` 跑 容器×视频编码×音频编码集×`audio_only`×目标×模式 的交叉积；`external_player`
+    的 49 行来自跑 `installed_players()`/`resolve_player()`/argv 在七台**合成**机器上
+    （所以断言不随这台机器装没装 VLC 变）。每个模块另配一条变异体：DLNA 音乐表加 opus（红 2）、
+    先追加后过滤（红 4）、PATH 与安装目录优先级反过来（红 1）、追加第二个 `--script-opts`
+    （红 1）。**四个都不是 0 红。**
+
+    *被语料当场纠正的五处，全部是我的错而不是参考实现的*：
+    ① `local_file` 从容器名推断 `audio_only`（`flac` 就当音乐）—— `audio_only` 是 ffprobe 的
+    独立事实，语料里 `flac` **容器带视频轨**的行立刻红，现在它自己是一维；
+    ② `floating` 的断言写成"输出里一个 `--geometry`/`--autofit` 都没有"—— `reshape` 当然会
+    **追加**我们自己的，要断言的是每族恰好一个且值是**我们选的**那个；
+    ③ 尺寸越界该夹到**最后**一项而不是默认项（夹到中间会让"我的选择被忽略"看起来像"重置"）；
+    ④ `external_player` 的语料缺 `platform` —— `win_mpvnet_on_linux`（linux 机器上只有一个
+    Windows 安装路径）**无法从机器名字推出来**；
+    ⑤ 同一份语料缺 `override_executable` —— 我让它把任何非空 override 当可执行，于是
+    `/opt/mine/vlc` 那一行红了，而参考实现正确地回落到了 PATH 那一个。
+    还有一处**故意的不偏离**：`eta_seconds("-5")` 在参考实现里回 **-5**（裸数字那条路是
+    `int(float(text))`，只有冒号形状被正则守着），我第一版断言它该回 0 —— 红的是我的断言。
+    现在钉住 -5 并写明理由：唯一消费者是进度标签，需要时钟的地方走 `hms()`，那里钳。
+
+    **前端那条被顺手验掉了**：上一轮留下的"卡片永远停在加载中"在打包器换成 Rust 之后仍然成立
+    —— 隔离配置目录起真实例，`macast.log` 读回
+    `window: page rendered — view=use cards=6 placeholders=0 errors=0`（那是页面自己数真实 DOM
+    节点得出的，不是手写字符串）。服务端 `query=status` 也确认那是本实例
+    （`Macast(Pavia-MacBookPro-1859.local)`），不是场上残留的另一个进程 —— 那一格上一轮就吃掉过一次读数。
+
+    *仍然欠着的，按依赖顺序*：`macast/xml/*.xml` 四份要搬出 `macast/` 才能删目录（编译期依赖）；
+    `screen_mirror`（13,629 行）与 `cast_local_file` 的**供字节那一半**是 Rust 完全没有的两块
+    （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
+    `airplay_mirror`/`nirvana`/`iina`/`potplayer`/`pi_fm`/`web`/`live` 九个插件按 §18 的方向
+    应当按**原生**实现而不是开脚本口；`scripts/verify_cast_airplay.py`（44k 行）是 **Python 应用的
+    测试套件**，只有等应用删掉才轮到它。**本轮没有删任何 Python 应用代码** —— 判决层是**增量**，
+    删 `macast/` 的前置条件（XML 搬走、插件按原生实现、测试套件退役）都还没满足。
+    **本分支从未推送 ⇒ 1473 条单元与那一次真机读数没有任何 CI 见证过。**
+
 50. **页面的病不是"资产过期"，是"那一段被删掉而卡片留着"**（2026-10-20，`frontend/index.html`
     + `src-tauri/src/host.rs` 的两条静态守卫；上一轮把它记成"嵌进窗口的页面不是当前的"并留了一条
     "先用 Web Inspector 定性"的待办）：
