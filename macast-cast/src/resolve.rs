@@ -3236,6 +3236,38 @@ mod tests {
         assert!(values > 5 && rejects > 5, "both paths must be exercised: {values}/{rejects}");
     }
 
+    /// The timeouts and quotas still match the reference's own numbers.
+    ///
+    /// `AGENTS.md` calls these a family for a reason: each one is the only thing standing between
+    /// a hostile page and an unbounded subprocess, and a hand-copied value that drifted would be
+    /// invisible until someone's machine was busy. `constants.json` carries them from the
+    /// reference's source text (via `scripts/build_corpora.py`), so a drift names itself.
+    #[test]
+    fn the_reference_timeouts_and_quotas_still_match() {
+        crate::pin_test_dir();
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/constants.json"))
+                .expect("corpus is JSON");
+        let rows = corpus.as_array().expect("rows");
+        let mut checked = 0usize;
+        for row in rows {
+            if row["group"].as_str() != Some("resolve") {
+                continue;
+            }
+            let name = row["name"].as_str().expect("name");
+            let reference = row["reference"].as_f64().expect("reference");
+            let local = match name {
+                "SCRAPE_TIMEOUT" => SCRAPE_TIMEOUT_SECS as f64,
+                "YTDLP_TIMEOUT" => YTDLP_TIMEOUT_SECS as f64,
+                "PROBE_TIMEOUT" => PROBE_TIMEOUT_SECS as f64,
+                other => panic!("{other} is in the corpus but not in this test's match"),
+            };
+            assert_eq!(local, reference, "{name} drifted from the reference");
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "the corpus lost a resolve constant: {checked}");
+    }
+
     #[test]
     fn json_unescape_handles_the_three_shapes() {
         crate::pin_test_dir();

@@ -1,0 +1,149 @@
+[
+{
+"group": "mirror_queue",
+"name": "LIVE_QUEUE_SECONDS",
+"reference": 0.75,
+"expression": "0.75",
+"value": 0.75
+},
+{
+"group": "mirror_queue",
+"name": "LIVE_QUEUE_MIN_CHUNKS",
+"reference": 64,
+"expression": "64",
+"value": 64
+},
+{
+"group": "mirror_queue",
+"name": "LIVE_QUEUE_MAX_CHUNKS",
+"reference": 256,
+"expression": "256",
+"value": 256
+},
+{
+"group": "mirror_queue",
+"name": "LIVE_QUEUE_MIN_UNITS",
+"reference": 8,
+"expression": "8",
+"value": 8
+},
+{
+"group": "mirror_queue",
+"name": "CHUNK",
+"reference": 4096,
+"expression": "4096",
+"value": 4096
+},
+{
+"group": "mirror_queue",
+"name": "MKV_CLUSTER_BYTES",
+"reference": 61440,
+"expression": "60 << 10",
+"value": 61440
+},
+{
+"group": "mirror_queue",
+"name": "FPS",
+"reference": 24,
+"expression": "24",
+"value": 24
+},
+{
+"group": "mirror_queue",
+"name": "TS_PACKET",
+"reference": 188,
+"expression": "188",
+"value": 188
+},
+{
+"group": "mirror_knobs",
+"name": "DLNA_PREFILL_SECONDS",
+"reference": 4,
+"expression": "4",
+"value": 4
+},
+{
+"group": "mirror_knobs",
+"name": "DLNA_PREFILL_MIN_SECONDS",
+"reference": 1,
+"expression": "1",
+"value": 1
+},
+{
+"group": "mirror_knobs",
+"name": "DLNA_PREFILL_MAX_SECONDS",
+"reference": 8,
+"expression": "8",
+"value": 8
+},
+{
+"group": "mirror_knobs",
+"name": "DLNA_PREFILL_MIN_BYTES",
+"reference": 2097152,
+"expression": "2 << 20",
+"value": 2097152
+},
+{
+"group": "mirror_knobs",
+"name": "DLNA_PREFILL_MAX_BYTES",
+"reference": 8388608,
+"expression": "8 << 20",
+"value": 8388608
+},
+{
+"group": "mirror_knobs",
+"name": "LIVE_EDGE_SECONDS",
+"reference": 1.0,
+"expression": "1.0",
+"value": 1.0
+},
+{
+"group": "mirror_knobs",
+"name": "LIVE_EDGE_MIN_SECONDS",
+"reference": 0.5,
+"expression": "0.5",
+"value": 0.5
+},
+{
+"group": "mirror_knobs",
+"name": "LIVE_EDGE_MAX_SECONDS",
+"reference": 5.0,
+"expression": "5.0",
+"value": 5.0
+},
+{
+"group": "mirror_knobs",
+"name": "DEFAULT_MAX_DURATION_HOURS",
+"reference": 12,
+"expression": "12",
+"value": 12
+},
+{
+"group": "mirror_encoder",
+"name": "VT_BITRATE_MULT",
+"reference": 1.5,
+"expression": "1.5",
+"value": 1.5
+},
+{
+"group": "resolve",
+"name": "SCRAPE_TIMEOUT",
+"reference": 15,
+"expression": "15",
+"value": 15
+},
+{
+"group": "resolve",
+"name": "YTDLP_TIMEOUT",
+"reference": 120,
+"expression": "120",
+"value": 120
+},
+{
+"group": "resolve",
+"name": "PROBE_TIMEOUT",
+"reference": 25,
+"expression": "25",
+"value": 25
+}
+]

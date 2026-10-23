@@ -397,6 +397,49 @@ mod tests {
         assert_eq!(cluster, 23.04);
     }
 
+    /// Every constant this port copied by hand still equals the reference's.
+    ///
+    /// `MKV_CLUSTER_BYTES` was `55_000` for a whole session — the midpoint of a comment that said
+    /// "50–60 KB" — instead of the reference's `60 << 10`. Nothing caught it because the corpus was
+    /// generated from the same misreading, so port and corpus agreed with each other and disagreed
+    /// with the software. This test closes that hole by comparing against `constants.json`, whose
+    /// values come from `scripts/build_corpora.py` reading the reference's own text.
+    ///
+    /// The Rust side reads its values through the local `const`s, so a hand edit fails here even
+    /// when the expression still looks plausible.
+    #[test]
+    fn every_hand_copied_constant_still_matches_the_reference() {
+        crate::pin_test_dir();
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/constants.json"))
+                .expect("corpus is JSON");
+        let rows = corpus.as_array().expect("rows");
+        let mut checked = 0usize;
+        for row in rows {
+            // Only this module's group: the knobs and the encoder have their own tests, and
+            // asserting them from here would mean importing constants this module does not own.
+            if row["group"].as_str() != Some("mirror_queue") {
+                continue;
+            }
+            let name = row["name"].as_str().expect("name");
+            let reference = row["reference"].as_f64().expect("reference");
+            let local = match name {
+                "LIVE_QUEUE_SECONDS" => LIVE_QUEUE_SECONDS,
+                "LIVE_QUEUE_MIN_CHUNKS" => LIVE_QUEUE_MIN_CHUNKS as f64,
+                "LIVE_QUEUE_MAX_CHUNKS" => LIVE_QUEUE_MAX_CHUNKS as f64,
+                "LIVE_QUEUE_MIN_UNITS" => LIVE_QUEUE_MIN_UNITS as f64,
+                "CHUNK" => CHUNK as f64,
+                "MKV_CLUSTER_BYTES" => MKV_CLUSTER_BYTES as f64,
+                "FPS" => FPS as f64,
+                "TS_PACKET" => TS_PACKET as f64,
+                other => panic!("{other} is in the corpus but not in this test's match"),
+            };
+            assert_eq!(local, reference, "{name} drifted from the reference");
+            checked += 1;
+        }
+        assert_eq!(checked, 8, "the corpus lost a mirror_queue constant: {checked}");
+    }
+
     #[test]
     fn the_aac_rate_is_the_48khz_one_not_the_44khz_one() {
         crate::pin_test_dir();

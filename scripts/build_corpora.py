@@ -540,6 +540,89 @@ def gen_py_float() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Constants: every number the port copied by hand out of `screen_mirror.py`
+# ---------------------------------------------------------------------------
+#
+# This exists because one of them was copied wrong: `MKV_CLUSTER_BYTES` became 55_000 (the midpoint
+# of a comment that said "50–60 KB") instead of `60 << 10`. The port and its corpus agreed with each
+# other because both started from the same misreading — the failure mode a differential corpus is
+# supposed to prevent. Now the reference's own text is the source, and a hand-copied value has
+# somewhere to be checked.
+
+CONSTANT_SITES = {
+    "mirror_queue": (
+        "macast/plugins/renderer/screen_mirror.py",
+        "macast-cast/src/mirror_queue.rs",
+        ["LIVE_QUEUE_SECONDS", "LIVE_QUEUE_MIN_CHUNKS", "LIVE_QUEUE_MAX_CHUNKS",
+         "LIVE_QUEUE_MIN_UNITS", "CHUNK", "MKV_CLUSTER_BYTES", "FPS", "TS_PACKET"],
+    ),
+    "mirror_knobs": (
+        "macast/plugins/renderer/screen_mirror.py",
+        "macast-cast/src/mirror_knobs.rs",
+        ["DLNA_PREFILL_SECONDS", "DLNA_PREFILL_MIN_SECONDS", "DLNA_PREFILL_MAX_SECONDS",
+         "DLNA_PREFILL_MIN_BYTES", "DLNA_PREFILL_MAX_BYTES", "LIVE_EDGE_SECONDS",
+         "LIVE_EDGE_MIN_SECONDS", "LIVE_EDGE_MAX_SECONDS", "DEFAULT_MAX_DURATION_HOURS"],
+    ),
+    "mirror_encoder": (
+        "macast/plugins/renderer/screen_mirror.py",
+        "macast-cast/src/mirror_encoder.rs",
+        ["VT_BITRATE_MULT"],
+    ),
+    # `resolve.rs`: the timeouts and quotas AGENTS.md calls a family. The extraction patterns for
+    # these live in `gen_constants` and differ from the mirror ones (class attributes, `u64`
+    # typed, `2 << 20` style), which is why each group names its own parser below.
+    "resolve": (
+        "macast/media_resolve.py",
+        "macast-cast/src/resolve.rs",
+        ["SCRAPE_TIMEOUT", "YTDLP_TIMEOUT", "PROBE_TIMEOUT"],
+    ),
+}
+
+
+#: `(python pattern, rust pattern)` overrides for groups whose spelling differs.
+CONSTANT_PATTERNS = {
+    "resolve": {
+        # Python: `SCRAPE_TIMEOUT = 15`; Rust: `pub const SCRAPE_TIMEOUT_SECS: u64 = 15;`
+        "SCRAPE_TIMEOUT": (r"^SCRAPE_TIMEOUT = (\d+)$",
+                           r"pub const SCRAPE_TIMEOUT_SECS: u64 = ([^;]+);"),
+        "YTDLP_TIMEOUT": (r"^YTDLP_TIMEOUT = (\d+)$",
+                          r"pub const YTDLP_TIMEOUT_SECS: u64 = ([^;]+);"),
+        "PROBE_TIMEOUT": (r"^PROBE_TIMEOUT = (\d+)$",
+                          r"pub const PROBE_TIMEOUT_SECS: u64 = ([^;]+);"),
+    },
+}
+
+
+def gen_constants() -> dict:
+    """Reference value and Rust expression for each constant, so a drift names itself."""
+    rows = []
+    for group, (py_path, rs_path, names) in CONSTANT_SITES.items():
+        py_src = reference_text(py_path)
+        rs_src = reference_text(rs_path)
+        overrides = CONSTANT_PATTERNS.get(group, {})
+        for name in names:
+            py_pattern, rs_pattern = overrides.get(
+                name,
+                (rf"^{name} = ([^#\n]+)$", rf"pub const {name}: [^=]+ = ([^;]+);"),
+            )
+            py_match = re.search(py_pattern, py_src, re.M)
+            if py_match is None:
+                raise SystemExit(f"cannot find {name} in {py_path} ({py_pattern})")
+            rs_match = re.search(rs_pattern, rs_src)
+            if rs_match is None:
+                raise SystemExit(f"cannot find {name} in {rs_path} ({rs_pattern})")
+            reference = eval(py_match.group(1).strip(), {"__builtins__": {}})  # noqa: S307
+            expression = rs_match.group(1).strip()
+            # Evaluate the Rust expression: it may be `60 << 10` or `2 << 20`.
+            value = eval(expression.replace("_", ""), {"__builtins__": {}})   # noqa: S307
+            rows.append({
+                "group": group, "name": name,
+                "reference": reference, "expression": expression, "value": value,
+            })
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Registration and CLI
 # ---------------------------------------------------------------------------
 
@@ -554,6 +637,7 @@ CORPORA = {
     "mirror_knobs": (CAST / "mirror_knobs.json", gen_mirror_knobs, "json"),
     "py_float": (CAST / "py_float.json", gen_py_float, "json"),
     "ytdlp_eta": (MPV / "ytdlp_eta.json", gen_ytdlp_eta, "json"),
+    "constants": (CAST / "constants.json", gen_constants, "json"),
 }
 
 
