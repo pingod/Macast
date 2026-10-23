@@ -2567,6 +2567,21 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     `{:.0}` 的银行家舍入（Rust 与 Python 一致）、`-0.0` 的格式化（两边都 `-0`）、
     `ceil`/`floor`（语义一致）。**只有 `round` 这一族是真分歧。**
 
+    **同一方法（差分探测）又找出三处，其中一处会回 416**（`28decf7`、`c1eaa66`、`9a4489e`）：
+    *   `eta_seconds`：`float("1_000")` 在 Python 是 1000；`inf`/`1e400` 抛 **OverflowError**
+        而参考实现的 `except ValueError` **接不住**（进度线程死）；`"1 :02:03"` 参考实现拒绝
+        而我第一版对每段 `trim()` **接受了它** —— 那是"顺手更宽容"，语料当场红。
+    *   `parse_range`：Python 的 `int()` 容**首尾空白**（含 `
+`）与 `+`。`bytes=0-9 `（尾随
+        一个空格）在参考实现是合法 Range，在这里曾是 `None`，而 `None` 让 `serve_plan` 回
+        **416** —— DLNA 渲染器把 416 读成"文件死了"。另外 `bytes=-` 参考实现回
+        `(None, None)`，我原来断言 `None`，那条**断言本身**是错的。
+    *   `py_float` 的 CPython 下划线规则（两侧都是 ASCII 数字才算数）**写得对但没有任何用例
+        问过**：`1__0`/`_1`/`1_`/`1_.5`/`1._5` 五个必须抛。补了 23 行语料；一条"剥掉所有
+        下划线"的变异体红 1 条 —— 那正是下次重构会写出的简化。
+    *顺手核对且**本来就是对的***：`py_round1`（2001 个值扫描，0 处分歧）、`bitrate_kbps`
+    的银行家舍入。
+
     *这一轮也做了端到端真机验证，比之前的"页面渲染了"更进一步*：release 二进制起真实例后，
     用真 SOAP 打了三个控制点 —— `AVTransport#GetTransportInfo` 回
     `CurrentTransportStatus=OK`、`RenderingControl#GetVolume` 回 `100`。
