@@ -209,14 +209,28 @@ pub fn parse_range(header: Option<&str>) -> Option<(Option<u64>, Option<u64>)> {
         return None;
     }
     let (first, last) = spec.split_once('-').unwrap_or((spec, ""));
-    if first.is_empty() {
-        return Some((None, Some(last.parse().ok()?)));
+    // **Fields are parsed the way Python's `int()` parses**, which tolerates surrounding
+    // whitespace (including `\n`) and a leading `+`. Rust's `str::parse::<u64>` accepts `+` but
+    // not whitespace, so `bytes=0-9 ` and `bytes=0 - 9` were refused here and accepted by the
+    // reference. A trailing space is exactly what a hand-written or buggy sender produces, and the
+    // consequence of refusing it is not "an error": it is a **416**, which a DLNA renderer reads as
+    // a dead file (AGENTS.md §4.8, the `parse_range` row). Found by differential probing.
+    fn number(field: &str) -> Option<u64> {
+        field.trim().parse::<u64>().ok()
     }
-    let start: u64 = first.parse().ok()?;
+    if first.is_empty() {
+        // `bytes=-` is `(None, None)` in the reference — an empty suffix still *is* a Range, and
+        // the caller resolves it against the real length (which yields "the last 0 bytes").
+        if last.is_empty() {
+            return Some((None, None));
+        }
+        return Some((None, Some(number(last)?)));
+    }
+    let start: u64 = number(first)?;
     if last.is_empty() {
         return Some((Some(start), None));
     }
-    let stop: u64 = last.parse().ok()?;
+    let stop: u64 = number(last)?;
     if stop < start {
         return None;
     }

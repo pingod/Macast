@@ -1,0 +1,224 @@
+[
+{
+"header": "",
+"out": [
+0,
+null
+]
+},
+{
+"header": "bytes=0-",
+"out": [
+0,
+null
+]
+},
+{
+"header": "bytes=-0",
+"out": [
+null,
+0
+]
+},
+{
+"header": "bytes=-",
+"out": [
+null,
+null
+]
+},
+{
+"header": "bytes=00-09",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes=+5-9",
+"out": [
+5,
+9
+]
+},
+{
+"header": "bytes= 5-9",
+"out": [
+5,
+9
+]
+},
+{
+"header": "bytes=5 -9",
+"out": [
+5,
+9
+]
+},
+{
+"header": "bytes=5- 9",
+"out": [
+5,
+9
+]
+},
+{
+"header": "bytes=0-9 ",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes= 0-9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "BYTES=0-9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "Bytes=0-9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes =0-9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes= 0 - 9 ",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes=0 - 9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes=0-9\n",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes=\t0-9",
+"out": [
+0,
+9
+]
+},
+{
+"header": "bytes=0-0",
+"out": [
+0,
+0
+]
+},
+{
+"header": "bytes=5-4",
+"out": null
+},
+{
+"header": "bytes=5-5",
+"out": [
+5,
+5
+]
+},
+{
+"header": "bytes=-1",
+"out": [
+null,
+1
+]
+},
+{
+"header": "bytes=-500",
+"out": [
+null,
+500
+]
+},
+{
+"header": "bytes=1--2",
+"out": null
+},
+{
+"header": "bytes=0x10-",
+"out": null
+},
+{
+"header": "bytes=abc",
+"out": null
+},
+{
+"header": "kilobytes=0-9",
+"out": null
+},
+{
+"header": "bytes=0-9,10-19",
+"out": null
+},
+{
+"header": "bytes=1e3-",
+"out": null
+},
+{
+"header": "bytes=999999999999999999999999-",
+"out": [
+999999999999999999999999,
+null
+],
+"exceeds_u64": true
+},
+{
+"header": "bytes=0-999999999999999999999999",
+"out": [
+0,
+999999999999999999999999
+],
+"exceeds_u64": true
+},
+{
+"header": "bytes=-999999999999999999999999",
+"out": [
+null,
+999999999999999999999999
+],
+"exceeds_u64": true
+},
+{
+"header": "bytes=  ",
+"out": null
+},
+{
+"header": "bytes=- ",
+"out": null
+},
+{
+"header": "bytes= -5",
+"out": null
+},
+{
+"header": "bytes=5- ",
+"out": null
+}
+]
