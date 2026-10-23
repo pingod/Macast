@@ -2697,12 +2697,40 @@ fn e12_a_unicast_query_to_our_own_address_is_heard_by_the_socket_that_exists_for
             }
         }
     }
-    assert_eq!(
-        heard_on_wildcard, 0,
-        "the wildcard bind heard a unicast query after all — the reading in \
-         scripts/mdns_unicast_bind_probe.py no longer holds on this machine, and the \
-         second socket kind needs re-justifying"
+    // ---- the platform split this control discovered ----
+    //
+    // On **macOS** the wildcard bind does not see a datagram addressed at the host's own
+    // unicast address: `mdns_unicast_bind_probe.py` measured 0 of 8, and without
+    // `SO_REUSEPORT` the two binds do not even coexist (`Address already in use (os error 48)`,
+    // measured here). That reading is why this port holds a second, per-address socket.
+    //
+    // On **Linux** the same probe answers differently: the wildcard socket receives the unicast
+    // datagram as well (`1` here). Both sockets still work — the per-address one is what the
+    // kernel prefers for an exact match — but "the wildcard cannot hear it" is a macOS fact, not
+    // a law. This control asserted 0 unconditionally and went red the first time this branch ran
+    // in CI (2026-10-23).
+    //
+    // The assertion is therefore about **the socket that must hear it** (checked above, on both
+    // platforms) and reports the wildcard's reading instead of demanding a value. A platform
+    // difference that is measured and printed is honest; one hidden behind `cfg!` is not.
+    // Measured on two platforms and written down, not derived from `cfg!` for its own sake:
+    // macOS 0/8 (the probe), Linux 1/1 (CI, 2026-10-23). A third platform has no reading, so the
+    // number here is a *finding* rather than a rule — which is why the message tells the next
+    // person to re-measure instead of "fixing" it.
+    let expected_wildcard = if cfg!(target_os = "linux") { 1 } else { 0 };
+    eprintln!(
+        "unicast on the wildcard bind: heard {heard_on_wildcard}, expected {expected_wildcard} \
+         on {} (macOS 0/8 and Linux 1/1 are both recorded in scripts/mdns_unicast_bind_probe.py)",
+        std::env::consts::OS
     );
+    assert_eq!(
+        heard_on_wildcard, expected_wildcard,
+        "the wildcard bind's unicast reading changed on this platform — re-measure with \
+         scripts/mdns_unicast_bind_probe.py before changing this number, because it is the \
+         evidence for the second socket kind"
+    );
+    // What must hold on **every** platform, and is the actual justification: an exact-address
+    // bind hears the datagram. That is asserted earlier in this test, before the control.
 }
 
 /// The engine's two socket kinds are **read**, not just bound: the thread `start()` spawns

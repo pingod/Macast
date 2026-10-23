@@ -623,7 +623,19 @@ impl AirPlayReceiver {
 
     /// Start listening on the first available port in the fallback range.
     pub fn start(&mut self) -> std::io::Result<u16> {
-        for port in AIRPLAY_PORT..AIRPLAY_PORT + PORT_FALLBACK_RANGE {
+        self.start_from(AIRPLAY_PORT)
+    }
+
+    /// [`start`](Self::start) with the search starting somewhere else.
+    ///
+    /// Exists so the fallback behaviour can be tested **without assuming port 7000 is free**.
+    /// The old test bound a blocker on 7000 itself, and on a CI runner that bind failed with
+    /// `AddrInUse` — the runner already had something there, so the test could not create its own
+    /// precondition and went red for a reason that has nothing to do with the code. Starting the
+    /// search from a dynamically chosen port tests the same logic on any machine.
+    fn start_from(&mut self, first: u16) -> std::io::Result<u16> {
+        let last = first.saturating_add(PORT_FALLBACK_RANGE);
+        for port in first..last {
             let addr = format!("0.0.0.0:{}", port);
             match TcpListener::bind(&addr) {
                 Ok(listener) => {
@@ -631,10 +643,10 @@ impl AirPlayReceiver {
                     *self.state.port.lock().unwrap() = port;
                     self.state.running.store(true, Ordering::SeqCst);
                     self.listener = Some(listener);
-                    if port != AIRPLAY_PORT {
+                    if port != first {
                         logger().warning(&format!(
                             "AirPlay port {} already in use (macOS AirPlay Receiver?), using {} instead",
-                            AIRPLAY_PORT, port
+                            first, port
                         ));
                     }
                     logger().info(&format!("AirPlay RTSP server started on port {}", port));

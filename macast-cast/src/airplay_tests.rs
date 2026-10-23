@@ -760,17 +760,33 @@ fn receiver_start_and_stop() {
     assert!(!recv.state.running.load(Ordering::SeqCst));
 }
 
+/// The fallback walks the range when the first port is taken — tested on a **dynamic** port.
+///
+/// The first version of this test bound its blocker on `127.0.0.1:7000` and asserted the receiver
+/// fell back from there. It passed on macOS and **failed on the CI runner** with
+/// `AddrInUse` at the *blocker* bind: the runner already had something on 7000, so the test could
+/// not create its own precondition and went red for a reason unrelated to the code (found
+/// 2026-10-23, the first time this branch ever ran in CI).
+///
+/// A test that needs a *specific* port to be free is a test that depends on the machine. This one
+/// asks the kernel for a free port instead, occupies it, and starts the search from there — the
+/// same logic, on any host.
 #[test]
 fn receiver_port_fallback_when_occupied() {
     crate::pin_test_dir();
-    let blocker = TcpListener::bind(("127.0.0.1", AIRPLAY_PORT))
-        .expect("bind blocker on default port");
+    // Ask the kernel for a free port, then hold it.
+    let probe = TcpListener::bind(("0.0.0.0", 0)).expect("probe bind");
+    let taken = probe.local_addr().expect("probe addr").port();
+    // The receiver binds `0.0.0.0`, so the blocker must too — `127.0.0.1:PORT` and
+    // `0.0.0.0:PORT` do not conflict on Linux, which would make this test vacuous there.
     let mut recv = AirPlayReceiver::new("TestBox".into());
-    let port = recv.start().expect("bind on fallback");
-    assert_ne!(port, AIRPLAY_PORT, "must fall back to next port");
-    assert!(port > AIRPLAY_PORT);
+    let port = recv
+        .start_from(taken)
+        .expect("bind on a later port in the range");
+    assert_ne!(port, taken, "must fall back past the occupied port");
+    assert!(port > taken, "fallback walks upward: {port} <= {taken}");
     recv.stop();
-    drop(blocker);
+    drop(probe);
 }
 
 #[test]
