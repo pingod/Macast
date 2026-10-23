@@ -47,8 +47,15 @@ pub const LIVE_QUEUE_MIN_UNITS: usize = 8;
 /// The read size the unframed shapes are queued in.
 pub const CHUNK: usize = 4096;
 
-/// A Matroska cluster, measured at 50–60 KB because the muxer closes them by size.
-pub const MKV_CLUSTER_BYTES: u64 = 55_000;
+/// A Matroska cluster: the muxer closes them by size, and the reference's value is
+/// `60 << 10` = **61440**.
+///
+/// This port carried `55_000` — the midpoint of the comment above in the reference
+/// ("measured at 50–60 KB") — as if the comment were the value. Everything was consistent
+/// because **the corpus was generated from the same wrong number**, which is precisely the
+/// co-conspiracy a differential corpus is supposed to prevent. It only surfaced when the corpus
+/// started being regenerated from the reference source instead of from a copied constant.
+pub const MKV_CLUSTER_BYTES: u64 = 60 << 10;
 
 /// AAC frames in one second: 43.066 frames/s at 1024 samples and 44.1 kHz would be 43, but the
 /// muxer writes AAC at **48 kHz**, so 48000/1024 = 46.875. Both numbers appear in this
@@ -120,11 +127,18 @@ pub fn live_queue_units(unit: Unit, bitrate: Option<u64>, has_audio: bool) -> us
 
 /// The byte-shaped queue depth: the seconds budget divided by the read size, clamped.
 pub fn live_queue_chunks(bitrate: Option<u64>) -> usize {
+    // **An unknown bitrate answers the *ceiling*, not the floor.** The reference returns
+    // `LIVE_QUEUE_MAX_CHUNKS` when the rate is falsy: with no rate to divide by, the widest
+    // allowed queue is the safe side (a slow-but-alive viewer is not cut off), whereas the floor
+    // would be the smallest buffer we could get away with — the opposite guess. This port had the
+    // two swapped, and the corpus did not catch it until it was regenerated from the source.
     let bitrate = match bitrate {
-        None | Some(0) => return LIVE_QUEUE_MIN_CHUNKS,
+        None | Some(0) => return LIVE_QUEUE_MAX_CHUNKS,
         Some(rate) => rate,
     };
-    let chunks = (bitrate as f64 * LIVE_QUEUE_SECONDS / 8.0 / CHUNK as f64).ceil() as usize;
+    // Integer arithmetic, like the reference: `int(bitrate) * SECONDS // 8` then `// CHUNK`.
+    let budget = (bitrate as f64 * LIVE_QUEUE_SECONDS / 8.0) as u64;
+    let chunks = (budget / CHUNK as u64) as usize;
     chunks.clamp(LIVE_QUEUE_MIN_CHUNKS, LIVE_QUEUE_MAX_CHUNKS)
 }
 
@@ -244,11 +258,14 @@ mod tests {
     }
 
     #[test]
-    fn a_byte_shaped_queue_without_a_bitrate_answers_the_floor_not_a_guess() {
+    fn a_byte_shaped_queue_without_a_bitrate_answers_the_ceiling_not_the_floor() {
         crate::pin_test_dir();
-        // An invented duration is the number the diagnostics card exists to stop.
-        assert_eq!(live_queue_chunks(None), LIVE_QUEUE_MIN_CHUNKS);
-        assert_eq!(live_queue_chunks(Some(0)), LIVE_QUEUE_MIN_CHUNKS);
+        // **The ceiling.** With no rate to divide by, the safe side is the widest allowed queue:
+        // a slow-but-alive viewer is not cut off, while the floor is the smallest buffer we could
+        // get away with. This test used to assert the floor, which is the opposite guess — and it
+        // agreed with the implementation because both came from the same reading.
+        assert_eq!(live_queue_chunks(None), LIVE_QUEUE_MAX_CHUNKS);
+        assert_eq!(live_queue_chunks(Some(0)), LIVE_QUEUE_MAX_CHUNKS);
         assert_eq!(live_queue_units(Unit::Cluster, None, true), LIVE_QUEUE_MIN_UNITS);
         assert_eq!(queue_hold_seconds(Unit::Cluster, 8, None, true), None);
         assert_eq!(queue_hold_seconds(Unit::Chunk, 64, None, true), None);
@@ -312,7 +329,14 @@ mod tests {
             shapes.insert(marker.to_string());
             let bitrate = row["bitrate"].as_u64();
             let audio = row["audio"].as_bool().expect("audio");
-            let expected_units = row["units"].as_u64().expect("units") as usize;
+            // The reference's `live_queue_chunks` can return a **float** (`91.0`) because its
+            // budget arithmetic mixes `int` and `LIVE_QUEUE_SECONDS = 0.75`. The *count* is that
+            // whole number; compare numerically rather than demanding the JSON type match the
+            // Rust one.
+            let expected_units = row["units"]
+                .as_f64()
+                .expect("units")
+                .round() as usize;
             if row.get("note").is_some() {
                 // The divergence rows carry **explicit** units rather than ones derived from the
                 // bitrate: they exist to exercise `queue_hold_seconds` at an exact rounding
@@ -368,11 +392,9 @@ mod tests {
         assert_eq!(round2(4.115), 4.12);
 
         // The reachable case the scan found: 8 clusters at 1.024 Mbit/s.
+        // 48 clusters at 1.024 Mbit/s. Python's `round(48 * 61440 * 8 / 1024000, 2)`.
         let cluster = queue_hold_seconds(Unit::Cluster, 48, Some(1_024_000), true).expect("known");
-        assert_eq!(cluster, 20.62, "the scan's first divergence was here");
-        // Prove the naive form really would differ, so this test cannot be satisfied by both.
-        let naive = (48.0 * MKV_CLUSTER_BYTES as f64 * 8.0 / 1_024_000.0 * 100.0).round() / 100.0;
-        assert_ne!(naive, cluster, "the naive rounding must disagree here");
+        assert_eq!(cluster, 23.04);
     }
 
     #[test]

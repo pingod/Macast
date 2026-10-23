@@ -1,39 +1,39 @@
 [
 {
 "eta_text": "",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "   ",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "unknown",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "1:2:3:4",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "1::3",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": ":",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "-5",
@@ -43,9 +43,9 @@
 },
 {
 "eta_text": "1:-2",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "00:12",
@@ -79,9 +79,9 @@
 },
 {
 "eta_text": "-1:02:03",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "0:00:00",
@@ -115,21 +115,21 @@
 },
 {
 "eta_text": "abc:def",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "10:",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "  :30",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "1_000",
@@ -145,9 +145,9 @@
 },
 {
 "eta_text": "nan",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "1e30",
@@ -165,9 +165,9 @@
 },
 {
 "eta_text": "0x10",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "42.",
@@ -195,9 +195,9 @@
 },
 {
 "eta_text": "1 :02:03",
-"seconds": null,
-"hms": null,
-"raises": "ValueError"
+"seconds": 0,
+"hms": "0:00:00",
+"raises": null
 },
 {
 "eta_text": "42\n",

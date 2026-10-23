@@ -861,9 +861,17 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
+            // Print what did arrive: without it, "2 requests arrived" and "0 arrived" read the
+            // same, and the next person has to reproduce a flake that only shows under load.
+            let seen = self.all();
+            let preview: Vec<String> = seen
+                .iter()
+                .map(|req| req.chars().take(120).collect())
+                .collect();
             panic!(
-                "the collector never saw {needle:?} within {secs}s ({} request(s) arrived)",
-                self.count()
+                "the collector never saw {needle:?} within {secs}s ({} request(s) arrived; \
+                 heads: {preview:?})",
+                seen.len()
             );
         }
 

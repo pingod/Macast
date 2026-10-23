@@ -386,6 +386,210 @@
 }
 },
 {
+"total": 10,
+"range": "bytes=-",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=-",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0-9 ",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0-9 ",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes= 5-9",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 5-9/10",
+"Content-Length": "5"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes= 5-9",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 5-9/10",
+"Content-Length": "5",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0 - 9",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0 - 9",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0-9\n",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=0-9\n",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 0-9/10",
+"Content-Length": "10",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=+5-9",
+"dlna": false,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 5-9/10",
+"Content-Length": "5"
+}
+}
+},
+{
+"total": 10,
+"range": "bytes=+5-9",
+"dlna": true,
+"result": {
+"status": 206,
+"headers": {
+"Accept-Ranges": "bytes",
+"Cache-Control": "no-store",
+"X-Content-Type-Options": "nosniff",
+"Content-Type": "video/mp4",
+"Content-Range": "bytes 5-9/10",
+"Content-Length": "5",
+"transferMode.dlna.org": "Streaming",
+"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
 "total": 1000,
 "range": null,
 "dlna": false,
@@ -782,51 +986,6 @@
 }
 },
 {
-"total": 0,
-"range": null,
-"dlna": false,
-"result": {
-"status": 404,
-"headers": {
-"Content-Length": "0"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=-",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=-",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
 "total": 1000,
 "range": "bytes=-",
 "dlna": false,
@@ -861,40 +1020,6 @@
 }
 },
 {
-"total": 10,
-"range": "bytes=0-9 ",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=0-9 ",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
 "total": 1000,
 "range": "bytes=0-9 ",
 "dlna": false,
@@ -923,40 +1048,6 @@
 "Content-Type": "video/mp4",
 "Content-Range": "bytes 0-9/1000",
 "Content-Length": "10",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes= 5-9",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 5-9/10",
-"Content-Length": "5"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes= 5-9",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 5-9/10",
-"Content-Length": "5",
 "transferMode.dlna.org": "Streaming",
 "contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
 }
@@ -997,40 +1088,6 @@
 }
 },
 {
-"total": 10,
-"range": "bytes=0 - 9",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=0 - 9",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
 "total": 1000,
 "range": "bytes=0 - 9",
 "dlna": false,
@@ -1058,40 +1115,6 @@
 "X-Content-Type-Options": "nosniff",
 "Content-Type": "video/mp4",
 "Content-Range": "bytes 0-9/1000",
-"Content-Length": "10",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=0-9\n",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
-"Content-Length": "10"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=0-9\n",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 0-9/10",
 "Content-Length": "10",
 "transferMode.dlna.org": "Streaming",
 "contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
@@ -1133,40 +1156,6 @@
 }
 },
 {
-"total": 10,
-"range": "bytes=+5-9",
-"dlna": false,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 5-9/10",
-"Content-Length": "5"
-}
-}
-},
-{
-"total": 10,
-"range": "bytes=+5-9",
-"dlna": true,
-"result": {
-"status": 206,
-"headers": {
-"Accept-Ranges": "bytes",
-"Cache-Control": "no-store",
-"X-Content-Type-Options": "nosniff",
-"Content-Type": "video/mp4",
-"Content-Range": "bytes 5-9/10",
-"Content-Length": "5",
-"transferMode.dlna.org": "Streaming",
-"contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
-}
-}
-},
-{
 "total": 1000,
 "range": "bytes=+5-9",
 "dlna": false,
@@ -1197,6 +1186,17 @@
 "Content-Length": "5",
 "transferMode.dlna.org": "Streaming",
 "contentFeatures.dlna.org": "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+}
+}
+},
+{
+"total": 0,
+"range": null,
+"dlna": false,
+"result": {
+"status": 404,
+"headers": {
+"Content-Length": "0"
 }
 }
 }

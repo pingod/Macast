@@ -331,7 +331,10 @@ mod tests {
                     answered += 1;
                 }
                 Some("ValueError") => {
-                    // The reference's own `except` answered 0, so this is an alignment.
+                    // The reference's own `except` answered 0, so this is an alignment. The
+                    // regenerated corpus has **no** rows here: `eta_seconds` swallows ValueError
+                    // itself, so a `raises: ValueError` row was an artifact of the first
+                    // generator calling `int(float(...))` directly instead of the function.
                     assert_eq!(got, 0, "eta_seconds({text:?}) should answer 0");
                     raised += 1;
                 }
@@ -344,11 +347,12 @@ mod tests {
             }
         }
         assert_eq!(rows.len(), 39, "the corpus lost rows");
-        assert_eq!(answered, 22, "answerable rows");
-        assert_eq!(raised, 14, "ValueError rows");
+        assert_eq!(answered, 36, "answerable rows");
+        assert_eq!(raised, 0, "ValueError rows: the reference swallows them itself");
         assert_eq!(overflows, 3, "OverflowError rows — the declared divergence");
-        // A corpus that never answered anything would pass every refusal branch.
-        assert!(answered > raised);
+        // Every row either answered or was the declared OverflowError class; a corpus that was
+        // mostly refusals would pass every refusal branch and prove nothing.
+        assert_eq!(answered + raised + overflows, rows.len());
     }
 
     #[test]
