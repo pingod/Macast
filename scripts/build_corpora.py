@@ -540,6 +540,260 @@ def gen_py_float() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# nirvana.py: the NVA request line, frames, decoder and command table
+# ---------------------------------------------------------------------------
+#
+# The plugin is 1,822 lines and imports `cheroot`, so nothing here can `import nirvana`. The four
+# corpora come from lifting the parser's own text where it is self-contained, and from
+# reimplementing `read_request_line`'s decision path branch for branch where it is not — with the
+# line numbers named, as elsewhere in this file.
+
+NIRVANA = "macast/plugins/protocol/nirvana.py"
+
+
+def gen_nva_request() -> dict:
+    """`NVAHTTPRequest.read_request_line` (`nirvana.py:266-340`), decision for decision."""
+    CRLF, SPACE = b"\r\n", b" "
+
+    def parse(line: bytes):
+        if not line:
+            return {"ok": False, "status": 408}
+        if not line.endswith(CRLF):
+            return {"ok": False, "status": 400, "why": "crlf"}
+        try:
+            method, uri, protocol = line.strip().split(SPACE, 2)
+        except (ValueError, IndexError):
+            return {"ok": False, "status": 400, "why": "malformed"}
+        is_nva = b"NVA" in protocol
+        if is_nva:
+            protocol = protocol.replace(b"NVA/1.0", b"HTTP/1.0")
+        if not protocol.startswith(b"HTTP/"):
+            return {"ok": False, "status": 400, "why": "protocol"}
+        parts = protocol[5:].split(b".", 1)
+        if len(parts) != 2:
+            return {"ok": False, "status": 400, "why": "version"}
+        try:
+            version = tuple(map(int, parts))
+        except ValueError:
+            return {"ok": False, "status": 400, "why": "malformed"}
+        if version > (1, 1):
+            return {"ok": False, "status": 505}
+        return {
+            "ok": True, "is_nva": is_nva,
+            "method": method.upper().decode("latin-1"),
+            "uri": uri.decode("latin-1"),
+            "close_connection": is_nva,
+        }
+
+    lines = [
+        b"GET http://h/a HTTP/1.0\r\n", b"GET http://h/a NVA/1.0\r\n",
+        b"PLAY http://h/a NVA/1.0\r\n", b"GET http://h/a HTTP/1.1\r\n",
+        b"GET http://h/a HTTP/2.0\r\n", b"GET http://h/a NVA/2.0\r\n",
+        b"GET http://h/a FOO/1.0\r\n", b"GET http://h/a HTTP/1\r\n",
+        b"GET  HTTP/1.0\r\n", b"GET http://h/a HTTP/1.0\n",
+        b"", b"GET http://h/a HTTP/x.y\r\n", b"nva http://h/a NVA/1.0\r\n",
+    ]
+    return [{"line": line.decode("latin-1"), "result": parse(line)} for line in lines]
+
+
+def gen_nva_frames() -> dict:
+    """`send_res` / `send_ping` / `send_cmd` (`nirvana.py:860-893`)."""
+    import struct
+    RET, SEND, PING = b"\xc0", b"\xe0", b"\xe4"
+    COMMAND = b"Command"
+
+    rows = []
+    for counter in (0, 1, 7, 255, 256, 65535, 2**31):
+        rows.append({"kind": "res_empty", "counter": counter,
+                     "hex": struct.pack(">cBI", RET, 0, counter).hex()})
+        rows.append({"kind": "ping", "counter": counter,
+                     "hex": struct.pack(">cBI", PING, 0, counter).hex()})
+        for body in (b"{}", b'{"a":1}', b'{"a":1,"b":[1,2]}', "弹幕".encode()):
+            rows.append({"kind": "res_body", "counter": counter, "body": body.decode(),
+                         "hex": struct.pack(f">cB2I{len(body)}s", RET, 1, counter,
+                                            len(body), body).hex()})
+        for verb in ("pause", "seek", "play", "a"):
+            encoded = verb.encode()
+            rows.append({"kind": "cmd", "counter": counter, "command": verb,
+                         "hex": struct.pack(f">cBI2B7sB{len(encoded)}s", SEND, 2, counter,
+                                            1, 7, COMMAND, len(encoded), encoded).hex()})
+            for body in (b"{}", b'{"p":2}'):
+                rows.append({"kind": "cmd_body", "counter": counter, "command": verb,
+                             "body": body.decode(),
+                             "hex": struct.pack(f">cBI2B7sB{len(encoded)}sI{len(body)}s",
+                                                SEND, 3, counter, 1, 7, COMMAND,
+                                                len(encoded), encoded, len(body), body).hex()})
+    return rows
+
+
+def gen_nva_decode() -> dict:
+    """`parse_request` (`nirvana.py:905-978`) with recording callbacks."""
+    import struct
+    RET, SEND, PING = b"\xc0", b"\xe0", b"\xe4"
+    COMMAND = b"Command"
+
+    def res(counter, body=None):
+        if body is None:
+            return struct.pack(">cBI", RET, 0, counter)
+        return struct.pack(f">cB2I{len(body)}s", RET, 1, counter, len(body), body)
+
+    def cmd(counter, verb, body=None):
+        encoded = verb.encode()
+        if body is None:
+            return struct.pack(f">cBI2B7sB{len(encoded)}s", SEND, 2, counter, 1, 7,
+                               COMMAND, len(encoded), encoded)
+        return struct.pack(f">cBI2B7sB{len(encoded)}sI{len(body)}s", SEND, 3, counter,
+                           1, 7, COMMAND, len(encoded), encoded, len(body), body)
+
+    def parse_events(chunks):
+        cache, events = b"", []
+
+        def cmd_from_client(method, counter, params=None):
+            events.append(["cmd", method, counter, params])
+
+        def res_from_client(counter, params=None):
+            events.append(["res", counter, params])
+
+        for data in chunks:
+            index = 0
+            cache += data
+            data, length = cache, len(cache)
+            while index < length:
+                if length - index < 6:
+                    break
+                if data[index] not in (SEND[0], RET[0]):
+                    index += 1
+                    continue
+                try:
+                    _header, flags, counter = struct.unpack(">cBI", data[index:index + 6])
+                    if data[index] == SEND[0]:
+                        assert flags in (2, 3)
+                        if length - index - 6 < 10:
+                            break
+                        n, field_len, field, verb_len = struct.unpack(
+                            ">BB7sB", data[index + 6:index + 16])
+                        assert n == 1 and field_len == 7 and field == COMMAND
+                        if flags == 2:
+                            if length - index - 16 < verb_len:
+                                break
+                            verb = struct.unpack(f">{verb_len}s",
+                                                 data[index + 16:index + 16 + verb_len])[0]
+                            cmd_from_client(verb.decode(), counter)
+                            index += 16 + verb_len
+                        else:
+                            if length - index - 16 < verb_len + 4:
+                                break
+                            verb, body_len = struct.unpack(
+                                f">{verb_len}sI", data[index + 16:index + verb_len + 20])
+                            if length - index - verb_len - 20 < body_len:
+                                break
+                            body = struct.unpack(
+                                f">{body_len}s",
+                                data[index + verb_len + 20:index + verb_len + 20 + body_len])[0]
+                            try:
+                                body = json.loads(body)
+                            except Exception:                       # noqa: BLE001
+                                pass                                    # no callback
+                            else:
+                                cmd_from_client(verb.decode(), counter, body)
+                            finally:
+                                index += verb_len + 20 + body_len
+                    else:
+                        assert flags in (0, 1)
+                        if flags == 0:
+                            res_from_client(counter)
+                            index += 6
+                        else:
+                            if length - index - 6 < 4:
+                                break
+                            body_len = struct.unpack(">I", data[index + 6:index + 10])[0]
+                            if length - index - 10 < body_len:
+                                break
+                            body = struct.unpack(
+                                f">{body_len}s",
+                                data[index + 10:index + 10 + body_len])[0]
+                            try:
+                                body = json.loads(body)
+                            except Exception:                       # noqa: BLE001
+                                pass
+                            else:
+                                res_from_client(counter, body)
+                            finally:
+                                index += 10 + body_len
+                except Exception:                                   # noqa: BLE001
+                    index += 1
+            cache = data[index:]
+        return events
+
+    cases = {
+        "single_res": [res(5, b'{"volume":0}')],
+        "two_frames": [cmd(1, "GetVolume") + res(2, b'{"volume":50}')],
+        "byte_at_a_time": [bytes([b]) for b in cmd(3, "OnProgress", b'{"position":64}')],
+        "junk_then_frames": [b"\xff\x00\x13\x99" + res(1) + res(2)],
+        "ping_then_res": [struct.pack(">cBI", PING, 0, 1) + res(9)],
+        "bad_json": [res(4, b"not json")],
+        "bad_flag": [bytes([0xe0, 9, 0, 0, 0, 1]) + res(7)],
+        "two_chunks": [cmd(1, "pause")[:8], cmd(1, "pause")[8:] + res(2, b"{}")],
+    }
+    return [{"case": name, "chunks": [c.hex() for c in chunks],
+             "events": parse_events(chunks)} for name, chunks in cases.items()]
+
+
+def gen_nva_commands() -> dict:
+    """`cmd_from_client` (`nirvana.py:1204-1340`), arm structure only."""
+    def dispatch(method, params):
+        events, raised = [], None
+
+        def send_res(*_a, **_k):
+            events.append("res")
+
+        try:
+            if method == "GetVolume":
+                send_res(); events.append("GetVolume")
+            elif method == "SetVolume":
+                if params is None:
+                    raise TypeError()
+                params.get("volume", -1)          # -1 fails the range check, no raise
+                events.append("SetVolume")
+            elif method == "Pause":
+                send_res(); events.append("Pause")
+            elif method == "Resume":
+                send_res(); events.append("Resume")
+            elif method == "SendDanmaku":
+                send_res(); events.append("SendDanmaku")
+            elif method == "SwitchDanmaku":
+                send_res(); events.append("SwitchDanmaku")
+            elif method == "SwitchSpeed":
+                float(params["speed"]); events.append("SwitchSpeed")
+            elif method == "SwitchQn":
+                send_res(); params["qn"]; events.append("SwitchQn")
+            elif method == "Stop":
+                send_res(); events.append("Stop")
+            elif method == "Play":
+                send_res(); params["aid"]; params["cid"]; events.append("Play")
+            elif method == "PlayUrl":
+                send_res(); params["url"]; events.append("PlayUrl")
+            elif method == "Seek":
+                send_res()
+                if params is None:
+                    raise TypeError()
+                params.get("seekTs", 0); events.append("Seek")
+            else:
+                send_res()
+        except (KeyError, TypeError) as exc:
+            raised = type(exc).__name__
+        return {"events": events, "raised": raised}
+
+    cases = [("GetVolume", None), ("Pause", None), ("Pause", {"x": 1}),
+             ("SetVolume", None), ("SetVolume", {"volume": 50}), ("SetVolume", {"other": 1}),
+             ("SwitchSpeed", None), ("SwitchSpeed", {"speed": "2"}),
+             ("SwitchQn", {"qn": 80}), ("Play", {"aid": 1}), ("Play", {"aid": 1, "cid": 2}),
+             ("PlayUrl", {"url": "http://x"}), ("Seek", {"seekTs": 30}), ("Seek", None),
+             ("Unknown", None)]
+    return [{"method": m, "params": p, "result": dispatch(m, p)} for m, p in cases]
+
+
+# ---------------------------------------------------------------------------
 # Constants: every number the port copied by hand out of `screen_mirror.py`
 # ---------------------------------------------------------------------------
 #
@@ -638,6 +892,10 @@ CORPORA = {
     "py_float": (CAST / "py_float.json", gen_py_float, "json"),
     "ytdlp_eta": (MPV / "ytdlp_eta.json", gen_ytdlp_eta, "json"),
     "constants": (CAST / "constants.json", gen_constants, "json"),
+    "nva_request": (UPNP / "nva_request.jsonl", gen_nva_request, "jsonl"),
+    "nva_frames": (UPNP / "nva_frames.jsonl", gen_nva_frames, "jsonl"),
+    "nva_decode": (UPNP / "nva_decode.jsonl", gen_nva_decode, "jsonl"),
+    "nva_commands": (UPNP / "nva_commands.jsonl", gen_nva_commands, "jsonl"),
 }
 
 
