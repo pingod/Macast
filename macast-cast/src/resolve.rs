@@ -3183,6 +3183,59 @@ pub fn resolve_now(
 mod tests {
     use super::*;
 
+    /// `py_float` matches Python's `float()` on the shapes that actually differ.
+    ///
+    /// 23 rows from executing `float()` over the underscore shapes CPython accepts and rejects.
+    /// The rule is not "underscores are fine": `1__0`, `_1`, `1_`, `1_.5` and `1._5` all raise,
+    /// while `1_0.5` and `1e1_0` are fine. A port that stripped every `_` would accept five
+    /// strings the reference refuses.
+    ///
+    /// Before this test nothing called `py_float` with any of them, so the flanking rule was
+    /// written correctly and never asked.
+    #[test]
+    fn py_float_matches_pythons_underscore_rules() {
+        crate::pin_test_dir();
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/py_float.json"))
+                .expect("corpus is JSON");
+        let rows = corpus.as_array().expect("rows");
+        let mut values = 0usize;
+        let mut rejects = 0usize;
+        for row in rows {
+            let text = row["text"].as_str().expect("text");
+            let got = py_float(text);
+            match row["special"].as_str() {
+                Some("ValueError") => {
+                    assert_eq!(got, None, "float({text:?}) raises in Python");
+                    rejects += 1;
+                }
+                Some("nan") => {
+                    assert!(
+                        got.map(|v| v.is_nan()).unwrap_or(false),
+                        "float({text:?}) should be NaN"
+                    );
+                    values += 1;
+                }
+                Some(mark @ ("inf" | "-inf")) => {
+                    let want = if mark == "inf" { f64::INFINITY } else { f64::NEG_INFINITY };
+                    assert_eq!(got, Some(want), "float({text:?})");
+                    values += 1;
+                }
+                _ => {
+                    let want = row["value"].as_f64().expect("value");
+                    let found = got.unwrap_or_else(|| panic!("float({text:?}) was refused"));
+                    assert!(
+                        (found - want).abs() < 1e-12,
+                        "float({text:?}) = {found}, expected {want}"
+                    );
+                    values += 1;
+                }
+            }
+        }
+        assert_eq!(rows.len(), 23, "the corpus lost rows");
+        assert!(values > 5 && rejects > 5, "both paths must be exercised: {values}/{rejects}");
+    }
+
     #[test]
     fn json_unescape_handles_the_three_shapes() {
         crate::pin_test_dir();

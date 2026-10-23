@@ -1,0 +1,117 @@
+[
+{
+"text": "1_000",
+"value": 1000.0,
+"special": null
+},
+{
+"text": "1_0.5",
+"value": 10.5,
+"special": null
+},
+{
+"text": "1__0",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "_1",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "1_",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "1_.5",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "1._5",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "0x1_0",
+"value": null,
+"special": "ValueError"
+},
+{
+"text": "1e1_0",
+"value": 10000000000.0,
+"special": null
+},
+{
+"text": " 1_0 ",
+"value": 10.0,
+"special": null
+},
+{
+"text": "inf",
+"value": null,
+"special": "inf"
+},
+{
+"text": "nan",
+"value": null,
+"special": "nan"
+},
+{
+"text": "1_0_0_0",
+"value": 1000.0,
+"special": null
+},
+{
+"text": "42",
+"value": 42.0,
+"special": null
+},
+{
+"text": "-42",
+"value": -42.0,
+"special": null
+},
+{
+"text": "+42",
+"value": 42.0,
+"special": null
+},
+{
+"text": ".5",
+"value": 0.5,
+"special": null
+},
+{
+"text": "42.",
+"value": 42.0,
+"special": null
+},
+{
+"text": "1e400",
+"value": null,
+"special": "inf"
+},
+{
+"text": "-inf",
+"value": null,
+"special": "-inf"
+},
+{
+"text": "Infinity",
+"value": null,
+"special": "inf"
+},
+{
+"text": "1E3",
+"value": 1000.0,
+"special": null
+},
+{
+"text": "",
+"value": null,
+"special": "ValueError"
+}
+]
