@@ -162,6 +162,12 @@ jobs:
       - name: The committed frontend bundle is current
         run: cargo run -p macast-frontend -- --check
 
+      - name: Generate the Linux icon set
+        # Same reason as the Windows step: `build.rs` derives only the two sizes
+        # `tauri.conf.json` names, and a `.deb`/AppImage wants `32x32.png` / `128x128.png` /
+        # `128x128@2x.png`. `cargo tauri icon` writes the whole set from the owner's artwork.
+        run: cargo tauri icon ../macast/assets/icon.png
+
       - name: Build the shell
         run: cargo tauri build
 
@@ -201,6 +207,16 @@ jobs:
 
       - name: The committed frontend bundle is current
         run: cargo run -p macast-frontend -- --check
+
+      - name: Generate the Windows icon set
+        # **Required, and the reason is in `src-tauri/build.rs`.** That file derives only
+        # `icon.png` and `icon.icns` from `macast/assets/` (one fact, one owner) and says in its
+        # own header that a Windows bundle additionally needs `icon.ico`, which it deliberately
+        # does *not* fake because resizing needs a real image library. The platform job is
+        # supposed to run `cargo tauri icon`, and this job did not — so `tauri-build` failed with
+        # `` `icons/icon.ico` not found; required for generating a Windows Resource file ``
+        # before compiling a single line of the port (measured 2026-10-23).
+        run: cargo tauri icon ../macast/assets/icon.png
 
       - name: Build the shell
         run: cargo tauri build
