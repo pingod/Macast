@@ -1548,6 +1548,58 @@ fn the_sweep_names_the_files_it_took_in_a_file_someone_reads() {
     );
 }
 
+/// Every `serve_plan` answer the reference computes, replayed against this port.
+///
+/// 36 rows from executing the reference's `serve_plan` over four relay shapes × nine Range
+/// values. This is the corpus that should have existed from the start: the `asked` gate below was
+/// wrong in a hand-written generator for a whole session because nothing compared the two
+/// implementations over the *cross product* of `(length, ranges, header)`.
+#[test]
+fn every_reference_serve_plan_replays_identically() {
+    crate::pin_test_dir();
+    let corpus: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/golden/serve_plan.json"))
+            .expect("corpus is JSON");
+    let rows = corpus.as_array().expect("rows");
+    let mut statuses = std::collections::BTreeSet::new();
+    for row in rows {
+        let length = row["length"].as_u64();
+        let ranges = row["ranges"].as_bool().expect("ranges");
+        let header = row["header"].as_str();
+        let plan = serve_plan(ranges, length, header);
+        assert_eq!(
+            plan.status as u64,
+            row["status"].as_u64().expect("status"),
+            "length={length:?} ranges={ranges} header={header:?}: status"
+        );
+        assert_eq!(
+            plan.start,
+            row["start"].as_u64().expect("start"),
+            "length={length:?} ranges={ranges} header={header:?}: start"
+        );
+        assert_eq!(
+            plan.stop,
+            row["stop"].as_u64(),
+            "length={length:?} ranges={ranges} header={header:?}: stop"
+        );
+        assert_eq!(
+            plan.total,
+            row["total"].as_u64(),
+            "length={length:?} ranges={ranges} header={header:?}: total"
+        );
+        assert_eq!(
+            plan.partial,
+            row["partial"].as_bool().expect("partial"),
+            "length={length:?} ranges={ranges} header={header:?}: partial"
+        );
+        statuses.insert(plan.status);
+    }
+    assert_eq!(rows.len(), 36, "the corpus lost rows");
+    // 200, 206 and 416 all have to appear, or one branch of the plan is untested.
+    assert!(statuses.contains(&200) && statuses.contains(&206) && statuses.contains(&416),
+            "the corpus must exercise 200/206/416, saw {statuses:?}");
+}
+
 /// The `asked` gate: a **206 needs a Range the client actually sent**, and that is checked last.
 ///
 /// `parse_range(None)` answers `(0, None)` — "from the beginning, unbounded" — which *looks* like
