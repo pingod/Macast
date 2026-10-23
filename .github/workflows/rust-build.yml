@@ -166,6 +166,7 @@ jobs:
         # Same reason as the Windows step: `build.rs` derives only the two sizes
         # `tauri.conf.json` names, and a `.deb`/AppImage wants `32x32.png` / `128x128.png` /
         # `128x128@2x.png`. `cargo tauri icon` writes the whole set from the owner's artwork.
+        working-directory: src-tauri
         run: cargo tauri icon ../macast/assets/icon.png
 
       - name: Build the shell
@@ -216,6 +217,11 @@ jobs:
         # supposed to run `cargo tauri icon`, and this job did not — so `tauri-build` failed with
         # `` `icons/icon.ico` not found; required for generating a Windows Resource file ``
         # before compiling a single line of the port (measured 2026-10-23).
+        # Run from `src-tauri`, where the tool writes `icons/`, and name the source relative to
+        # it. A job step starts at the repository root, so `../macast/...` from there pointed at
+        # `runner/_work/macast/...` — measured 2026-10-23 as
+        # `cannot find the path specified (os error 3)`.
+        working-directory: src-tauri
         run: cargo tauri icon ../macast/assets/icon.png
 
       - name: Build the shell
