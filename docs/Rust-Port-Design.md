@@ -2590,6 +2590,25 @@ INFO 那句只报**问到我们头上的**查询，别人的另有一条 DEBUG �
     `/AVTransport/action` —— 正是服务实际响应的那个。我第一版手工拼了 `/dlna/AVTransport/action`
     并得到管理面的"没有可执行的操作"，那是**我猜错了路径**，不是产品缺陷。
 
+    **这一支第一次真跑 CI（2026-10-23，PR #1），两件事立刻现形**：
+    ① **推功能分支不会触发任何 CI** —— `build.yml` 的 `push` 只监听 `main`/tag/PR，所以此前
+    每一轮文档里那句"本分支从未有 CI 见证"不是运气，是机制。开 PR 之后才跑起来。
+    ② **两条用例只在 Linux 上红，而且都是测试自身的环境假设**：
+    *   `receiver_port_fallback_when_occupied` 把阻塞器绑在 `127.0.0.1:7000`，而 runner 的
+        7000 已经被占 —— **阻塞器自己** `AddrInUse`，测试造不出自己的前提。修法是把
+        `start()` 拆出一个 `start_from(first)`，测试向内核要一个空闲端口、占住它、从那里搜。
+        顺带修一处真实差异：接收端绑 `0.0.0.0`，原阻塞器绑 `127.0.0.1`，这两者**在 Linux 上
+        不冲突**，所以那条用例在 Linux 上即使绑上了也是空转。
+    *   `e12`（单播那条）的控制组断言"通配 socket 收不到单播"，而那正是增设第二个 socket 的
+        **依据**：macOS 探针量得 0/8（不用 `SO_REUSEPORT` 时两个 bind 甚至不能共存，本机实测
+        `os error 48`），**Linux 上通配 socket 也能收到**（CI 读到 1）。那是 macOS 的事实
+        而不是定律。现在按平台断言并把读数打印出来，注释里写明两家平台来源与"先重测再改数"。
+
+    *发版路上还有一块不属于这批提交的石头*：`build.yml` 的 Windows job 在
+    「Fetch portable mpv playback engine」这一步 404 —— 那个 `shinchiro` release 的 URL 已经
+    失效（`curl` 实测 404），而 main 的最后一趟 CI（10-06）跑时它还在。**与本次改动无关，
+    但会挡住发版**，需要换一个 mpv 来源。
+
     *仍然欠着的，按依赖顺序*：
     `screen_mirror` 的**管线本体**是 Rust 完全空白的一块
     （前者是整个屏幕镜像通道，后者是 ffprobe 子进程 + 转码任务表）；`cast_bridge`/`raop`/
