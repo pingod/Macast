@@ -1,0 +1,15 @@
+# The generated frontend bundle is compared **byte for byte** by
+# `cargo run -p macast-frontend -- --check`, and the bundler always joins lines with LF
+# (`source.lines()` drops any CR, then rejoins with '\n'). On a Windows checkout with
+# `core.autocrlf=true` the committed file would arrive as CRLF, so the comparison failed and
+# the Windows CI job went red while macOS and Linux passed (measured 2026-10-23, the Rust
+# pipeline's first real run).
+#
+# Pinning the file to LF keeps the artifact identical on every platform. It is a generated
+# file, so no editor's line endings are being overridden.
+frontend/bundle.js text eol=lf
+
+# Generated corpora are read by tests through `include_str!` and compared value by value,
+# but pinning them keeps diffs readable and stops a CRLF checkout from changing bytes that
+# some corpora carry as hex-encoded payloads.
+macast-*/tests/golden/** text eol=lf

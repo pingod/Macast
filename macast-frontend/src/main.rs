@@ -372,7 +372,18 @@ pub struct Check {
 /// Compare the checked-in bundle with what the modules produce now.
 pub fn check(layout: &Layout) -> Check {
     let expected = assemble(layout);
-    let actual = std::fs::read_to_string(&layout.bundle).unwrap_or_default();
+    // **Normalise the checked-in file's line endings before comparing.** `assemble` joins with
+    // `\n` unconditionally (`source.lines()` drops any CR), so a checkout that arrived with
+    // `core.autocrlf=true` would differ on every line and report "stale" for a bundle that is
+    // byte-identical in the repository. That is exactly what happened on the Windows CI job the
+    // first time this check ran there (2026-10-23) while macOS and Linux passed.
+    //
+    // `.gitattributes` pins `frontend/bundle.js` to `eol=lf`, which is the real fix; this is the
+    // second half, so a developer whose global git config rewrites it still gets a true answer
+    // instead of a red that says "run the bundler" when running it changes nothing.
+    let actual = std::fs::read_to_string(&layout.bundle)
+        .unwrap_or_default()
+        .replace("\r\n", "\n");
     let html = std::fs::read_to_string(&layout.index).unwrap_or_default();
     let inline_present = match (html.find(BEGIN), html.find(END)) {
         (Some(b), Some(e)) => !html[b + BEGIN.len()..e].trim().is_empty(),
