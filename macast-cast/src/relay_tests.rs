@@ -1547,3 +1547,38 @@ fn the_sweep_names_the_files_it_took_in_a_file_someone_reads() {
         "the count went missing while the names arrived: {text}"
     );
 }
+
+/// The `asked` gate: a **206 needs a Range the client actually sent**, and that is checked last.
+///
+/// `parse_range(None)` answers `(0, None)` — "from the beginning, unbounded" — which *looks* like
+/// a window. The reference therefore cannot decide on the parse alone: it carries `asked` down to
+/// the last line and answers **200** for an absent header, **200** for junk, and **200** for the
+/// empty suffix (`bytes=-`, which parses to `(None, None)`). Only a real requested window earns a
+/// 206.
+///
+/// Written because I got this wrong twice: first by building the corpus without the `asked` gate
+/// (which made "no header" look like a 206), then by asserting that wrong answer here.
+#[test]
+fn a_206_needs_a_range_the_client_actually_sent() {
+    crate::pin_test_dir();
+    assert_eq!(parse_range(None), Some((Some(0), None)));
+    assert_eq!(parse_range(Some("bytes=-")), Some((None, None)));
+
+    for header in [None, Some("bytes=-"), Some("garbage"), Some("")] {
+        let plan = serve_plan(true, Some(1000), header);
+        assert_eq!(
+            (plan.status, plan.start, plan.stop),
+            (200, 0, Some(999)),
+            "header {header:?} must be a whole-file 200"
+        );
+        assert!(!plan.partial, "header {header:?} is not a partial response");
+    }
+
+    // A real window is a 206, in both spellings.
+    let bounded = serve_plan(true, Some(1000), Some("bytes=2-5"));
+    assert_eq!((bounded.status, bounded.start, bounded.stop), (206, 2, Some(5)));
+    let suffix = serve_plan(true, Some(1000), Some("bytes=-500"));
+    assert_eq!((suffix.status, suffix.start, suffix.stop), (206, 500, Some(999)));
+    let open = serve_plan(true, Some(1000), Some("bytes=0-"));
+    assert_eq!((open.status, open.start, open.stop), (206, 0, Some(999)));
+}

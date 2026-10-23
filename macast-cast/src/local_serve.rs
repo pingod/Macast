@@ -482,7 +482,7 @@ mod tests {
 
     /// Every answer the reference's `do_GET` produced, replayed against this port.
     ///
-    /// 49 cases from executing the reference's decision path (no socket) over two lengths, twelve
+    /// 73 cases from executing the reference's decision path (no socket) over two lengths, twelve
     /// `Range` values and both DLNA flags: the three red lines, the junk-ignored table, the suffix
     /// form, and the 416 that names the real length.
     #[test]
@@ -549,7 +549,7 @@ mod tests {
             }
             rows += 1;
         }
-        assert_eq!(rows, 49, "the corpus lost cases");
+        assert_eq!(rows, 73, "the corpus lost cases");
     }
 
     /// A directory under the temp root, unique per test.
