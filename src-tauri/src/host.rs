@@ -3688,6 +3688,22 @@ mod tests {
             .filter(|line| line.contains("cargo run -p macast-frontend -- --check"))
             .count();
         assert_eq!(checks, 3, "every platform must check the bundle before building");
+
+        // **The icon set is generated on the platforms that need more than `build.rs` makes.**
+        // `src-tauri/build.rs` derives exactly the two files `tauri.conf.json` names, and its own
+        // header says a `.deb`/AppImage wants the `32x32`/`128x128` sizes while a Windows bundle
+        // wants `icon.ico` — written by `cargo tauri icon` in the platform job. That convention
+        // was documented and unenforced, so both jobs went red the first time they really ran
+        // (2026-10-23: icons/icon.ico not found). This assertion is the second half of the rule.
+        let icon_steps = text
+            .lines()
+            .filter(|line| line.trim_start().starts_with("run:"))
+            .filter(|line| line.contains("cargo tauri icon"))
+            .count();
+        assert_eq!(
+            icon_steps, 2,
+            "Windows and Linux each need `cargo tauri icon` before the build"
+        );
     }
 
     /// **`frontend/bundle.js` is what the modules produce right now.**
