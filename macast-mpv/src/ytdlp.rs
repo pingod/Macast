@@ -55,24 +55,60 @@ pub fn eta_seconds(text: &str) -> i64 {
     if text.contains(':') {
         // Split into at most three fields, right-aligned: `12:34` is minutes:seconds,
         // `1:02:03` is hours:minutes:seconds.
+        //
+        // **Fields are parsed untrimmed**, because the reference's `ETA_RE`
+        // (`^(?:(\d+):)?(\d+):(\d+)$`) has no `\s` and runs on the already-stripped text: an
+        // inner space like `"1 :02:03"` simply does not match, so Python falls through to
+        // `int(float(...))` and raises `ValueError` → 0. Trimming each field made this port
+        // accept a string the reference refuses, which the corpus caught as a divergence.
         let parts: Vec<&str> = text.split(':').collect();
-        if parts.len() > 3 || parts.iter().any(|part| part.trim().is_empty()) {
+        if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
             return 0;
         }
         let mut seconds = 0i64;
         for part in &parts {
-            match part.trim().parse::<i64>() {
-                Ok(value) if value >= 0 => seconds = seconds * 60 + value,
+            match part.parse::<i64>() {
+                Ok(value) if value >= 0 => seconds = seconds.saturating_mul(60).saturating_add(value),
                 _ => return 0,
             }
         }
         return seconds;
     }
     // A bare number, possibly with a fractional part (`42.7`).
-    match text.parse::<f64>() {
+    //
+    // Three divergences from Python's `int(float(text))` used to live here, and the third is a
+    // real defect rather than a tidy-up:
+    //
+    // 1. **Underscores.** `float("1_000")` is 1000 in Python; `str::parse::<f64>` rejects it. A
+    //    real yt-dlp never prints one, but the progress regex captures `<\S+>` and this function
+    //    is the only thing standing between that and a state write.
+    // 2. **Unicode digits.** `float("١٢")` is 12 and `int(float("𝟜𝟚"))` is 42 — Python accepts
+    //    any `Nd` decimal digits. Rather than port that, the ASCII-only answer is kept and named
+    //    here: an ETA label in Arabic-Indic digits would read as "no estimate", which is the
+    //    cosmetic loss this function already tolerates.
+    // 3. **Overflow.** `float("1e30")` gives 1e30 and Python's `int()` of it is a 31-digit
+    //    integer, so `elapsed + eta` stays exact there. A cast to `i64` **saturates** at
+    //    `i64::MAX` (that is Rust's defined behaviour for `as`, not something this code arranges),
+    //    which keeps the number large and honest. The residual risk is on the *caller*: an
+    //    `elapsed + eta` in `i64` would wrap negative and `hms` would clamp that to `0:00:00` —
+    //    a progress bar reading "just started" on a nearly-finished download. No caller exists
+    //    yet; whoever writes one owes it a saturating add, and this note is the reason.
+    let parsed = match text.parse::<f64>() {
         Ok(value) if value.is_finite() => value as i64,
-        _ => 0,
-    }
+        // `inf`/`-inf` raise `OverflowError` in Python — *not* `ValueError` — so the reference's
+        // `except ValueError` does not catch them and the progress thread dies. Answering 0 is
+        // the one behaviour that keeps a download going, and it is a deliberate divergence.
+        Ok(_) => 0,
+        Err(_) => {
+            // The underscore form, which Python's float parser accepts and Rust's does not.
+            let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+            match cleaned.parse::<f64>() {
+                Ok(value) if value.is_finite() => value as i64,
+                _ => 0,
+            }
+        }
+    };
+    parsed
 }
 
 /// Seconds → `H:MM:SS`, clamped at zero.
@@ -245,32 +281,74 @@ mod tests {
         assert!(streamed.iter().any(|p| p.contains("ytdl_hook-ytdl_path=")));
     }
 
-    /// Every ETA string the reference answered, replayed against this port.
+    /// Every ETA string the reference answered **or raised on**, replayed against this port.
     ///
-    /// The corpus covers the three shapes yt-dlp prints, the malformed colon shapes the regex
-    /// rejects, and the odd cases that separate a regex guard from a bare-number parse
-    /// (`-5`, `1.9`, `  :30`). Produced by executing the reference's `eta_seconds`/`hms`.
+    /// 39 rows: the ordinary shapes, the malformed colon forms, and the eleven inputs a
+    /// differential probe turned up (`1_000`, `1e30`, `nan`, `0x10`, `1e400`, `inf`, …).
+    ///
+    /// Two classes of row, and the second is a **declared divergence**:
+    ///
+    /// * a `ValueError` means the reference's own `except` caught it and answered 0 — the port
+    ///   must answer 0 too;
+    /// * an `OverflowError` (`inf`, `-inf`, `1e400`) is **not** caught by `except ValueError`, so
+    ///   the reference's progress thread dies. Answering 0 keeps a download going, and that is a
+    ///   deliberate difference rather than an alignment failure.
     #[test]
-    fn every_reference_eta_answer_replays_identically() {
-        let corpus = include_str!("../tests/golden/ytdlp_eta.jsonl");
-        let mut rows = 0usize;
-        for line in corpus.lines().filter(|line| !line.trim().is_empty()) {
-            let row: serde_json::Value = serde_json::from_str(line).expect("corpus row");
+    fn every_reference_eta_answer_replays_identically_except_the_declared_ones() {
+        let corpus: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/ytdlp_eta.json"))
+                .expect("corpus is JSON");
+        let rows = corpus.as_array().expect("rows");
+        let mut answered = 0usize;
+        let mut raised = 0usize;
+        let mut overflows = 0usize;
+        for row in rows {
             let text = row["eta_text"].as_str().expect("eta_text");
-            let seconds = row["seconds"].as_i64().expect("seconds");
-            assert_eq!(
-                eta_seconds(text),
-                seconds,
-                "eta_seconds({text:?}) disagrees with the reference"
-            );
-            assert_eq!(
-                hms(seconds),
-                row["hms"].as_str().unwrap_or(""),
-                "hms({seconds}) disagrees with the reference"
-            );
-            rows += 1;
+            let raises = row["raises"].as_str();
+            let got = eta_seconds(text);
+            match raises {
+                None if row.get("exceeds_i64").is_some() => {
+                    // Python's `int` is unbounded and this port's is not: `1e30` becomes a
+                    // 31-digit integer there and `i64::MAX` here. What must hold is that the
+                    // port stays at the **large** end rather than wrapping to something small
+                    // (a wrapped value would make `hms` clamp to `0:00:00` and report a
+                    // nearly-finished download as "just started").
+                    assert_eq!(got, i64::MAX, "eta_seconds({text:?}) must saturate high");
+                    assert!(row["seconds"].as_i64().is_none(), "the corpus is self-consistent");
+                    answered += 1;
+                }
+                None => {
+                    assert_eq!(
+                        got,
+                        row["seconds"].as_i64().expect("seconds"),
+                        "eta_seconds({text:?}) disagrees"
+                    );
+                    assert_eq!(
+                        hms(got),
+                        row["hms"].as_str().unwrap_or(""),
+                        "hms for {text:?} disagrees"
+                    );
+                    answered += 1;
+                }
+                Some("ValueError") => {
+                    // The reference's own `except` answered 0, so this is an alignment.
+                    assert_eq!(got, 0, "eta_seconds({text:?}) should answer 0");
+                    raised += 1;
+                }
+                Some("OverflowError") => {
+                    // **Declared divergence**: the reference dies here, this port answers 0.
+                    assert_eq!(got, 0, "eta_seconds({text:?}) answers 0 on purpose");
+                    overflows += 1;
+                }
+                Some(other) => panic!("unexpected exception {other} for {text:?}"),
+            }
         }
-        assert_eq!(rows, 22, "the corpus lost rows");
+        assert_eq!(rows.len(), 39, "the corpus lost rows");
+        assert_eq!(answered, 22, "answerable rows");
+        assert_eq!(raised, 14, "ValueError rows");
+        assert_eq!(overflows, 3, "OverflowError rows — the declared divergence");
+        // A corpus that never answered anything would pass every refusal branch.
+        assert!(answered > raised);
     }
 
     #[test]
