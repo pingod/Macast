@@ -688,11 +688,27 @@ jobs:
       - name: Fetch portable mpv playback engine
         # Macast plays DLNA media via mpv; Windows has no mpv by default so we
         # bundle a static x86_64 build next to the exe (-> bin/mpv.exe).
+        #
+        # **The asset name is resolved at run time, not pinned.** This step used to hardcode
+        # `.../download/20260903/mpv-x86_64-20260903-git-69e63f425a.7z`, and by 2026-10-23 that
+        # URL answered **404** — the upstream project prunes old releases, so a pinned date is a
+        # build that breaks on someone else's schedule. `latest` is the honest target for a
+        # dependency we do not version; if the asset stops existing, the step fails here with
+        # "no mpv asset in the latest release" instead of a bare curl exit code.
         shell: bash
         run: |
           mkdir -p bin
-          curl -sL -o mpv.7z \
-            "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-x86_64-20260903-git-69e63f425a.7z"
+          api="https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
+          url=$(curl -sL "$api" \
+            | python -c "import json,sys; d=json.load(sys.stdin); \
+                print(next((a['browser_download_url'] for a in d['assets'] \
+                if a['name'].startswith('mpv-x86_64-') and not '-v3-' in a['name']), ''))")
+          if [ -z "$url" ]; then
+            echo "::error::no mpv asset in the latest shinchiro release — the upstream naming changed"
+            exit 1
+          fi
+          echo "fetching $url"
+          curl -fsSL -o mpv.7z "$url"
           7z x -y -obin mpv.7z
           # keep only the player binary + its assets; drop docs/installer/bats
           rm -rf bin/doc bin/installer bin/*.bat bin/mpv.com mpv.7z
